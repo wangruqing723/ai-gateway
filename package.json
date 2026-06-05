@@ -1,0 +1,15 @@
+{
+  "name": "ai-gateway",
+  "version": "1.0.0",
+  "description": "Lightweight local API gateway for Claude Code, Claude Desktop and Codex",
+  "type": "module",
+  "main": "gateway.js",
+  "scripts": {
+    "start": "node gateway.js",
+    "init":  "node gateway.js --init"
+  },
+  "dependencies": {
+    "js-yaml": "^4.1.0",
+    "minimatch": "^9.0.0"
+  }
+}

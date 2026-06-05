@@ -1,0 +1,50 @@
+port: 7789
+
+# ── Provider 定义 ────────────────────────────────────────
+# format: anthropic | openai
+# apiKey 可选：留空则从客户端请求头中自动提取
+providers:
+  mimo:
+    baseUrl: "https://token-plan-cn.xiaomimimo.com"
+    apiKey: "sk-xxx"
+    format: anthropic
+
+  mimo_vision:
+    baseUrl: "https://api.xiaomimimo.com"
+    apiKey: "sk-xxx"
+    format: openai
+
+  deepseek:
+    baseUrl: "https://api.deepseek.com"
+    apiKey: "sk-xxx"
+    format: openai
+
+# ── 路由规则 ──────────────────────────────────────────────
+# 按顺序匹配，第一条命中的生效
+# match 支持通配符 * 和 ?
+# vision 可选：配置后对纯文本 provider 自动翻译图片
+routes:
+  - match: "claude-3-5-sonnet*"
+    provider: mimo
+    model: "mimo-v2.5-pro"
+    vision:
+      provider: mimo_vision
+      model: "mimo-v2.5"
+
+  - match: "claude-3-opus*"
+    provider: mimo
+    model: "mimo-v2.5-pro"
+    vision:
+      provider: mimo_vision
+      model: "mimo-v2.5"
+
+  - match: "claude-3-haiku*"
+    provider: deepseek
+    model: "deepseek-chat"
+
+  - match: "*"
+    provider: mimo
+    model: "mimo-v2.5-pro"
+    vision:
+      provider: mimo_vision
+      model: "mimo-v2.5"
