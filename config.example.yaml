@@ -1,4 +1,14 @@
 port: 7789
+# host: "127.0.0.1"     # 默认仅监听本地（Docker 环境请改为 "0.0.0.0"）
+
+# ── 请求配置 ──────────────────────────────────────────────
+timeout: 120000        # 请求超时（毫秒），默认 120 秒（1000-300000）
+
+# ── 缓存配置 ──────────────────────────────────────────────
+# 图片识别结果持久化缓存（SQLite）
+cache:
+  maxAgeDays: 7        # 缓存过期天数（默认 7 天）
+  maxRecords: 1000     # 最大记录数（默认 1000 条）
 
 # ── Provider 定义 ────────────────────────────────────────
 # format: anthropic | openai
@@ -8,16 +18,19 @@ providers:
     baseUrl: "https://token-plan-cn.xiaomimimo.com"
     apiKey: "sk-xxx"
     format: anthropic
+    maxConcurrent: 3   # 最大并发请求数（默认 5）
 
   mimo_vision:
     baseUrl: "https://api.xiaomimimo.com"
     apiKey: "sk-xxx"
     format: openai
+    maxConcurrent: 5
 
   deepseek:
     baseUrl: "https://api.deepseek.com"
     apiKey: "sk-xxx"
     format: openai
+    maxConcurrent: 5
 
 # ── 路由规则 ──────────────────────────────────────────────
 # 按顺序匹配，第一条命中的生效

@@ -6,10 +6,15 @@
   "main": "gateway.js",
   "scripts": {
     "start": "node gateway.js",
-    "init":  "node gateway.js --init"
+    "init": "node gateway.js --init",
+    "cache": "node gateway.js cache",
+    "cache:stats": "node gateway.js cache stats",
+    "cache:clear": "node gateway.js cache clear",
+    "cache:cleanup": "node gateway.js cache cleanup"
   },
   "dependencies": {
     "js-yaml": "^4.1.0",
-    "minimatch": "^9.0.0"
+    "minimatch": "^9.0.0",
+    "sql.js": "^1.14.1"
   }
 }

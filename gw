@@ -1,0 +1,37 @@
+#!/bin/bash
+# ai-gateway 快捷命令
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+case "$1" in
+  start)
+    cd "$SCRIPT_DIR" && node gateway.js
+    ;;
+  cache)
+    cd "$SCRIPT_DIR" && node gateway.js cache "${2:-stats}"
+    ;;
+  stats)
+    cd "$SCRIPT_DIR" && node gateway.js cache stats
+    ;;
+  clear)
+    cd "$SCRIPT_DIR" && node gateway.js cache clear
+    ;;
+  cleanup)
+    cd "$SCRIPT_DIR" && node gateway.js cache cleanup
+    ;;
+  *)
+    echo "ai-gateway 快捷命令"
+    echo ""
+    echo "用法:"
+    echo "  ./gw start      # 启动网关"
+    echo "  ./gw cache      # 查看缓存统计"
+    echo "  ./gw stats      # 查看缓存统计（简写）"
+    echo "  ./gw clear      # 清空缓存"
+    echo "  ./gw cleanup    # 清理过期缓存"
+    echo ""
+    echo "或使用 npm:"
+    echo "  npm start                    # 启动网关"
+    echo "  node gateway.js cache stats  # 查看缓存统计"
+    echo "  node gateway.js cache clear  # 清空缓存"
+    ;;
+esac
