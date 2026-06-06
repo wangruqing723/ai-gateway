@@ -7,20 +7,17 @@ services:
     # build: .
 
     container_name: ai-gateway
-    restart: unless-stopped
+    #restart: unless-stopped
     ports:
       - "7789:7789"
     volumes:
       # 挂载配置文件（宿主机编辑后重启容器即生效）
       - ./config.yaml:/app/config.yaml:ro
       # 持久化图片缓存
-      - gateway-data:/app/data
+      - ./data:/app/data
     environment:
       - TZ=Asia/Shanghai
     deploy:
       resources:
         limits:
           memory: 256M
-
-volumes:
-  gateway-data:
