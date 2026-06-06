@@ -91,7 +91,12 @@ function formatSize(bytes) {
 
 // ── 日志 ────────────────────────────────────
 let requestCounter = 0;
-function generateRequestId() { return `r${++requestCounter}`.padStart(6, 'r0'); }
+function generateRequestId() {
+  requestCounter++;
+  // 超过 99999 后重置（避免格式问题）
+  if (requestCounter > 99999) requestCounter = 1;
+  return `r${String(requestCounter).padStart(5, '0')}`;
+}
 
 function getBeijingTime() {
   return new Date().toLocaleString('zh-CN', {
