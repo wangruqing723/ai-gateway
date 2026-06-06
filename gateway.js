@@ -250,6 +250,11 @@ const server = http.createServer(async (clientReq, clientRes) => {
   const maxConcurrent = provider.maxConcurrent || 5;
   const maxPerSecond = provider.maxPerSecond || 0;
 
+  // 调试日志：显示速率限制配置
+  if (maxPerSecond > 0) {
+    log(reqId, `  速率限制: ${maxPerSecond}/秒`);
+  }
+
   // 只有在有排队时才显示队列状态
   if (queueStatus.queued > 0 || queueStatus.running >= maxConcurrent) {
     log(reqId, `  队列: ${queueStatus.running}/${maxConcurrent} 运行, ${queueStatus.queued} 等待`);
