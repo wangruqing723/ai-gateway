@@ -7,6 +7,11 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 
+# 清理 sql.js 中不需要的文件（只保留 Node.js 需要的 WASM 版本）
+RUN cd node_modules/sql.js/dist && \
+    rm -f *-debug* *-browser* worker.* sql-asm*.js sql-asm*.js.map && \
+    ls -la
+
 # 复制源码
 COPY gateway.js ./
 COPY lib/ ./lib/
@@ -24,9 +29,6 @@ COPY --from=builder /app/lib ./lib
 
 # 创建数据目录
 RUN mkdir -p /app/data
-
-# 配置和数据通过 volume 挂载
-VOLUME ["/app/config.yaml", "/app/data"]
 
 EXPOSE 7789
 
