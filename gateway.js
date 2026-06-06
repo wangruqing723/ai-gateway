@@ -248,13 +248,14 @@ const server = http.createServer(async (clientReq, clientRes) => {
   // 获取队列状态
   const queueStatus = getQueueStatus(provider.name);
   const maxConcurrent = provider.maxConcurrent || 5;
+  const maxPerSecond = provider.maxPerSecond || 0;
 
   // 只有在有排队时才显示队列状态
   if (queueStatus.queued > 0 || queueStatus.running >= maxConcurrent) {
     log(reqId, `  队列: ${queueStatus.running}/${maxConcurrent} 运行, ${queueStatus.queued} 等待`);
   }
 
-  // 通过队列转发请求（并发控制）
+  // 通过队列转发请求（并发控制 + 速率限制）
   enqueue(provider.name, maxConcurrent, () => {
     return forwardRequest({
       clientReq,
@@ -268,7 +269,7 @@ const server = http.createServer(async (clientReq, clientRes) => {
       startTime,
       timeout: config.timeout,
     });
-  }).catch(err => {
+  }, maxPerSecond).catch(err => {
     log(reqId, `  队列处理异常: ${err.message}`);
   });
 });

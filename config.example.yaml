@@ -19,18 +19,21 @@ providers:
     apiKey: "sk-xxx"
     format: anthropic
     maxConcurrent: 3   # 最大并发请求数（默认 5）
+    maxPerSecond: 2    # 每秒最多请求数（默认不限制）
 
   mimo_vision:
     baseUrl: "https://api.xiaomimimo.com"
     apiKey: "sk-xxx"
     format: openai
     maxConcurrent: 5
+    maxPerSecond: 3
 
   deepseek:
     baseUrl: "https://api.deepseek.com"
     apiKey: "sk-xxx"
     format: openai
     maxConcurrent: 5
+    maxPerSecond: 3
 
 # ── 路由规则 ──────────────────────────────────────────────
 # 按顺序匹配，第一条命中的生效
