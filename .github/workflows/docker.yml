@@ -1,11 +1,17 @@
 name: Docker Build & Publish
 
 on:
-  # 推送到 master 时自动构建
+  # 推送到 master 时自动构建并推送
   push:
     branches: [master]
     tags:
       - 'v*'        # 推送版本标签时也触发（如 v1.0.0）
+    paths-ignore:
+      - '*.md'
+      - 'scripts/**'
+  # PR 时只构建验证，不推送
+  pull_request:
+    branches: [master]
     paths-ignore:
       - '*.md'
       - 'scripts/**'
@@ -28,15 +34,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 登录 GitHub Container Registry
+      # 登录 GHCR（仅非 PR 时登录）
       - name: Login to GHCR
+        if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # 设置 Docker Buildx（支持多平台和缓存）
+      # 设置 Docker Buildx
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -56,12 +63,12 @@ jobs:
             # 每次构建带 short SHA
             type=sha,prefix=
 
-      # 构建并推送
+      # 构建并推送（PR 时只构建不推送）
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
           context: .
-          push: true
+          push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
