@@ -1,0 +1,13 @@
+node_modules
+.git
+data
+config.yaml
+*.swp
+.DS_Store
+test-*.js
+scripts
+README.md
+.gitignore
+.dockerignore
+Dockerfile
+docker-compose.yml

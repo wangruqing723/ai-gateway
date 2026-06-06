@@ -1,0 +1,26 @@
+services:
+  gateway:
+    # ── 方式一：使用 GitHub 自动构建的镜像（推荐）──
+    image: ghcr.io/wangruqing723/ai-gateway:latest
+
+    # ── 方式二：本地构建 ──────────────────────────
+    # build: .
+
+    container_name: ai-gateway
+    restart: unless-stopped
+    ports:
+      - "7789:7789"
+    volumes:
+      # 挂载配置文件（宿主机编辑后重启容器即生效）
+      - ./config.yaml:/app/config.yaml:ro
+      # 持久化图片缓存
+      - gateway-data:/app/data
+    environment:
+      - TZ=Asia/Shanghai
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+volumes:
+  gateway-data:
