@@ -18,8 +18,9 @@ providers:
     baseUrl: "https://token-plan-cn.xiaomimimo.com"
     apiKey: "sk-xxx"
     format: anthropic
-    maxConcurrent: 3   # 最大并发请求数（默认 5）
-    maxPerSecond: 2    # 每秒最多请求数（默认不限制）
+    maxConcurrent: 3      # 最大并发请求数（默认 5）
+    maxPerSecond: 2       # 每秒最多请求数（默认不限制）
+    maxQueueWait: 30000   # 队列最大等待时间毫秒（默认 30 秒）
 
   mimo_vision:
     baseUrl: "https://api.xiaomimimo.com"
@@ -27,6 +28,7 @@ providers:
     format: openai
     maxConcurrent: 5
     maxPerSecond: 3
+    maxQueueWait: 30000
 
   deepseek:
     baseUrl: "https://api.deepseek.com"
@@ -34,6 +36,7 @@ providers:
     format: openai
     maxConcurrent: 5
     maxPerSecond: 3
+    maxQueueWait: 30000
 
 # ── 路由规则 ──────────────────────────────────────────────
 # 按顺序匹配，第一条命中的生效

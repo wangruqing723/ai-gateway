@@ -249,18 +249,14 @@ const server = http.createServer(async (clientReq, clientRes) => {
   const queueStatus = getQueueStatus(provider.name);
   const maxConcurrent = provider.maxConcurrent || 5;
   const maxPerSecond = provider.maxPerSecond || 0;
-
-  // 调试日志：显示速率限制配置
-  if (maxPerSecond > 0) {
-    log(reqId, `  速率限制: ${maxPerSecond}/秒`);
-  }
+  const maxQueueWait = provider.maxQueueWait || 30000;  // 默认 30 秒
 
   // 只有在有排队时才显示队列状态
   if (queueStatus.queued > 0 || queueStatus.running >= maxConcurrent) {
     log(reqId, `  队列: ${queueStatus.running}/${maxConcurrent} 运行, ${queueStatus.queued} 等待`);
   }
 
-  // 通过队列转发请求（并发控制 + 速率限制）
+  // 通过队列转发请求（并发控制 + 速率限制 + 队列超时）
   enqueue(provider.name, maxConcurrent, () => {
     return forwardRequest({
       clientReq,
@@ -274,7 +270,7 @@ const server = http.createServer(async (clientReq, clientRes) => {
       startTime,
       timeout: config.timeout,
     });
-  }, maxPerSecond).catch(err => {
+  }, maxPerSecond, maxQueueWait).catch(err => {
     log(reqId, `  队列处理异常: ${err.message}`);
   });
 });
