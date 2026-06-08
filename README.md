@@ -7,7 +7,7 @@
 - **多格式输入**：同时支持 Anthropic、OpenAI Chat、OpenAI Responses 三种格式
 - **模型名映射**：将客户端发来的模型名（如 `claude-3-5-sonnet`）映射到实际模型
 - **多 Provider 路由**：不同模型走不同 provider，支持 Anthropic / OpenAI 兼容格式
-- **图片翻译**：对纯文本模型自动将图片转换为文字描述（可选）
+- **视觉无缝衔接**：为纯文本模型配置视觉伴侣模型后，网关自动检测请求中的图片——纯文本走主模型，含图请求走视觉模型，客户端无需手动切换
 - **格式自动转换**：请求/响应在不同格式之间自动转换，流式响应完整支持
 
 ## 架构
@@ -50,7 +50,7 @@ routes:
   - match: "claude-3-5-sonnet*"
     provider: mimo
     model: "mimo-v2.5-pro"
-    vision:               # 可选：配置后自动翻译图片
+    vision:               # 可选：配置视觉伴侣模型
       provider: mimo_vision
       model: "mimo-v2.5"
 
@@ -59,11 +59,114 @@ routes:
     model: "mimo-v2.5-pro"
 ```
 
+### 视觉模型无缝衔接
+
+当主力模型不支持图片（或图片处理成本较高）时，可以通过 `vision` 配置指定一个视觉伴侣模型。网关会自动检测请求中是否包含图片：
+
+- **纯文本请求** → 转发到主模型（如 `mimo-v2.5-pro`）
+- **含图片请求** → 自动转发到视觉模型（如 `mimo-v2.5`），并将图片描述回填到请求中
+
+整个过程对客户端完全透明，用户始终使用同一个模型名（如 `claude-3-5-sonnet`），无需手动切换。
+
+适用场景：主力模型更便宜/更快但不支持图片，搭配一个支持图片的模型作为补充。
+
 ## 启动
 
 ```bash
 node gateway.js
 ```
+
+## Docker 部署
+
+镜像已通过 GitHub Actions 自动构建并发布到 GHCR，支持 `linux/amd64` 和 `linux/arm64` 架构。
+
+### 快速开始
+
+```bash
+# 创建工作目录
+mkdir -p ~/ai-gateway/data
+cd ~/ai-gateway
+
+# 创建配置文件（参考 config.example.yaml）
+# 注意：Docker 环境 host 必须设为 0.0.0.0
+cat > config.yaml << 'EOF'
+port: 7789
+host: "0.0.0.0"
+
+providers:
+  mimo:
+    baseUrl: "https://your-provider.com"
+    apiKey: "sk-xxx"
+    format: anthropic
+
+routes:
+  - match: "*"
+    provider: mimo
+    model: "your-model"
+EOF
+```
+
+### 使用 Docker Compose（推荐）
+
+在项目目录下直接运行（`docker-compose.yml` 已包含在仓库中）：
+
+```bash
+cd /path/to/ai-gateway
+docker compose up -d
+```
+
+如需在其他目录运行，将 `docker-compose.yml` 和 `config.yaml` 复制到同一目录即可。
+
+如需本地构建镜像，取消 `docker-compose.yml` 中 `build: .` 的注释。
+
+这会拉取 `ghcr.io/wangruqing723/ai-gateway:latest` 镜像（自动匹配 `amd64`/`arm64` 架构），并自动完成：
+- 端口映射 `7789:7789`
+- 配置文件只读挂载 `./config.yaml`
+- 数据目录挂载 `./data`（持久化 SQLite 缓存）
+- 内存限制 256MB
+- 健康检查：每 30 秒访问 `/health` 端点
+
+### 使用 Docker 命令
+
+```bash
+docker run -d \
+  --name ai-gateway \
+  -p 7789:7789 \
+  -v $(pwd)/config.yaml:/app/config.yaml:ro \
+  -v $(pwd)/data:/app/data \
+  -e TZ=Asia/Shanghai \
+  --memory=256m \
+  ghcr.io/wangruqing723/ai-gateway:latest
+```
+
+### 验证部署
+
+```bash
+# 查看容器状态
+docker compose ps
+
+# 检查健康状态
+curl http://localhost:7789/health
+
+# 查看日志
+docker compose logs -f
+```
+
+### 常用操作
+
+| 操作 | 命令 |
+|---|---|
+| 停止 | `docker compose down` |
+| 重启（配置变更后） | `docker compose restart` |
+| 更新到最新镜像 | `docker compose pull && docker compose up -d` |
+| 查看日志 | `docker compose logs -f` |
+
+### 注意事项
+
+- **host 配置**：Docker 环境下 `host` 必须设为 `"0.0.0.0"`，否则端口映射不会生效
+- **配置变更**：修改 `config.yaml` 后需重启容器（`docker compose restart`）
+- **数据持久化**：`./data` 目录挂载了 SQLite 缓存数据库，请勿删除
+- **开机自启**：取消 `docker-compose.yml` 中 `restart: unless-stopped` 的注释即可
 
 ## 接入客户端
 
@@ -124,7 +227,7 @@ chmod +x scripts/install-mac.sh
 
 - `match` 支持通配符 `*`（任意字符）和 `?`（单个字符）
 - 按顺序匹配，第一条命中的生效
-- `vision` 为可选，不配置则不处理图片
+- `vision` 为可选，配置后网关自动检测图片并路由到视觉模型，无需客户端干预
 
 ## 许可
 
