@@ -156,6 +156,7 @@ const server = http.createServer(async (clientReq, clientRes) => {
 
     const cacheStats = await getCacheStats();
 
+    const mem = process.memoryUsage();
     const health = {
       status: 'ok',
       uptime: Math.floor(process.uptime()),
@@ -164,6 +165,10 @@ const server = http.createServer(async (clientReq, clientRes) => {
       cache: {
         total: cacheStats.total,
         contentSize: cacheStats.contentSize,
+      },
+      memory: {
+        heapUsedMB: Math.round(mem.heapUsed / 1024 / 1024),
+        rssMB: Math.round(mem.rss / 1024 / 1024),
       },
     };
 
