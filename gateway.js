@@ -279,6 +279,7 @@ const server = http.createServer(async (clientReq, clientRes) => {
       log: log.bind(null, reqId),
       startTime,
       timeout: config.timeout,
+      streamActivityTimeout: config.streamActivityTimeout,
     });
   }, maxPerSecond, maxQueueWait).catch(err => {
     log(reqId, `  队列处理异常: ${err.message}`);
@@ -334,6 +335,7 @@ server.listen(config.port, config.host, async () => {
     log('system', `  图片缓存 : 无`);
   }
   log('system', `  请求超时 : ${config.timeout / 1000} 秒`);
+  log('system', `  流式活跃超时 : ${config.streamActivityTimeout / 1000} 秒`);
   log('system', '───────────────────────────────────────────');
   log('system', '  接受格式: Anthropic · OpenAI Chat · OpenAI Responses');
   log('system', '  健康检查: GET /health');
