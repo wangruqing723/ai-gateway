@@ -1,5 +1,5 @@
 # ── 构建阶段 ──────────────────────────────────
-FROM golang:1.22-alpine AS builder
+FROM golang:1.23-alpine AS builder
 
 WORKDIR /build
 
@@ -7,6 +7,7 @@ WORKDIR /build
 ENV GOPROXY=https://goproxy.cn,direct
 
 # 复制源码，用 go mod tidy 自动解析并下载依赖（仓库未提交 go.sum）
+# 依赖纯 Go 的 modernc.org/sqlite，CGO_ENABLED=0 即可编译，保持静态二进制
 COPY . .
 RUN go mod tidy
 
