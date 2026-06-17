@@ -15,8 +15,10 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	_ "time/tzdata" // 嵌入时区数据库，使 distroless 等无 tzdata 的镜像也能解析 Asia/Shanghai
 
 	"ai-gateway/internal/config"
+	"ai-gateway/internal/converter"
 	"ai-gateway/internal/proxy"
 	"ai-gateway/internal/queue"
 	"ai-gateway/internal/router"
@@ -78,7 +80,7 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	clientFormat := detectClientFormat(urlPath)
+	clientFormat := converter.DetectClientFormat(urlPath)
 	if clientFormat == "" {
 		writeJSONError(w, http.StatusNotFound, "gateway_error", "未知端点: "+urlPath)
 		return
@@ -101,7 +103,18 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 	}
 
 	model, _ := body["model"].(string)
-	stream, _ := body["stream"].(bool)
+
+	// 规范化为内部格式
+	var internal *converter.Internal
+	switch clientFormat {
+	case "anthropic":
+		internal = converter.FromAnthropic(body)
+	case "openai-chat":
+		internal = converter.FromOpenAIChat(body)
+	default:
+		internal = converter.FromOpenAIResponses(body)
+	}
+	model = internal.Model
 
 	// 路由匹配
 	matched := router.MatchRoute(model, s.cfg)
@@ -112,12 +125,22 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 	p := matched.Provider
 	p.APIKey = router.ResolveAPIKey(p, r.Header)
 
-	logf(reqID, "→ %s → %s [stream=%v]", model, matched.TargetModel, stream)
+	logf(reqID, "→ %s → %s [%d msgs, stream=%v]", model, matched.TargetModel, len(internal.Messages), internal.Stream)
 
-	// TODO(converter): 此处应做 fromXxx → 内部格式 → toYyy 的请求体转换。
-	// PoC 阶段，anthropic→anthropic 直接透传原始 body；其它格式待 converter 包实现。
 	// TODO(vision): 若 matched.VisionProvider != nil 且消息含图片，先做图片识别翻译。
-	upstreamBody := raw
+
+	// 内部格式 → 上游 provider 请求体
+	var upstreamMap map[string]any
+	if p.Format == "anthropic" {
+		upstreamMap = converter.ToAnthropicBody(internal, matched.TargetModel)
+	} else {
+		upstreamMap = converter.ToOpenAIChatBody(internal, matched.TargetModel)
+	}
+	upstreamBody, err := json.Marshal(upstreamMap)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "gateway_error", "上游请求体序列化失败: "+err.Error())
+		return
+	}
 
 	// 通过队列获取执行槽位（并发 + 限速 + 等待超时）
 	release, err := s.qm.Acquire(r.Context(), p.Name, p.MaxConcurrent, p.MaxPerSecond, p.MaxQueueWait)
@@ -137,7 +160,7 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		Provider:              p,
 		ClientFormat:          clientFormat,
 		OriginalModel:         model,
-		IsStreaming:           stream,
+		IsStreaming:           internal.Stream,
 		Log:                   func(f string, a ...any) { logf(reqID, f, a...) },
 		StartTime:             start,
 		TimeoutMs:             s.cfg.Timeout,
@@ -170,19 +193,6 @@ func (s *server) handleHealth(w http.ResponseWriter) {
 	w.Header().Set("content-type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	w.Write(out)
-}
-
-// detectClientFormat 对齐 converter.js 的端点识别
-func detectClientFormat(path string) string {
-	switch {
-	case strings.HasSuffix(path, "/v1/messages"):
-		return "anthropic"
-	case strings.HasSuffix(path, "/v1/chat/completions"):
-		return "openai-chat"
-	case strings.HasSuffix(path, "/v1/responses"):
-		return "openai-responses"
-	}
-	return ""
 }
 
 func nextReqID() string {

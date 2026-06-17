@@ -12,9 +12,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"ai-gateway/internal/config"
+	"ai-gateway/internal/converter"
 )
 
 // LogFunc 日志函数，绑定了 reqId
@@ -24,9 +26,9 @@ type LogFunc func(format string, args ...any)
 type Options struct {
 	ClientReq             *http.Request
 	ClientRes             http.ResponseWriter
-	UpstreamBody          []byte          // 已转换好的上游请求体
+	UpstreamBody          []byte // 已转换好的上游请求体
 	Provider              *config.Provider
-	ClientFormat          string          // anthropic | openai-chat | openai-responses
+	ClientFormat          string // anthropic | openai-chat | openai-responses
 	OriginalModel         string
 	IsStreaming           bool
 	Log                   LogFunc
@@ -79,7 +81,7 @@ func Forward(opts *Options) error {
 	return handleStream(ctx, cancel, resp, opts)
 }
 
-// handleResponse 非流式响应：读取整体，转换后回写。
+// handleResponse 非流式响应：读取整体，按格式转换后回写。
 func handleResponse(resp *http.Response, opts *Options) error {
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -87,9 +89,21 @@ func handleResponse(resp *http.Response, opts *Options) error {
 		writeJSONError(opts.ClientRes, http.StatusBadGateway, "upstream_error", err.Error())
 		return err
 	}
-	// TODO(converter): 此处应调用 convertResponse(providerFormat, clientFormat, raw)。
-	// PoC 阶段，anthropic→anthropic / openai→openai-chat 为透传，其余格式待 converter 包实现。
-	out := raw
+
+	var data map[string]any
+	if err := json.Unmarshal(raw, &data); err != nil {
+		writeJSONError(opts.ClientRes, http.StatusBadGateway, "parse_error", "上游响应解析失败: "+err.Error())
+		return err
+	}
+
+	var result map[string]any
+	if opts.Provider.Format == "anthropic" {
+		result = converter.ConvertAnthropicResponse(data, opts.ClientFormat, opts.OriginalModel)
+	} else {
+		result = converter.ConvertOpenAIChatResponse(data, opts.ClientFormat, opts.OriginalModel)
+	}
+
+	out, _ := json.Marshal(result)
 	opts.ClientRes.Header().Set("content-type", "application/json")
 	opts.ClientRes.WriteHeader(http.StatusOK)
 	_, err = opts.ClientRes.Write(out)
@@ -129,33 +143,69 @@ func handleStream(ctx context.Context, cancel context.CancelFunc, resp *http.Res
 		}
 	}()
 
-	// TODO(converter): isPassthrough 之外的格式需逐行经 transformer 转换。
-	// PoC 打通 anthropic→anthropic / openai→openai-chat 透传链路（mimo 实际走 anthropic 透传）。
-	reader := bufio.NewReader(resp.Body)
-	buf := make([]byte, 16*1024)
-	for {
-		n, err := reader.Read(buf)
-		if n > 0 {
-			timer.Reset(activityTimeout) // 重置活跃超时
-			if _, werr := opts.ClientRes.Write(buf[:n]); werr != nil {
-				cancel()
-				return werr // 客户端断开
+	// 相同格式直接透传字节流，保留完整 SSE 格式与打字机效果；不同格式逐行解析转换。
+	isPassthrough := (opts.Provider.Format == "anthropic" && opts.ClientFormat == "anthropic") ||
+		(opts.Provider.Format == "openai" && opts.ClientFormat == "openai-chat")
+
+	if isPassthrough {
+		buf := make([]byte, 16*1024)
+		for {
+			n, err := resp.Body.Read(buf)
+			if n > 0 {
+				timer.Reset(activityTimeout)
+				if _, werr := opts.ClientRes.Write(buf[:n]); werr != nil {
+					cancel()
+					return werr
+				}
+				flusher.Flush()
 			}
-			flusher.Flush()
-		}
-		if err != nil {
-			if err == io.EOF {
-				return nil // 正常结束
+			if err != nil {
+				return finishStream(err, timedOut, opts, flusher)
 			}
-			if timedOut {
-				opts.Log("上游流式响应超时，已主动断开 (%d秒无数据)", opts.StreamActivityTimeout/1000)
-				gracefulSSEClose(opts.ClientRes, flusher, opts.ClientFormat, opts.StreamActivityTimeout)
-				return nil
-			}
-			// 客户端断开或其它读取错误
-			return err
 		}
 	}
+
+	// 不同格式：逐行解析并经 transformer 转换（对齐 Node 的按 \n 切分逻辑）。
+	transform := converter.NewStreamTransformer(opts.Provider.Format, opts.ClientFormat)
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024) // 放大单行上限，应对大块 SSE
+	for scanner.Scan() {
+		timer.Reset(activityTimeout)
+		line := strings.TrimRight(scanner.Text(), "\r")
+		if line == "" {
+			// 保留空行分隔（对齐 Node：clientRes.write('\n')）
+			if _, werr := opts.ClientRes.Write([]byte("\n")); werr != nil {
+				cancel()
+				return werr
+			}
+			flusher.Flush()
+			continue
+		}
+		for _, out := range transform.Transform(line) {
+			if out == "" {
+				continue
+			}
+			if _, werr := opts.ClientRes.Write([]byte(out)); werr != nil {
+				cancel()
+				return werr
+			}
+		}
+		flusher.Flush()
+	}
+	return finishStream(scanner.Err(), timedOut, opts, flusher)
+}
+
+// finishStream 统一处理流结束：正常 EOF / 活跃超时 / 客户端断开。
+func finishStream(err error, timedOut bool, opts *Options, flusher http.Flusher) error {
+	if err == nil || err == io.EOF {
+		return nil // 正常结束
+	}
+	if timedOut {
+		opts.Log("上游流式响应超时，已主动断开 (%d秒无数据)", opts.StreamActivityTimeout/1000)
+		gracefulSSEClose(opts.ClientRes, flusher, opts.ClientFormat, opts.StreamActivityTimeout)
+		return nil
+	}
+	return err // 客户端断开或其它读取错误
 }
 
 // gracefulSSEClose 向客户端补发合规 SSE 收尾事件，避免截断流（对齐 Node 版改动）。
