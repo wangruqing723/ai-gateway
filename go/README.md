@@ -72,21 +72,40 @@ docker run -d -p 7789:7789 \
   ai-gateway-go
 ```
 
-### ⚠️ SQLite 数据卷注意事项
+### SQLite 数据卷注意事项
 
-SQLite 依赖文件锁，在 **macOS Docker Desktop 的 bind mount（virtiofs/gRPC-FUSE）** 上写入会失败（表现为
-`unable to open database file: out of memory (14)` 或缓存静默不落盘）。这是 SQLite + Docker for Mac 的已知现象，
-**与 Go 代码无关**（Node 版 sql.js 整库读写 buffer、不用文件锁，故未暴露此问题）。
+Go 版用真正的 SQLite（`modernc.org/sqlite`），会用文件锁保证并发安全。只要 `data` 目录所在的文件系统支持
+正常的文件锁语义，bind mount 与 named volume 都可用。实测情况如下：
 
-生产部署（Linux）用普通 bind mount 或 Docker named volume 均正常。本地 macOS 验证缓存时，建议用 named volume：
+| 部署方式 | 数据位置 | 结果 |
+|----------|----------|------|
+| 直接运行二进制（不经 Docker） | Mac 原生 APFS | ✅ 正常 |
+| Docker named volume | Docker 管理的卷 | ✅ 正常 |
+| **Docker bind mount（家目录范围内）** | 如 `~/docker/ai-gateway/data` | ✅ 正常（在 Colima + virtiofs 上实测：写入、命中、重启后从磁盘读回均正常） |
+| Docker bind mount（共享范围外的路径） | 如 `/tmp/...` | ❌ 报 `unable to open database file: out of memory (14)` |
+
+要点：
+
+- **data 目录要放在容器运行时（Colima / Docker Desktop）共享给虚拟机的路径下**（通常是用户家目录范围内）。
+  放在 `/tmp` 等未共享的路径会导致 SQLite 打不开数据库文件。
+- **目录要对容器用户（distroless nonroot / UID 65532）可写**，最简单 `chmod 777 data`。
+- 这与 Go 代码无关，是文件系统挂载/权限问题；Node 版 sql.js 整库读写 buffer、不用文件锁，所以没暴露这一点。
+
+最省心的两种方式：
 
 ```bash
+# 方式一（推荐用于 Mac 本机自用）：直接跑静态二进制，数据写在原生 APFS，零坑
+./ai-gateway
+
+# 方式二：Docker + named volume（与文件系统挂载方式无关，始终正常）
 docker volume create aigw-data
 docker run -d -p 7789:7789 \
   -v "$PWD/config.yaml:/app/config.yaml:ro" \
   -v aigw-data:/app/data \
   ai-gateway-go
 ```
+
+生产部署（Linux）用普通 bind mount 或 named volume 均正常，无上述路径限制。
 
 ## 迁移评估结论
 
