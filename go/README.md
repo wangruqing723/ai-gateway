@@ -20,6 +20,7 @@ go/
 ├── internal/router/    # 路由匹配 + API Key 解析（对齐 lib/router.js）
 ├── internal/queue/     # per-provider 并发/限速队列（对齐 lib/queue.js）
 ├── internal/proxy/     # 流式/非流式转发 + context 超时（对齐 lib/proxy.js）
+├── internal/converter/ # 三格式请求/响应/流式 SSE 互转（对齐 lib/converter.js）
 ├── Dockerfile          # 多阶段构建 → distroless 静态镜像
 └── go.mod
 ```
@@ -32,13 +33,13 @@ go/
 | 路由匹配 | ✅ | `*`/`?` 通配，nocase |
 | 并发/限速队列 | ✅ | channel 信号量 + 滑动窗口 + 队列等待超时 |
 | 流式转发 + 活跃超时 | ✅ | context 统一收口，超时补发合规 SSE 收尾 |
-| 非流式转发 | ✅ | anthropic→anthropic / openai→openai-chat 透传 |
+| 非流式转发 | ✅ | 三格式互转后回写 |
 | 健康检查 /health | ✅ | 队列状态 + 内存 |
-| **格式互转 converter** | ⏳ TODO | 三格式双向转换 + 流式 SSE 逐事件转换，最大风险点，需对拍测试 |
+| **格式互转 converter** | ✅ | 三格式请求/响应/流式 SSE 双向转换（`internal/converter`），对齐 Node 版逐函数实现 |
 | **vision 图片识别** | ⏳ TODO | 调用视觉模型 + 并发去重 |
 | **SQLite 图片缓存** | ⏳ TODO | Go 用 modernc.org/sqlite（纯 Go，保持静态二进制） |
 
-> PoC 当前可完整代理 mimo 实际使用的 **anthropic→anthropic 透传链路**（含流式）。
+> 已验证链路（Docker 实测）：anthropic→anthropic 透传、anthropic 上游→openai-chat 客户端（非流式 + 流式 SSE 转换），请求体 model 改写正确。
 
 ## 本地运行
 
@@ -53,7 +54,7 @@ go run ./cmd/gateway
 ```bash
 cd go
 docker build -t ai-gateway-go .
-# 预期镜像体积约 10-20 MB（对比 Node 版约 150-200 MB）
+# 实测镜像体积约 15 MB（distroless），对比 Node 版约 150-200 MB
 ```
 
 ## 迁移工作量评估
