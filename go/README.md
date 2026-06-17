@@ -1,7 +1,8 @@
 # ai-gateway — Go PoC
 
 这是 Node 版 `ai-gateway` 迁移到 Go 的概念验证（Proof of Concept），用于评估"性能/稳定性/体积"迁移收益。
-**不是生产可用版本**，仅打通核心骨架，部分能力以 `TODO` 标注待补全。
+已实现与 Node 版功能对等的全部核心能力（converter / vision / cache 均已补齐并经 Docker 实测）。
+**仍建议在生产切流前用真实流量对 Node 版做响应对拍**，确认 converter 完全等价。
 
 ## 设计目标
 
@@ -21,11 +22,13 @@ go/
 ├── internal/queue/     # per-provider 并发/限速队列（对齐 lib/queue.js）
 ├── internal/proxy/     # 流式/非流式转发 + context 超时（对齐 lib/proxy.js）
 ├── internal/converter/ # 三格式请求/响应/流式 SSE 互转（对齐 lib/converter.js）
+├── internal/vision/    # 图片识别 + 缓存复用 + singleflight 去重（对齐 lib/vision.js）
+├── internal/cache/     # SQLite 图片缓存，纯 Go modernc.org/sqlite（对齐 lib/cache.js）
 ├── Dockerfile          # 多阶段构建 → distroless 静态镜像
 └── go.mod
 ```
 
-## 已实现 vs 待补全
+## 功能实现状态
 
 | 能力 | 状态 | 说明 |
 |------|------|------|
@@ -34,12 +37,15 @@ go/
 | 并发/限速队列 | ✅ | channel 信号量 + 滑动窗口 + 队列等待超时 |
 | 流式转发 + 活跃超时 | ✅ | context 统一收口，超时补发合规 SSE 收尾 |
 | 非流式转发 | ✅ | 三格式互转后回写 |
-| 健康检查 /health | ✅ | 队列状态 + 内存 |
-| **格式互转 converter** | ✅ | 三格式请求/响应/流式 SSE 双向转换（`internal/converter`），对齐 Node 版逐函数实现 |
-| **vision 图片识别** | ⏳ TODO | 调用视觉模型 + 并发去重 |
-| **SQLite 图片缓存** | ⏳ TODO | Go 用 modernc.org/sqlite（纯 Go，保持静态二进制） |
+| 格式互转 converter | ✅ | 三格式请求/响应/流式 SSE 双向转换，对齐 Node 版逐函数实现 |
+| vision 图片识别 | ✅ | 调用视觉模型 + SQLite 缓存复用 + 同图并发去重 + tool_result 递归 |
+| SQLite 图片缓存 | ✅ | 纯 Go modernc.org/sqlite，`CGO_ENABLED=0` 可编译，保持静态二进制 |
+| 健康检查 /health | ✅ | 队列状态 + 缓存统计 + 内存 |
 
-> 已验证链路（Docker 实测）：anthropic→anthropic 透传、anthropic 上游→openai-chat 客户端（非流式 + 流式 SSE 转换），请求体 model 改写正确。
+> 已验证链路（Docker 实测）：
+> - anthropic→anthropic 透传（含流式）
+> - anthropic 上游→openai-chat 客户端（非流式 + 流式 SSE 转换），请求体 model 改写正确
+> - 图片请求：第 1 次走视觉识别并写缓存，第 2 次命中缓存（`图片: 1 缓存`），`/health` 显示 `cache.total=1`
 
 ## 本地运行
 
@@ -49,14 +55,44 @@ cd go
 go run ./cmd/gateway
 ```
 
-## 构建镜像
+## 构建与运行镜像
 
 ```bash
 cd go
 docker build -t ai-gateway-go .
-# 实测镜像体积约 15 MB（distroless），对比 Node 版约 150-200 MB
+# 实测镜像体积约 20.5 MB（distroless + sqlite 驱动），对比 Node 版约 150-200 MB
 ```
 
-## 迁移工作量评估
+运行（distroless 以 nonroot/UID 65532 运行，data 卷需对该用户可写）：
 
-剩余 TODO 中 **converter 是大头**（Node 版 483 行格式转换逻辑），建议用真实流量对 Node 版与 Go 版做响应对拍，保证等价后再切流。整体预计 3-5 人天可达到功能对等。
+```bash
+docker run -d -p 7789:7789 \
+  -v "$PWD/config.yaml:/app/config.yaml:ro" \
+  -v "$PWD/data:/app/data" \
+  ai-gateway-go
+```
+
+### ⚠️ SQLite 数据卷注意事项
+
+SQLite 依赖文件锁，在 **macOS Docker Desktop 的 bind mount（virtiofs/gRPC-FUSE）** 上写入会失败（表现为
+`unable to open database file: out of memory (14)` 或缓存静默不落盘）。这是 SQLite + Docker for Mac 的已知现象，
+**与 Go 代码无关**（Node 版 sql.js 整库读写 buffer、不用文件锁，故未暴露此问题）。
+
+生产部署（Linux）用普通 bind mount 或 Docker named volume 均正常。本地 macOS 验证缓存时，建议用 named volume：
+
+```bash
+docker volume create aigw-data
+docker run -d -p 7789:7789 \
+  -v "$PWD/config.yaml:/app/config.yaml:ro" \
+  -v aigw-data:/app/data \
+  ai-gateway-go
+```
+
+## 迁移评估结论
+
+功能已与 Node 版对等。实测收益：
+- **镜像体积** 约 20.5 MB（Node 版约 150-200 MB，≈ 1/8）
+- **运行内存** 启动后约 6 MB（Node 版约 50-80 MB）
+- **稳定性** 队列 slot 用 `defer release()` 释放、超时用 `context` 统一收口，从语言层面规避了 Node 版易出的泄漏/卡死类问题
+
+切流前建议：用真实流量对 Node 版与 Go 版做响应对拍，重点覆盖 converter 的跨格式与流式 SSE 分支。

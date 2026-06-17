@@ -1,8 +1,7 @@
 // Command ai-gateway-go 是 Node 版 gateway.js 的 Go PoC。
 //
-// 已打通：配置加载、路由匹配、per-provider 并发/限速队列、流式/非流式转发、context 超时、健康检查。
-// 待补全（标注 TODO）：converter 三格式互转、vision 图片识别、SQLite 缓存。
-// PoC 当前可完整代理 mimo 实际使用的 anthropic→anthropic 透传链路。
+// 已实现：配置加载、路由匹配、per-provider 并发/限速队列、流式/非流式转发、context 超时、
+// 三格式互转 converter、vision 图片识别、SQLite 缓存、健康检查。
 package main
 
 import (
@@ -11,17 +10,21 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"runtime"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"time"
 	_ "time/tzdata" // 嵌入时区数据库，使 distroless 等无 tzdata 的镜像也能解析 Asia/Shanghai
 
+	"ai-gateway/internal/cache"
 	"ai-gateway/internal/config"
 	"ai-gateway/internal/converter"
 	"ai-gateway/internal/proxy"
 	"ai-gateway/internal/queue"
 	"ai-gateway/internal/router"
+	"ai-gateway/internal/vision"
 )
 
 var reqCounter uint64
@@ -44,17 +47,49 @@ func main() {
 		},
 	}
 
-	srv := &server{cfg: cfg, qm: qm, httpClient: httpClient}
+	// 初始化 SQLite 图片缓存
+	imgCache, err := cache.Open()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[gateway] 缓存初始化失败: %s\n", err)
+		os.Exit(1)
+	}
+	// 启动时清理过期缓存
+	maxAgeDays := cfg.Cache.MaxAgeDays
+	if maxAgeDays == 0 {
+		maxAgeDays = 7
+	}
+	maxRecords := cfg.Cache.MaxRecords
+	if maxRecords == 0 {
+		maxRecords = 1000
+	}
+	if res, err := imgCache.Cleanup(maxAgeDays, maxRecords); err == nil && res.Deleted > 0 {
+		fmt.Fprintf(os.Stderr, "[ai-gateway] 缓存清理: 删除 %d 条过期记录\n", res.Deleted)
+	}
+
+	translator := vision.New(imgCache, qm, httpClient)
+
+	srv := &server{cfg: cfg, qm: qm, httpClient: httpClient, cache: imgCache, translator: translator}
+
+	// 优雅退出：关闭缓存
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-stop
+		logSystem("收到退出信号，正在关闭...")
+		imgCache.Close()
+		os.Exit(0)
+	}()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", srv.handle)
 
 	addr := net.JoinHostPort(cfg.Host, fmt.Sprintf("%d", cfg.Port))
-	printBanner(cfg)
+	printBanner(cfg, imgCache)
 
 	httpServer := &http.Server{Addr: addr, Handler: mux}
 	if err := httpServer.ListenAndServe(); err != nil {
 		logSystem("服务器错误: %s", err)
+		imgCache.Close()
 		os.Exit(1)
 	}
 }
@@ -63,6 +98,8 @@ type server struct {
 	cfg        *config.Config
 	qm         *queue.Manager
 	httpClient *http.Client
+	cache      *cache.Cache
+	translator *vision.Translator
 }
 
 func (s *server) handle(w http.ResponseWriter, r *http.Request) {
@@ -125,9 +162,21 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 	p := matched.Provider
 	p.APIKey = router.ResolveAPIKey(p, r.Header)
 
-	logf(reqID, "→ %s → %s [%d msgs, stream=%v]", model, matched.TargetModel, len(internal.Messages), internal.Stream)
+	// 是否需要视觉识别：路由配了 vision 且消息含图片
+	needVision := matched.VisionProvider != nil && vision.HasImages(internal.Messages)
+	displayModel := matched.TargetModel
+	if needVision {
+		displayModel = matched.VisionModel
+	}
+	logf(reqID, "→ %s → %s [%d msgs, stream=%v]", model, displayModel, len(internal.Messages), internal.Stream)
 
-	// TODO(vision): 若 matched.VisionProvider != nil 且消息含图片，先做图片识别翻译。
+	// 图片翻译：把图片块替换为视觉模型生成的文字描述
+	if needVision {
+		vp := matched.VisionProvider
+		vp.APIKey = router.ResolveAPIKey(vp, r.Header)
+		internal.Messages = s.translator.Translate(r.Context(), internal.Messages, vp, matched.VisionModel,
+			func(f string, a ...any) { logf(reqID, f, a...) })
+	}
 
 	// 内部格式 → 上游 provider 请求体
 	var upstreamMap map[string]any
@@ -180,10 +229,15 @@ func (s *server) handleHealth(w http.ResponseWriter) {
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
 
+	cs := s.cache.GetStats()
 	health := map[string]any{
 		"status":  "ok",
 		"timeout": s.cfg.Timeout,
 		"queues":  queues,
+		"cache": map[string]any{
+			"total":       cs.Total,
+			"contentSize": cs.ContentSize,
+		},
 		"memory": map[string]any{
 			"heapAllocMB": m.HeapAlloc / 1024 / 1024,
 			"sysMB":       m.Sys / 1024 / 1024,

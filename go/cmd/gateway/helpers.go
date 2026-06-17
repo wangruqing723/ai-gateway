@@ -8,6 +8,7 @@ import (
 	"os"
 	"time"
 
+	"ai-gateway/internal/cache"
 	"ai-gateway/internal/config"
 )
 
@@ -56,7 +57,7 @@ func mask(v string) string {
 }
 
 // printBanner 启动横幅，对齐 Node 版样式
-func printBanner(cfg *config.Config) {
+func printBanner(cfg *config.Config, c *cache.Cache) {
 	logSystem("═══════════════════════════════════════════")
 	logSystem("  ai-gateway (Go PoC) 启动成功")
 	logSystem("───────────────────────────────────────────")
@@ -75,10 +76,27 @@ func printBanner(cfg *config.Config) {
 		logSystem("    %-30s → %s/%s%s", r.Match, r.Provider, r.Model, vis)
 	}
 	logSystem("───────────────────────────────────────────")
+	cs := c.GetStats()
+	if cs.Total > 0 {
+		logSystem("  图片缓存 : %d 条 (%s)", cs.Total, formatSize(cs.ContentSize))
+	} else {
+		logSystem("  图片缓存 : 无")
+	}
 	logSystem("  请求超时 : %d 秒", cfg.Timeout/1000)
 	logSystem("  流式活跃超时 : %d 秒", cfg.StreamActivityTimeout/1000)
 	logSystem("───────────────────────────────────────────")
 	logSystem("  接受格式: Anthropic · OpenAI Chat · OpenAI Responses")
 	logSystem("  健康检查: GET /health")
 	logSystem("═══════════════════════════════════════════")
+}
+
+// formatSize 人类可读体积
+func formatSize(bytes int64) string {
+	if bytes < 1024 {
+		return fmt.Sprintf("%d B", bytes)
+	}
+	if bytes < 1024*1024 {
+		return fmt.Sprintf("%.1f KB", float64(bytes)/1024)
+	}
+	return fmt.Sprintf("%.1f MB", float64(bytes)/(1024*1024))
 }
