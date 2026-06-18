@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -10,15 +9,21 @@ import (
 
 	"ai-gateway/internal/cache"
 	"ai-gateway/internal/config"
+	"ai-gateway/internal/httputil"
 )
 
-// 北京时间日志，对齐 Node 版格式：[时间] [reqId] msg
-func beijingTime() string {
+// 包级缓存时区，避免每条日志重复加载
+var beijingLoc = func() *time.Location {
 	loc, err := time.LoadLocation("Asia/Shanghai")
 	if err != nil {
 		loc = time.FixedZone("CST", 8*3600)
 	}
-	return time.Now().In(loc).Format("2006-01-02 15:04:05.000")
+	return loc
+}()
+
+// 北京时间日志，对齐 Node 版格式：[时间] [reqId] msg
+func beijingTime() string {
+	return time.Now().In(beijingLoc).Format("2006-01-02 15:04:05.000")
 }
 
 func logf(reqID, format string, args ...any) {
@@ -35,14 +40,9 @@ func readBody(r *http.Request) ([]byte, error) {
 	return io.ReadAll(r.Body)
 }
 
-// writeJSONError 统一 JSON 错误响应
+// writeJSONError 统一 JSON 错误响应（委托 httputil 共享实现）
 func writeJSONError(w http.ResponseWriter, status int, errType, msg string) {
-	w.Header().Set("content-type", "application/json")
-	w.WriteHeader(status)
-	payload, _ := json.Marshal(map[string]any{
-		"error": map[string]any{"type": errType, "message": msg},
-	})
-	w.Write(payload)
+	httputil.WriteJSONError(w, status, errType, msg)
 }
 
 // mask 脱敏密钥显示

@@ -53,7 +53,7 @@ func New(c *cache.Cache, qm *queue.Manager, httpClient *http.Client) *Translator
 	}
 }
 
-// HasImages 检测消息数组是否包含图片块（含 tool_result 内嵌），对齐 Node 版 hasImages。
+// HasImages 检测消息数组是否包含图片块（对齐 Node hasImages：只查一层，不递归进 tool_result）。
 func HasImages(messages []any) bool {
 	for _, m := range messages {
 		msg, ok := m.(map[string]any)
@@ -71,6 +71,8 @@ func HasImages(messages []any) bool {
 	return false
 }
 
+// blocksHaveImage 检测 content 块是否包含图片（对齐 Node hasImages：只查一层）。
+// 注意：processBlocks 处理时仍会递归进 tool_result，这是 Node 的已知不对齐行为。
 func blocksHaveImage(blocks []any) bool {
 	for _, b := range blocks {
 		block, ok := b.(map[string]any)
@@ -79,11 +81,6 @@ func blocksHaveImage(blocks []any) bool {
 		}
 		if block["type"] == "image" {
 			return true
-		}
-		if block["type"] == "tool_result" {
-			if inner, ok := block["content"].([]any); ok && blocksHaveImage(inner) {
-				return true
-			}
 		}
 	}
 	return false
@@ -195,6 +192,7 @@ func (t *Translator) callVision(ctx context.Context, imageBlock map[string]any, 
 	t.mu.Lock()
 	if r, ok := t.pending[hash]; ok {
 		t.mu.Unlock()
+		// 等待者只关注自身 ctx；leader 完成后会写缓存，下次可命中
 		select {
 		case <-r.done:
 			return r.text, false, r.err
@@ -215,15 +213,24 @@ func (t *Translator) callVision(ctx context.Context, imageBlock map[string]any, 
 		t.mu.Unlock()
 	}()
 
+	// leader 使用独立 context，避免单个请求取消导致所有等待者收到取消错误
+	// （当 leader 请求断开时，识别仍可完成并写入缓存，后续请求可命中）
+	detachedCtx, detachedCancel := context.WithTimeout(context.Background(), visionRequestTimeout)
+	defer detachedCancel()
+
 	// 经队列控制视觉 provider 并发
-	release, qerr := t.qm.Acquire(ctx, vision.Name, vision.MaxConcurrent, vision.MaxPerSecond, vision.MaxQueueWait)
+	release, qerr := t.qm.Acquire(detachedCtx, vision.Name, vision.MaxConcurrent, vision.MaxPerSecond, vision.MaxQueueWait)
 	if qerr != nil {
 		return "", false, qerr
 	}
 	defer release()
 
-	text, err = t.doRecognize(ctx, imageBlock, vision, visionModel)
+	text, err = t.doRecognize(detachedCtx, imageBlock, vision, visionModel)
 	if err != nil {
+		// 如果原始请求已取消且识别无其它错误，返回请求上下文错误更合理
+		if ctx.Err() != nil {
+			return "", false, ctx.Err()
+		}
 		return "", false, err
 	}
 	_ = t.cache.Set(hash, text)
@@ -247,10 +254,8 @@ func (t *Translator) doRecognize(ctx context.Context, imageBlock map[string]any,
 	})
 
 	url := buildVisionURL(vision.BaseURL)
-	cctx, cancel := context.WithTimeout(ctx, visionRequestTimeout)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(cctx, http.MethodPost, url, bytes.NewReader(reqBody))
+	// 超时由调用方的 context 控制（leader 的 detachedCtx 或直接请求 ctx），无需再叠加
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(reqBody))
 	if err != nil {
 		return "", err
 	}

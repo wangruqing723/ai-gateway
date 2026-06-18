@@ -72,6 +72,9 @@ func ImageHash(imageBlock map[string]any) string {
 	if src != nil {
 		if t, _ := src["type"].(string); t == "base64" {
 			mediaType, _ := src["media_type"].(string)
+			if mediaType == "" {
+				mediaType = "undefined" // 对齐 Node：模板插值 undefined_<data>
+			}
 			data, _ := src["data"].(string)
 			raw = mediaType + "_" + data
 		} else {

@@ -38,7 +38,7 @@ func main() {
 
 	qm := queue.NewManager()
 
-	// 复用连接池的 HTTP 客户端；流式不设整体 Timeout（靠 ctx 活跃超时控制）
+	// 复用连接池的 HTTP 客户端；不设 http.Client.Timeout（非流式靠 ctx 超时，流式靠 header 超时 + 活跃超时）
 	httpClient := &http.Client{
 		Transport: &http.Transport{
 			MaxIdleConns:        200,
@@ -197,6 +197,11 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		logf(reqID, "  队列处理异常: %s", err.Error())
 		if err == queue.ErrQueueTimeout {
 			writeJSONError(w, http.StatusServiceUnavailable, "queue_timeout", err.Error())
+		} else if r.Context().Err() != nil {
+			// 客户端已断开，net/http 会忽略写入，无需也不应写响应
+			logf(reqID, "  客户端已断开，跳过响应")
+		} else {
+			writeJSONError(w, http.StatusBadGateway, "gateway_error", "队列错误: "+err.Error())
 		}
 		return
 	}
@@ -251,9 +256,5 @@ func (s *server) handleHealth(w http.ResponseWriter) {
 
 func nextReqID() string {
 	n := atomic.AddUint64(&reqCounter, 1)
-	if n > 99999 {
-		atomic.StoreUint64(&reqCounter, 1)
-		n = 1
-	}
-	return fmt.Sprintf("r%05d", n)
+	return fmt.Sprintf("r%05d", (n-1)%100000+1)
 }

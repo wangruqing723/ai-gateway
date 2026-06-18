@@ -14,7 +14,7 @@ type StreamTransformer interface {
 // NewStreamTransformer 按 provider/client 格式创建流式转换器。
 // 相同格式（含 openai→openai-chat）直接透传。
 func NewStreamTransformer(providerFormat, clientFormat string) StreamTransformer {
-	if providerFormat == clientFormat || (providerFormat == "openai" && clientFormat == "openai-chat") {
+	if IsPassthrough(providerFormat, clientFormat) {
 		return passthrough{}
 	}
 	st := &streamState{msgID: "chatcmpl-" + shortID(), respID: "resp_" + shortID(), itemID: "msg_" + shortID()}
