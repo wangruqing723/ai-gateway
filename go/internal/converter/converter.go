@@ -8,6 +8,7 @@ package converter
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"strings"
 )
 
@@ -34,6 +35,13 @@ func DetectClientFormat(path string) string {
 		return "openai-responses"
 	}
 	return ""
+}
+
+// IsPassthrough 判断 provider 和 client 格式是否可直接透传（不需逐行转换）。
+// 供 proxy 和 stream 模块共用，消除判定逻辑分歧。
+func IsPassthrough(providerFormat, clientFormat string) bool {
+	return providerFormat == clientFormat ||
+		(providerFormat == "openai" && clientFormat == "openai-chat")
 }
 
 // ── 客户端请求 → 内部格式 ──────────────────────
@@ -200,7 +208,8 @@ func normalizeOpenAIContent(content any) []any {
 		}
 		switch block["type"] {
 		case "text":
-			out = append(out, map[string]any{"type": "text", "text": block["text"]})
+			// 兼容客户端发 text 为 JSON 数字（float64）的情况，统一转为字符串
+			out = append(out, map[string]any{"type": "text", "text": fmt.Sprintf("%v", block["text"])})
 		case "image_url":
 			out = append(out, openAIImageToAnthropic(block["image_url"]))
 		default:
@@ -227,7 +236,7 @@ func normalizeResponsesContent(content any) []any {
 		}
 		switch block["type"] {
 		case "input_text", "output_text":
-			out = append(out, map[string]any{"type": "text", "text": block["text"]})
+			out = append(out, map[string]any{"type": "text", "text": fmt.Sprintf("%v", block["text"])})
 		case "input_image":
 			out = append(out, responsesImageToAnthropic(block))
 		default:

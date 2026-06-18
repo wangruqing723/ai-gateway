@@ -20,14 +20,17 @@ type Match struct {
 func MatchRoute(model string, cfg *config.Config) *Match {
 	for _, route := range cfg.Routes {
 		if globMatch(strings.ToLower(route.Match), strings.ToLower(model)) {
-			p := cfg.Providers[route.Provider]
+			// 复制 Provider 结构体，避免并发请求修改共享指针字段（如 APIKey）
+			pSrc := cfg.Providers[route.Provider]
+			pCopy := *pSrc
 			target := route.Model
 			if target == "" {
 				target = model
 			}
-			m := &Match{Provider: p, TargetModel: target}
+			m := &Match{Provider: &pCopy, TargetModel: target}
 			if route.Vision != nil {
-				m.VisionProvider = cfg.Providers[route.Vision.Provider]
+				vpCopy := *cfg.Providers[route.Vision.Provider]
+				m.VisionProvider = &vpCopy
 				m.VisionModel = route.Vision.Model
 			}
 			return m

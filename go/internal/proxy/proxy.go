@@ -5,18 +5,20 @@
 package proxy
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"ai-gateway/internal/config"
 	"ai-gateway/internal/converter"
+	"ai-gateway/internal/httputil"
 )
 
 // LogFunc 日志函数，绑定了 reqId
@@ -46,12 +48,45 @@ func Forward(opts *Options) error {
 	ctx, cancel := context.WithCancel(opts.ClientReq.Context())
 	defer cancel()
 
-	// 非流式才设整体超时；流式靠活跃超时，避免长响应被整体超时误杀
-	if !opts.IsStreaming {
-		var c2 context.CancelFunc
-		ctx, c2 = context.WithTimeout(ctx, time.Duration(opts.TimeoutMs)*time.Millisecond)
-		defer c2()
+	timeout := time.Duration(opts.TimeoutMs) * time.Millisecond
+
+	if opts.IsStreaming {
+		// 流式路径：对 Do 阶段加 header 响应超时，避免上游接受连接但不发字节时永久阻塞
+		// 拿到响应头后切换到活跃超时控制（见 handleStream）
+		doCtx, doCancel := context.WithTimeout(ctx, timeout)
+		req, err := http.NewRequestWithContext(doCtx, http.MethodPost, upstreamURL+upstreamPath, bytes.NewReader(opts.UpstreamBody))
+		if err != nil {
+			doCancel()
+			writeJSONError(opts.ClientRes, http.StatusBadGateway, "proxy_error", err.Error())
+			return err
+		}
+		setUpstreamHeaders(req, opts.Provider)
+
+		resp, err := opts.HTTPClient.Do(req)
+		doCancel() // 释放 header 超时 context，后续靠活跃超时
+		if err != nil {
+			opts.Log("转发失败: %s", err.Error())
+			if errors.Is(err, context.DeadlineExceeded) {
+				writeJSONError(opts.ClientRes, http.StatusGatewayTimeout, "timeout_error", fmt.Sprintf("上游响应头超时 (%d秒)", opts.TimeoutMs/1000))
+				return err
+			}
+			writeJSONError(opts.ClientRes, http.StatusBadGateway, "proxy_error", err.Error())
+			return err
+		}
+		defer resp.Body.Close()
+
+		elapsed := time.Since(opts.StartTime).Milliseconds()
+		if resp.StatusCode >= 400 {
+			opts.Log("← HTTP %d [%dms]", resp.StatusCode, elapsed)
+			return handleError(resp, opts.ClientRes, opts.Log)
+		}
+		opts.Log("← %d [%dms]", resp.StatusCode, elapsed)
+		return handleStream(ctx, cancel, resp, opts)
 	}
+
+	// 非流式：整体超时
+	ctx, cancel2 := context.WithTimeout(ctx, timeout)
+	defer cancel2()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, upstreamURL+upstreamPath, bytes.NewReader(opts.UpstreamBody))
 	if err != nil {
@@ -63,6 +98,10 @@ func Forward(opts *Options) error {
 	resp, err := opts.HTTPClient.Do(req)
 	if err != nil {
 		opts.Log("转发失败: %s", err.Error())
+		if errors.Is(err, context.DeadlineExceeded) {
+			writeJSONError(opts.ClientRes, http.StatusGatewayTimeout, "timeout_error", fmt.Sprintf("上游请求超时 (%d秒)", opts.TimeoutMs/1000))
+			return err
+		}
 		writeJSONError(opts.ClientRes, http.StatusBadGateway, "proxy_error", err.Error())
 		return err
 	}
@@ -74,11 +113,7 @@ func Forward(opts *Options) error {
 		return handleError(resp, opts.ClientRes, opts.Log)
 	}
 	opts.Log("← %d [%dms]", resp.StatusCode, elapsed)
-
-	if !opts.IsStreaming {
-		return handleResponse(resp, opts)
-	}
-	return handleStream(ctx, cancel, resp, opts)
+	return handleResponse(resp, opts)
 }
 
 // handleResponse 非流式响应：读取整体，按格式转换后回写。
@@ -133,19 +168,18 @@ func handleStream(ctx context.Context, cancel context.CancelFunc, resp *http.Res
 	// 活跃超时计时器：到期 cancel ctx，从而中断下面的 Read
 	timer := time.NewTimer(activityTimeout)
 	defer timer.Stop()
-	timedOut := false
+	var timedOut atomic.Bool
 	go func() {
 		select {
 		case <-timer.C:
-			timedOut = true
+			timedOut.Store(true)
 			cancel() // 中断上游读取
 		case <-ctx.Done():
 		}
 	}()
 
 	// 相同格式直接透传字节流，保留完整 SSE 格式与打字机效果；不同格式逐行解析转换。
-	isPassthrough := (opts.Provider.Format == "anthropic" && opts.ClientFormat == "anthropic") ||
-		(opts.Provider.Format == "openai" && opts.ClientFormat == "openai-chat")
+	isPassthrough := converter.IsPassthrough(opts.Provider.Format, opts.ClientFormat)
 
 	if isPassthrough {
 		buf := make([]byte, 16*1024)
@@ -160,39 +194,68 @@ func handleStream(ctx context.Context, cancel context.CancelFunc, resp *http.Res
 				flusher.Flush()
 			}
 			if err != nil {
-				return finishStream(err, timedOut, opts, flusher)
+				return finishStream(err, timedOut.Load(), opts, flusher)
 			}
 		}
 	}
 
 	// 不同格式：逐行解析并经 transformer 转换（对齐 Node 的按 \n 切分逻辑）。
+	// 手动按 \n 分行读取，无 bufio.Scanner 的 4MB 单行上限，避免大 SSE 事件被截断。
 	transform := converter.NewStreamTransformer(opts.Provider.Format, opts.ClientFormat)
-	scanner := bufio.NewScanner(resp.Body)
-	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024) // 放大单行上限，应对大块 SSE
-	for scanner.Scan() {
-		timer.Reset(activityTimeout)
-		line := strings.TrimRight(scanner.Text(), "\r")
-		if line == "" {
-			// 保留空行分隔（对齐 Node：clientRes.write('\n')）
-			if _, werr := opts.ClientRes.Write([]byte("\n")); werr != nil {
-				cancel()
-				return werr
+	readBuf := make([]byte, 64*1024)
+	var lineBuf []byte
+	for {
+		n, readErr := resp.Body.Read(readBuf)
+		if n > 0 {
+			timer.Reset(activityTimeout)
+			chunk := readBuf[:n]
+			for {
+				idx := bytes.IndexByte(chunk, '\n')
+				if idx < 0 {
+					// 无完整行，剩余数据暂存到 lineBuf
+					lineBuf = append(lineBuf, chunk...)
+					break
+				}
+				line := string(append(lineBuf, chunk[:idx]...))
+				lineBuf = lineBuf[:0]
+				chunk = chunk[idx+1:]
+				line = strings.TrimRight(line, "\r")
+				if line == "" {
+					if _, werr := opts.ClientRes.Write([]byte("\n")); werr != nil {
+						cancel()
+						return werr
+					}
+					flusher.Flush()
+					continue
+				}
+				for _, out := range transform.Transform(line) {
+					if out == "" {
+						continue
+					}
+					if _, werr := opts.ClientRes.Write([]byte(out)); werr != nil {
+						cancel()
+						return werr
+					}
+				}
+				flusher.Flush()
 			}
-			flusher.Flush()
-			continue
 		}
-		for _, out := range transform.Transform(line) {
-			if out == "" {
-				continue
+		if readErr != nil {
+			// 流结束：lineBuf 中可能有不以 \n 结尾的最后一行
+			if len(lineBuf) > 0 {
+				line := strings.TrimRight(string(lineBuf), "\r")
+				if line != "" {
+					for _, out := range transform.Transform(line) {
+						if out != "" {
+							opts.ClientRes.Write([]byte(out))
+						}
+					}
+					flusher.Flush()
+				}
 			}
-			if _, werr := opts.ClientRes.Write([]byte(out)); werr != nil {
-				cancel()
-				return werr
-			}
+			return finishStream(readErr, timedOut.Load(), opts, flusher)
 		}
-		flusher.Flush()
 	}
-	return finishStream(scanner.Err(), timedOut, opts, flusher)
 }
 
 // finishStream 统一处理流结束：正常 EOF / 活跃超时 / 客户端断开。
@@ -205,7 +268,12 @@ func finishStream(err error, timedOut bool, opts *Options, flusher http.Flusher)
 		gracefulSSEClose(opts.ClientRes, flusher, opts.ClientFormat, opts.StreamActivityTimeout)
 		return nil
 	}
-	return err // 客户端断开或其它读取错误
+	// context.Canceled：客户端主动断开连接，属正常结束而非异常
+	if errors.Is(err, context.Canceled) {
+		opts.Log("客户端断开连接")
+		return nil
+	}
+	return err // 其它读取错误
 }
 
 // gracefulSSEClose 向客户端补发合规 SSE 收尾事件，避免截断流（对齐 Node 版改动）。
@@ -237,11 +305,7 @@ func handleError(resp *http.Response, w http.ResponseWriter, log LogFunc) error 
 	return err
 }
 
+// writeJSONError 代理内部使用 httputil 共享实现。
 func writeJSONError(w http.ResponseWriter, status int, errType, msg string) {
-	w.Header().Set("content-type", "application/json")
-	w.WriteHeader(status)
-	payload, _ := json.Marshal(map[string]any{
-		"error": map[string]any{"type": errType, "message": msg},
-	})
-	w.Write(payload)
+	httputil.WriteJSONError(w, status, errType, msg)
 }
