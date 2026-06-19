@@ -32,6 +32,7 @@ type Translator struct {
 	cache      *cache.Cache
 	qm         *queue.Manager
 	httpClient *http.Client
+	directMode bool // 直通模式：跳过视觉队列的并发/限速控制
 
 	mu      sync.Mutex
 	pending map[string]*recognition // 正在识别中的图片，按 hash 去重
@@ -44,11 +45,12 @@ type recognition struct {
 }
 
 // New 创建翻译器。httpClient 可复用主程序的连接池。
-func New(c *cache.Cache, qm *queue.Manager, httpClient *http.Client) *Translator {
+func New(c *cache.Cache, qm *queue.Manager, httpClient *http.Client, directMode bool) *Translator {
 	return &Translator{
 		cache:      c,
 		qm:         qm,
 		httpClient: httpClient,
+		directMode: directMode,
 		pending:    make(map[string]*recognition),
 	}
 }
@@ -218,14 +220,18 @@ func (t *Translator) callVision(ctx context.Context, imageBlock map[string]any, 
 	detachedCtx, detachedCancel := context.WithTimeout(context.Background(), visionRequestTimeout)
 	defer detachedCancel()
 
-	// 经队列控制视觉 provider 并发
-	release, qerr := t.qm.Acquire(detachedCtx, vision.Name, vision.MaxConcurrent, vision.MaxPerSecond, vision.MaxQueueWait)
-	if qerr != nil {
-		return "", false, qerr
+	if t.directMode {
+		// 直通模式：跳过队列，直接识别
+		text, err = t.doRecognize(detachedCtx, imageBlock, vision, visionModel)
+	} else {
+		// 经队列控制视觉 provider 并发
+		release, qerr := t.qm.Acquire(detachedCtx, vision.Name, vision.MaxConcurrent, vision.MaxPerSecond, vision.MaxQueueWait)
+		if qerr != nil {
+			return "", false, qerr
+		}
+		defer release()
+		text, err = t.doRecognize(detachedCtx, imageBlock, vision, visionModel)
 	}
-	defer release()
-
-	text, err = t.doRecognize(detachedCtx, imageBlock, vision, visionModel)
 	if err != nil {
 		// 如果原始请求已取消且识别无其它错误，返回请求上下文错误更合理
 		if ctx.Err() != nil {

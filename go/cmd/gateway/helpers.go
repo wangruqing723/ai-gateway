@@ -84,6 +84,13 @@ func printBanner(cfg *config.Config, c *cache.Cache) {
 	}
 	logSystem("  请求超时 : %d 秒", cfg.Timeout/1000)
 	logSystem("  流式活跃超时 : %d 秒", cfg.StreamActivityTimeout/1000)
+	// 直通模式状态：开启时跳过队列，关闭时走队列（并发/限速/排队）
+	if cfg.DirectMode {
+		logSystem("  直通模式 : 开启（跳过队列，限流交由上游 429）")
+		logSystem("    直通超时 : 非流式 %d秒 / 流式头 %d秒 / 流式活跃 %d秒", cfg.DirectTimeoutNoStream/1000, cfg.DirectTimeoutStreamHeader/1000, cfg.DirectTimeoutStreamActive/1000)
+	} else {
+		logSystem("  直通模式 : 关闭（请求经队列：并发/限速/排队）")
+	}
 	logSystem("───────────────────────────────────────────")
 	logSystem("  接受格式: Anthropic · OpenAI Chat · OpenAI Responses")
 	logSystem("  健康检查: GET /health")

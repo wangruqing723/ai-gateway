@@ -66,7 +66,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "[ai-gateway] 缓存清理: 删除 %d 条过期记录\n", res.Deleted)
 	}
 
-	translator := vision.New(imgCache, qm, httpClient)
+	translator := vision.New(imgCache, qm, httpClient, cfg.DirectMode)
 
 	srv := &server{cfg: cfg, qm: qm, httpClient: httpClient, cache: imgCache, translator: translator}
 
@@ -191,21 +191,34 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 通过队列获取执行槽位（并发 + 限速 + 等待超时）
-	release, err := s.qm.Acquire(r.Context(), p.Name, p.MaxConcurrent, p.MaxPerSecond, p.MaxQueueWait)
-	if err != nil {
-		logf(reqID, "  队列处理异常: %s", err.Error())
-		if err == queue.ErrQueueTimeout {
-			writeJSONError(w, http.StatusServiceUnavailable, "queue_timeout", err.Error())
-		} else if r.Context().Err() != nil {
-			// 客户端已断开，net/http 会忽略写入，无需也不应写响应
-			logf(reqID, "  客户端已断开，跳过响应")
-		} else {
-			writeJSONError(w, http.StatusBadGateway, "gateway_error", "队列错误: "+err.Error())
+	// 直通模式：跳过队列（并发/限速/排队），请求直接转发；超时用 direct* 配置。
+	// 非直通模式：先经队列获取执行槽位（并发 + 限速 + 等待超时）。
+	if !s.cfg.DirectMode {
+		release, err := s.qm.Acquire(r.Context(), p.Name, p.MaxConcurrent, p.MaxPerSecond, p.MaxQueueWait)
+		if err != nil {
+			logf(reqID, "  队列处理异常: %s", err.Error())
+			if err == queue.ErrQueueTimeout {
+				writeJSONError(w, http.StatusServiceUnavailable, "queue_timeout", err.Error())
+			} else if r.Context().Err() != nil {
+				// 客户端已断开，net/http 会忽略写入，无需也不应写响应
+				logf(reqID, "  客户端已断开，跳过响应")
+			} else {
+				writeJSONError(w, http.StatusBadGateway, "gateway_error", "队列错误: "+err.Error())
+			}
+			return
 		}
-		return
+		defer release()
 	}
-	defer release()
+
+	// 超时参数：直通模式用 direct* 三档；否则沿用全局 timeout / streamActivityTimeout
+	timeoutMs := s.cfg.Timeout
+	headerTimeoutMs := 0 // 0 表示 proxy 回退用 timeoutMs
+	activityTimeoutMs := s.cfg.StreamActivityTimeout
+	if s.cfg.DirectMode {
+		timeoutMs = s.cfg.DirectTimeoutNoStream
+		headerTimeoutMs = s.cfg.DirectTimeoutStreamHeader
+		activityTimeoutMs = s.cfg.DirectTimeoutStreamActive
+	}
 
 	opts := &proxy.Options{
 		ClientReq:             r,
@@ -217,8 +230,9 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		IsStreaming:           internal.Stream,
 		Log:                   func(f string, a ...any) { logf(reqID, f, a...) },
 		StartTime:             start,
-		TimeoutMs:             s.cfg.Timeout,
-		StreamActivityTimeout: s.cfg.StreamActivityTimeout,
+		TimeoutMs:             timeoutMs,
+		HeaderTimeoutMs:       headerTimeoutMs,
+		StreamActivityTimeout: activityTimeoutMs,
 		HTTPClient:            s.httpClient,
 	}
 	if err := proxy.Forward(opts); err != nil {

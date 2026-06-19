@@ -50,6 +50,15 @@ type Config struct {
 	Providers             map[string]*Provider `yaml:"providers"`
 	Routes                []Route              `yaml:"routes"`
 	Path                  string               `yaml:"-"`
+
+	// ── 直通模式（direct mode）──────────────────────────────
+	// 开启后请求不进队列：跳过并发控制、限速与排队等待，直接转发到上游。
+	// 限流交给上游自己用 429 处理（网关原样透传，不重试）。仅保留超时保护。
+	// 默认 false，保持原有队列行为；Node 版不识别这些字段会自动忽略，互不影响。
+	DirectMode                bool `yaml:"directMode"`                // 直通开关
+	DirectTimeoutNoStream     int  `yaml:"directTimeoutNoStream"`     // 非流式整体超时（毫秒），默认 60000
+	DirectTimeoutStreamHeader int  `yaml:"directTimeoutStreamHeader"` // 流式等响应头超时（毫秒），默认 60000
+	DirectTimeoutStreamActive int  `yaml:"directTimeoutStreamActive"` // 流式活跃超时（毫秒，中途无数据即断），默认 120000
 }
 
 // Load 读取并校验配置，查找顺序对齐 Node 版（优先项目目录，其次 ~/.config）。
@@ -104,6 +113,16 @@ func applyDefaults(c *Config) {
 	}
 	if c.StreamActivityTimeout == 0 {
 		c.StreamActivityTimeout = 60000
+	}
+	// 直通模式超时默认值（仅 directMode 开启时实际生效）
+	if c.DirectTimeoutNoStream == 0 {
+		c.DirectTimeoutNoStream = 60000
+	}
+	if c.DirectTimeoutStreamHeader == 0 {
+		c.DirectTimeoutStreamHeader = 60000
+	}
+	if c.DirectTimeoutStreamActive == 0 {
+		c.DirectTimeoutStreamActive = 120000
 	}
 	for name, p := range c.Providers {
 		p.Name = name
