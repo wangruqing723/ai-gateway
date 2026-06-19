@@ -1,0 +1,30 @@
+# Go 版试用专用 compose，与 Node 版（docker-compose.yml）并存、互不影响。
+# - 用独立数据目录 ./data-go，绝不碰 Node 版的 ./data
+# - config.yaml 只读共享（两版格式一致），不会被改写
+# - 同一时间只跑一个版本，沿用 7789 端口，客户端配置无需改动
+#
+# 启动 Go 版：  docker compose -f docker-compose.go.yml up -d --build
+# 查看日志：    docker compose -f docker-compose.go.yml logs -f
+# 停止 Go 版：  docker compose -f docker-compose.go.yml down
+# 切回 Node 版：先把上面停掉，再 docker compose up -d
+services:
+  gateway-go:
+    # 本地构建 Go 版镜像（Dockerfile 在 go/ 目录下）
+    build:
+      context: ./go
+      dockerfile: Dockerfile
+    image: ai-gateway-go:local
+    container_name: ai-gateway-go
+    ports:
+      - "7789:7789"
+    volumes:
+      # 复用同一份配置（只读，Go 版不会写它）
+      - ./config.yaml:/app/config.yaml:ro
+      # 独立数据目录，与 Node 版的 ./data 隔离
+      - ./data-go:/app/data
+    environment:
+      - TZ=Asia/Shanghai
+    deploy:
+      resources:
+        limits:
+          memory: 128M

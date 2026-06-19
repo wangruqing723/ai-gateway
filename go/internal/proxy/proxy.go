@@ -36,6 +36,7 @@ type Options struct {
 	Log                   LogFunc
 	StartTime             time.Time
 	TimeoutMs             int
+	HeaderTimeoutMs       int // 流式：等上游响应头的超时（毫秒）。为 0 时回退用 TimeoutMs，保证非直通调用方行为不变
 	StreamActivityTimeout int
 	HTTPClient            *http.Client
 }
@@ -53,7 +54,13 @@ func Forward(opts *Options) error {
 	if opts.IsStreaming {
 		// 流式路径：对 Do 阶段加 header 响应超时，避免上游接受连接但不发字节时永久阻塞
 		// 拿到响应头后切换到活跃超时控制（见 handleStream）
-		doCtx, doCancel := context.WithTimeout(ctx, timeout)
+		// header 超时优先用 HeaderTimeoutMs（直通模式），为 0 时回退到整体 TimeoutMs
+		headerTimeoutMs := opts.TimeoutMs
+		if opts.HeaderTimeoutMs > 0 {
+			headerTimeoutMs = opts.HeaderTimeoutMs
+		}
+		headerTimeout := time.Duration(headerTimeoutMs) * time.Millisecond
+		doCtx, doCancel := context.WithTimeout(ctx, headerTimeout)
 		req, err := http.NewRequestWithContext(doCtx, http.MethodPost, upstreamURL+upstreamPath, bytes.NewReader(opts.UpstreamBody))
 		if err != nil {
 			doCancel()
@@ -67,7 +74,7 @@ func Forward(opts *Options) error {
 		if err != nil {
 			opts.Log("转发失败: %s", err.Error())
 			if errors.Is(err, context.DeadlineExceeded) {
-				writeJSONError(opts.ClientRes, http.StatusGatewayTimeout, "timeout_error", fmt.Sprintf("上游响应头超时 (%d秒)", opts.TimeoutMs/1000))
+				writeJSONError(opts.ClientRes, http.StatusGatewayTimeout, "timeout_error", fmt.Sprintf("上游响应头超时 (%d秒)", headerTimeoutMs/1000))
 				return err
 			}
 			writeJSONError(opts.ClientRes, http.StatusBadGateway, "proxy_error", err.Error())
