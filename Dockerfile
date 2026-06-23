@@ -6,9 +6,8 @@ WORKDIR /build
 # 使用国内模块代理，避免 proxy.golang.org 不可达导致下载超时
 ENV GOPROXY=https://goproxy.cn,direct
 
-# 复制源码，用 go mod tidy 自动解析并下载依赖（仓库未提交 go.sum）
-# 依赖纯 Go 的 modernc.org/sqlite，CGO_ENABLED=0 即可编译，保持静态二进制
-COPY . .
+# 复制 Go 源码目录，go.mod 在 go/ 子目录下
+COPY go/ .
 RUN go mod tidy
 
 # 静态编译，去除符号表减小体积
