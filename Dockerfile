@@ -1,39 +1,27 @@
 # ── 构建阶段 ──────────────────────────────────
-FROM node:20-alpine AS builder
+FROM golang:1.23-alpine AS builder
 
-WORKDIR /app
+WORKDIR /build
 
-# 先复制依赖清单，利用 Docker 层缓存
-COPY package.json package-lock.json ./
-RUN npm ci --omit=dev
+# 使用国内模块代理，避免 proxy.golang.org 不可达导致下载超时
+ENV GOPROXY=https://goproxy.cn,direct
 
-# 清理 sql.js 中不需要的文件（只保留 Node.js 需要的 WASM 版本）
-RUN cd node_modules/sql.js/dist && \
-    rm -f *-debug* *-browser* worker.* sql-asm*.js sql-asm*.js.map && \
-    ls -la
+# 复制源码，用 go mod tidy 自动解析并下载依赖（仓库未提交 go.sum）
+# 依赖纯 Go 的 modernc.org/sqlite，CGO_ENABLED=0 即可编译，保持静态二进制
+COPY . .
+RUN go mod tidy
 
-# 复制源码
-COPY gateway.js ./
-COPY lib/ ./lib/
+# 静态编译，去除符号表减小体积
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /ai-gateway ./cmd/gateway
 
 # ── 运行阶段 ──────────────────────────────────
-FROM node:20-alpine
+# distroless static：仅含 CA 证书，无 shell/包管理器，攻击面最小、体积最小。
+# 时区数据已通过 `import _ "time/tzdata"` 嵌入二进制，无需基础镜像提供 tzdata。
+# 注：gcr.io 国内不可达，这里用 daocloud 镜像加速；若网络可直连 gcr.io 可改回原地址。
+FROM m.daocloud.io/gcr.io/distroless/static-debian12:nonroot
 
 WORKDIR /app
-
-# 从构建阶段复制
-COPY --from=builder /app/node_modules ./node_modules
-COPY --from=builder /app/package.json ./
-COPY --from=builder /app/gateway.js ./
-COPY --from=builder /app/lib ./lib
-
-# 创建数据目录
-RUN mkdir -p /app/data
+COPY --from=builder /ai-gateway /app/ai-gateway
 
 EXPOSE 7789
-
-# 健康检查
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD wget -q --spider http://0.0.0.0:7789/health || exit 1
-
-CMD ["node", "gateway.js"]
+ENTRYPOINT ["/app/ai-gateway"]

@@ -13,11 +13,11 @@ services:
     volumes:
       # 挂载配置文件（宿主机编辑后重启容器即生效）
       - ./config.yaml:/app/config.yaml:ro
-      # 持久化图片缓存
+      # 持久化数据目录（SQLite 缓存）
       - ./data:/app/data
     environment:
       - TZ=Asia/Shanghai
     deploy:
       resources:
         limits:
-          memory: 256M
+          memory: 128M

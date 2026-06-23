@@ -2,6 +2,8 @@
 
 轻量本地 API Gateway，统一接入 Claude Code、Claude Desktop 和 Codex CLI。
 
+**当前版本**：Go 1.23（主版本） | [Node.js 版本归档](docker-compose.node.yml)
+
 ## 特性
 
 - **多格式输入**：同时支持 Anthropic、OpenAI Chat、OpenAI Responses 三种格式
@@ -20,13 +22,20 @@ Codex CLI              →  /v1/responses          (OpenAI Responses)┘
 
 ## 安装
 
+### Go 版本（推荐）
+
 ```bash
 git clone <repo>
 cd ai-gateway
-npm install
 cp config.example.yaml config.yaml
 # 编辑 config.yaml，填入 provider 配置
 ```
+
+### Node.js 版本（归档）
+
+Node.js 版本已归档，镜像地址：`ghcr.io/wangruqing723/ai-gateway:latest`
+
+启动方式：`docker compose -f docker-compose.node.yml up -d`
 
 ## 配置
 
@@ -72,11 +81,25 @@ routes:
 
 ## 启动
 
+### Go 版本
+
 ```bash
+cd ai-gateway/go
+go run ./cmd/gateway
+```
+
+或使用 Docker（见下方 Docker 部署章节）。
+
+### Node.js 版本
+
+```bash
+npm install
 node gateway.js
 ```
 
 ## Docker 部署
+
+**当前主版本为 Go 实现**，镜像体积更小（~20MB vs 150MB）、内存占用更低（128MB vs 256MB）。
 
 镜像已通过 GitHub Actions 自动构建并发布到 GHCR，支持 `linux/amd64` 和 `linux/arm64` 架构。
 
@@ -115,18 +138,25 @@ cd /path/to/ai-gateway
 docker compose up -d
 ```
 
-如需在其他目录运行，将 `docker-compose.yml` 和 `config.yaml` 复制到同一目录即可。
-
-如需本地构建镜像，取消 `docker-compose.yml` 中 `build: .` 的注释。
-
-这会拉取 `ghcr.io/wangruqing723/ai-gateway:latest` 镜像（自动匹配 `amd64`/`arm64` 架构），并自动完成：
+这会拉取 `ghcr.io/wangruqing723/ai-gateway:latest` 镜像（Go 版本，自动匹配 `amd64`/`arm64` 架构），并自动完成：
 - 端口映射 `7789:7789`
 - 配置文件只读挂载 `./config.yaml`
 - 数据目录挂载 `./data`（持久化 SQLite 缓存）
-- 内存限制 256MB
-- 健康检查：每 30 秒访问 `/health` 端点
+- 内存限制 128MB
+
+如需本地构建镜像，取消 `docker-compose.yml` 中 `build: .` 的注释。
+
+#### 使用 Node.js 归档版本
+
+如需使用 Node.js 版本：
+
+```bash
+docker compose -f docker-compose.node.yml up -d
+```
 
 ### 使用 Docker 命令
+
+**Go 版本（使用 GHCR 镜像，推荐）**：
 
 ```bash
 docker run -d \
@@ -135,8 +165,36 @@ docker run -d \
   -v $(pwd)/config.yaml:/app/config.yaml:ro \
   -v $(pwd)/data:/app/data \
   -e TZ=Asia/Shanghai \
-  --memory=256m \
+  --memory=128m \
   ghcr.io/wangruqing723/ai-gateway:latest
+```
+
+**Go 版本（本地构建）**：
+
+```bash
+docker build -t ai-gateway:go .
+docker run -d \
+  --name ai-gateway \
+  -p 7789:7789 \
+  -v $(pwd)/config.yaml:/app/config.yaml:ro \
+  -v $(pwd)/data:/app/data \
+  -e TZ=Asia/Shanghai \
+  --memory=128m \
+  ai-gateway:go
+```
+
+**Node.js 版本（归档）**：
+
+```bash
+docker build -t ai-gateway:node -f Dockerfile.node .
+docker run -d \
+  --name ai-gateway \
+  -p 7789:7789 \
+  -v $(pwd)/config.yaml:/app/config.yaml:ro \
+  -v $(pwd)/data:/app/data \
+  -e TZ=Asia/Shanghai \
+  --memory=256m \
+  ai-gateway:node
 ```
 
 ### 验证部署

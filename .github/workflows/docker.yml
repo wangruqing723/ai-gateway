@@ -1,4 +1,4 @@
-name: Docker Build & Publish
+name: Docker Build & Publish (Go)
 
 on:
   # 推送到 master 时自动构建并推送
@@ -9,12 +9,16 @@ on:
     paths-ignore:
       - '*.md'
       - 'scripts/**'
+      - 'gateway.js'     # Node.js 源码变更不触发
+      - 'lib/**'         # Node.js lib 变更不触发
   # PR 时只构建验证，不推送
   pull_request:
     branches: [master]
     paths-ignore:
       - '*.md'
       - 'scripts/**'
+      - 'gateway.js'
+      - 'lib/**'
   # 允许手动触发
   workflow_dispatch:
 
