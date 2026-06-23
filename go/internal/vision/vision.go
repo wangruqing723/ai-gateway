@@ -73,8 +73,7 @@ func HasImages(messages []any) bool {
 	return false
 }
 
-// blocksHaveImage 检测 content 块是否包含图片（对齐 Node hasImages：只查一层）。
-// 注意：processBlocks 处理时仍会递归进 tool_result，这是 Node 的已知不对齐行为。
+// blocksHaveImage 检测 content 块是否包含图片（递归检查 tool_result 内嵌图片）。
 func blocksHaveImage(blocks []any) bool {
 	for _, b := range blocks {
 		block, ok := b.(map[string]any)
@@ -83,6 +82,12 @@ func blocksHaveImage(blocks []any) bool {
 		}
 		if block["type"] == "image" {
 			return true
+		}
+		// 递归检测 tool_result 内嵌的图片
+		if block["type"] == "tool_result" {
+			if inner, ok := block["content"].([]any); ok && blocksHaveImage(inner) {
+				return true
+			}
 		}
 	}
 	return false

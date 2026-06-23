@@ -254,7 +254,10 @@ func handleStream(ctx context.Context, cancel context.CancelFunc, resp *http.Res
 				if line != "" {
 					for _, out := range transform.Transform(line) {
 						if out != "" {
-							opts.ClientRes.Write([]byte(out))
+							if _, werr := opts.ClientRes.Write([]byte(out)); werr != nil {
+								cancel()
+								return werr
+							}
 						}
 					}
 					flusher.Flush()

@@ -222,6 +222,25 @@ docker compose logs -f
 ### 注意事项
 
 - **host 配置**：Docker 环境下 `host` 必须设为 `"0.0.0.0"`，否则端口映射不会生效
+- **健康检查**：Go 版本使用 distroless 镜像（无 shell），需在编排层配置健康检查：
+  ```yaml
+  # Docker Compose
+  healthcheck:
+    test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:7789/health || exit 1"]
+    interval: 30s
+    timeout: 5s
+    retries: 3
+    start_period: 10s
+  
+  # Kubernetes
+  livenessProbe:
+    httpGet:
+      path: /health
+      port: 7789
+    initialDelaySeconds: 10
+    periodSeconds: 30
+  ```
+  注意：healthcheck 的 `test` 需在宿主机或包含 `wget`/`curl` 的 sidecar 容器中执行
 - **配置变更**：修改 `config.yaml` 后需重启容器（`docker compose restart`）
 - **数据持久化**：`./data` 目录挂载了 SQLite 缓存数据库，请勿删除
 - **开机自启**：取消 `docker-compose.yml` 中 `restart: unless-stopped` 的注释即可
