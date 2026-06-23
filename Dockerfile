@@ -6,7 +6,7 @@ WORKDIR /build
 # 使用国内模块代理，避免 proxy.golang.org 不可达导致下载超时
 ENV GOPROXY=https://goproxy.cn,direct
 
-# 复制 Go 源码目录，go.mod 在 go/ 子目录下
+# 复制 Go 源码（假设 Dockerfile 在项目根目录，需要复制 go/ 子目录）
 COPY go/ .
 RUN go mod tidy
 
