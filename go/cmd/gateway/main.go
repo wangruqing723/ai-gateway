@@ -117,6 +117,12 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// /v1/models 端点：返回已配置的可用模型列表
+	if urlPath == "/v1/models" && r.Method == http.MethodGet {
+		s.handleModels(w)
+		return
+	}
+
 	clientFormat := converter.DetectClientFormat(urlPath)
 	if clientFormat == "" {
 		writeJSONError(w, http.StatusNotFound, "gateway_error", "未知端点: "+urlPath)
@@ -264,6 +270,45 @@ func (s *server) handleHealth(w http.ResponseWriter) {
 	}
 	out, _ := json.MarshalIndent(health, "", "  ")
 	w.Header().Set("content-type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write(out)
+}
+
+// handleModels 返回已配置的可用模型列表（OpenAI 兼容格式）
+// 注意：返回的 id 是路由匹配模式（支持通配符 * 和 ?），而非具体模型名称。
+// 客户端请求时，网关会按顺序匹配这些模式，首条命中生效。
+func (s *server) handleModels(w http.ResponseWriter) {
+	// 从路由规则中提取唯一的 match 模型模式
+	seen := make(map[string]bool)
+	models := make([]map[string]any, 0, len(s.cfg.Routes))
+	for _, route := range s.cfg.Routes {
+		if !seen[route.Match] {
+			seen[route.Match] = true
+			entry := map[string]any{
+				"id":            route.Match,
+				"object":        "model",
+				"owned_by":      route.Provider,
+				"target_model":  route.Model,
+			}
+			// 如果配置了 vision，添加视觉模型信息
+			if route.Vision != nil {
+				entry["vision"] = map[string]any{
+					"provider": route.Vision.Provider,
+					"model":    route.Vision.Model,
+				}
+			}
+			models = append(models, entry)
+		}
+	}
+
+	result := map[string]any{
+		"object": "list",
+		"data":   models,
+		"description": "返回网关已配置的路由匹配模式（支持通配符 * 和 ?）。客户端请求时按顺序匹配，首条命中生效。",
+	}
+	out, _ := json.MarshalIndent(result, "", "  ")
+	w.Header().Set("content-type", "application/json")
+	w.Header().Set("content-length", fmt.Sprintf("%d", len(out)))
 	w.WriteHeader(http.StatusOK)
 	w.Write(out)
 }
