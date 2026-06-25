@@ -1,4 +1,4 @@
-// Command ai-gateway-go 是 Node 版 gateway.js 的 Go PoC。
+// Command ai-gateway 是当前主版本的 Go 网关实现。
 //
 // 已实现：配置加载、路由匹配、per-provider 并发/限速队列、流式/非流式转发、context 超时、
 // 三格式互转 converter、vision 图片识别、SQLite 缓存、健康检查。

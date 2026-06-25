@@ -1,5 +1,7 @@
 config.yaml
 *.swp
+.DS_Store
 data
 data-go
+data-node
 node_modules

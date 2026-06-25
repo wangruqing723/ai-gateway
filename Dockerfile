@@ -6,9 +6,12 @@ WORKDIR /build
 # 使用国内模块代理，避免 proxy.golang.org 不可达导致下载超时
 ENV GOPROXY=https://goproxy.cn,direct
 
-# 复制 Go 源码（假设 Dockerfile 在项目根目录，需要复制 go/ 子目录）
-COPY go/ .
-RUN go mod tidy
+# 先复制依赖清单，利用 Docker 层缓存
+COPY go.mod go.sum ./
+RUN go mod download
+
+# 复制源码
+COPY . .
 
 # 静态编译，去除符号表减小体积
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /ai-gateway ./cmd/gateway

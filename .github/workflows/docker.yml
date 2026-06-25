@@ -8,17 +8,11 @@ on:
       - 'v*'        # 推送版本标签时也触发（如 v1.0.0）
     paths-ignore:
       - '*.md'
-      - 'scripts/**'
-      - 'gateway.js'     # Node.js 源码变更不触发
-      - 'lib/**'         # Node.js lib 变更不触发
   # PR 时只构建验证，不推送
   pull_request:
     branches: [master]
     paths-ignore:
       - '*.md'
-      - 'scripts/**'
-      - 'gateway.js'
-      - 'lib/**'
   # 允许手动触发
   workflow_dispatch:
 
@@ -75,7 +69,8 @@ jobs:
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
-          context: ./go
+          context: .
+          file: ./Dockerfile
           platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
