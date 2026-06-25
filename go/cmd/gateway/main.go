@@ -5,8 +5,10 @@
 package main
 
 import (
+	"context"
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -228,6 +230,11 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 			logf(reqID, "  队列处理异常: %s", err.Error())
 			if err == queue.ErrQueueTimeout {
 				writeJSONError(w, http.StatusServiceUnavailable, "queue_timeout", err.Error())
+			} else if r.Context().Err() != nil {
+				// 客户端已断开，net/http 会忽略写入，无需也不应写响应
+				logf(reqID, "  客户端已断开，跳过响应")
+			} else {
+				writeJSONError(w, http.StatusBadGateway, "gateway_error", "队列错误: "+err.Error())
 			}
 			return
 		}
@@ -260,7 +267,14 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		HTTPClient:            s.httpClient,
 	}
 	if err := proxy.Forward(opts); err != nil {
-		logf(reqID, "  转发结束（异常）: %s", err.Error())
+		// 区分客户端断开、超时、其他错误，避免把正常断开误报为异常
+		if errors.Is(err, context.Canceled) {
+			logf(reqID, "  客户端断开连接")
+		} else if errors.Is(err, context.DeadlineExceeded) {
+			logf(reqID, "  转发超时（%d秒）: %s", timeoutMs/1000, err.Error())
+		} else {
+			logf(reqID, "  转发结束（异常）: %s", err.Error())
+		}
 	}
 }
 
