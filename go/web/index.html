@@ -1,0 +1,765 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Gateway 管理面板</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3/dist/cdn.min.js"></script>
+    <style>
+        /* 自定义滚动条样式 */
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+        ::-webkit-scrollbar-track {
+            background: #1f2937;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #4b5563;
+            border-radius: 4px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: #6b7280;
+        }
+    </style>
+</head>
+<body class="bg-gray-900 text-gray-100 min-h-screen">
+    <!-- 顶部导航栏 -->
+    <nav class="bg-gray-800 border-b border-gray-700 px-6 py-4">
+        <div class="flex items-center justify-between">
+            <div class="flex items-center space-x-4">
+                <h1 class="text-xl font-bold text-blue-400">🚀 AI Gateway</h1>
+                <span class="text-sm text-gray-400">管理面板</span>
+            </div>
+            <div class="flex items-center space-x-2">
+                <span class="text-sm text-gray-400" x-text="configPath"></span>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Tab 切换 -->
+    <div class="bg-gray-800 border-b border-gray-700 px-6">
+        <div class="flex space-x-1">
+            <button @click="activeTab = 'config'"
+                    :class="activeTab === 'config' ? 'bg-gray-900 text-blue-400 border-blue-400' : 'text-gray-400 hover:text-gray-300 border-transparent'"
+                    class="px-4 py-3 text-sm font-medium border-b-2 transition-colors focus:outline-none">
+                ⚙️ 配置管理
+            </button>
+            <button @click="activeTab = 'monitor'"
+                    :class="activeTab === 'monitor' ? 'bg-gray-900 text-blue-400 border-blue-400' : 'text-gray-400 hover:text-gray-300 border-transparent'"
+                    class="px-4 py-3 text-sm font-medium border-b-2 transition-colors focus:outline-none">
+                📊 监控仪表盘
+            </button>
+            <button @click="activeTab = 'logs'"
+                    :class="activeTab === 'logs' ? 'bg-gray-900 text-blue-400 border-blue-400' : 'text-gray-400 hover:text-gray-300 border-transparent'"
+                    class="px-4 py-3 text-sm font-medium border-b-2 transition-colors focus:outline-none">
+                📋 请求日志
+            </button>
+        </div>
+    </div>
+
+    <!-- 主内容区 -->
+    <div class="container mx-auto px-6 py-6">
+        <!-- 状态提示 -->
+        <div x-show="statusMessage" x-transition
+             :class="statusType === 'success' ? 'bg-green-900/50 border-green-500 text-green-200' : 'bg-red-900/50 border-red-500 text-red-200'"
+             class="mb-4 p-4 border rounded-lg flex items-center justify-between">
+            <span x-text="statusMessage"></span>
+            <button @click="statusMessage = ''" class="text-current opacity-70 hover:opacity-100">&times;</button>
+        </div>
+
+        <!-- Tab 1: 配置管理 -->
+        <div x-show="activeTab === 'config'" x-transition>
+            <div class="flex items-center justify-between mb-6">
+                <h2 class="text-lg font-semibold">配置管理</h2>
+                <div class="flex space-x-3">
+                    <button @click="reloadConfig()"
+                            :disabled="loading"
+                            class="px-4 py-2 bg-gray-700 hover:bg-gray-600 disabled:opacity-50 rounded-lg text-sm font-medium transition-colors">
+                        🔄 重载配置
+                    </button>
+                    <button @click="saveConfig()"
+                            :disabled="loading"
+                            class="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 rounded-lg text-sm font-medium transition-colors">
+                        💾 保存配置
+                    </button>
+                </div>
+            </div>
+
+            <!-- 编辑模式切换 -->
+            <div class="bg-gray-800 rounded-lg p-1 mb-4 flex space-x-1">
+                <button @click="editMode = 'visual'"
+                        :class="editMode === 'visual' ? 'bg-gray-900 text-blue-400' : 'text-gray-400 hover:text-gray-300'"
+                        class="flex-1 px-4 py-2 rounded-md text-sm font-medium transition-colors">
+                    可视化编辑
+                </button>
+                <button @click="editMode = 'yaml'; loadYamlConfig()"
+                        :class="editMode === 'yaml' ? 'bg-gray-900 text-blue-400' : 'text-gray-400 hover:text-gray-300'"
+                        class="flex-1 px-4 py-2 rounded-md text-sm font-medium transition-colors">
+                    YAML 编辑器
+                </button>
+            </div>
+
+            <!-- 可视化编辑模式 -->
+            <div x-show="editMode === 'visual'" x-transition>
+                <!-- 全局设置 -->
+                <div class="bg-gray-800 rounded-lg p-6 mb-6">
+                    <h3 class="text-md font-semibold mb-4 flex items-center">
+                        <span class="mr-2">📡</span> 全局设置
+                    </h3>
+                    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                        <div>
+                            <label class="block text-sm text-gray-400 mb-1">端口 (Port)</label>
+                            <input type="number" x-model.number="config.port"
+                                   class="w-full bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-500">
+                        </div>
+                        <div>
+                            <label class="block text-sm text-gray-400 mb-1">监听地址 (Host)</label>
+                            <input type="text" x-model="config.host"
+                                   class="w-full bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-500">
+                        </div>
+                        <div>
+                            <label class="block text-sm text-gray-400 mb-1">请求超时 (ms)</label>
+                            <input type="number" x-model.number="config.timeout"
+                                   class="w-full bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-500">
+                        </div>
+                        <div>
+                            <label class="block text-sm text-gray-400 mb-1">流式活跃超时 (ms)</label>
+                            <input type="number" x-model.number="config.streamActivityTimeout"
+                                   class="w-full bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-500">
+                        </div>
+                        <div>
+                            <label class="block text-sm text-gray-400 mb-1">缓存最大天数</label>
+                            <input type="number" x-model.number="config.cache.maxAgeDays"
+                                   class="w-full bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-500">
+                        </div>
+                        <div>
+                            <label class="block text-sm text-gray-400 mb-1">缓存最大记录数</label>
+                            <input type="number" x-model.number="config.cache.maxRecords"
+                                   class="w-full bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-500">
+                        </div>
+                    </div>
+                    <!-- 直通模式 -->
+                    <div class="mt-4 pt-4 border-t border-gray-700">
+                        <label class="flex items-center space-x-3 cursor-pointer">
+                            <input type="checkbox" x-model="config.directMode"
+                                   class="w-4 h-4 text-blue-600 bg-gray-700 border-gray-600 rounded focus:ring-blue-500">
+                            <span class="text-sm font-medium">直通模式 (Direct Mode)</span>
+                            <span class="text-xs text-gray-400">跳过队列，直接转发请求到上游</span>
+                        </label>
+                        <div x-show="config.directMode" class="grid grid-cols-1 md:grid-cols-3 gap-4 mt-4">
+                            <div>
+                                <label class="block text-sm text-gray-400 mb-1">非流式超时 (ms)</label>
+                                <input type="number" x-model.number="config.directTimeoutNoStream"
+                                       class="w-full bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-500">
+                            </div>
+                            <div>
+                                <label class="block text-sm text-gray-400 mb-1">流式头超时 (ms)</label>
+                                <input type="number" x-model.number="config.directTimeoutStreamHeader"
+                                       class="w-full bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-500">
+                            </div>
+                            <div>
+                                <label class="block text-sm text-gray-400 mb-1">流式活跃超时 (ms)</label>
+                                <input type="number" x-model.number="config.directTimeoutStreamActive"
+                                       class="w-full bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-500">
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Providers -->
+                <div class="bg-gray-800 rounded-lg p-6 mb-6">
+                    <div class="flex items-center justify-between mb-4">
+                        <h3 class="text-md font-semibold flex items-center">
+                            <span class="mr-2">🏢</span> Providers
+                        </h3>
+                        <button @click="addProvider()"
+                                class="px-3 py-1.5 bg-green-600 hover:bg-green-700 rounded-lg text-sm font-medium transition-colors">
+                            + 添加 Provider
+                        </button>
+                    </div>
+                    <div class="space-y-4">
+                        <template x-for="(provider, name) in config.providers" :key="name">
+                            <div class="bg-gray-700/50 rounded-lg p-4 border border-gray-600">
+                                <div class="flex items-center justify-between mb-3">
+                                    <div class="flex items-center space-x-2">
+                                        <span class="font-medium text-blue-300" x-text="name"></span>
+                                        <span class="text-xs px-2 py-0.5 rounded"
+                                              :class="provider.format === 'anthropic' ? 'bg-purple-900/50 text-purple-300' : 'bg-green-900/50 text-green-300'"
+                                              x-text="provider.format"></span>
+                                    </div>
+                                    <div class="flex space-x-2">
+                                        <button @click="editProvider(name)"
+                                                class="px-3 py-1 bg-gray-600 hover:bg-gray-500 rounded text-xs transition-colors">
+                                            编辑
+                                        </button>
+                                        <button @click="removeProvider(name)"
+                                                class="px-3 py-1 bg-red-600/80 hover:bg-red-600 rounded text-xs transition-colors">
+                                            删除
+                                        </button>
+                                    </div>
+                                </div>
+                                <div class="grid grid-cols-1 md:grid-cols-2 gap-2 text-sm">
+                                    <div>
+                                        <span class="text-gray-400">URL:</span>
+                                        <span class="ml-2 text-gray-200" x-text="provider.baseUrl"></span>
+                                    </div>
+                                    <div>
+                                        <span class="text-gray-400">API Key:</span>
+                                        <span class="ml-2 text-gray-200" x-text="provider.apiKey || '(未配置)'"></span>
+                                    </div>
+                                    <div>
+                                        <span class="text-gray-400">并发:</span>
+                                        <span class="ml-2 text-gray-200" x-text="provider.maxConcurrent"></span>
+                                    </div>
+                                    <div>
+                                        <span class="text-gray-400">限速:</span>
+                                        <span class="ml-2 text-gray-200" x-text="(provider.maxPerSecond || 0) + ' req/s'"></span>
+                                    </div>
+                                </div>
+                            </div>
+                        </template>
+                    </div>
+                </div>
+
+                <!-- Routes -->
+                <div class="bg-gray-800 rounded-lg p-6 mb-6">
+                    <div class="flex items-center justify-between mb-4">
+                        <h3 class="text-md font-semibold flex items-center">
+                            <span class="mr-2">🔀</span> 路由规则
+                        </h3>
+                        <button @click="addRoute()"
+                                class="px-3 py-1.5 bg-green-600 hover:bg-green-700 rounded-lg text-sm font-medium transition-colors">
+                            + 添加路由
+                        </button>
+                    </div>
+                    <div class="space-y-3">
+                        <template x-for="(route, index) in config.routes" :key="index">
+                            <div class="bg-gray-700/50 rounded-lg p-4 border border-gray-600">
+                                <div class="flex items-center justify-between">
+                                    <div class="flex-1">
+                                        <div class="flex items-center space-x-3">
+                                            <span class="text-gray-400 text-sm" x-text="(index + 1) + '.'"></span>
+                                            <span class="font-mono text-sm text-yellow-300" x-text="route.match"></span>
+                                            <span class="text-gray-500">→</span>
+                                            <span class="text-blue-300" x-text="route.provider"></span>
+                                            <span class="text-gray-500">/</span>
+                                            <span class="text-green-300" x-text="route.model"></span>
+                                        </div>
+                                        <div x-show="route.vision" class="mt-2 ml-8 text-xs text-gray-400">
+                                            <span class="mr-1">👁️</span>
+                                            视觉: <span x-text="route.vision?.provider"></span> / <span x-text="route.vision?.model"></span>
+                                        </div>
+                                    </div>
+                                    <div class="flex space-x-2">
+                                        <button @click="moveRoute(index, -1)" :disabled="index === 0"
+                                                :class="index === 0 ? 'opacity-50 cursor-not-allowed' : ''"
+                                                class="px-2 py-1 bg-gray-600 hover:bg-gray-500 rounded text-xs transition-colors">
+                                            ↑
+                                        </button>
+                                        <button @click="moveRoute(index, 1)" :disabled="index === config.routes.length - 1"
+                                                :class="index === config.routes.length - 1 ? 'opacity-50 cursor-not-allowed' : ''"
+                                                class="px-2 py-1 bg-gray-600 hover:bg-gray-500 rounded text-xs transition-colors">
+                                            ↓
+                                        </button>
+                                        <button @click="editRoute(index)"
+                                                class="px-3 py-1 bg-gray-600 hover:bg-gray-500 rounded text-xs transition-colors">
+                                            编辑
+                                        </button>
+                                        <button @click="removeRoute(index)"
+                                                class="px-3 py-1 bg-red-600/80 hover:bg-red-600 rounded text-xs transition-colors">
+                                            删除
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </template>
+                    </div>
+                </div>
+            </div>
+
+            <!-- YAML 编辑模式 -->
+            <div x-show="editMode === 'yaml'" x-transition>
+                <div class="bg-gray-800 rounded-lg p-6">
+                    <div class="flex items-center justify-between mb-4">
+                        <h3 class="text-md font-semibold">YAML 编辑器</h3>
+                        <span class="text-xs text-gray-400">直接编辑配置文件内容</span>
+                    </div>
+                    <textarea x-model="yamlContent"
+                              class="w-full h-[600px] bg-gray-900 border border-gray-600 rounded-lg p-4 font-mono text-sm text-gray-200 focus:outline-none focus:border-blue-500 resize-y"
+                              placeholder="加载中..."></textarea>
+                </div>
+            </div>
+        </div>
+
+        <!-- Tab 2: 监控仪表盘 -->
+        <div x-show="activeTab === 'monitor'" x-transition>
+            <h2 class="text-lg font-semibold mb-6">📊 监控仪表盘</h2>
+            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+                <div class="bg-gray-800 rounded-lg p-6 border border-gray-700">
+                    <div class="text-sm text-gray-400 mb-1">总请求</div>
+                    <div class="text-3xl font-bold text-blue-400">--</div>
+                </div>
+                <div class="bg-gray-800 rounded-lg p-6 border border-gray-700">
+                    <div class="text-sm text-gray-400 mb-1">成功率</div>
+                    <div class="text-3xl font-bold text-green-400">--</div>
+                </div>
+                <div class="bg-gray-800 rounded-lg p-6 border border-gray-700">
+                    <div class="text-sm text-gray-400 mb-1">内存使用</div>
+                    <div class="text-3xl font-bold text-yellow-400">--</div>
+                </div>
+                <div class="bg-gray-800 rounded-lg p-6 border border-gray-700">
+                    <div class="text-sm text-gray-400 mb-1">缓存条目</div>
+                    <div class="text-3xl font-bold text-purple-400">--</div>
+                </div>
+            </div>
+            <div class="bg-gray-800 rounded-lg p-6 border border-gray-700">
+                <p class="text-gray-400 text-center py-8">
+                    🔜 后续版本将接入实时数据
+                </p>
+                <div class="mt-4">
+                    <h4 class="text-sm font-medium text-gray-300 mb-3">Provider 状态</h4>
+                    <div class="space-y-2">
+                        <template x-for="(provider, name) in config.providers" :key="name">
+                            <div class="flex items-center justify-between py-2 px-4 bg-gray-700/50 rounded">
+                                <span class="text-gray-300" x-text="name"></span>
+                                <span class="text-gray-500 text-sm">数据待接入...</span>
+                            </div>
+                        </template>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Tab 3: 请求日志 -->
+        <div x-show="activeTab === 'logs'" x-transition>
+            <h2 class="text-lg font-semibold mb-6">📋 请求日志</h2>
+            <div class="bg-gray-800 rounded-lg p-6 border border-gray-700">
+                <p class="text-gray-400 text-center py-8">
+                    🔜 后续版本将展示：
+                </p>
+                <ul class="text-gray-400 space-y-2 max-w-md mx-auto">
+                    <li class="flex items-center">
+                        <span class="mr-2">•</span>
+                        最近请求列表（时间、模型、状态、延迟）
+                    </li>
+                    <li class="flex items-center">
+                        <span class="mr-2">•</span>
+                        成功/失败统计
+                    </li>
+                    <li class="flex items-center">
+                        <span class="mr-2">•</span>
+                        按 Provider / 模型分组筛选
+                    </li>
+                </ul>
+                <div class="mt-6 bg-gray-700/50 rounded-lg overflow-hidden">
+                    <table class="w-full">
+                        <thead>
+                            <tr class="border-b border-gray-600">
+                                <th class="px-4 py-3 text-left text-sm font-medium text-gray-400">时间</th>
+                                <th class="px-4 py-3 text-left text-sm font-medium text-gray-400">方法</th>
+                                <th class="px-4 py-3 text-left text-sm font-medium text-gray-400">模型</th>
+                                <th class="px-4 py-3 text-left text-sm font-medium text-gray-400">Provider</th>
+                                <th class="px-4 py-3 text-left text-sm font-medium text-gray-400">状态</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td colspan="5" class="px-4 py-8 text-center text-gray-500">
+                                    数据待接入...
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Provider 编辑模态框 -->
+    <div x-show="showProviderModal" x-transition
+         class="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+        <div @click.away="showProviderModal = false"
+             class="bg-gray-800 rounded-lg p-6 w-full max-w-md border border-gray-700">
+            <h3 class="text-lg font-semibold mb-4" x-text="editingProvider ? '编辑 Provider' : '添加 Provider'"></h3>
+            <div class="space-y-4">
+                <div>
+                    <label class="block text-sm text-gray-400 mb-1">名称</label>
+                    <input type="text" x-model="providerForm.name"
+                           :disabled="editingProvider"
+                           class="w-full bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-500 disabled:opacity-50">
+                </div>
+                <div>
+                    <label class="block text-sm text-gray-400 mb-1">Base URL</label>
+                    <input type="text" x-model="providerForm.baseUrl"
+                           placeholder="https://api.example.com"
+                           class="w-full bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-500">
+                </div>
+                <div>
+                    <label class="block text-sm text-gray-400 mb-1">API Key</label>
+                    <input type="password" x-model="providerForm.apiKey"
+                           placeholder="留空则从客户端请求头提取"
+                           class="w-full bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-500">
+                </div>
+                <div>
+                    <label class="block text-sm text-gray-400 mb-1">格式</label>
+                    <select x-model="providerForm.format"
+                            class="w-full bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-500">
+                        <option value="anthropic">Anthropic</option>
+                        <option value="openai">OpenAI</option>
+                    </select>
+                </div>
+                <div class="grid grid-cols-2 gap-4">
+                    <div>
+                        <label class="block text-sm text-gray-400 mb-1">最大并发</label>
+                        <input type="number" x-model.number="providerForm.maxConcurrent"
+                               class="w-full bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-500">
+                    </div>
+                    <div>
+                        <label class="block text-sm text-gray-400 mb-1">每秒请求数</label>
+                        <input type="number" x-model.number="providerForm.maxPerSecond"
+                               placeholder="0 = 不限"
+                               class="w-full bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-500">
+                    </div>
+                </div>
+                <div>
+                    <label class="block text-sm text-gray-400 mb-1">队列最大等待 (ms)</label>
+                    <input type="number" x-model.number="providerForm.maxQueueWait"
+                           class="w-full bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-500">
+                </div>
+            </div>
+            <div class="flex justify-end space-x-3 mt-6">
+                <button @click="showProviderModal = false"
+                        class="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded-lg text-sm transition-colors">
+                    取消
+                </button>
+                <button @click="saveProvider()"
+                        class="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg text-sm font-medium transition-colors">
+                    保存
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Route 编辑模态框 -->
+    <div x-show="showRouteModal" x-transition
+         class="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+        <div @click.away="showRouteModal = false"
+             class="bg-gray-800 rounded-lg p-6 w-full max-w-md border border-gray-700">
+            <h3 class="text-lg font-semibold mb-4" x-text="editingRouteIndex >= 0 ? '编辑路由' : '添加路由'"></h3>
+            <div class="space-y-4">
+                <div>
+                    <label class="block text-sm text-gray-400 mb-1">匹配模式 (Match)</label>
+                    <input type="text" x-model="routeForm.match"
+                           placeholder="例如: claude-* 或 gpt-4"
+                           class="w-full bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-500">
+                </div>
+                <div>
+                    <label class="block text-sm text-gray-400 mb-1">Provider</label>
+                    <select x-model="routeForm.provider"
+                            class="w-full bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-500">
+                        <template x-for="(provider, name) in config.providers" :key="name">
+                            <option :value="name" x-text="name"></option>
+                        </template>
+                    </select>
+                </div>
+                <div>
+                    <label class="block text-sm text-gray-400 mb-1">目标模型 (Model)</label>
+                    <input type="text" x-model="routeForm.model"
+                           placeholder="上游实际使用的模型名"
+                           class="w-full bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-500">
+                </div>
+                <!-- Vision 配置 -->
+                <div class="pt-4 border-t border-gray-700">
+                    <label class="flex items-center space-x-3 cursor-pointer mb-3">
+                        <input type="checkbox" x-model="routeForm.enableVision"
+                               class="w-4 h-4 text-blue-600 bg-gray-700 border-gray-600 rounded focus:ring-blue-500">
+                        <span class="text-sm font-medium">启用视觉识别</span>
+                    </label>
+                    <div x-show="routeForm.enableVision" class="space-y-3">
+                        <div>
+                            <label class="block text-sm text-gray-400 mb-1">视觉 Provider</label>
+                            <select x-model="routeForm.visionProvider"
+                                    class="w-full bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-500">
+                                <template x-for="(provider, name) in config.providers" :key="name">
+                                    <option :value="name" x-text="name"></option>
+                                </template>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="block text-sm text-gray-400 mb-1">视觉模型</label>
+                            <input type="text" x-model="routeForm.visionModel"
+                                   placeholder="例如: claude-3-opus-20240229"
+                                   class="w-full bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-500">
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="flex justify-end space-x-3 mt-6">
+                <button @click="showRouteModal = false"
+                        class="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded-lg text-sm transition-colors">
+                    取消
+                </button>
+                <button @click="saveRoute()"
+                        class="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg text-sm font-medium transition-colors">
+                    保存
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        function gatewayApp() {
+            return {
+                activeTab: 'config',
+                editMode: 'visual',
+                loading: false,
+                statusMessage: '',
+                statusType: 'success',
+                configPath: '',
+                config: {
+                    port: 7789,
+                    host: '127.0.0.1',
+                    timeout: 120000,
+                    streamActivityTimeout: 60000,
+                    cache: { maxAgeDays: 7, maxRecords: 1000 },
+                    directMode: false,
+                    directTimeoutNoStream: 60000,
+                    directTimeoutStreamHeader: 60000,
+                    directTimeoutStreamActive: 120000,
+                    providers: {},
+                    routes: []
+                },
+                yamlContent: '',
+
+                // Provider 编辑
+                showProviderModal: false,
+                editingProvider: null,
+                providerForm: {
+                    name: '',
+                    baseUrl: '',
+                    apiKey: '',
+                    format: 'anthropic',
+                    maxConcurrent: 5,
+                    maxPerSecond: 0,
+                    maxQueueWait: 30000
+                },
+
+                // Route 编辑
+                showRouteModal: false,
+                editingRouteIndex: -1,
+                routeForm: {
+                    match: '',
+                    provider: '',
+                    model: '',
+                    enableVision: false,
+                    visionProvider: '',
+                    visionModel: ''
+                },
+
+                async init() {
+                    await this.loadConfig();
+                },
+
+                async loadConfig() {
+                    try {
+                        const res = await fetch('/api/config');
+                        if (!res.ok) throw new Error('加载配置失败');
+                        const data = await res.json();
+                        this.config = data;
+                        this.configPath = data.path || '未知';
+                    } catch (err) {
+                        this.showStatus('加载配置失败: ' + err.message, 'error');
+                    }
+                },
+
+                async loadYamlConfig() {
+                    try {
+                        const res = await fetch('/api/config/raw');
+                        if (!res.ok) throw new Error('加载 YAML 失败');
+                        this.yamlContent = await res.text();
+                    } catch (err) {
+                        this.showStatus('加载 YAML 失败: ' + err.message, 'error');
+                    }
+                },
+
+                async saveConfig() {
+                    this.loading = true;
+                    try {
+                        let body;
+                        if (this.editMode === 'yaml') {
+                            body = this.yamlContent;
+                        } else {
+                            body = JSON.stringify(this.config);
+                        }
+
+                        const res = await fetch('/api/config', {
+                            method: 'PUT',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: body
+                        });
+
+                        if (!res.ok) {
+                            const err = await res.json();
+                            throw new Error(err.message || '保存失败');
+                        }
+
+                        const result = await res.json();
+                        this.showStatus(result.message || '配置已保存', 'success');
+                        await this.loadConfig();
+                    } catch (err) {
+                        this.showStatus('保存失败: ' + err.message, 'error');
+                    } finally {
+                        this.loading = false;
+                    }
+                },
+
+                async reloadConfig() {
+                    this.loading = true;
+                    try {
+                        const res = await fetch('/api/config/reload', { method: 'POST' });
+                        if (!res.ok) throw new Error('重载失败');
+                        const result = await res.json();
+                        this.showStatus(result.message || '配置已重载', 'success');
+                        await this.loadConfig();
+                    } catch (err) {
+                        this.showStatus('重载失败: ' + err.message, 'error');
+                    } finally {
+                        this.loading = false;
+                    }
+                },
+
+                showStatus(message, type) {
+                    this.statusMessage = message;
+                    this.statusType = type;
+                    setTimeout(() => { this.statusMessage = ''; }, 5000);
+                },
+
+                // Provider 操作
+                addProvider() {
+                    this.editingProvider = null;
+                    this.providerForm = {
+                        name: '',
+                        baseUrl: '',
+                        apiKey: '',
+                        format: 'anthropic',
+                        maxConcurrent: 5,
+                        maxPerSecond: 0,
+                        maxQueueWait: 30000
+                    };
+                    this.showProviderModal = true;
+                },
+
+                editProvider(name) {
+                    this.editingProvider = name;
+                    const p = this.config.providers[name];
+                    this.providerForm = {
+                        name: name,
+                        baseUrl: p.baseUrl,
+                        apiKey: p.apiKey,
+                        format: p.format,
+                        maxConcurrent: p.maxConcurrent,
+                        maxPerSecond: p.maxPerSecond,
+                        maxQueueWait: p.maxQueueWait
+                    };
+                    this.showProviderModal = true;
+                },
+
+                saveProvider() {
+                    if (!this.providerForm.name || !this.providerForm.baseUrl) {
+                        this.showStatus('名称和 URL 不能为空', 'error');
+                        return;
+                    }
+
+                    const provider = {
+                        baseUrl: this.providerForm.baseUrl,
+                        apiKey: this.providerForm.apiKey,
+                        format: this.providerForm.format,
+                        maxConcurrent: this.providerForm.maxConcurrent || 5,
+                        maxPerSecond: this.providerForm.maxPerSecond || 0,
+                        maxQueueWait: this.providerForm.maxQueueWait || 30000
+                    };
+
+                    this.config.providers[this.providerForm.name] = provider;
+                    this.showProviderModal = false;
+                },
+
+                removeProvider(name) {
+                    if (confirm(`确定删除 Provider "${name}"？相关路由也会被删除。`)) {
+                        delete this.config.providers[name];
+                        this.config.routes = this.config.routes.filter(r => r.provider !== name);
+                    }
+                },
+
+                // Route 操作
+                addRoute() {
+                    this.editingRouteIndex = -1;
+                    const providers = Object.keys(this.config.providers);
+                    this.routeForm = {
+                        match: '',
+                        provider: providers[0] || '',
+                        model: '',
+                        enableVision: false,
+                        visionProvider: providers[0] || '',
+                        visionModel: ''
+                    };
+                    this.showRouteModal = true;
+                },
+
+                editRoute(index) {
+                    this.editingRouteIndex = index;
+                    const route = this.config.routes[index];
+                    this.routeForm = {
+                        match: route.match,
+                        provider: route.provider,
+                        model: route.model,
+                        enableVision: !!route.vision,
+                        visionProvider: route.vision?.provider || '',
+                        visionModel: route.vision?.model || ''
+                    };
+                    this.showRouteModal = true;
+                },
+
+                saveRoute() {
+                    if (!this.routeForm.match || !this.routeForm.provider || !this.routeForm.model) {
+                        this.showStatus('匹配模式、Provider 和模型不能为空', 'error');
+                        return;
+                    }
+
+                    const route = {
+                        match: this.routeForm.match,
+                        provider: this.routeForm.provider,
+                        model: this.routeForm.model,
+                        vision: this.routeForm.enableVision ? {
+                            provider: this.routeForm.visionProvider,
+                            model: this.routeForm.visionModel
+                        } : null
+                    };
+
+                    if (this.editingRouteIndex >= 0) {
+                        this.config.routes[this.editingRouteIndex] = route;
+                    } else {
+                        this.config.routes.push(route);
+                    }
+                    this.showRouteModal = false;
+                },
+
+                removeRoute(index) {
+                    if (confirm('确定删除此路由规则？')) {
+                        this.config.routes.splice(index, 1);
+                    }
+                },
+
+                moveRoute(index, direction) {
+                    const newIndex = index + direction;
+                    if (newIndex < 0 || newIndex >= this.config.routes.length) return;
+                    const temp = this.config.routes[index];
+                    this.config.routes[index] = this.config.routes[newIndex];
+                    this.config.routes[newIndex] = temp;
+                }
+            };
+        }
+    </script>
+</body>
+</html>

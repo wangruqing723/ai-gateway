@@ -135,6 +135,53 @@ func applyDefaults(c *Config) {
 	}
 }
 
+// ReadRaw 读取 config.yaml 原始文本（给前端 YAML 编辑器用）
+func ReadRaw(c *Config) ([]byte, error) {
+	if c.Path == "" {
+		return nil, fmt.Errorf("配置文件路径未知")
+	}
+	return os.ReadFile(c.Path)
+}
+
+// Save 将配置写回文件（先写临时文件再 rename，保证原子性）
+func Save(c *Config) error {
+	if c.Path == "" {
+		return fmt.Errorf("配置文件路径未知")
+	}
+
+	// 序列化为 YAML
+	out, err := yaml.Marshal(c)
+	if err != nil {
+		return fmt.Errorf("配置序列化失败: %w", err)
+	}
+
+	// 写入临时文件
+	tmpPath := c.Path + ".tmp"
+	if err := os.WriteFile(tmpPath, out, 0644); err != nil {
+		return fmt.Errorf("写入临时文件失败: %w", err)
+	}
+
+	// 原子替换
+	if err := os.Rename(tmpPath, c.Path); err != nil {
+		os.Remove(tmpPath) // 清理临时文件
+		return fmt.Errorf("替换配置文件失败: %w", err)
+	}
+	return nil
+}
+
+// LoadAndValidate 从 YAML 字节加载并验证（用于保存前校验），不设置 Path
+func LoadAndValidate(data []byte) (*Config, error) {
+	var c Config
+	if err := yaml.Unmarshal(data, &c); err != nil {
+		return nil, fmt.Errorf("配置解析失败: %w", err)
+	}
+	applyDefaults(&c)
+	if err := validate(&c); err != nil {
+		return nil, err
+	}
+	return &c, nil
+}
+
 // validate 校验关键字段，区间与 Node 版保持一致
 func validate(c *Config) error {
 	if len(c.Providers) == 0 {

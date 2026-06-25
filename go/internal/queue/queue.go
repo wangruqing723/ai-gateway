@@ -181,3 +181,16 @@ func (m *Manager) StatusOf(name string, maxConcurrent, maxPerSecond int) Status 
 		MaxPerSecond:  q.maxPerSecond,
 	}
 }
+
+// UpdateProvider 更新 provider 的限速器参数
+// 仅更新 maxPerSecond，maxConcurrent 无法在运行时修改（channel 容量不可变）
+func (m *Manager) UpdateProvider(name string, maxConcurrent, maxPerSecond int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	q, ok := m.queues[name]
+	if ok {
+		q.mu.Lock()
+		q.maxPerSecond = maxPerSecond
+		q.mu.Unlock()
+	}
+}

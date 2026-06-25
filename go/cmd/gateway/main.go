@@ -5,6 +5,7 @@
 package main
 
 import (
+	"embed"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -13,6 +14,7 @@ import (
 	"os/signal"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -26,6 +28,9 @@ import (
 	"ai-gateway/internal/router"
 	"ai-gateway/internal/vision"
 )
+
+//go:embed web/index.html
+var webFS embed.FS
 
 var reqCounter uint64
 
@@ -96,6 +101,7 @@ func main() {
 
 type server struct {
 	cfg        *config.Config
+	cfgMu      sync.RWMutex           // 保护 cfg 的并发读写
 	qm         *queue.Manager
 	httpClient *http.Client
 	cache      *cache.Cache
@@ -108,6 +114,18 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 	// HEAD 健康探测
 	if r.Method == http.MethodHead {
 		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	// 前端页面：GET / 返回 index.html
+	if urlPath == "/" && r.Method == http.MethodGet {
+		s.handleIndex(w, r)
+		return
+	}
+
+	// 配置管理 API：/api/config/*
+	if strings.HasPrefix(urlPath, "/api/config") {
+		s.handleConfigAPI(w, r)
 		return
 	}
 
@@ -128,6 +146,11 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusNotFound, "gateway_error", "未知端点: "+urlPath)
 		return
 	}
+
+	// 获取配置快照（避免长时间持有读锁）
+	s.cfgMu.RLock()
+	cfg := s.cfg
+	s.cfgMu.RUnlock()
 
 	reqID := nextReqID()
 	start := time.Now()
@@ -160,7 +183,7 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 	model = internal.Model
 
 	// 路由匹配
-	matched := router.MatchRoute(model, s.cfg)
+	matched := router.MatchRoute(model, cfg)
 	if matched == nil {
 		writeJSONError(w, http.StatusBadRequest, "gateway_error", fmt.Sprintf("没有匹配 model %q 的路由规则", model))
 		return
@@ -199,17 +222,12 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 
 	// 直通模式：跳过队列（并发/限速/排队），请求直接转发；超时用 direct* 配置。
 	// 非直通模式：先经队列获取执行槽位（并发 + 限速 + 等待超时）。
-	if !s.cfg.DirectMode {
+	if !cfg.DirectMode {
 		release, err := s.qm.Acquire(r.Context(), p.Name, p.MaxConcurrent, p.MaxPerSecond, p.MaxQueueWait)
 		if err != nil {
 			logf(reqID, "  队列处理异常: %s", err.Error())
 			if err == queue.ErrQueueTimeout {
 				writeJSONError(w, http.StatusServiceUnavailable, "queue_timeout", err.Error())
-			} else if r.Context().Err() != nil {
-				// 客户端已断开，net/http 会忽略写入，无需也不应写响应
-				logf(reqID, "  客户端已断开，跳过响应")
-			} else {
-				writeJSONError(w, http.StatusBadGateway, "gateway_error", "队列错误: "+err.Error())
 			}
 			return
 		}
@@ -217,13 +235,13 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 超时参数：直通模式用 direct* 三档；否则沿用全局 timeout / streamActivityTimeout
-	timeoutMs := s.cfg.Timeout
+	timeoutMs := cfg.Timeout
 	headerTimeoutMs := 0 // 0 表示 proxy 回退用 timeoutMs
-	activityTimeoutMs := s.cfg.StreamActivityTimeout
-	if s.cfg.DirectMode {
-		timeoutMs = s.cfg.DirectTimeoutNoStream
-		headerTimeoutMs = s.cfg.DirectTimeoutStreamHeader
-		activityTimeoutMs = s.cfg.DirectTimeoutStreamActive
+	activityTimeoutMs := cfg.StreamActivityTimeout
+	if cfg.DirectMode {
+		timeoutMs = cfg.DirectTimeoutNoStream
+		headerTimeoutMs = cfg.DirectTimeoutStreamHeader
+		activityTimeoutMs = cfg.DirectTimeoutStreamActive
 	}
 
 	opts := &proxy.Options{
@@ -247,8 +265,12 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleHealth(w http.ResponseWriter) {
+	s.cfgMu.RLock()
+	cfg := s.cfg
+	s.cfgMu.RUnlock()
+
 	queues := make(map[string]queue.Status)
-	for name, p := range s.cfg.Providers {
+	for name, p := range cfg.Providers {
 		queues[name] = s.qm.StatusOf(name, p.MaxConcurrent, p.MaxPerSecond)
 	}
 	var m runtime.MemStats
@@ -257,7 +279,7 @@ func (s *server) handleHealth(w http.ResponseWriter) {
 	cs := s.cache.GetStats()
 	health := map[string]any{
 		"status":  "ok",
-		"timeout": s.cfg.Timeout,
+		"timeout": cfg.Timeout,
 		"queues":  queues,
 		"cache": map[string]any{
 			"total":       cs.Total,
@@ -278,10 +300,14 @@ func (s *server) handleHealth(w http.ResponseWriter) {
 // 注意：返回的 id 是路由匹配模式（支持通配符 * 和 ?），而非具体模型名称。
 // 客户端请求时，网关会按顺序匹配这些模式，首条命中生效。
 func (s *server) handleModels(w http.ResponseWriter) {
+	s.cfgMu.RLock()
+	cfg := s.cfg
+	s.cfgMu.RUnlock()
+
 	// 从路由规则中提取唯一的 match 模型模式
 	seen := make(map[string]bool)
-	models := make([]map[string]any, 0, len(s.cfg.Routes))
-	for _, route := range s.cfg.Routes {
+	models := make([]map[string]any, 0, len(cfg.Routes))
+	for _, route := range cfg.Routes {
 		if !seen[route.Match] {
 			seen[route.Match] = true
 			entry := map[string]any{
@@ -316,4 +342,165 @@ func (s *server) handleModels(w http.ResponseWriter) {
 func nextReqID() string {
 	n := atomic.AddUint64(&reqCounter, 1)
 	return fmt.Sprintf("r%05d", (n-1)%100000+1)
+}
+
+// handleIndex 返回嵌入的前端页面
+func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
+	data, err := webFS.ReadFile("web/index.html")
+	if err != nil {
+		http.Error(w, "前端页面加载失败", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write(data)
+}
+
+// handleConfigAPI 处理配置管理相关的 API 请求
+func (s *server) handleConfigAPI(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/api/config")
+
+	switch {
+	case path == "" && r.Method == http.MethodGet:
+		// GET /api/config - 返回配置 JSON（apiKey 脱敏）
+		s.handleGetConfig(w, r)
+	case path == "/raw" && r.Method == http.MethodGet:
+		// GET /api/config/raw - 返回原始 YAML
+		s.handleGetConfigRaw(w, r)
+	case path == "" && r.Method == http.MethodPut:
+		// PUT /api/config - 保存配置
+		s.handlePutConfig(w, r)
+	case path == "/reload" && r.Method == http.MethodPost:
+		// POST /api/config/reload - 重新加载配置
+		s.handleReloadConfig(w, r)
+	default:
+		writeJSONError(w, http.StatusNotFound, "gateway_error", "未知的配置 API 端点")
+	}
+}
+
+// handleGetConfig 返回配置 JSON（apiKey 脱敏）
+func (s *server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
+	s.cfgMu.RLock()
+	cfg := s.cfg
+	s.cfgMu.RUnlock()
+
+	// 创建副本并脱敏 apiKey
+	cfgCopy := *cfg
+	providersCopy := make(map[string]*config.Provider)
+	for name, p := range cfg.Providers {
+		pCopy := *p
+		pCopy.APIKey = mask(p.APIKey)
+		providersCopy[name] = &pCopy
+	}
+	cfgCopy.Providers = providersCopy
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(cfgCopy)
+}
+
+// handleGetConfigRaw 返回原始 YAML 文本（apiKey 脱敏）
+func (s *server) handleGetConfigRaw(w http.ResponseWriter, r *http.Request) {
+	s.cfgMu.RLock()
+	cfg := s.cfg
+	s.cfgMu.RUnlock()
+
+	data, err := config.ReadRaw(cfg)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "gateway_error", "读取配置失败: "+err.Error())
+		return
+	}
+
+	// 简单脱敏：替换所有 apiKey 值
+	content := string(data)
+	lines := strings.Split(content, "\n")
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "apiKey:") {
+			parts := strings.SplitN(trimmed, ":", 2)
+			if len(parts) == 2 {
+				value := strings.TrimSpace(parts[1])
+				if value != "" && value != `""` && value != `''` {
+					lines[i] = parts[0] + ": " + mask(value)
+				}
+			}
+		}
+	}
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Write([]byte(strings.Join(lines, "\n")))
+}
+
+// handlePutConfig 保存配置
+func (s *server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
+	body, err := readBody(r)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, "gateway_error", "读取请求体失败: "+err.Error())
+		return
+	}
+
+	// 验证配置
+	newCfg, err := config.LoadAndValidate(body)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, "config_validation_error", err.Error())
+		return
+	}
+
+	s.cfgMu.RLock()
+	oldCfg := s.cfg
+	s.cfgMu.RUnlock()
+
+	// 处理 apiKey：如果前端传回的是脱敏值，保留原值
+	for name, p := range newCfg.Providers {
+		if oldP, exists := oldCfg.Providers[name]; exists {
+			if strings.Contains(p.APIKey, "****") {
+				p.APIKey = oldP.APIKey
+			}
+		}
+	}
+
+	// 设置路径并保存
+	newCfg.Path = oldCfg.Path
+	if err := config.Save(newCfg); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "gateway_error", "保存配置失败: "+err.Error())
+		return
+	}
+
+	// 热重载：更新配置和队列管理器
+	s.cfgMu.Lock()
+	s.cfg = newCfg
+	s.cfgMu.Unlock()
+
+	// 更新队列管理器的 provider 限速器
+	for name, p := range newCfg.Providers {
+		s.qm.UpdateProvider(name, p.MaxConcurrent, p.MaxPerSecond)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"status":  "success",
+		"message": "配置已保存，服务已热重载",
+	})
+}
+
+// handleReloadConfig 从磁盘重新加载配置
+func (s *server) handleReloadConfig(w http.ResponseWriter, r *http.Request) {
+	newCfg, err := config.Load()
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "gateway_error", "重新加载配置失败: "+err.Error())
+		return
+	}
+
+	s.cfgMu.Lock()
+	s.cfg = newCfg
+	s.cfgMu.Unlock()
+
+	// 更新队列管理器的 provider 限速器
+	for name, p := range newCfg.Providers {
+		s.qm.UpdateProvider(name, p.MaxConcurrent, p.MaxPerSecond)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"status":  "success",
+		"message": "配置已从磁盘重新加载",
+	})
 }
