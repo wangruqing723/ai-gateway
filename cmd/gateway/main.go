@@ -103,7 +103,7 @@ func main() {
 
 type server struct {
 	cfg        *config.Config
-	cfgMu      sync.RWMutex           // 保护 cfg 的并发读写
+	cfgMu      sync.RWMutex // 保护 cfg 的并发读写
 	qm         *queue.Manager
 	httpClient *http.Client
 	cache      *cache.Cache
@@ -325,10 +325,10 @@ func (s *server) handleModels(w http.ResponseWriter) {
 		if !seen[route.Match] {
 			seen[route.Match] = true
 			entry := map[string]any{
-				"id":            route.Match,
-				"object":        "model",
-				"owned_by":      route.Provider,
-				"target_model":  route.Model,
+				"id":           route.Match,
+				"object":       "model",
+				"owned_by":     route.Provider,
+				"target_model": route.Model,
 			}
 			// 如果配置了 vision，添加视觉模型信息
 			if route.Vision != nil {
@@ -342,8 +342,8 @@ func (s *server) handleModels(w http.ResponseWriter) {
 	}
 
 	result := map[string]any{
-		"object": "list",
-		"data":   models,
+		"object":      "list",
+		"data":        models,
 		"description": "返回网关已配置的路由匹配模式（支持通配符 * 和 ?）。客户端请求时按顺序匹配，首条命中生效。",
 	}
 	out, _ := json.MarshalIndent(result, "", "  ")

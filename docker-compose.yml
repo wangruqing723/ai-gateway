@@ -1,18 +1,22 @@
 services:
   gateway:
     # ── 方式一：使用 GitHub 自动构建的镜像（推荐）──
-    image: ghcr.io/wangruqing723/ai-gateway:latest
+    #image: ghcr.io/wangruqing723/ai-gateway:latest
 
     # ── 方式二：本地构建 ──────────────────────────
-    # build: .
+    build: .
+    image: ai-gateway:local
 
     container_name: ai-gateway
     #restart: unless-stopped
+    # 本地配置页面支持保存 config.yaml；默认使用当前 macOS 用户 wyong 的 UID/GID。
+    # 如在其他机器运行，可设置 AI_GATEWAY_UID=$(id -u) AI_GATEWAY_GID=$(id -g)。
+    user: "${AI_GATEWAY_UID:-501}:${AI_GATEWAY_GID:-20}"
     ports:
       - "7789:7789"
     volumes:
-      # 挂载配置文件（宿主机编辑后重启容器即生效）
-      - ./config.yaml:/app/config.yaml:ro
+      # 挂载配置文件；管理页面保存配置时需要写权限。
+      - ./config.yaml:/app/config.yaml
       # 持久化数据目录（SQLite 缓存）
       - ./data:/app/data
     environment:

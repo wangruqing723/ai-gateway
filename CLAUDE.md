@@ -27,6 +27,14 @@ Go 源码注释、日志、README 主要使用中文；新增说明请保持这�
 
 ## Build, Test, and Development Commands
 
+本项目 Go 开发验证必须优先在 Docker 容器内执行；不要因为宿主机缺少 `go`/`gofmt` 就判定无法验证。验证容器名固定使用 `ai-gateway-dev-verify`，避免与正式服务容器混淆。运行服务镜像是 distroless，不含 Go 工具链；格式化、测试和 vet 应使用 `golang:1.23-alpine` 临时容器运行，例如：
+
+```bash
+docker run --pull never --rm --name ai-gateway-dev-verify -v "$PWD":/work -w /work golang:1.23-alpine go test ./...
+docker run --pull never --rm --name ai-gateway-dev-verify -v "$PWD":/work -w /work golang:1.23-alpine gofmt -w ./cmd ./internal
+docker run --pull never --rm --name ai-gateway-dev-verify -v "$PWD":/work -w /work golang:1.23-alpine go vet ./...
+```
+
 ```bash
 go run ./cmd/gateway
 CGO_ENABLED=0 go build -o ai-gateway ./cmd/gateway

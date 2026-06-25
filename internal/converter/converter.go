@@ -15,8 +15,8 @@ import (
 // Internal 内部统一格式（Anthropic-like）
 type Internal struct {
 	Model     string
-	Messages  []any          // 每个元素为 map[string]any: {role, content}
-	System    any            // string 或 nil
+	Messages  []any // 每个元素为 map[string]any: {role, content}
+	System    any   // string 或 nil
 	Stream    bool
 	MaxTokens int
 	Tools     any            // 数组或 nil

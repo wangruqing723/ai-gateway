@@ -11,54 +11,54 @@ import (
 
 // Provider 上游 provider 定义
 type Provider struct {
-	Name          string `yaml:"-"`             // 运行时填充（map 的 key）
-	BaseURL       string `yaml:"baseUrl"`       // 上游地址
-	APIKey        string `yaml:"apiKey"`        // 密钥，留空则从客户端请求头提取
-	Format        string `yaml:"format"`        // anthropic | openai
-	MaxConcurrent int    `yaml:"maxConcurrent"` // 最大并发
-	MaxPerSecond  int    `yaml:"maxPerSecond"`  // 每秒最多请求数，0 表示不限
-	MaxQueueWait  int    `yaml:"maxQueueWait"`  // 队列最大等待（毫秒）
+	Name          string `yaml:"-" json:"name,omitempty"`                    // 运行时填充（map 的 key）
+	BaseURL       string `yaml:"baseUrl" json:"baseUrl"`                     // 上游地址
+	APIKey        string `yaml:"apiKey" json:"apiKey"`                       // 密钥，留空则从客户端请求头提取
+	Format        string `yaml:"format" json:"format"`                       // anthropic | openai
+	MaxConcurrent int    `yaml:"maxConcurrent" json:"maxConcurrent"`         // 最大并发
+	MaxPerSecond  int    `yaml:"maxPerSecond" json:"maxPerSecond"`           // 每秒最多请求数，0 表示不限
+	MaxQueueWait  int    `yaml:"maxQueueWait" json:"maxQueueWait,omitempty"` // 队列最大等待（毫秒）
 }
 
 // Vision 路由上的视觉子配置
 type Vision struct {
-	Provider string `yaml:"provider"`
-	Model    string `yaml:"model"`
+	Provider string `yaml:"provider" json:"provider"`
+	Model    string `yaml:"model" json:"model"`
 }
 
 // Route 路由规则，按顺序匹配，首条命中生效
 type Route struct {
-	Match    string  `yaml:"match"`
-	Provider string  `yaml:"provider"`
-	Model    string  `yaml:"model"`
-	Vision   *Vision `yaml:"vision"`
+	Match    string  `yaml:"match" json:"match"`
+	Provider string  `yaml:"provider" json:"provider"`
+	Model    string  `yaml:"model" json:"model"`
+	Vision   *Vision `yaml:"vision" json:"vision,omitempty"`
 }
 
 // Cache 缓存配置
 type Cache struct {
-	MaxAgeDays int `yaml:"maxAgeDays"`
-	MaxRecords int `yaml:"maxRecords"`
+	MaxAgeDays int `yaml:"maxAgeDays" json:"maxAgeDays"`
+	MaxRecords int `yaml:"maxRecords" json:"maxRecords"`
 }
 
 // Config 顶层配置
 type Config struct {
-	Port                  int                  `yaml:"port"`
-	Host                  string               `yaml:"host"`
-	Timeout               int                  `yaml:"timeout"`               // 请求超时（毫秒）
-	StreamActivityTimeout int                  `yaml:"streamActivityTimeout"` // 流式活跃超时（毫秒）
-	Cache                 Cache                `yaml:"cache"`
-	Providers             map[string]*Provider `yaml:"providers"`
-	Routes                []Route              `yaml:"routes"`
-	Path                  string               `yaml:"-"`
+	Port                  int                  `yaml:"port" json:"port"`
+	Host                  string               `yaml:"host" json:"host"`
+	Timeout               int                  `yaml:"timeout" json:"timeout"`                             // 请求超时（毫秒）
+	StreamActivityTimeout int                  `yaml:"streamActivityTimeout" json:"streamActivityTimeout"` // 流式活跃超时（毫秒）
+	Cache                 Cache                `yaml:"cache" json:"cache"`
+	Providers             map[string]*Provider `yaml:"providers" json:"providers"`
+	Routes                []Route              `yaml:"routes" json:"routes"`
+	Path                  string               `yaml:"-" json:"path,omitempty"`
 
 	// ── 直通模式（direct mode）──────────────────────────────
 	// 开启后请求不进队列：跳过并发控制、限速与排队等待，直接转发到上游。
 	// 限流交给上游自己用 429 处理（网关原样透传，不重试）。仅保留超时保护。
 	// 默认 false，保持原有队列行为；Node 版不识别这些字段会自动忽略，互不影响。
-	DirectMode                bool `yaml:"directMode"`                // 直通开关
-	DirectTimeoutNoStream     int  `yaml:"directTimeoutNoStream"`     // 非流式整体超时（毫秒），默认 60000
-	DirectTimeoutStreamHeader int  `yaml:"directTimeoutStreamHeader"` // 流式等响应头超时（毫秒），默认 60000
-	DirectTimeoutStreamActive int  `yaml:"directTimeoutStreamActive"` // 流式活跃超时（毫秒，中途无数据即断），默认 120000
+	DirectMode                bool `yaml:"directMode" json:"directMode"`                               // 直通开关
+	DirectTimeoutNoStream     int  `yaml:"directTimeoutNoStream" json:"directTimeoutNoStream"`         // 非流式整体超时（毫秒），默认 60000
+	DirectTimeoutStreamHeader int  `yaml:"directTimeoutStreamHeader" json:"directTimeoutStreamHeader"` // 流式等响应头超时（毫秒），默认 60000
+	DirectTimeoutStreamActive int  `yaml:"directTimeoutStreamActive" json:"directTimeoutStreamActive"` // 流式活跃超时（毫秒，中途无数据即断），默认 120000
 }
 
 // Load 读取并校验配置，查找顺序对齐 Node 版（优先项目目录，其次 ~/.config）。
@@ -158,7 +158,12 @@ func Save(c *Config) error {
 	// 写入临时文件
 	tmpPath := c.Path + ".tmp"
 	if err := os.WriteFile(tmpPath, out, 0644); err != nil {
-		return fmt.Errorf("写入临时文件失败: %w", err)
+		// Docker 单文件挂载场景下，配置文件本身可写，但 /app 目录可能不可写，
+		// 因此无法创建 config.yaml.tmp。此时退回到直接覆盖写入。
+		if directErr := os.WriteFile(c.Path, out, 0644); directErr != nil {
+			return fmt.Errorf("写入临时文件失败: %w；直接写入也失败: %w", err, directErr)
+		}
+		return nil
 	}
 
 	// 原子替换
