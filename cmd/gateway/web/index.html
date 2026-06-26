@@ -130,30 +130,42 @@
             </div>
 
             <div class="px-4 py-5">
-                <button @click="addRoute()" class="btn btn-primary w-full">
-                    <span class="material-symbols-outlined">alt_route</span>
-                    新增路由规则
+                <button x-show="activeTab === 'providers' || activeTab === 'routes'" x-cloak @click="quickAdd()" class="btn btn-primary w-full">
+                    <span class="material-symbols-outlined" x-text="quickAddIcon()"></span>
+                    <span x-text="quickAddLabel()"></span>
                 </button>
             </div>
 
             <nav class="flex-1 px-3">
-                <button @click="activeTab = 'config'"
-                        :class="activeTab === 'config' ? 'bg-cyan2/12 text-cyan border-l-cyan' : 'text-muted border-l-transparent hover:bg-white/[.04] hover:text-text'"
-                        class="flex w-full items-center gap-3 border-l-4 px-4 py-3 text-sm font-bold transition">
-                    <span class="material-symbols-outlined" :class="activeTab === 'config' ? 'icon-fill' : ''">tune</span>
-                    配置管理
-                </button>
                 <button @click="activeTab = 'monitor'"
                         :class="activeTab === 'monitor' ? 'bg-cyan2/12 text-cyan border-l-cyan' : 'text-muted border-l-transparent hover:bg-white/[.04] hover:text-text'"
-                        class="mt-1 flex w-full items-center gap-3 border-l-4 px-4 py-3 text-sm font-bold transition">
+                        class="flex w-full items-center gap-3 border-l-4 px-4 py-3 text-sm font-bold transition">
                     <span class="material-symbols-outlined">monitoring</span>
                     监控仪表盘
+                </button>
+                <button @click="activeTab = 'providers'; editMode = 'visual'"
+                        :class="activeTab === 'providers' ? 'bg-cyan2/12 text-cyan border-l-cyan' : 'text-muted border-l-transparent hover:bg-white/[.04] hover:text-text'"
+                        class="mt-1 flex w-full items-center gap-3 border-l-4 px-4 py-3 text-sm font-bold transition">
+                    <span class="material-symbols-outlined" :class="activeTab === 'providers' ? 'icon-fill' : ''">dns</span>
+                    提供商
+                </button>
+                <button @click="activeTab = 'routes'; editMode = 'visual'"
+                        :class="activeTab === 'routes' ? 'bg-cyan2/12 text-cyan border-l-cyan' : 'text-muted border-l-transparent hover:bg-white/[.04] hover:text-text'"
+                        class="mt-1 flex w-full items-center gap-3 border-l-4 px-4 py-3 text-sm font-bold transition">
+                    <span class="material-symbols-outlined" :class="activeTab === 'routes' ? 'icon-fill' : ''">alt_route</span>
+                    路由
                 </button>
                 <button @click="activeTab = 'logs'"
                         :class="activeTab === 'logs' ? 'bg-cyan2/12 text-cyan border-l-cyan' : 'text-muted border-l-transparent hover:bg-white/[.04] hover:text-text'"
                         class="mt-1 flex w-full items-center gap-3 border-l-4 px-4 py-3 text-sm font-bold transition">
                     <span class="material-symbols-outlined">receipt_long</span>
                     请求日志
+                </button>
+                <button @click="activeTab = 'settings'"
+                        :class="activeTab === 'settings' ? 'bg-cyan2/12 text-cyan border-l-cyan' : 'text-muted border-l-transparent hover:bg-white/[.04] hover:text-text'"
+                        class="mt-1 flex w-full items-center gap-3 border-l-4 px-4 py-3 text-sm font-bold transition">
+                    <span class="material-symbols-outlined" :class="activeTab === 'settings' ? 'icon-fill' : ''">tune</span>
+                    全局设置
                 </button>
             </nav>
 
@@ -177,7 +189,7 @@
                         </button>
                         <div class="min-w-0">
                             <h1 class="truncate text-lg font-extrabold tracking-tight text-white sm:text-xl" x-text="pageTitle()"></h1>
-                            <p class="hidden text-xs text-muted sm:block">按顺序匹配路由，命中后转发到指定 Provider 和目标模型</p>
+                            <p class="hidden text-xs text-muted sm:block" x-text="pageSubtitle()"></p>
                         </div>
                     </div>
 
@@ -209,14 +221,20 @@
                     </button>
                 </div>
                 <div class="space-y-2">
-                    <button @click="activeTab = 'config'; mobileNavOpen = false" class="btn btn-secondary w-full justify-start">
-                        <span class="material-symbols-outlined">tune</span> 配置管理
-                    </button>
                     <button @click="activeTab = 'monitor'; mobileNavOpen = false" class="btn btn-secondary w-full justify-start">
                         <span class="material-symbols-outlined">monitoring</span> 监控仪表盘
                     </button>
+                    <button @click="activeTab = 'providers'; editMode = 'visual'; mobileNavOpen = false" class="btn btn-secondary w-full justify-start">
+                        <span class="material-symbols-outlined">dns</span> 提供商
+                    </button>
+                    <button @click="activeTab = 'routes'; editMode = 'visual'; mobileNavOpen = false" class="btn btn-secondary w-full justify-start">
+                        <span class="material-symbols-outlined">alt_route</span> 路由
+                    </button>
                     <button @click="activeTab = 'logs'; mobileNavOpen = false" class="btn btn-secondary w-full justify-start">
                         <span class="material-symbols-outlined">receipt_long</span> 请求日志
+                    </button>
+                    <button @click="activeTab = 'settings'; mobileNavOpen = false" class="btn btn-secondary w-full justify-start">
+                        <span class="material-symbols-outlined">tune</span> 全局设置
                     </button>
                 </div>
             </div>
@@ -234,7 +252,7 @@
                     </button>
                 </div>
 
-                <section x-show="activeTab === 'config'" x-transition class="lg:flex lg:h-full lg:min-h-0 lg:flex-col">
+                <section x-show="isConfigTab()" x-transition class="lg:flex lg:h-full lg:min-h-0 lg:flex-col">
                     <div class="mb-5 grid shrink-0 grid-cols-1 gap-4 xl:grid-cols-4">
                         <div class="glass rounded-lg p-4">
                             <div class="mb-3 flex items-center justify-between">
@@ -270,7 +288,7 @@
                         </div>
                     </div>
 
-                    <div class="mb-5 flex shrink-0 flex-col justify-between gap-3 rounded-lg border border-line bg-panel/70 p-2 sm:flex-row sm:items-center">
+                    <div x-show="activeTab === 'settings'" x-transition class="mb-5 flex shrink-0 flex-col justify-between gap-3 rounded-lg border border-line bg-panel/70 p-2 sm:flex-row sm:items-center">
                         <div class="grid grid-cols-2 gap-2 sm:w-auto">
                             <button @click="editMode = 'visual'"
                                     :class="editMode === 'visual' ? 'bg-cyan2 text-ink' : 'text-muted hover:bg-white/[.06] hover:text-text'"
@@ -291,7 +309,7 @@
 
                     <div x-show="editMode === 'visual'" x-transition class="grid grid-cols-1 gap-5 xl:grid-cols-12 lg:min-h-0 lg:flex-1 lg:overflow-hidden">
                         <div class="space-y-5 xl:col-span-8 lg:min-h-0 lg:overflow-y-auto lg:pr-2">
-                            <section class="glass rounded-lg">
+                            <section x-show="activeTab === 'routes'" x-transition class="glass rounded-lg">
                                 <div class="flex flex-col gap-3 border-b border-line p-4 sm:flex-row sm:items-center sm:justify-between">
                                     <div>
                                         <h2 class="text-base font-extrabold text-cyan">路由规则</h2>
@@ -358,7 +376,7 @@
                                 </div>
                             </section>
 
-                            <section class="glass rounded-lg p-4">
+                            <section x-show="activeTab === 'settings'" x-transition class="glass rounded-lg p-4">
                                 <div class="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                                     <div>
                                         <h2 class="text-base font-extrabold text-white">全局设置</h2>
@@ -413,7 +431,7 @@
                                 </div>
                             </section>
 
-                            <section class="glass rounded-lg">
+                            <section x-show="activeTab === 'providers'" x-transition class="glass rounded-lg">
                                 <div class="flex flex-col gap-3 border-b border-line p-4 sm:flex-row sm:items-center sm:justify-between">
                                     <div>
                                         <h2 class="text-base font-extrabold text-white">Providers</h2>
@@ -642,7 +660,7 @@
     <script>
         function gatewayApp() {
             return {
-                activeTab: 'config',
+                activeTab: 'providers',
                 editMode: 'visual',
                 mobileNavOpen: false,
                 loading: false,
@@ -823,9 +841,45 @@
                 },
 
                 pageTitle() {
+                    if (this.activeTab === 'providers') return '提供商';
+                    if (this.activeTab === 'routes') return '路由';
+                    if (this.activeTab === 'settings') return '全局设置';
                     if (this.activeTab === 'monitor') return '监控仪表盘';
                     if (this.activeTab === 'logs') return '请求日志';
                     return '配置管理';
+                },
+
+                pageSubtitle() {
+                    if (this.activeTab === 'providers') return '配置上游地址、协议格式、并发和限速';
+                    if (this.activeTab === 'routes') return '按顺序匹配路由，命中后转发到指定 Provider 和目标模型';
+                    if (this.activeTab === 'settings') return '管理监听、超时、缓存、直通模式和 YAML 原文';
+                    if (this.activeTab === 'monitor') return '查看运行状态和 Provider 指标';
+                    if (this.activeTab === 'logs') return '查看最近请求记录和转发结果';
+                    return '';
+                },
+
+                isConfigTab() {
+                    return ['providers', 'routes', 'settings'].includes(this.activeTab);
+                },
+
+                quickAddLabel() {
+                    if (this.activeTab === 'providers') return '新增 Provider';
+                    return '新增路由规则';
+                },
+
+                quickAddIcon() {
+                    if (this.activeTab === 'providers') return 'add_circle';
+                    return 'alt_route';
+                },
+
+                quickAdd() {
+                    if (this.activeTab === 'providers') {
+                        this.addProvider();
+                        return;
+                    }
+                    this.activeTab = 'routes';
+                    this.editMode = 'visual';
+                    this.addRoute();
                 },
 
                 providerCount() {
