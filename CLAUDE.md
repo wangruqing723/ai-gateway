@@ -1,5 +1,11 @@
 # CLAUDE.md
 
+This file provides guidance to AI coding assistants (Claude Code, Codex, and others) when working with code in this repository.
+
+> 注：`AGENTS.md` 指向本文件，所有指南以 CLAUDE.md 为唯一信息源。更新指南请只编辑本文件。
+
+---
+
 ## 项目概述
 
 `ai-gateway` 是轻量本地 API 网关，统一接入 Claude Code、Claude Desktop、Codex CLI，并在 Anthropic、OpenAI Chat、OpenAI Responses 三种客户端格式和不同上游 provider 之间路由、转换与转发。
@@ -22,6 +28,7 @@ Go 源码注释、日志、README 主要使用中文；新增说明请保持这�
 - `internal/vision/`：图片检测、视觉模型翻译、SQLite 缓存和 singleflight 去重。
 - `internal/cache/`：基于 `modernc.org/sqlite` 的纯 Go 图片缓存。
 - `cmd/gateway/web/`：嵌入式前端资源，路径需匹配 `//go:embed web/index.html`。
+- 前端开发热加载：本地 compose 挂载 `./cmd/gateway/web:/app/web:ro` 并设置 `AI_GATEWAY_WEB_DIR=/app/web`；该变量存在时服务从磁盘读取 `index.html` 并通过 SSE 自动刷新浏览器，生产环境不设置时使用 `go:embed`。
 - `TODO-review.md`：Go 版问题修复跟踪。
 - `config.example.yaml`：配置模板；本地复制为 `config.yaml`。
 

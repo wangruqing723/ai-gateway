@@ -17,10 +17,13 @@ services:
     volumes:
       # 挂载配置文件；管理页面保存配置时需要写权限。
       - ./config.yaml:/app/config.yaml
+      # 开发模式前端热加载目录；修改 cmd/gateway/web/index.html 后浏览器自动刷新。
+      - ./cmd/gateway/web:/app/web:ro
       # 持久化数据目录（SQLite 缓存）
       - ./data:/app/data
     environment:
       - TZ=Asia/Shanghai
+      - AI_GATEWAY_WEB_DIR=/app/web
     deploy:
       resources:
         limits:

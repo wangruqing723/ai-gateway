@@ -5,6 +5,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"embed"
 	"encoding/json"
@@ -14,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -75,7 +77,7 @@ func main() {
 
 	translator := vision.New(imgCache, qm, httpClient, cfg.DirectMode)
 
-	srv := &server{cfg: cfg, qm: qm, httpClient: httpClient, cache: imgCache, translator: translator}
+	srv := &server{cfg: cfg, qm: qm, httpClient: httpClient, cache: imgCache, translator: translator, webDevDir: os.Getenv("AI_GATEWAY_WEB_DIR")}
 
 	// 优雅退出：关闭缓存
 	stop := make(chan os.Signal, 1)
@@ -108,6 +110,7 @@ type server struct {
 	httpClient *http.Client
 	cache      *cache.Cache
 	translator *vision.Translator
+	webDevDir  string
 }
 
 func (s *server) handle(w http.ResponseWriter, r *http.Request) {
@@ -122,6 +125,12 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 	// 前端页面：GET / 返回 index.html
 	if urlPath == "/" && r.Method == http.MethodGet {
 		s.handleIndex(w, r)
+		return
+	}
+
+	// 开发模式前端热加载：仅 AI_GATEWAY_WEB_DIR 启用时可用
+	if urlPath == "/__dev/reload" && r.Method == http.MethodGet && s.webDevDir != "" {
+		s.handleDevReload(w, r)
 		return
 	}
 
@@ -358,15 +367,86 @@ func nextReqID() string {
 	return fmt.Sprintf("r%05d", (n-1)%100000+1)
 }
 
-// handleIndex 返回嵌入的前端页面
+// handleIndex 返回前端页面。默认使用嵌入资源；开发模式下从 AI_GATEWAY_WEB_DIR 实时读取。
 func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
-	data, err := webFS.ReadFile("web/index.html")
+	var data []byte
+	var err error
+	if s.webDevDir != "" {
+		data, err = os.ReadFile(filepath.Join(s.webDevDir, "index.html"))
+		if err == nil {
+			data = injectDevReload(data)
+		}
+		w.Header().Set("Cache-Control", "no-store")
+	} else {
+		data, err = webFS.ReadFile("web/index.html")
+	}
 	if err != nil {
-		http.Error(w, "前端页面加载失败", http.StatusInternalServerError)
+		http.Error(w, "前端页面加载失败: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Write(data)
+}
+
+func injectDevReload(data []byte) []byte {
+	script := []byte(`<script>
+(() => {
+  const events = new EventSource('/__dev/reload');
+  events.onmessage = (event) => {
+    if (event.data === 'reload') window.location.reload();
+  };
+})();
+</script>`)
+	if bytes.Contains(data, script) {
+		return data
+	}
+	if idx := bytes.LastIndex(data, []byte("</body>")); idx >= 0 {
+		out := make([]byte, 0, len(data)+len(script))
+		out = append(out, data[:idx]...)
+		out = append(out, script...)
+		out = append(out, data[idx:]...)
+		return out
+	}
+	return append(data, script...)
+}
+
+func (s *server) handleDevReload(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "当前响应不支持流式刷新", http.StatusInternalServerError)
+		return
+	}
+	indexPath := filepath.Join(s.webDevDir, "index.html")
+	lastMod := fileModTime(indexPath)
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Connection", "keep-alive")
+	fmt.Fprint(w, ": connected\n\n")
+	flusher.Flush()
+
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-ticker.C:
+			current := fileModTime(indexPath)
+			if !current.IsZero() && current.After(lastMod) {
+				lastMod = current
+				fmt.Fprint(w, "data: reload\n\n")
+				flusher.Flush()
+			}
+		}
+	}
+}
+
+func fileModTime(path string) time.Time {
+	info, err := os.Stat(path)
+	if err != nil {
+		return time.Time{}
+	}
+	return info.ModTime()
 }
 
 // handleConfigAPI 处理配置管理相关的 API 请求
