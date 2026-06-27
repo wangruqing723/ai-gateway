@@ -17,6 +17,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -27,6 +28,8 @@ import (
 	"ai-gateway/internal/cache"
 	"ai-gateway/internal/config"
 	"ai-gateway/internal/converter"
+	"ai-gateway/internal/metrics"
+	"ai-gateway/internal/providerhealth"
 	"ai-gateway/internal/proxy"
 	"ai-gateway/internal/queue"
 	"ai-gateway/internal/router"
@@ -77,7 +80,7 @@ func main() {
 
 	translator := vision.New(imgCache, qm, httpClient, cfg.DirectMode)
 
-	srv := &server{cfg: cfg, qm: qm, httpClient: httpClient, cache: imgCache, translator: translator, webDevDir: os.Getenv("AI_GATEWAY_WEB_DIR")}
+	srv := &server{cfg: cfg, qm: qm, httpClient: httpClient, cache: imgCache, translator: translator, metrics: metrics.NewCollector(1000), providerHealth: providerhealth.NewChecker(), webDevDir: os.Getenv("AI_GATEWAY_WEB_DIR")}
 
 	// 优雅退出：关闭缓存
 	stop := make(chan os.Signal, 1)
@@ -104,13 +107,15 @@ func main() {
 }
 
 type server struct {
-	cfg        *config.Config
-	cfgMu      sync.RWMutex // 保护 cfg 的并发读写
-	qm         *queue.Manager
-	httpClient *http.Client
-	cache      *cache.Cache
-	translator *vision.Translator
-	webDevDir  string
+	cfg            *config.Config
+	cfgMu          sync.RWMutex // 保护 cfg 的并发读写
+	qm             *queue.Manager
+	httpClient     *http.Client
+	cache          *cache.Cache
+	translator     *vision.Translator
+	metrics        *metrics.Collector
+	providerHealth *providerhealth.Checker
+	webDevDir      string
 }
 
 func (s *server) handle(w http.ResponseWriter, r *http.Request) {
@@ -140,6 +145,21 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if urlPath == "/api/metrics" && r.Method == http.MethodGet {
+		s.handleMetrics(w, r)
+		return
+	}
+
+	if urlPath == "/api/logs" && r.Method == http.MethodGet {
+		s.handleLogs(w, r)
+		return
+	}
+
+	if urlPath == "/api/providers/health" && r.Method == http.MethodPost {
+		s.handleProviderHealthCheck(w, r)
+		return
+	}
+
 	// /health 端点
 	if urlPath == "/health" && r.Method == http.MethodGet {
 		s.handleHealth(w)
@@ -152,34 +172,58 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 获取配置快照（避免长时间持有读锁）
+	s.cfgMu.RLock()
+	cfg := s.cfg
+	s.cfgMu.RUnlock()
+
 	clientFormat := converter.DetectClientFormat(urlPath)
 	if clientFormat == "" {
 		writeJSONError(w, http.StatusNotFound, "gateway_error", "未知端点: "+urlPath)
 		return
 	}
 
-	// 获取配置快照（避免长时间持有读锁）
-	s.cfgMu.RLock()
-	cfg := s.cfg
-	s.cfgMu.RUnlock()
-
 	reqID := nextReqID()
 	start := time.Now()
+	rec := &statusRecorder{ResponseWriter: w}
+	w = rec
+	reqLog := metrics.RequestLog{
+		ID:           reqID,
+		Started:      start,
+		Time:         start.In(beijingLoc).Format("2006-01-02 15:04:05"),
+		Method:       r.Method,
+		Path:         urlPath,
+		ClientFormat: clientFormat,
+		Format:       clientFormat,
+	}
+	defer func() {
+		reqLog.Status = rec.Status()
+		reqLog.ResponseBytes = rec.Bytes()
+		reqLog.DurationMs = time.Since(start).Milliseconds()
+		if reqLog.Error == "" && reqLog.Status >= 400 {
+			reqLog.Error = http.StatusText(reqLog.Status)
+		}
+		s.metrics.Add(reqLog)
+	}()
+
 	logf(reqID, "→ %s %s [%s]", r.Method, urlPath, clientFormat)
 
 	raw, err := readBody(r)
 	if err != nil {
-		writeJSONError(w, http.StatusBadRequest, "gateway_error", "读取请求失败: "+err.Error())
+		reqLog.Error = "读取请求失败: " + err.Error()
+		writeJSONError(w, http.StatusBadRequest, "gateway_error", reqLog.Error)
 		return
 	}
 
 	var body map[string]any
 	if err := json.Unmarshal(raw, &body); err != nil {
-		writeJSONError(w, http.StatusBadRequest, "gateway_error", "请求体 JSON 解析失败: "+err.Error())
+		reqLog.Error = "请求体 JSON 解析失败: " + err.Error()
+		writeJSONError(w, http.StatusBadRequest, "gateway_error", reqLog.Error)
 		return
 	}
 
 	model, _ := body["model"].(string)
+	reqLog.Model = model
 
 	// 规范化为内部格式
 	var internal *converter.Internal
@@ -192,18 +236,25 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		internal = converter.FromOpenAIResponses(body)
 	}
 	model = internal.Model
+	reqLog.Model = model
+	reqLog.Stream = internal.Stream
 
 	// 路由匹配
 	matched := router.MatchRoute(model, cfg)
 	if matched == nil {
-		writeJSONError(w, http.StatusBadRequest, "gateway_error", fmt.Sprintf("没有匹配 model %q 的路由规则", model))
+		reqLog.Error = fmt.Sprintf("没有匹配 model %q 的路由规则", model)
+		writeJSONError(w, http.StatusBadRequest, "gateway_error", reqLog.Error)
 		return
 	}
+	reqLog.Route = matched.RouteMatch
+	reqLog.Provider = matched.Provider.Name
+	reqLog.TargetModel = matched.TargetModel
 	p := matched.Provider
 	p.APIKey = router.ResolveAPIKey(p, r.Header)
 
 	// 是否需要视觉识别：路由配了 vision 且消息含图片
 	needVision := matched.VisionProvider != nil && vision.HasImages(internal.Messages)
+	reqLog.Vision = needVision
 	displayModel := matched.TargetModel
 	if needVision {
 		displayModel = matched.VisionModel
@@ -227,15 +278,18 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 	}
 	upstreamBody, err := json.Marshal(upstreamMap)
 	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "gateway_error", "上游请求体序列化失败: "+err.Error())
+		reqLog.Error = "上游请求体序列化失败: " + err.Error()
+		writeJSONError(w, http.StatusInternalServerError, "gateway_error", reqLog.Error)
 		return
 	}
 
 	// 直通模式：跳过队列（并发/限速/排队），请求直接转发；超时用 direct* 配置。
 	// 非直通模式：先经队列获取执行槽位（并发 + 限速 + 等待超时）。
 	if !cfg.DirectMode {
-		release, err := s.qm.Acquire(r.Context(), p.Name, p.MaxConcurrent, p.MaxPerSecond, p.MaxQueueWait)
+		release, waitMs, err := s.qm.Acquire(r.Context(), p.Name, p.MaxConcurrent, p.MaxPerSecond, p.MaxQueueWait)
+		reqLog.QueueWaitMs = waitMs
 		if err != nil {
+			reqLog.Error = err.Error()
 			logf(reqID, "  队列处理异常: %s", err.Error())
 			if err == queue.ErrQueueTimeout {
 				writeJSONError(w, http.StatusServiceUnavailable, "queue_timeout", err.Error())
@@ -276,6 +330,7 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		HTTPClient:            s.httpClient,
 	}
 	if err := proxy.Forward(opts); err != nil {
+		reqLog.Error = err.Error()
 		// 区分客户端断开、超时、其他错误，避免把正常断开误报为异常
 		if errors.Is(err, context.Canceled) {
 			logf(reqID, "  客户端断开连接")
@@ -301,9 +356,10 @@ func (s *server) handleHealth(w http.ResponseWriter) {
 
 	cs := s.cache.GetStats()
 	health := map[string]any{
-		"status":  "ok",
-		"timeout": cfg.Timeout,
-		"queues":  queues,
+		"status":         "ok",
+		"timeout":        cfg.Timeout,
+		"queues":         queues,
+		"providerHealth": s.providerHealth.Snapshot(cfg),
 		"cache": map[string]any{
 			"total":       cs.Total,
 			"contentSize": cs.ContentSize,
@@ -315,6 +371,61 @@ func (s *server) handleHealth(w http.ResponseWriter) {
 	}
 	out, _ := json.MarshalIndent(health, "", "  ")
 	w.Header().Set("content-type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write(out)
+}
+
+func (s *server) handleProviderHealthCheck(w http.ResponseWriter, r *http.Request) {
+	s.cfgMu.RLock()
+	cfg := s.cfg
+	s.cfgMu.RUnlock()
+
+	statuses := s.providerHealth.CheckAll(r.Context(), cfg, s.httpClient)
+	out, _ := json.MarshalIndent(map[string]any{
+		"providers": statuses,
+	}, "", "  ")
+	w.Header().Set("content-type", "application/json")
+	w.Header().Set("content-length", fmt.Sprintf("%d", len(out)))
+	w.WriteHeader(http.StatusOK)
+	w.Write(out)
+}
+
+func (s *server) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	out, _ := json.MarshalIndent(s.metrics.Metrics(time.Now()), "", "  ")
+	w.Header().Set("content-type", "application/json")
+	w.Header().Set("content-length", fmt.Sprintf("%d", len(out)))
+	w.WriteHeader(http.StatusOK)
+	w.Write(out)
+}
+
+func (s *server) handleLogs(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	filter := metrics.LogFilter{
+		Provider: q.Get("provider"),
+		Model:    q.Get("model"),
+		Status:   q.Get("status"),
+		Stream:   q.Get("stream"),
+		Query:    q.Get("q"),
+	}
+	if limit, err := strconv.Atoi(q.Get("limit")); err == nil {
+		filter.Limit = limit
+	}
+	if offset, err := strconv.Atoi(q.Get("offset")); err == nil {
+		filter.Offset = offset
+	}
+	if since := q.Get("since"); since != "" {
+		if t, err := time.Parse(time.RFC3339, since); err == nil {
+			filter.Since = t
+		}
+	}
+
+	logs := s.metrics.Logs(filter)
+	out, _ := json.MarshalIndent(map[string]any{
+		"data":  logs,
+		"limit": filter.Limit,
+	}, "", "  ")
+	w.Header().Set("content-type", "application/json")
+	w.Header().Set("content-length", fmt.Sprintf("%d", len(out)))
 	w.WriteHeader(http.StatusOK)
 	w.Write(out)
 }

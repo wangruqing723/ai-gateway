@@ -45,6 +45,45 @@ func writeJSONError(w http.ResponseWriter, status int, errType, msg string) {
 	httputil.WriteJSONError(w, status, errType, msg)
 }
 
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+	bytes  int64
+}
+
+func (r *statusRecorder) WriteHeader(status int) {
+	if r.status == 0 {
+		r.status = status
+		r.ResponseWriter.WriteHeader(status)
+	}
+}
+
+func (r *statusRecorder) Write(p []byte) (int, error) {
+	if r.status == 0 {
+		r.WriteHeader(http.StatusOK)
+	}
+	n, err := r.ResponseWriter.Write(p)
+	r.bytes += int64(n)
+	return n, err
+}
+
+func (r *statusRecorder) Flush() {
+	if f, ok := r.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func (r *statusRecorder) Status() int {
+	if r.status == 0 {
+		return http.StatusOK
+	}
+	return r.status
+}
+
+func (r *statusRecorder) Bytes() int64 {
+	return r.bytes
+}
+
 // mask 脱敏密钥显示
 func mask(v string) string {
 	if v == "" {

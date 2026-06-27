@@ -65,8 +65,9 @@ func (m *Manager) ensure(name string, maxConcurrent, maxPerSecond int) *provider
 // Acquire 获取一个执行 slot。返回 release 函数，调用方必须 defer release()。
 // 行为对齐 Node：先并发控制（最多等待 maxQueueWait），再速率限制（窗口满则等待到窗口滑出）。
 // ctx 取消（如客户端断开）会提前返回。
-func (m *Manager) Acquire(ctx context.Context, name string, maxConcurrent, maxPerSecond, maxQueueWaitMs int) (release func(), err error) {
+func (m *Manager) Acquire(ctx context.Context, name string, maxConcurrent, maxPerSecond, maxQueueWaitMs int) (release func(), waitMs int64, err error) {
 	q := m.ensure(name, maxConcurrent, maxPerSecond)
+	start := time.Now()
 
 	q.mu.Lock()
 	q.waiting++
@@ -87,12 +88,12 @@ func (m *Manager) Acquire(ctx context.Context, name string, maxConcurrent, maxPe
 		q.mu.Lock()
 		q.waiting--
 		q.mu.Unlock()
-		return nil, ErrQueueTimeout
+		return nil, time.Since(start).Milliseconds(), ErrQueueTimeout
 	case <-ctx.Done():
 		q.mu.Lock()
 		q.waiting--
 		q.mu.Unlock()
-		return nil, ctx.Err()
+		return nil, time.Since(start).Milliseconds(), ctx.Err()
 	}
 
 	q.mu.Lock()
@@ -106,7 +107,7 @@ func (m *Manager) Acquire(ctx context.Context, name string, maxConcurrent, maxPe
 		q.mu.Lock()
 		q.running--
 		q.mu.Unlock()
-		return nil, err
+		return nil, time.Since(start).Milliseconds(), err
 	}
 
 	released := false
@@ -119,7 +120,7 @@ func (m *Manager) Acquire(ctx context.Context, name string, maxConcurrent, maxPe
 		q.mu.Lock()
 		q.running--
 		q.mu.Unlock()
-	}, nil
+	}, time.Since(start).Milliseconds(), nil
 }
 
 // waitForRate 实现每秒最多 maxPerSecond 个请求的滑动窗口限速。

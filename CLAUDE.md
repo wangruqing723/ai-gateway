@@ -27,6 +27,8 @@ Go 源码注释、日志、README 主要使用中文；新增说明请保持这�
 - `internal/converter/`：Anthropic、OpenAI Chat、OpenAI Responses 与内部格式互转。
 - `internal/vision/`：图片检测、视觉模型翻译、SQLite 缓存和 singleflight 去重。
 - `internal/cache/`：基于 `modernc.org/sqlite` 的纯 Go 图片缓存。
+- `internal/metrics/`：内存环形请求日志与运行指标聚合，支持 P95、成功率、Provider 排行。
+- `internal/providerhealth/`：上游 Provider 健康检测，探测 `/v1/models` 端点。
 - `cmd/gateway/web/`：嵌入式前端资源，路径需匹配 `//go:embed web/index.html`。
 - 前端开发热加载：本地 compose 挂载 `./cmd/gateway/web:/app/web:ro` 并设置 `AI_GATEWAY_WEB_DIR=/app/web`；该变量存在时服务从磁盘读取 `index.html` 并通过 SSE 自动刷新浏览器，生产环境不设置时使用 `go:embed`。
 - `TODO-review.md`：Go 版问题修复跟踪。
@@ -83,6 +85,7 @@ go test ./internal/<pkg>/ -run TestName -v
 `cmd/gateway/main.go` 的 `server.handle()` 按顺序处理：
 
 1. 特殊路由：`HEAD`、`GET /`、`/api/config*`、`GET /health`、`GET /v1/models`。
+- 观测 API：`GET /api/metrics`（聚合指标）、`GET /api/logs`（请求日志，支持筛选）、`POST /api/providers/health`（触发 Provider 健康检测）。
 2. `converter.DetectClientFormat(urlPath)` 按路径识别客户端格式。
 3. `FromAnthropic`、`FromOpenAIChat`、`FromOpenAIResponses` 规范化为 `*converter.Internal`。
 4. `router.MatchRoute(model, cfg)` 按 `routes` 顺序匹配，支持 `*`/`?` 且大小写不敏感。
@@ -99,6 +102,8 @@ go test ./internal/<pkg>/ -run TestName -v
 - **流式转发**：同格式直接透传；跨格式使用 `converter.NewStreamTransformer` 逐行转换，避免 `bufio.Scanner` 的大行限制。
 - **超时控制**：`internal/proxy` 统一用 `context` 收口；流式超时后会补发合规 SSE 收尾事件。
 - **配置热重载**：`/api/config` 支持脱敏读取、校验落盘、从磁盘 reload；`server.cfg` 由 `cfgMu` 保护。
+- **请求观测**：`internal/metrics` 维护最近 1000 条代理请求的环形日志；`/api/metrics` 在读取时聚合 P95、成功率等指标；`/api/logs` 支持按状态/Provider/模型/流式/关键词筛选。只记录真实代理转发请求，静态资源和管理 API 不进日志。
+- **Provider 健康检测**：`internal/providerhealth` 通过探测 `/v1/models` 判断上游是否可用；手动触发 `POST /api/providers/health` 后结果缓存在内存中，`/health` 响应携带缓存状态。
 
 ## Commit & Pull Request Guidelines
 

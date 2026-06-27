@@ -230,7 +230,7 @@ func (t *Translator) callVision(ctx context.Context, imageBlock map[string]any, 
 		text, err = t.doRecognize(detachedCtx, imageBlock, vision, visionModel)
 	} else {
 		// 经队列控制视觉 provider 并发
-		release, qerr := t.qm.Acquire(detachedCtx, vision.Name, vision.MaxConcurrent, vision.MaxPerSecond, vision.MaxQueueWait)
+		release, _, qerr := t.qm.Acquire(detachedCtx, vision.Name, vision.MaxConcurrent, vision.MaxPerSecond, vision.MaxQueueWait)
 		if qerr != nil {
 			return "", false, qerr
 		}

@@ -11,6 +11,7 @@ import (
 // Match 路由匹配结果
 type Match struct {
 	Provider       *config.Provider
+	RouteMatch     string
 	TargetModel    string
 	VisionProvider *config.Provider // 可能为 nil
 	VisionModel    string
@@ -27,7 +28,7 @@ func MatchRoute(model string, cfg *config.Config) *Match {
 			if target == "" {
 				target = model
 			}
-			m := &Match{Provider: &pCopy, TargetModel: target}
+			m := &Match{Provider: &pCopy, RouteMatch: route.Match, TargetModel: target}
 			if route.Vision != nil {
 				vpCopy := *cfg.Providers[route.Vision.Provider]
 				m.VisionProvider = &vpCopy

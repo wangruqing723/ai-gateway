@@ -129,14 +129,7 @@
                 </div>
             </div>
 
-            <div class="px-4 py-5">
-                <button x-show="activeTab === 'providers' || activeTab === 'routes'" x-cloak @click="quickAdd()" class="btn btn-primary w-full">
-                    <span class="material-symbols-outlined" x-text="quickAddIcon()"></span>
-                    <span x-text="quickAddLabel()"></span>
-                </button>
-            </div>
-
-            <nav class="flex-1 px-3">
+            <nav class="flex-1 px-3 py-5">
                 <button @click="activeTab = 'monitor'"
                         :class="activeTab === 'monitor' ? 'bg-cyan2/12 text-cyan border-l-cyan' : 'text-muted border-l-transparent hover:bg-white/[.04] hover:text-text'"
                         class="flex w-full items-center gap-3 border-l-4 px-4 py-3 text-sm font-bold transition">
@@ -503,20 +496,6 @@
                                 <pre class="max-h-[560px] overflow-auto bg-ink p-4 font-mono text-xs leading-5 text-slate-300 lg:min-h-0 lg:flex-1" x-text="configPreview()"></pre>
                             </section>
 
-                            <section class="glass rounded-lg p-4">
-                                <h2 class="mb-4 text-base font-extrabold text-white">Provider 概览</h2>
-                                <div class="space-y-2">
-                                    <template x-for="(provider, name) in config.providers" :key="name">
-                                        <div class="flex items-center justify-between gap-3 rounded-lg border border-line bg-ink px-3 py-3">
-                                            <div class="min-w-0">
-                                                <div class="truncate text-sm font-bold text-text" x-text="name"></div>
-                                                <div class="truncate text-xs text-muted" x-text="provider.format + ' · ' + (provider.maxConcurrent || 5) + ' 并发'"></div>
-                                            </div>
-                                            <span class="h-2.5 w-2.5 shrink-0 rounded-full bg-good"></span>
-                                        </div>
-                                    </template>
-                                </div>
-                            </section>
                         </aside>
                     </div>
 
@@ -537,20 +516,280 @@
                     </div>
                 </section>
 
-                <section x-show="activeTab === 'monitor'" x-transition x-cloak class="glass rounded-lg p-10 text-center">
-                    <div class="mx-auto mb-4 grid h-14 w-14 place-items-center rounded-lg border border-line bg-ink text-cyan">
-                        <span class="material-symbols-outlined text-[30px]">monitoring</span>
+                <section x-show="activeTab === 'monitor'" x-transition x-cloak class="space-y-5 lg:h-full lg:min-h-0 lg:overflow-y-auto lg:pr-2">
+                    <div class="grid grid-cols-1 gap-4 md:grid-cols-2 2xl:grid-cols-4">
+                        <article class="glass rounded-lg p-4">
+                            <div class="mb-3 flex items-center justify-between">
+                                <span class="text-sm font-bold text-muted">请求速率</span>
+                                <span class="material-symbols-outlined text-cyan">speed</span>
+                            </div>
+                            <div class="text-3xl font-extrabold text-white" x-text="metricValue('requestsPerMinute', '--')"></div>
+                            <div class="mt-1 text-xs text-muted">最近 1 分钟请求数</div>
+                        </article>
+                        <article class="glass rounded-lg p-4">
+                            <div class="mb-3 flex items-center justify-between">
+                                <span class="text-sm font-bold text-muted">成功率</span>
+                                <span class="material-symbols-outlined text-good">task_alt</span>
+                            </div>
+                            <div class="text-3xl font-extrabold text-white" x-text="metricPercent('successRate')"></div>
+                            <div class="mt-1 text-xs text-muted">最近窗口内的成功请求占比</div>
+                        </article>
+                        <article class="glass rounded-lg p-4">
+                            <div class="mb-3 flex items-center justify-between">
+                                <span class="text-sm font-bold text-muted">P95 延迟</span>
+                                <span class="material-symbols-outlined text-warn">timer</span>
+                            </div>
+                            <div class="text-3xl font-extrabold text-white" x-text="metricDuration('p95LatencyMs')"></div>
+                            <div class="mt-1 text-xs text-muted">端到端转发耗时</div>
+                        </article>
+                        <article class="glass rounded-lg p-4">
+                            <div class="mb-3 flex items-center justify-between">
+                                <span class="text-sm font-bold text-muted">服务状态</span>
+                                <span class="material-symbols-outlined" :class="health?.status === 'ok' ? 'text-good' : 'text-danger'">monitor_heart</span>
+                            </div>
+                            <div class="text-3xl font-extrabold text-white" x-text="health?.status || '未知'"></div>
+                            <div class="mt-1 truncate text-xs text-muted" x-text="(config.host || '127.0.0.1') + ':' + (config.port || 7789) + ' · ' + (config.directMode ? '直通模式' : '队列模式')"></div>
+                        </article>
                     </div>
-                    <h2 class="text-xl font-extrabold text-white">监控仪表盘后续实现</h2>
-                    <p class="mx-auto mt-3 max-w-xl text-sm leading-6 text-muted">当前改造仅覆盖配置管理页面。后续可在这里接入实时请求数、成功率、Provider 延迟、缓存统计和队列状态。</p>
+
+                    <div class="grid grid-cols-1 gap-5 xl:grid-cols-12">
+                        <section class="glass rounded-lg xl:col-span-8">
+                            <div class="flex items-center justify-between border-b border-line p-4">
+                                <div class="flex items-center gap-2 font-bold text-white">
+                                    <span class="material-symbols-outlined text-cyan">dns</span>
+                                    Provider 运行状态
+                                </div>
+                                <div class="flex gap-2">
+                                    <button @click="checkProviderHealth()" class="btn btn-secondary px-2 py-2" title="检测 Provider">
+                                        <span class="material-symbols-outlined text-[18px]">health_and_safety</span>
+                                    </button>
+                                    <button @click="refreshMonitor()" class="btn btn-secondary px-2 py-2" title="刷新仪表盘">
+                                        <span class="material-symbols-outlined text-[18px]">refresh</span>
+                                    </button>
+                                </div>
+                            </div>
+                            <div class="overflow-x-auto">
+                                <table class="w-full min-w-[860px] border-collapse text-left">
+                                    <thead class="bg-panel2 text-xs uppercase tracking-wide text-muted">
+                                        <tr>
+                                            <th class="px-4 py-3 font-bold">Provider</th>
+                                            <th class="px-4 py-3 font-bold">健康</th>
+                                            <th class="px-4 py-3 font-bold">格式</th>
+                                            <th class="px-4 py-3 font-bold">运行中</th>
+                                            <th class="px-4 py-3 font-bold">排队</th>
+                                            <th class="px-4 py-3 font-bold">并发</th>
+                                            <th class="px-4 py-3 font-bold">限速</th>
+                                            <th class="px-4 py-3 font-bold">状态</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody class="divide-y divide-line">
+                                        <template x-for="row in providerStatusRows()" :key="row.name">
+                                            <tr class="bg-panel/35">
+                                                <td class="px-4 py-4 font-mono text-sm font-bold text-white" x-text="row.name"></td>
+                                                <td class="px-4 py-4">
+                                                    <span class="chip" :class="row.healthClass" :title="row.healthTitle" x-text="row.healthLabel"></span>
+                                                </td>
+                                                <td class="px-4 py-4"><span class="chip bg-white/[.05] text-text" x-text="row.format"></span></td>
+                                                <td class="px-4 py-4 font-mono text-sm text-text" x-text="row.running"></td>
+                                                <td class="px-4 py-4 font-mono text-sm" :class="row.queued > 0 ? 'text-warn' : 'text-muted'" x-text="row.queued"></td>
+                                                <td class="px-4 py-4 font-mono text-sm text-text" x-text="row.maxConcurrent"></td>
+                                                <td class="px-4 py-4 font-mono text-sm text-text" x-text="row.maxPerSecond > 0 ? row.maxPerSecond + '/s' : '不限'"></td>
+                                                <td class="px-4 py-4">
+                                                    <span class="chip" :class="row.statusClass" x-text="row.status"></span>
+                                                </td>
+                                            </tr>
+                                        </template>
+                                        <tr x-show="providerStatusRows().length === 0">
+                                            <td colspan="8" class="px-4 py-10 text-center text-sm text-muted">还没有 Provider</td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </section>
+
+                        <aside class="space-y-5 xl:col-span-4">
+                            <section class="glass rounded-lg p-4">
+                                <h2 class="mb-4 text-base font-extrabold text-white">系统资源</h2>
+                                <div class="grid grid-cols-2 gap-3 text-xs">
+                                    <div class="rounded-lg bg-ink p-3">
+                                        <div class="text-muted">图片缓存</div>
+                                        <div class="mt-1 font-mono text-text" x-text="cacheSummary()"></div>
+                                    </div>
+                                    <div class="rounded-lg bg-ink p-3">
+                                        <div class="text-muted">Heap</div>
+                                        <div class="mt-1 font-mono text-text" x-text="(health?.memory?.heapAllocMB ?? '--') + ' MB'"></div>
+                                    </div>
+                                    <div class="rounded-lg bg-ink p-3">
+                                        <div class="text-muted">Sys</div>
+                                        <div class="mt-1 font-mono text-text" x-text="(health?.memory?.sysMB ?? '--') + ' MB'"></div>
+                                    </div>
+                                    <div class="rounded-lg bg-ink p-3">
+                                        <div class="text-muted">超时</div>
+                                        <div class="mt-1 font-mono text-text" x-text="seconds(config.timeout) + 's'"></div>
+                                    </div>
+                                </div>
+                            </section>
+
+                            <section class="glass rounded-lg p-4">
+                                <h2 class="mb-4 text-base font-extrabold text-white">配置健康</h2>
+                                <div class="space-y-2">
+                                    <template x-for="issue in configIssues()" :key="issue">
+                                        <div class="rounded-lg border border-warn/30 bg-warn/10 px-3 py-2 text-sm text-amber-100" x-text="issue"></div>
+                                    </template>
+                                    <div x-show="configIssues().length === 0" class="rounded-lg border border-good/30 bg-good/10 px-3 py-2 text-sm text-emerald-100">
+                                        配置引用关系正常
+                                    </div>
+                                </div>
+                            </section>
+                        </aside>
+                    </div>
+
+                    <div class="grid grid-cols-1 gap-5 xl:grid-cols-12">
+                        <section class="glass rounded-lg xl:col-span-5">
+                            <div class="border-b border-line p-4 font-bold text-white">Provider 延迟排行</div>
+                            <div class="divide-y divide-line">
+                                <template x-for="row in latencyRows()" :key="row.name">
+                                    <div class="flex items-center justify-between gap-3 px-4 py-3">
+                                        <div class="min-w-0">
+                                            <div class="truncate font-mono text-sm font-bold text-text" x-text="row.name"></div>
+                                            <div class="mt-1 text-xs text-muted" x-text="row.requests + ' 次请求'"></div>
+                                        </div>
+                                        <span class="font-mono text-sm text-cyan" x-text="row.p95 + ' ms'"></span>
+                                    </div>
+                                </template>
+                                <div x-show="latencyRows().length === 0" class="px-4 py-8 text-center text-sm text-muted">暂无延迟数据</div>
+                            </div>
+                        </section>
+
+                        <section class="glass rounded-lg xl:col-span-7">
+                            <div class="border-b border-line p-4 font-bold text-white">最近错误</div>
+                            <div class="divide-y divide-line">
+                                <template x-for="err in recentErrors()" :key="err.id || err.time + err.message">
+                                    <div class="grid grid-cols-1 gap-2 px-4 py-3 md:grid-cols-[9rem_7rem_1fr] md:items-center">
+                                        <span class="font-mono text-xs text-muted" x-text="err.time || '--'"></span>
+                                        <span class="chip border-danger/35 bg-danger/10 text-rose-100" x-text="err.status || err.code || 'error'"></span>
+                                        <span class="truncate text-sm text-text" x-text="err.message || err.error || '未知错误'"></span>
+                                    </div>
+                                </template>
+                                <div x-show="recentErrors().length === 0" class="px-4 py-8 text-center text-sm text-muted">暂无错误记录</div>
+                            </div>
+                        </section>
+                    </div>
+
+                    <section class="glass rounded-lg">
+                        <div class="flex items-center justify-between border-b border-line p-4">
+                            <div class="font-bold text-white">最近请求</div>
+                            <span class="text-xs text-muted" x-text="requestLogs.length ? '最近 ' + requestLogs.length + ' 条' : '暂无请求明细'"></span>
+                        </div>
+                        <div class="overflow-x-auto">
+                            <table class="w-full min-w-[900px] border-collapse text-left">
+                                <thead class="bg-panel2 text-xs uppercase tracking-wide text-muted">
+                                    <tr>
+                                        <th class="px-4 py-3 font-bold">时间</th>
+                                        <th class="px-4 py-3 font-bold">状态</th>
+                                        <th class="px-4 py-3 font-bold">格式</th>
+                                        <th class="px-4 py-3 font-bold">模型</th>
+                                        <th class="px-4 py-3 font-bold">Provider</th>
+                                        <th class="px-4 py-3 font-bold">耗时</th>
+                                        <th class="px-4 py-3 font-bold">错误</th>
+                                    </tr>
+                                </thead>
+                                <tbody class="divide-y divide-line">
+                                    <template x-for="log in requestLogs" :key="log.id || log.time + log.model">
+                                        <tr class="bg-panel/35">
+                                            <td class="px-4 py-4 font-mono text-xs text-muted" x-text="log.time || log.startedAt || '--'"></td>
+                                            <td class="px-4 py-4"><span class="chip" :class="statusClass(log.status)" x-text="log.status || '--'"></span></td>
+                                            <td class="px-4 py-4 text-sm text-text" x-text="log.format || log.clientFormat || '--'"></td>
+                                            <td class="px-4 py-4 font-mono text-sm text-cyan" x-text="log.model || '--'"></td>
+                                            <td class="px-4 py-4 font-mono text-sm text-text" x-text="log.provider || '--'"></td>
+                                            <td class="px-4 py-4 font-mono text-sm text-text" x-text="durationText(log.durationMs || log.latencyMs)"></td>
+                                            <td class="px-4 py-4 max-w-[18rem] truncate text-sm text-muted" x-text="log.error || ''"></td>
+                                        </tr>
+                                    </template>
+                                    <tr x-show="requestLogs.length === 0">
+                                        <td colspan="7" class="px-4 py-10 text-center text-sm text-muted">暂无请求明细</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </section>
                 </section>
 
-                <section x-show="activeTab === 'logs'" x-transition x-cloak class="glass rounded-lg p-10 text-center">
-                    <div class="mx-auto mb-4 grid h-14 w-14 place-items-center rounded-lg border border-line bg-ink text-cyan">
-                        <span class="material-symbols-outlined text-[30px]">receipt_long</span>
+                <section x-show="activeTab === 'logs'" x-transition x-cloak class="glass rounded-lg lg:h-full lg:min-h-0 lg:overflow-hidden">
+                    <div class="flex flex-col gap-3 border-b border-line p-4">
+                        <div>
+                            <h2 class="text-base font-extrabold text-white">请求日志</h2>
+                            <p class="mt-1 text-xs text-muted" x-text="requestLogs.length ? '最近 ' + requestLogs.length + ' 条请求' : '暂无请求明细'"></p>
+                        </div>
+                        <div class="grid grid-cols-1 gap-3 md:grid-cols-6">
+                            <select x-model="logFilters.status" @change="loadRequestLogs()" class="field text-sm">
+                                <option value="">全部状态</option>
+                                <option value="success">成功</option>
+                                <option value="error">错误</option>
+                                <option value="4xx">4xx</option>
+                                <option value="5xx">5xx</option>
+                            </select>
+                            <select x-model="logFilters.provider" @change="loadRequestLogs()" class="field text-sm">
+                                <option value="">全部 Provider</option>
+                                <template x-for="(provider, name) in config.providers" :key="name">
+                                    <option :value="name" x-text="name"></option>
+                                </template>
+                            </select>
+                            <select x-model="logFilters.stream" @change="loadRequestLogs()" class="field text-sm">
+                                <option value="">全部类型</option>
+                                <option value="true">流式</option>
+                                <option value="false">非流式</option>
+                            </select>
+                            <select x-model="logFilters.model" @change="loadRequestLogs()" class="field text-sm md:col-span-1">
+                                <option value="">全部模型</option>
+                                <template x-for="model in configuredModelOptions()" :key="model">
+                                    <option :value="model" x-text="model"></option>
+                                </template>
+                            </select>
+                            <input x-model="logFilters.q" @keydown.enter="loadRequestLogs()" class="field text-sm md:col-span-1" placeholder="关键词 / 请求 ID">
+                            <div class="flex gap-2">
+                                <button @click="loadRequestLogs()" class="btn btn-secondary flex-1 px-2" title="刷新">
+                                    <span class="material-symbols-outlined">refresh</span>
+                                </button>
+                                <button @click="resetLogFilters()" class="btn btn-secondary flex-1 px-2" title="清空筛选">
+                                    <span class="material-symbols-outlined">filter_alt_off</span>
+                                </button>
+                            </div>
+                        </div>
                     </div>
-                    <h2 class="text-xl font-extrabold text-white">请求日志后续实现</h2>
-                    <p class="mx-auto mt-3 max-w-xl text-sm leading-6 text-muted">这里暂时保留入口，不展示占位表格。后续可接入最近请求、状态码、模型、Provider、耗时和筛选条件。</p>
+                    <div class="overflow-x-auto lg:max-h-[calc(100%-9.75rem)]">
+                        <table class="w-full min-w-[980px] border-collapse text-left">
+                            <thead class="sticky top-0 bg-panel2 text-xs uppercase tracking-wide text-muted">
+                                <tr>
+                                    <th class="px-4 py-3 font-bold">时间</th>
+                                    <th class="px-4 py-3 font-bold">状态</th>
+                                    <th class="px-4 py-3 font-bold">格式</th>
+                                    <th class="px-4 py-3 font-bold">模型</th>
+                                    <th class="px-4 py-3 font-bold">Provider</th>
+                                    <th class="px-4 py-3 font-bold">耗时</th>
+                                    <th class="px-4 py-3 font-bold">请求 ID</th>
+                                    <th class="px-4 py-3 font-bold">错误</th>
+                                </tr>
+                            </thead>
+                            <tbody class="divide-y divide-line">
+                                <template x-for="log in requestLogs" :key="log.id || log.time + log.model">
+                                    <tr class="bg-panel/35 transition hover:bg-white/[.04]">
+                                        <td class="px-4 py-4 font-mono text-xs text-muted" x-text="log.time || log.startedAt || '--'"></td>
+                                        <td class="px-4 py-4"><span class="chip" :class="statusClass(log.status)" x-text="log.status || '--'"></span></td>
+                                        <td class="px-4 py-4 text-sm text-text" x-text="log.format || log.clientFormat || '--'"></td>
+                                        <td class="px-4 py-4 font-mono text-sm text-cyan" x-text="log.model || '--'"></td>
+                                        <td class="px-4 py-4 font-mono text-sm text-text" x-text="log.provider || '--'"></td>
+                                        <td class="px-4 py-4 font-mono text-sm text-text" x-text="durationText(log.durationMs || log.latencyMs)"></td>
+                                        <td class="px-4 py-4 font-mono text-xs text-muted" x-text="log.id || log.requestId || '--'"></td>
+                                        <td class="px-4 py-4 max-w-[22rem] truncate text-sm text-muted" x-text="log.error || ''"></td>
+                                    </tr>
+                                </template>
+                                <tr x-show="requestLogs.length === 0">
+                                    <td colspan="8" class="px-4 py-12 text-center text-sm text-muted">暂无请求明细</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
                 </section>
             </main>
         </div>
@@ -660,7 +899,7 @@
     <script>
         function gatewayApp() {
             return {
-                activeTab: 'providers',
+                activeTab: 'monitor',
                 editMode: 'visual',
                 mobileNavOpen: false,
                 loading: false,
@@ -679,6 +918,16 @@
                     directTimeoutStreamActive: 120000,
                     providers: {},
                     routes: []
+                },
+                health: null,
+                metrics: null,
+                requestLogs: [],
+                logFilters: {
+                    status: '',
+                    provider: '',
+                    stream: '',
+                    model: '',
+                    q: ''
                 },
                 yamlContent: '',
                 showProviderModal: false,
@@ -705,6 +954,11 @@
 
                 async init() {
                     await this.loadConfig();
+                    await this.refreshMonitor();
+                    window.setInterval(() => {
+                        if (this.activeTab === 'monitor') this.refreshMonitor(false);
+                        if (this.activeTab === 'logs') this.loadRequestLogs();
+                    }, 5000);
                 },
 
                 normalizeConfig(data) {
@@ -791,6 +1045,78 @@
                     }
                 },
 
+                async refreshMonitor(showErrors = true) {
+                    await Promise.all([
+                        this.loadHealth(showErrors),
+                        this.loadMetrics(),
+                        this.loadRequestLogs()
+                    ]);
+                },
+
+                async loadHealth(showErrors = true) {
+                    try {
+                        const res = await fetch('/health');
+                        if (!res.ok) throw new Error('健康检查失败');
+                        this.health = await res.json();
+                    } catch (err) {
+                        this.health = null;
+                        if (showErrors) this.showStatus('健康检查失败: ' + err.message, 'error');
+                    }
+                },
+
+                async loadMetrics() {
+                    const data = await this.loadOptionalJSON('/api/metrics');
+                    this.metrics = data || null;
+                },
+
+                async checkProviderHealth() {
+                    this.loading = true;
+                    try {
+                        const res = await fetch('/api/providers/health', { method: 'POST' });
+                        if (!res.ok) throw new Error('Provider 健康检测失败');
+                        const data = await res.json();
+                        this.health = this.health || {};
+                        this.health.providerHealth = data.providers || {};
+                        this.showStatus('Provider 健康检测完成', 'success');
+                    } catch (err) {
+                        this.showStatus('Provider 健康检测失败: ' + err.message, 'error');
+                    } finally {
+                        this.loading = false;
+                    }
+                },
+
+                async loadRequestLogs() {
+                    const params = new URLSearchParams({ limit: '100' });
+                    Object.entries(this.logFilters).forEach(([key, value]) => {
+                        if (value !== '') params.set(key, value);
+                    });
+                    const data = await this.loadOptionalJSON('/api/logs?' + params.toString());
+                    if (Array.isArray(data)) {
+                        this.requestLogs = data;
+                    } else if (Array.isArray(data?.logs)) {
+                        this.requestLogs = data.logs;
+                    } else if (Array.isArray(data?.data)) {
+                        this.requestLogs = data.data;
+                    } else {
+                        this.requestLogs = [];
+                    }
+                },
+
+                resetLogFilters() {
+                    this.logFilters = { status: '', provider: '', stream: '', model: '', q: '' };
+                    this.loadRequestLogs();
+                },
+
+                async loadOptionalJSON(path) {
+                    try {
+                        const res = await fetch(path);
+                        if (!res.ok) return null;
+                        return await res.json();
+                    } catch (_) {
+                        return null;
+                    }
+                },
+
                 async saveConfig() {
                     this.loading = true;
                     try {
@@ -862,26 +1188,6 @@
                     return ['providers', 'routes', 'settings'].includes(this.activeTab);
                 },
 
-                quickAddLabel() {
-                    if (this.activeTab === 'providers') return '新增 Provider';
-                    return '新增路由规则';
-                },
-
-                quickAddIcon() {
-                    if (this.activeTab === 'providers') return 'add_circle';
-                    return 'alt_route';
-                },
-
-                quickAdd() {
-                    if (this.activeTab === 'providers') {
-                        this.addProvider();
-                        return;
-                    }
-                    this.activeTab = 'routes';
-                    this.editMode = 'visual';
-                    this.addRoute();
-                },
-
                 providerCount() {
                     return Object.keys(this.config.providers || {}).length;
                 },
@@ -890,37 +1196,184 @@
                     return (this.config.routes || []).length;
                 },
 
+                configuredModelOptions() {
+                    const models = new Set();
+                    (this.config.routes || []).forEach((route) => {
+                        if (route.match) models.add(route.match);
+                        if (route.model) models.add(route.model);
+                        if (route.vision?.model) models.add(route.vision.model);
+                    });
+                    return Array.from(models).sort((a, b) => a.localeCompare(b));
+                },
+
                 seconds(value) {
                     return Math.round((Number(value) || 0) / 1000);
                 },
 
-                configPreview() {
-                    const providers = Object.entries(this.config.providers || {}).map(([name, p]) => {
-                        return [
-                            `  ${name}:`,
-                            `    baseUrl: "${p.baseUrl || ''}"`,
-                            `    apiKey: "${p.apiKey || ''}"`,
-                            `    format: ${p.format || 'anthropic'}`,
-                            `    maxConcurrent: ${p.maxConcurrent || 5}`,
-                            `    maxPerSecond: ${p.maxPerSecond || 0}`,
-                            `    maxQueueWait: ${p.maxQueueWait || 30000}`
-                        ].join('\n');
-                    }).join('\n');
+                durationText(value) {
+                    if (value === undefined || value === null || value === '') return '--';
+                    return `${Math.round(Number(value) || 0)} ms`;
+                },
 
-                    const routes = (this.config.routes || []).map((r) => {
-                        const base = [
-                            `  - match: "${r.match || ''}"`,
-                            `    provider: ${r.provider || ''}`,
-                            `    model: "${r.model || ''}"`
-                        ];
-                        if (r.vision) {
-                            base.push('    vision:');
-                            base.push(`      provider: ${r.vision.provider || ''}`);
-                            base.push(`      model: "${r.vision.model || ''}"`);
+                formatBytes(value) {
+                    const bytes = Number(value) || 0;
+                    if (bytes < 1024) return `${bytes} B`;
+                    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+                    return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+                },
+
+                cacheSummary() {
+                    const cache = this.health?.cache;
+                    if (!cache) return '--';
+                    return `${cache.total || 0} 条 / ${this.formatBytes(cache.contentSize)}`;
+                },
+
+                metricValue(key, fallback = '--') {
+                    const summary = this.metrics?.summary || this.metrics || {};
+                    const value = summary[key];
+                    return value === undefined || value === null ? fallback : value;
+                },
+
+                metricPercent(key) {
+                    const value = this.metricValue(key, null);
+                    if (value === null) return '--';
+                    const n = Number(value);
+                    if (!Number.isFinite(n)) return '--';
+                    return `${(n <= 1 ? n * 100 : n).toFixed(1)}%`;
+                },
+
+                metricDuration(key) {
+                    const value = this.metricValue(key, null);
+                    return value === null ? '--' : this.durationText(value);
+                },
+
+                providerStatusRows() {
+                    const queues = this.health?.queues || {};
+                    const health = this.health?.providerHealth || {};
+                    return Object.entries(this.config.providers || {}).map(([name, provider]) => {
+                        const q = queues[name] || {};
+                        const h = health[name] || { status: 'unchecked', message: '未检测' };
+                        const running = Number(q.running || 0);
+                        const queued = Number(q.queued || 0);
+                        let status = '空闲';
+                        let statusClass = 'border-good/35 bg-good/10 text-emerald-100';
+                        if (this.config.directMode) {
+                            status = '直通';
+                            statusClass = 'border-cyan2/35 bg-cyan2/10 text-cyan';
+                        } else if (queued > 0) {
+                            status = '排队';
+                            statusClass = 'border-warn/35 bg-warn/10 text-amber-100';
+                        } else if (running > 0) {
+                            status = '忙碌';
+                            statusClass = 'border-cyan2/35 bg-cyan2/10 text-cyan';
                         }
-                        return base.join('\n');
-                    }).join('\n');
+                        return {
+                            name,
+                            format: provider.format || 'anthropic',
+                            running,
+                            queued,
+                            maxConcurrent: q.maxConcurrent || provider.maxConcurrent || 5,
+                            maxPerSecond: q.maxPerSecond ?? provider.maxPerSecond ?? 0,
+                            healthLabel: this.providerHealthLabel(h),
+                            healthClass: this.providerHealthClass(h.status),
+                            healthTitle: this.providerHealthTitle(h),
+                            status,
+                            statusClass
+                        };
+                    });
+                },
 
+                providerHealthLabel(health) {
+                    if (health.status === 'ok') return '健康';
+                    if (health.status === 'warn') return '可达';
+                    if (health.status === 'error') return '异常';
+                    return '未检测';
+                },
+
+                providerHealthClass(status) {
+                    if (status === 'ok') return 'border-good/35 bg-good/10 text-emerald-100';
+                    if (status === 'warn') return 'border-warn/35 bg-warn/10 text-amber-100';
+                    if (status === 'error') return 'border-danger/35 bg-danger/10 text-rose-100';
+                    return 'bg-white/[.05] text-muted';
+                },
+
+                providerHealthTitle(health) {
+                    const parts = [];
+                    if (health.message) parts.push(health.message);
+                    if (health.httpCode) parts.push('HTTP ' + health.httpCode);
+                    if (health.latencyMs) parts.push(health.latencyMs + ' ms');
+                    if (health.checkedAt) parts.push(health.checkedAt);
+                    return parts.join(' · ') || '未检测';
+                },
+
+                configIssues() {
+                    const issues = [];
+                    const providers = this.config.providers || {};
+                    const routes = this.config.routes || [];
+                    if (Object.keys(providers).length === 0) issues.push('还没有配置 Provider');
+                    if (routes.length === 0) issues.push('还没有配置路由规则');
+                    Object.entries(providers).forEach(([name, provider]) => {
+                        if (!provider.baseUrl) issues.push(`Provider ${name} 缺少 baseUrl`);
+                    });
+                    routes.forEach((route) => {
+                        if (route.provider && !providers[route.provider]) issues.push(`路由 ${route.match || '(未命名)'} 引用了不存在的 Provider ${route.provider}`);
+                        if (route.vision?.provider && !providers[route.vision.provider]) issues.push(`路由 ${route.match || '(未命名)'} 的视觉 Provider 不存在`);
+                    });
+                    if (this.config.directMode) issues.push('直通模式已开启，队列运行中/排队指标不会变化');
+                    return issues;
+                },
+
+                latencyRows() {
+                    const providers = this.metrics?.providers || this.metrics?.providerStats || [];
+                    const rows = Array.isArray(providers)
+                        ? providers
+                        : Object.entries(providers).map(([name, value]) => ({ name, ...value }));
+                    return rows
+                        .map((row) => ({
+                            name: row.name || row.provider || '--',
+                            p95: Math.round(Number(row.p95LatencyMs ?? row.p95 ?? row.latencyP95Ms ?? 0)),
+                            requests: Number(row.requests ?? row.count ?? row.total ?? 0)
+                        }))
+                        .filter((row) => row.name !== '--' && row.p95 > 0)
+                        .sort((a, b) => b.p95 - a.p95)
+                        .slice(0, 6);
+                },
+
+                recentErrors() {
+                    const metricErrors = this.metrics?.recentErrors || this.metrics?.errors || [];
+                    const logErrors = this.requestLogs.filter((log) => Number(log.status || 0) >= 400 || log.error);
+                    return [...metricErrors, ...logErrors].slice(0, 6);
+                },
+
+                statusClass(status) {
+                    const code = Number(status);
+                    if (!code) return 'bg-white/[.05] text-muted';
+                    if (code >= 500) return 'border-danger/35 bg-danger/10 text-rose-100';
+                    if (code >= 400) return 'border-warn/35 bg-warn/10 text-amber-100';
+                    return 'border-good/35 bg-good/10 text-emerald-100';
+                },
+
+                configPreview() {
+                    if (this.activeTab === 'providers') return this.providersPreview();
+                    if (this.activeTab === 'routes') return this.routesPreview();
+                    return this.fullConfigPreview();
+                },
+
+                providersPreview() {
+                    return [
+                        'providers:',
+                        this.providersYaml() || '  {}'
+                    ].join('\n');
+                },
+
+                routesPreview() {
+                    return [
+                        'routes:',
+                        this.routesYaml() || '  []'
+                    ].join('\n');
+                },
+
+                fullConfigPreview() {
                     return [
                         `host: "${this.config.host || '127.0.0.1'}"`,
                         `port: ${this.config.port || 7789}`,
@@ -934,10 +1387,40 @@
                         `directTimeoutStreamHeader: ${this.config.directTimeoutStreamHeader || 60000}`,
                         `directTimeoutStreamActive: ${this.config.directTimeoutStreamActive || 120000}`,
                         'providers:',
-                        providers || '  {}',
+                        this.providersYaml() || '  {}',
                         'routes:',
-                        routes || '  []'
+                        this.routesYaml() || '  []'
                     ].join('\n');
+                },
+
+                providersYaml() {
+                    return Object.entries(this.config.providers || {}).map(([name, p]) => {
+                        return [
+                            `  ${name}:`,
+                            `    baseUrl: "${p.baseUrl || ''}"`,
+                            `    apiKey: "${p.apiKey || ''}"`,
+                            `    format: ${p.format || 'anthropic'}`,
+                            `    maxConcurrent: ${p.maxConcurrent || 5}`,
+                            `    maxPerSecond: ${p.maxPerSecond || 0}`,
+                            `    maxQueueWait: ${p.maxQueueWait || 30000}`
+                        ].join('\n');
+                    }).join('\n');
+                },
+
+                routesYaml() {
+                    return (this.config.routes || []).map((r) => {
+                        const base = [
+                            `  - match: "${r.match || ''}"`,
+                            `    provider: ${r.provider || ''}`,
+                            `    model: "${r.model || ''}"`
+                        ];
+                        if (r.vision) {
+                            base.push('    vision:');
+                            base.push(`      provider: ${r.vision.provider || ''}`);
+                            base.push(`      model: "${r.vision.model || ''}"`);
+                        }
+                        return base.join('\n');
+                    }).join('\n');
                 },
 
                 async copyPreview() {
