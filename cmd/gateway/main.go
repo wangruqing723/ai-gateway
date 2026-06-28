@@ -193,6 +193,7 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		Time:         start.In(beijingLoc).Format("2006-01-02 15:04:05"),
 		Method:       r.Method,
 		Path:         urlPath,
+		ClientIP:     clientIP(r),
 		ClientFormat: clientFormat,
 		Format:       clientFormat,
 	}
@@ -250,7 +251,10 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 	reqLog.Provider = matched.Provider.Name
 	reqLog.TargetModel = matched.TargetModel
 	p := matched.Provider
-	p.APIKey = router.ResolveAPIKey(p, r.Header)
+	apiKey, keySource := router.ResolveAPIKeyWithSource(p, r.Header)
+	p.APIKey = apiKey
+	reqLog.KeySource = keySource
+	reqLog.KeyFingerprint = keyFingerprint(apiKey)
 
 	// 是否需要视觉识别：路由配了 vision 且消息含图片
 	needVision := matched.VisionProvider != nil && vision.HasImages(internal.Messages)
@@ -673,7 +677,6 @@ func (s *server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "gateway_error", "保存配置失败: "+err.Error())
 		return
 	}
-
 	// 热重载：更新配置和队列管理器
 	s.cfgMu.Lock()
 	s.cfg = newCfg

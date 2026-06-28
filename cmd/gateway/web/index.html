@@ -687,6 +687,9 @@
                                     <tr>
                                         <th class="px-4 py-3 font-bold">时间</th>
                                         <th class="px-4 py-3 font-bold">状态</th>
+                                        <th class="px-4 py-3 font-bold">来源</th>
+                                        <th class="px-4 py-3 font-bold">Key 来源</th>
+                                        <th class="px-4 py-3 font-bold">Key 指纹</th>
                                         <th class="px-4 py-3 font-bold">格式</th>
                                         <th class="px-4 py-3 font-bold">模型</th>
                                         <th class="px-4 py-3 font-bold">Provider</th>
@@ -699,6 +702,9 @@
                                         <tr class="bg-panel/35">
                                             <td class="px-4 py-4 font-mono text-xs text-muted" x-text="log.time || log.startedAt || '--'"></td>
                                             <td class="px-4 py-4"><span class="chip" :class="statusClass(log.status)" x-text="log.status || '--'"></span></td>
+                                            <td class="px-4 py-4 font-mono text-xs text-text" x-text="log.clientIp || '--'"></td>
+                                            <td class="px-4 py-4 font-mono text-xs text-text" x-text="log.keySource || '--'"></td>
+                                            <td class="px-4 py-4 font-mono text-xs text-text" x-text="log.keyFingerprint || '--'"></td>
                                             <td class="px-4 py-4 text-sm text-text" x-text="log.format || log.clientFormat || '--'"></td>
                                             <td class="px-4 py-4 font-mono text-sm text-cyan" x-text="log.model || '--'"></td>
                                             <td class="px-4 py-4 font-mono text-sm text-text" x-text="log.provider || '--'"></td>
@@ -707,12 +713,13 @@
                                         </tr>
                                     </template>
                                     <tr x-show="requestLogs.length === 0">
-                                        <td colspan="7" class="px-4 py-10 text-center text-sm text-muted">暂无请求明细</td>
+                                        <td colspan="10" class="px-4 py-10 text-center text-sm text-muted">暂无请求明细</td>
                                     </tr>
                                 </tbody>
                             </table>
                         </div>
                     </section>
+
                 </section>
 
                 <section x-show="activeTab === 'logs'" x-transition x-cloak class="glass rounded-lg lg:h-full lg:min-h-0 lg:overflow-hidden">
@@ -763,6 +770,9 @@
                                 <tr>
                                     <th class="px-4 py-3 font-bold">时间</th>
                                     <th class="px-4 py-3 font-bold">状态</th>
+                                    <th class="px-4 py-3 font-bold">来源</th>
+                                    <th class="px-4 py-3 font-bold">Key 来源</th>
+                                    <th class="px-4 py-3 font-bold">Key 指纹</th>
                                     <th class="px-4 py-3 font-bold">格式</th>
                                     <th class="px-4 py-3 font-bold">模型</th>
                                     <th class="px-4 py-3 font-bold">Provider</th>
@@ -776,6 +786,9 @@
                                     <tr class="bg-panel/35 transition hover:bg-white/[.04]">
                                         <td class="px-4 py-4 font-mono text-xs text-muted" x-text="log.time || log.startedAt || '--'"></td>
                                         <td class="px-4 py-4"><span class="chip" :class="statusClass(log.status)" x-text="log.status || '--'"></span></td>
+                                        <td class="px-4 py-4 font-mono text-xs text-text" x-text="log.clientIp || '--'"></td>
+                                        <td class="px-4 py-4 font-mono text-xs text-text" x-text="log.keySource || '--'"></td>
+                                        <td class="px-4 py-4 font-mono text-xs text-text" x-text="log.keyFingerprint || '--'"></td>
                                         <td class="px-4 py-4 text-sm text-text" x-text="log.format || log.clientFormat || '--'"></td>
                                         <td class="px-4 py-4 font-mono text-sm text-cyan" x-text="log.model || '--'"></td>
                                         <td class="px-4 py-4 font-mono text-sm text-text" x-text="log.provider || '--'"></td>
@@ -785,7 +798,7 @@
                                     </tr>
                                 </template>
                                 <tr x-show="requestLogs.length === 0">
-                                    <td colspan="8" class="px-4 py-12 text-center text-sm text-muted">暂无请求明细</td>
+                                    <td colspan="11" class="px-4 py-12 text-center text-sm text-muted">暂无请求明细</td>
                                 </tr>
                             </tbody>
                         </table>

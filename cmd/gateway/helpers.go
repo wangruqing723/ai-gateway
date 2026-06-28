@@ -1,10 +1,14 @@
 package main
 
 import (
+	"crypto/sha1"
+	"encoding/hex"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"ai-gateway/internal/cache"
@@ -145,4 +149,35 @@ func formatSize(bytes int64) string {
 		return fmt.Sprintf("%.1f KB", float64(bytes)/1024)
 	}
 	return fmt.Sprintf("%.1f MB", float64(bytes)/(1024*1024))
+}
+
+func clientIP(r *http.Request) string {
+	if xff := strings.TrimSpace(r.Header.Get("x-forwarded-for")); xff != "" {
+		if idx := strings.Index(xff, ","); idx >= 0 {
+			return strings.TrimSpace(xff[:idx])
+		}
+		return xff
+	}
+	if xr := strings.TrimSpace(r.Header.Get("x-real-ip")); xr != "" {
+		return xr
+	}
+	if ra := strings.TrimSpace(r.RemoteAddr); ra != "" {
+		if host, _, err := net.SplitHostPort(ra); err == nil {
+			return host
+		}
+		return ra
+	}
+	return "unknown"
+}
+
+func keyFingerprint(apiKey string) string {
+	if apiKey == "" {
+		return ""
+	}
+	sum := sha1.Sum([]byte(apiKey))
+	encoded := strings.ToUpper(hex.EncodeToString(sum[:]))
+	if len(encoded) >= 8 {
+		return encoded[:8]
+	}
+	return encoded
 }

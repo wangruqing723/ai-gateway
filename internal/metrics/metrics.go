@@ -29,6 +29,9 @@ type RequestLog struct {
 	StartedAt      string    `json:"startedAt"`
 	Method         string    `json:"method"`
 	Path           string    `json:"path"`
+	ClientIP       string    `json:"clientIp,omitempty"`
+	KeySource      string    `json:"keySource,omitempty"`
+	KeyFingerprint string    `json:"keyFingerprint,omitempty"`
 	Status         int       `json:"status"`
 	ClientFormat   string    `json:"clientFormat"`
 	Format         string    `json:"format"`

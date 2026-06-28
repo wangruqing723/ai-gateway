@@ -42,14 +42,34 @@ func MatchRoute(model string, cfg *config.Config) *Match {
 
 // ResolveAPIKey 优先用 provider.apiKey，否则从请求头提取（x-api-key 或 Bearer）。
 func ResolveAPIKey(p *config.Provider, h http.Header) string {
+	k, _ := ResolveAPIKeyWithSource(p, h)
+	return k
+}
+
+// ResolveAPIKeyWithSource 与 ResolveAPIKey 行为一致，但额外返回 key 的来源。
+// 返回值:
+// - string: 解析到的 key，未命中则空
+// - string: key 来源，provider / x-api-key / authorization / none
+func ResolveAPIKeyWithSource(p *config.Provider, h http.Header) (string, string) {
 	if p.APIKey != "" {
-		return p.APIKey
+		return p.APIKey, "provider"
 	}
 	if k := h.Get("x-api-key"); k != "" {
-		return k
+		return k, "x-api-key"
 	}
 	auth := h.Get("authorization")
-	return strings.TrimSpace(strings.TrimPrefix(auth, "Bearer "))
+	auth = strings.TrimSpace(auth)
+	if auth == "" {
+		return "", "none"
+	}
+	low := strings.ToLower(auth)
+	if strings.HasPrefix(low, "bearer ") {
+		auth = strings.TrimSpace(auth[len("bearer "):])
+	}
+	if auth == "" {
+		return "", "none"
+	}
+	return auth, "authorization"
 }
 
 // globMatch 实现 minimatch 子集：支持 * 与 ?，足够覆盖路由场景（claude-opus* 等）。
