@@ -955,10 +955,7 @@
                 async init() {
                     await this.loadConfig();
                     await this.refreshMonitor();
-                    window.setInterval(() => {
-                        if (this.activeTab === 'monitor') this.refreshMonitor(false);
-                        if (this.activeTab === 'logs') this.loadRequestLogs();
-                    }, 5000);
+                    window.setInterval(() => this.refreshMonitor(false), 5000);
                 },
 
                 normalizeConfig(data) {
@@ -1046,11 +1043,15 @@
                 },
 
                 async refreshMonitor(showErrors = true) {
-                    await Promise.all([
-                        this.loadHealth(showErrors),
-                        this.loadMetrics(),
-                        this.loadRequestLogs()
-                    ]);
+                    if (this.activeTab === 'logs') {
+                        await this.loadRequestLogs();
+                    } else {
+                        await Promise.all([
+                            this.loadHealth(showErrors),
+                            this.loadMetrics(),
+                            this.loadRequestLogs()
+                        ]);
+                    }
                 },
 
                 async loadHealth(showErrors = true) {
@@ -1091,15 +1092,7 @@
                         if (value !== '') params.set(key, value);
                     });
                     const data = await this.loadOptionalJSON('/api/logs?' + params.toString());
-                    if (Array.isArray(data)) {
-                        this.requestLogs = data;
-                    } else if (Array.isArray(data?.logs)) {
-                        this.requestLogs = data.logs;
-                    } else if (Array.isArray(data?.data)) {
-                        this.requestLogs = data.data;
-                    } else {
-                        this.requestLogs = [];
-                    }
+                    this.requestLogs = Array.isArray(data?.data) ? data.data : [];
                 },
 
                 resetLogFilters() {

@@ -369,8 +369,13 @@ func (s *server) handleHealth(w http.ResponseWriter) {
 			"sysMB":       m.Sys / 1024 / 1024,
 		},
 	}
-	out, _ := json.MarshalIndent(health, "", "  ")
+	out, err := json.MarshalIndent(health, "", "  ")
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "gateway_error", "健康状态序列化失败: "+err.Error())
+		return
+	}
 	w.Header().Set("content-type", "application/json")
+	w.Header().Set("content-length", fmt.Sprintf("%d", len(out)))
 	w.WriteHeader(http.StatusOK)
 	w.Write(out)
 }
