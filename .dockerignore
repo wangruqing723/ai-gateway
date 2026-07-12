@@ -1,5 +1,7 @@
 node_modules
 .git
+.superpowers
+.playwright-cli
 data
 data-go
 data-node

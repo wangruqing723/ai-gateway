@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"ai-gateway/internal/cache"
@@ -20,7 +21,10 @@ import (
 	"ai-gateway/internal/queue"
 )
 
-const visionRequestTimeout = 120 * time.Second
+const (
+	visionRequestTimeout       = 120 * time.Second
+	maxVisionResponseBodyBytes = 4 << 20
+)
 
 const visionPrompt = "请对这张图片进行全面详细的描述，包括所有可见文字（原文）、数据与图表数值、代码内容、UI布局与元素等，确保纯文本模型仅凭此描述即可完整理解图片。"
 
@@ -29,33 +33,46 @@ type LogFunc func(format string, args ...any)
 
 // Translator 图片识别翻译器
 type Translator struct {
-	cache      *cache.Cache
+	cache      recognitionCache
 	qm         *queue.Manager
 	httpClient *http.Client
-	directMode bool // 直通模式：跳过视觉队列的并发/限速控制
+	directMode atomic.Bool // 直通模式：跳过视觉队列的并发/限速控制
 
 	mu      sync.Mutex
 	pending map[string]*recognition // 正在识别中的图片，按 hash 去重
 }
 
+type recognitionCache interface {
+	Get(hash string) (string, bool)
+	Set(hash, description string) error
+}
+
 type recognition struct {
-	done chan struct{}
-	text string
-	err  error
+	done    chan struct{}
+	cancel  context.CancelFunc
+	waiters int
+	text    string
+	err     error
 }
 
 // New 创建翻译器。httpClient 可复用主程序的连接池。
 func New(c *cache.Cache, qm *queue.Manager, httpClient *http.Client, directMode bool) *Translator {
-	return &Translator{
+	t := &Translator{
 		cache:      c,
 		qm:         qm,
 		httpClient: httpClient,
-		directMode: directMode,
 		pending:    make(map[string]*recognition),
 	}
+	t.directMode.Store(directMode)
+	return t
 }
 
-// HasImages 检测消息数组是否包含图片块（对齐 Node hasImages：只查一层，不递归进 tool_result）。
+// SetDirectMode 动态更新后续视觉识别是否跳过队列。
+func (t *Translator) SetDirectMode(enabled bool) {
+	t.directMode.Store(enabled)
+}
+
+// HasImages 检测消息数组是否包含图片块（对齐 Node hasImages：最多检查一层 tool_result）。
 func HasImages(messages []any) bool {
 	for _, m := range messages {
 		msg, ok := m.(map[string]any)
@@ -73,7 +90,7 @@ func HasImages(messages []any) bool {
 	return false
 }
 
-// blocksHaveImage 检测 content 块是否包含图片（递归检查 tool_result 内嵌图片）。
+// blocksHaveImage 检测当前层及一层 tool_result，保持与历史 Node gate 一致。
 func blocksHaveImage(blocks []any) bool {
 	for _, b := range blocks {
 		block, ok := b.(map[string]any)
@@ -83,10 +100,15 @@ func blocksHaveImage(blocks []any) bool {
 		if block["type"] == "image" {
 			return true
 		}
-		// 递归检测 tool_result 内嵌的图片
+		// 检查一层 tool_result 内嵌图片，不继续向下递归。
 		if block["type"] == "tool_result" {
-			if inner, ok := block["content"].([]any); ok && blocksHaveImage(inner) {
-				return true
+			if inner, ok := block["content"].([]any); ok {
+				for _, child := range inner {
+					childBlock, ok := child.(map[string]any)
+					if ok && childBlock["type"] == "image" {
+						return true
+					}
+				}
 			}
 		}
 	}
@@ -145,6 +167,9 @@ func (t *Translator) Translate(ctx context.Context, messages []any, vision *conf
 func (t *Translator) processBlocks(ctx context.Context, blocks []any, vision *config.Provider, visionModel string, idx *int, st *stats, log LogFunc) []any {
 	out := make([]any, 0, len(blocks))
 	for _, b := range blocks {
+		if ctx.Err() != nil {
+			break
+		}
 		block, ok := b.(map[string]any)
 		if !ok {
 			out = append(out, b)
@@ -189,63 +214,105 @@ func (t *Translator) processBlocks(ctx context.Context, blocks []any, vision *co
 
 // callVision 识别单张图片：先查缓存，再 singleflight 去重，最后经队列调用视觉 API。
 func (t *Translator) callVision(ctx context.Context, imageBlock map[string]any, vision *config.Provider, visionModel string) (text string, fromCache bool, err error) {
+	if err := ctx.Err(); err != nil {
+		return "", false, err
+	}
+
 	hash := cache.ImageHash(imageBlock)
 
 	if cached, ok := t.cache.Get(hash); ok {
 		return cached, true, nil
 	}
+	if err := ctx.Err(); err != nil {
+		return "", false, err
+	}
 
 	// singleflight：同一图片并发识别时复用同一次请求
 	t.mu.Lock()
-	if r, ok := t.pending[hash]; ok {
+	if err := ctx.Err(); err != nil {
 		t.mu.Unlock()
-		// 等待者只关注自身 ctx；leader 完成后会写缓存，下次可命中
-		select {
-		case <-r.done:
-			return r.text, false, r.err
-		case <-ctx.Done():
-			return "", false, ctx.Err()
-		}
-	}
-	r := &recognition{done: make(chan struct{})}
-	t.pending[hash] = r
-	t.mu.Unlock()
-
-	// 识别完成后清理 pending 并广播
-	defer func() {
-		r.text, r.err = text, err
-		close(r.done)
-		t.mu.Lock()
-		delete(t.pending, hash)
-		t.mu.Unlock()
-	}()
-
-	// leader 使用独立 context，避免单个请求取消导致所有等待者收到取消错误
-	// （当 leader 请求断开时，识别仍可完成并写入缓存，后续请求可命中）
-	detachedCtx, detachedCancel := context.WithTimeout(context.Background(), visionRequestTimeout)
-	defer detachedCancel()
-
-	if t.directMode {
-		// 直通模式：跳过队列，直接识别
-		text, err = t.doRecognize(detachedCtx, imageBlock, vision, visionModel)
-	} else {
-		// 经队列控制视觉 provider 并发
-		release, _, qerr := t.qm.Acquire(detachedCtx, vision.Name, vision.MaxConcurrent, vision.MaxPerSecond, vision.MaxQueueWait)
-		if qerr != nil {
-			return "", false, qerr
-		}
-		defer release()
-		text, err = t.doRecognize(detachedCtx, imageBlock, vision, visionModel)
-	}
-	if err != nil {
-		// 如果原始请求已取消且识别无其它错误，返回请求上下文错误更合理
-		if ctx.Err() != nil {
-			return "", false, ctx.Err()
-		}
 		return "", false, err
 	}
-	_ = t.cache.Set(hash, text)
-	return text, false, nil
+	r, ok := t.pending[hash]
+	if ok {
+		r.waiters++
+	} else {
+		if cached, cacheOK := t.cache.Get(hash); cacheOK {
+			t.mu.Unlock()
+			return cached, true, nil
+		}
+		if err := ctx.Err(); err != nil {
+			t.mu.Unlock()
+			return "", false, err
+		}
+		sharedCtx, cancel := context.WithTimeout(context.Background(), visionRequestTimeout)
+		r = &recognition{
+			done:    make(chan struct{}),
+			cancel:  cancel,
+			waiters: 1,
+		}
+		t.pending[hash] = r
+		go t.runRecognition(sharedCtx, hash, r, imageBlock, vision, visionModel)
+	}
+	t.mu.Unlock()
+	defer t.leaveRecognition(hash, r)
+
+	select {
+	case <-ctx.Done():
+		return "", false, ctx.Err()
+	case <-r.done:
+		return r.text, false, r.err
+	}
+}
+
+// runRecognition 在独立 goroutine 中执行一次共享识别，并统一发布结果和写入缓存。
+func (t *Translator) runRecognition(ctx context.Context, hash string, r *recognition, imageBlock map[string]any, vision *config.Provider, visionModel string) {
+	defer r.cancel()
+
+	text, err := t.recognize(ctx, imageBlock, vision, visionModel)
+	if err == nil {
+		_ = t.cache.Set(hash, text)
+	}
+
+	t.mu.Lock()
+	r.text, r.err = text, err
+	if t.pending[hash] == r {
+		delete(t.pending, hash)
+	}
+	close(r.done)
+	t.mu.Unlock()
+}
+
+func (t *Translator) recognize(ctx context.Context, imageBlock map[string]any, vision *config.Provider, visionModel string) (string, error) {
+	if t.directMode.Load() {
+		// 直通模式：跳过队列，直接识别
+		return t.doRecognize(ctx, imageBlock, vision, visionModel)
+	}
+
+	// 经队列控制视觉 provider 并发
+	release, _, err := t.qm.Acquire(ctx, vision.Name, vision.MaxConcurrent, vision.MaxPerSecond, vision.MaxQueueWait)
+	if err != nil {
+		return "", err
+	}
+	defer release()
+	return t.doRecognize(ctx, imageBlock, vision, visionModel)
+}
+
+// leaveRecognition 注销一个调用方；最后一个 waiter 离开时取消共享上游。
+func (t *Translator) leaveRecognition(hash string, r *recognition) {
+	var cancel context.CancelFunc
+	t.mu.Lock()
+	if r.waiters > 0 {
+		r.waiters--
+	}
+	if r.waiters == 0 && t.pending[hash] == r {
+		delete(t.pending, hash)
+		cancel = r.cancel
+	}
+	t.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 }
 
 // doRecognize 实际调用视觉模型（OpenAI /chat/completions 格式）。
@@ -265,7 +332,7 @@ func (t *Translator) doRecognize(ctx context.Context, imageBlock map[string]any,
 	})
 
 	url := buildVisionURL(vision.BaseURL)
-	// 超时由调用方的 context 控制（leader 的 detachedCtx 或直接请求 ctx），无需再叠加
+	// 超时由共享识别 context 控制，无需在 HTTP 层重复叠加。
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(reqBody))
 	if err != nil {
 		return "", err
@@ -279,7 +346,16 @@ func (t *Translator) doRecognize(ctx context.Context, imageBlock map[string]any,
 	}
 	defer resp.Body.Close()
 
-	raw, _ := io.ReadAll(resp.Body)
+	if resp.ContentLength > maxVisionResponseBodyBytes {
+		return "", fmt.Errorf("视觉 API 响应超过大小限制 (%d bytes)", maxVisionResponseBodyBytes)
+	}
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxVisionResponseBodyBytes+1))
+	if err != nil {
+		return "", fmt.Errorf("读取视觉响应失败: %w", err)
+	}
+	if len(raw) > maxVisionResponseBodyBytes {
+		return "", fmt.Errorf("视觉 API 响应超过大小限制 (%d bytes)", maxVisionResponseBodyBytes)
+	}
 	var response map[string]any
 	if err := json.Unmarshal(raw, &response); err != nil {
 		return "", fmt.Errorf("解析视觉响应失败: %w", err)

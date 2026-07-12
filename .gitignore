@@ -5,3 +5,5 @@ data
 data-go
 data-node
 node_modules
+.superpowers/
+.playwright-cli/

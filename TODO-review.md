@@ -1,10 +1,29 @@
-# Go PoC 待修复问题清单
+# Go 版审查与修复记录
 
 > 来源：`/code-review` 对 `poc/go-rewrite` 分支（相对 `dev`）全部提交的多角度审查。
-> 10 个角度发现约 50 个候选，逐个验证 + 补充扫描后，保留以下 15 个非 REFUTED 结论。
-> 行号为验证器校正后的位置。对 PoC 而言无致命崩溃 bug，主要是并发竞争、与 Node 的边界行为偏差、超时语义差异。
+> 10 个角度发现约 50 个候选，逐个验证 + 补充扫描后，保留以下 16 个非 REFUTED 结论。
+> 下方行号是 2026/06/24 审查时的历史快照，根目录迁移和后续 hardening 后不再作为当前位置索引。对当时 PoC 而言无致命崩溃 bug，主要是并发竞争、与 Node 的边界行为偏差、超时语义差异。
 
-## ✅ 修复状态：全部完成 (2026/06/24)
+## 2026/07/11 本机使用 hardening
+
+本轮针对当前 Go 主版本重新做了核心链路、配置管理、并发状态和部署边界审查。代码与回归测试范围已完成以下修复：
+
+- [x] proxy 请求/响应体上限、响应头/流活跃超时、客户端断开与协议失败终态
+- [x] queue 动态 FIFO、完整 deadline、取消、动态限额、Provider 删除/重加与权威 limits
+- [x] Anthropic、OpenAI Chat、OpenAI Responses 三协议 request/response/SSE 与 tools/system 映射
+- [x] vision shared recognition waiter 生命周期、最后 waiter 取消、动态 direct mode 与一层图片 gate
+- [x] config 严格字段/边界校验、结构化密钥脱敏、原子保存、精确 sentinel 与 Provider 身份保护
+- [x] 配置 revision/ETag 并发控制、统一 runtime apply、`restartRequired` 与实际监听地址区分
+- [x] metrics 有界分钟桶/直方图、Provider health 指纹/generation/singleflight/cooldown
+- [x] 本机 loopback Origin 边界、method/media type/body limit、安全响应头和本地 vendor 资源
+- [x] 优雅停机、默认/开发 Compose 分离及 CI test/race/vet/Compose gate
+- [x] 最终全量 test/race/vet、两套 Compose、镜像 build、定向 SSE/queue smoke 与真实浏览器验收
+
+最终验证（2026/07/12）：Docker Go 1.23 全量 test/race/vet 通过；高风险 converter/proxy/gateway 与最初 SSE/queue 隔离复现均重复 20 次通过；默认/开发 Compose、vendor SHA/JS、最终镜像构建通过；真实浏览器桌面与 390x844 移动端验收通过。
+
+边界结论：本轮关闭的是个人本机使用场景的已知审查项，不代表适合直接暴露公网，也不声明为通用多租户生产就绪。远程访问仍必须由前置代理提供认证、TLS 和访问控制。
+
+## ✅ 历史 PoC 修复状态：全部完成 (2026/06/24)
 
 所有 16 个问题已修复完成：
 - ✅ **第一批（并发，影响最大）**：#1 #2 #3 —— 生产并发下的真实隐患，`go test -race` 可复现。

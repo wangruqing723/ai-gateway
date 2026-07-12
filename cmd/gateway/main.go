@@ -7,7 +7,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -36,7 +38,7 @@ import (
 	"ai-gateway/internal/vision"
 )
 
-//go:embed web/index.html
+//go:embed web/index.html web/vendor/*
 var webFS embed.FS
 
 var reqCounter uint64
@@ -79,18 +81,31 @@ func main() {
 	}
 
 	translator := vision.New(imgCache, qm, httpClient, cfg.DirectMode)
+	revision, err := newConfigRevision()
+	if err != nil {
+		_ = imgCache.Close()
+		fmt.Fprintf(os.Stderr, "[gateway] 生成配置 revision 失败: %s\n", err)
+		os.Exit(1)
+	}
 
-	srv := &server{cfg: cfg, qm: qm, httpClient: httpClient, cache: imgCache, translator: translator, metrics: metrics.NewCollector(1000), providerHealth: providerhealth.NewChecker(), webDevDir: os.Getenv("AI_GATEWAY_WEB_DIR")}
-
-	// 优雅退出：关闭缓存
-	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		<-stop
-		logSystem("收到退出信号，正在关闭...")
-		imgCache.Close()
-		os.Exit(0)
-	}()
+	srv := &server{
+		cfg:            cfg,
+		revision:       revision,
+		listenHost:     cfg.Host,
+		listenPort:     cfg.Port,
+		qm:             qm,
+		httpClient:     httpClient,
+		cache:          imgCache,
+		translator:     translator,
+		metrics:        metrics.NewCollector(1000),
+		providerHealth: providerhealth.NewChecker(),
+		webDevDir:      os.Getenv("AI_GATEWAY_WEB_DIR"),
+	}
+	initialLimits := make(map[string]queue.Limits, len(cfg.Providers))
+	for name, provider := range cfg.Providers {
+		initialLimits[name] = queue.Limits{MaxConcurrent: provider.MaxConcurrent, MaxPerSecond: provider.MaxPerSecond}
+	}
+	qm.Reconcile(initialLimits)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", srv.handle)
@@ -98,43 +113,113 @@ func main() {
 	addr := net.JoinHostPort(cfg.Host, fmt.Sprintf("%d", cfg.Port))
 	printBanner(cfg, imgCache)
 
-	httpServer := &http.Server{Addr: addr, Handler: mux}
-	if err := httpServer.ListenAndServe(); err != nil {
+	httpServer := newGatewayHTTPServer(addr, mux)
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
+	shutdownDone := make(chan struct{})
+	go func() {
+		<-stop
+		logSystem("收到退出信号，正在关闭...")
+		if err := shutdownThenClose(httpServer, 30*time.Second, imgCache.Close); err != nil {
+			logSystem("优雅关闭异常: %s", err)
+		}
+		close(shutdownDone)
+	}()
+
+	if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		signal.Stop(stop)
+		_ = imgCache.Close()
 		logSystem("服务器错误: %s", err)
-		imgCache.Close()
 		os.Exit(1)
 	}
+	<-shutdownDone
+}
+
+type httpShutdowner interface {
+	Shutdown(context.Context) error
+}
+
+type cacheRuntime interface {
+	GetStats() cache.Stats
+	Cleanup(maxAgeDays, maxRecords int) (cache.CleanupResult, error)
+}
+
+type visionRuntime interface {
+	Translate(context.Context, []any, *config.Provider, string, vision.LogFunc) []any
+	SetDirectMode(bool)
+}
+
+type providerHealthRuntime interface {
+	Snapshot(*config.Config) map[string]providerhealth.Status
+	CheckAll(context.Context, *config.Config, *http.Client) map[string]providerhealth.Status
+	InvalidateChanged(*config.Config, *config.Config)
+}
+
+func newGatewayHTTPServer(addr string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadTimeout:       60 * time.Second,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    1 << 20,
+	}
+}
+
+func shutdownThenClose(server httpShutdowner, timeout time.Duration, closeResource func() error) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	shutdownErr := server.Shutdown(ctx)
+	closeErr := closeResource()
+	return errors.Join(shutdownErr, closeErr)
 }
 
 type server struct {
 	cfg            *config.Config
 	cfgMu          sync.RWMutex // 保护 cfg 的并发读写
+	configOpMu     sync.Mutex   // 串行化保存、重载与运行时应用
+	revision       string
+	revisionSource func() (string, error)
+	listenHost     string
+	listenPort     int
 	qm             *queue.Manager
 	httpClient     *http.Client
-	cache          *cache.Cache
-	translator     *vision.Translator
+	cache          cacheRuntime
+	translator     visionRuntime
 	metrics        *metrics.Collector
-	providerHealth *providerhealth.Checker
+	providerHealth providerHealthRuntime
 	webDevDir      string
 }
 
 func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 	urlPath := strings.Split(r.URL.Path, "?")[0]
+	setSecurityHeaders(w)
 
-	// HEAD 健康探测
-	if r.Method == http.MethodHead {
-		w.WriteHeader(http.StatusOK)
-		return
-	}
-
-	// 前端页面：GET / 返回 index.html
-	if urlPath == "/" && r.Method == http.MethodGet {
+	// 前端页面：GET/HEAD / 返回 index.html
+	if urlPath == "/" {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			writeMethodNotAllowed(w, http.MethodGet, http.MethodHead)
+			return
+		}
 		s.handleIndex(w, r)
 		return
 	}
 
+	if strings.HasPrefix(urlPath, "/vendor/") {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			writeMethodNotAllowed(w, http.MethodGet, http.MethodHead)
+			return
+		}
+		s.handleStatic(w, r, urlPath)
+		return
+	}
+
 	// 开发模式前端热加载：仅 AI_GATEWAY_WEB_DIR 启用时可用
-	if urlPath == "/__dev/reload" && r.Method == http.MethodGet && s.webDevDir != "" {
+	if urlPath == "/__dev/reload" && s.webDevDir != "" {
+		if r.Method != http.MethodGet {
+			writeMethodNotAllowed(w, http.MethodGet)
+			return
+		}
 		s.handleDevReload(w, r)
 		return
 	}
@@ -145,29 +230,53 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if urlPath == "/api/metrics" && r.Method == http.MethodGet {
+	if urlPath == "/api/metrics" {
+		if r.Method != http.MethodGet {
+			writeMethodNotAllowed(w, http.MethodGet)
+			return
+		}
 		s.handleMetrics(w, r)
 		return
 	}
 
-	if urlPath == "/api/logs" && r.Method == http.MethodGet {
+	if urlPath == "/api/logs" {
+		if r.Method != http.MethodGet {
+			writeMethodNotAllowed(w, http.MethodGet)
+			return
+		}
 		s.handleLogs(w, r)
 		return
 	}
 
-	if urlPath == "/api/providers/health" && r.Method == http.MethodPost {
+	if urlPath == "/api/providers/health" {
+		if r.Method != http.MethodPost {
+			writeMethodNotAllowed(w, http.MethodPost)
+			return
+		}
+		if isCrossSiteRequest(r) {
+			writeForbiddenOrigin(w)
+			return
+		}
 		s.handleProviderHealthCheck(w, r)
 		return
 	}
 
 	// /health 端点
-	if urlPath == "/health" && r.Method == http.MethodGet {
-		s.handleHealth(w)
+	if urlPath == "/health" {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			writeMethodNotAllowed(w, http.MethodGet, http.MethodHead)
+			return
+		}
+		s.handleHealth(w, r.Method == http.MethodHead)
 		return
 	}
 
 	// /v1/models 端点：返回已配置的可用模型列表
-	if urlPath == "/v1/models" && r.Method == http.MethodGet {
+	if urlPath == "/v1/models" {
+		if r.Method != http.MethodGet {
+			writeMethodNotAllowed(w, http.MethodGet)
+			return
+		}
 		s.handleModels(w)
 		return
 	}
@@ -180,6 +289,18 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 	clientFormat := converter.DetectClientFormat(urlPath)
 	if clientFormat == "" {
 		writeJSONError(w, http.StatusNotFound, "gateway_error", "未知端点: "+urlPath)
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeMethodNotAllowed(w, http.MethodPost)
+		return
+	}
+	if isCrossSiteRequest(r) {
+		writeForbiddenOrigin(w)
+		return
+	}
+	if requestMediaType(r) != "application/json" {
+		writeJSONError(w, http.StatusUnsupportedMediaType, "unsupported_media_type", "推理请求须使用 application/json")
 		return
 	}
 
@@ -209,8 +330,13 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 
 	logf(reqID, "→ %s %s [%s]", r.Method, urlPath, clientFormat)
 
-	raw, err := readBody(r)
+	raw, err := readBodyLimited(r, maxProxyBodyBytes)
 	if err != nil {
+		if errors.Is(err, errRequestBodyTooLarge) {
+			reqLog.Error = err.Error()
+			writeJSONError(w, http.StatusRequestEntityTooLarge, "request_too_large", err.Error())
+			return
+		}
 		reqLog.Error = "读取请求失败: " + err.Error()
 		writeJSONError(w, http.StatusBadRequest, "gateway_error", reqLog.Error)
 		return
@@ -258,6 +384,12 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 
 	// 是否需要视觉识别：路由配了 vision 且消息含图片
 	needVision := matched.VisionProvider != nil && vision.HasImages(internal.Messages)
+	isPassthrough := converter.IsPassthrough(p.Format, clientFormat)
+	if internal.Err != nil && !isPassthrough {
+		reqLog.Error = "请求协议转换失败: " + internal.Err.Error()
+		writeJSONError(w, http.StatusBadRequest, "conversion_error", reqLog.Error)
+		return
+	}
 	reqLog.Vision = needVision
 	displayModel := matched.TargetModel
 	if needVision {
@@ -275,10 +407,29 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 
 	// 内部格式 → 上游 provider 请求体
 	var upstreamMap map[string]any
-	if p.Format == "anthropic" {
-		upstreamMap = converter.ToAnthropicBody(internal, matched.TargetModel)
+	if isPassthrough {
+		// 同格式请求无需 canonical 重建；保留 provider 原生扩展字段，只替换路由后的 model。
+		upstreamMap = body
+		upstreamMap["model"] = matched.TargetModel
+		if needVision {
+			// 图片翻译只覆盖 messages，system/tools 等 provider 原生扩展仍保留原值。
+			var translated map[string]any
+			if p.Format == "anthropic" {
+				translated = converter.ToAnthropicBody(internal, matched.TargetModel)
+			} else {
+				translated = converter.ToOpenAIChatBody(internal, matched.TargetModel)
+			}
+			upstreamMap["messages"] = mergeTranslatedMessageContent(body["messages"], translated["messages"])
+		}
+	} else if p.Format == "anthropic" {
+		upstreamMap, err = converter.ToAnthropicBodyChecked(internal, matched.TargetModel)
 	} else {
-		upstreamMap = converter.ToOpenAIChatBody(internal, matched.TargetModel)
+		upstreamMap, err = converter.ToOpenAIChatBodyChecked(internal, matched.TargetModel)
+	}
+	if err != nil {
+		reqLog.Error = "上游请求协议转换失败: " + err.Error()
+		writeJSONError(w, http.StatusBadRequest, "conversion_error", reqLog.Error)
+		return
 	}
 	upstreamBody, err := json.Marshal(upstreamMap)
 	if err != nil {
@@ -346,10 +497,43 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *server) handleHealth(w http.ResponseWriter) {
+func mergeTranslatedMessageContent(original, translated any) any {
+	originalMessages, originalOK := original.([]any)
+	translatedMessages, translatedOK := translated.([]any)
+	if !originalOK || !translatedOK || len(originalMessages) != len(translatedMessages) {
+		return translated
+	}
+	merged := make([]any, len(originalMessages))
+	for i := range originalMessages {
+		originalMessage, originalOK := originalMessages[i].(map[string]any)
+		translatedMessage, translatedOK := translatedMessages[i].(map[string]any)
+		if !originalOK || !translatedOK || originalMessage["role"] != translatedMessage["role"] {
+			return translated
+		}
+		message := make(map[string]any, len(originalMessage))
+		for key, value := range originalMessage {
+			message[key] = value
+		}
+		if content, exists := translatedMessage["content"]; exists {
+			message["content"] = content
+		}
+		merged[i] = message
+	}
+	return merged
+}
+
+func (s *server) handleHealth(w http.ResponseWriter, head bool) {
 	s.cfgMu.RLock()
 	cfg := s.cfg
+	listenHost := s.listenHost
+	listenPort := s.listenPort
 	s.cfgMu.RUnlock()
+	if listenHost == "" {
+		listenHost = cfg.Host
+	}
+	if listenPort == 0 {
+		listenPort = cfg.Port
+	}
 
 	queues := make(map[string]queue.Status)
 	for name, p := range cfg.Providers {
@@ -358,10 +542,14 @@ func (s *server) handleHealth(w http.ResponseWriter) {
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
 
-	cs := s.cache.GetStats()
+	var cs cache.Stats
+	if s.cache != nil {
+		cs = s.cache.GetStats()
+	}
 	health := map[string]any{
 		"status":         "ok",
 		"timeout":        cfg.Timeout,
+		"listenAddress":  net.JoinHostPort(listenHost, strconv.Itoa(listenPort)),
 		"queues":         queues,
 		"providerHealth": s.providerHealth.Snapshot(cfg),
 		"cache": map[string]any{
@@ -381,7 +569,9 @@ func (s *server) handleHealth(w http.ResponseWriter) {
 	w.Header().Set("content-type", "application/json")
 	w.Header().Set("content-length", fmt.Sprintf("%d", len(out)))
 	w.WriteHeader(http.StatusOK)
-	w.Write(out)
+	if !head {
+		_, _ = w.Write(out)
+	}
 }
 
 func (s *server) handleProviderHealthCheck(w http.ResponseWriter, r *http.Request) {
@@ -505,7 +695,32 @@ func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Write(data)
+	if r.Method != http.MethodHead {
+		_, _ = w.Write(data)
+	}
+}
+
+func (s *server) handleStatic(w http.ResponseWriter, r *http.Request, urlPath string) {
+	relative := strings.TrimPrefix(urlPath, "/")
+	if relative == "" || strings.Contains(relative, "..") || strings.ContainsRune(relative, '\\') {
+		writeJSONError(w, http.StatusNotFound, "gateway_error", "静态资源不存在")
+		return
+	}
+	var data []byte
+	var err error
+	if s.webDevDir != "" {
+		data, err = os.ReadFile(filepath.Join(s.webDevDir, filepath.FromSlash(relative)))
+	} else {
+		data, err = webFS.ReadFile("web/" + relative)
+	}
+	if err != nil {
+		writeJSONError(w, http.StatusNotFound, "gateway_error", "静态资源不存在")
+		return
+	}
+	w.Header().Set("Content-Type", staticContentType(relative))
+	if r.Method != http.MethodHead {
+		_, _ = w.Write(data)
+	}
 }
 
 func injectDevReload(data []byte) []byte {
@@ -573,18 +788,39 @@ func fileModTime(path string) time.Time {
 func (s *server) handleConfigAPI(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/api/config")
 
-	switch {
-	case path == "" && r.Method == http.MethodGet:
-		// GET /api/config - 返回配置 JSON（apiKey 脱敏）
-		s.handleGetConfig(w, r)
-	case path == "/raw" && r.Method == http.MethodGet:
-		// GET /api/config/raw - 返回原始 YAML
+	switch path {
+	case "":
+		switch r.Method {
+		case http.MethodGet:
+			s.handleGetConfig(w, r)
+		case http.MethodPut:
+			if isCrossSiteRequest(r) {
+				writeForbiddenOrigin(w)
+				return
+			}
+			if !isAllowedConfigMediaType(requestMediaType(r)) {
+				writeJSONError(w, http.StatusUnsupportedMediaType, "unsupported_media_type", "配置须使用 JSON 或 YAML Content-Type")
+				return
+			}
+			s.handlePutConfig(w, r)
+		default:
+			writeMethodNotAllowed(w, http.MethodGet, http.MethodPut)
+		}
+	case "/raw":
+		if r.Method != http.MethodGet {
+			writeMethodNotAllowed(w, http.MethodGet)
+			return
+		}
 		s.handleGetConfigRaw(w, r)
-	case path == "" && r.Method == http.MethodPut:
-		// PUT /api/config - 保存配置
-		s.handlePutConfig(w, r)
-	case path == "/reload" && r.Method == http.MethodPost:
-		// POST /api/config/reload - 重新加载配置
+	case "/reload":
+		if r.Method != http.MethodPost {
+			writeMethodNotAllowed(w, http.MethodPost)
+			return
+		}
+		if isCrossSiteRequest(r) {
+			writeForbiddenOrigin(w)
+			return
+		}
 		s.handleReloadConfig(w, r)
 	default:
 		writeJSONError(w, http.StatusNotFound, "gateway_error", "未知的配置 API 端点")
@@ -593,127 +829,271 @@ func (s *server) handleConfigAPI(w http.ResponseWriter, r *http.Request) {
 
 // handleGetConfig 返回配置 JSON（apiKey 脱敏）
 func (s *server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
-	s.cfgMu.RLock()
-	cfg := s.cfg
-	s.cfgMu.RUnlock()
-
-	// 创建副本并脱敏 apiKey
-	cfgCopy := *cfg
-	providersCopy := make(map[string]*config.Provider)
-	for name, p := range cfg.Providers {
-		pCopy := *p
-		pCopy.APIKey = mask(p.APIKey)
-		providersCopy[name] = &pCopy
+	cfg, revision, restartRequired, err := s.configViewSnapshot()
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "gateway_error", "生成配置 revision 失败: "+err.Error())
+		return
 	}
-	cfgCopy.Providers = providersCopy
+	encoded, err := json.Marshal(cfg)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "gateway_error", "配置序列化失败: "+err.Error())
+		return
+	}
+	var response map[string]any
+	if err := json.Unmarshal(encoded, &response); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "gateway_error", "配置序列化失败: "+err.Error())
+		return
+	}
+	providers, _ := response["providers"].(map[string]any)
+	for name, provider := range cfg.Providers {
+		view, _ := providers[name].(map[string]any)
+		view["apiKeyConfigured"] = provider.APIKey == config.APIKeyKeepSentinel
+	}
+	response["revision"] = revision
+	response["restartRequired"] = restartRequired
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(cfgCopy)
+	w.Header().Set("ETag", strconv.Quote(revision))
+	_ = json.NewEncoder(w).Encode(response)
+}
+
+func (s *server) configViewSnapshot() (*config.Config, string, []string, error) {
+	s.cfgMu.Lock()
+	defer s.cfgMu.Unlock()
+	if s.revision == "" {
+		revision, err := s.issueConfigRevision()
+		if err != nil {
+			return nil, "", nil, err
+		}
+		s.revision = revision
+	}
+	if s.listenHost == "" {
+		s.listenHost = s.cfg.Host
+	}
+	if s.listenPort == 0 {
+		s.listenPort = s.cfg.Port
+	}
+	cfgCopy := *s.cfg
+	cfgCopy.Providers = make(map[string]*config.Provider, len(s.cfg.Providers))
+	for name, provider := range s.cfg.Providers {
+		providerCopy := *provider
+		providerCopy.Name = ""
+		if provider.APIKey != "" {
+			providerCopy.APIKey = config.APIKeyKeepSentinel
+		}
+		cfgCopy.Providers[name] = &providerCopy
+	}
+	return &cfgCopy, s.revision, restartRequiredFields(s.cfg, s.listenHost, s.listenPort), nil
 }
 
 // handleGetConfigRaw 返回原始 YAML 文本（apiKey 脱敏）
 func (s *server) handleGetConfigRaw(w http.ResponseWriter, r *http.Request) {
+	s.configOpMu.Lock()
 	s.cfgMu.RLock()
 	cfg := s.cfg
 	s.cfgMu.RUnlock()
 
 	data, err := config.ReadRaw(cfg)
 	if err != nil {
+		s.configOpMu.Unlock()
 		writeJSONError(w, http.StatusInternalServerError, "gateway_error", "读取配置失败: "+err.Error())
 		return
 	}
 
-	// 简单脱敏：替换所有 apiKey 值
-	content := string(data)
-	lines := strings.Split(content, "\n")
-	for i, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "apiKey:") {
-			parts := strings.SplitN(trimmed, ":", 2)
-			if len(parts) == 2 {
-				value := strings.TrimSpace(parts[1])
-				if value != "" && value != `""` && value != `''` {
-					lines[i] = parts[0] + ": " + mask(value)
-				}
-			}
-		}
+	redacted, err := config.RedactYAML(data, config.APIKeyKeepSentinel)
+	s.configOpMu.Unlock()
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "gateway_error", "配置脱敏失败: "+err.Error())
+		return
 	}
 
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.Write([]byte(strings.Join(lines, "\n")))
+	w.Header().Set("Content-Type", "application/yaml; charset=utf-8")
+	_, _ = w.Write(redacted)
 }
 
 // handlePutConfig 保存配置
 func (s *server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
-	body, err := readBody(r)
+	body, err := readBodyLimited(r, maxConfigBodyBytes)
 	if err != nil {
+		if errors.Is(err, errRequestBodyTooLarge) {
+			writeJSONError(w, http.StatusRequestEntityTooLarge, "request_too_large", err.Error())
+			return
+		}
 		writeJSONError(w, http.StatusBadRequest, "gateway_error", "读取请求体失败: "+err.Error())
 		return
 	}
 
-	// 验证配置
-	newCfg, err := config.LoadAndValidate(body)
+	newCfg, err := config.DecodeAndValidate(body)
 	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, "config_validation_error", err.Error())
 		return
 	}
 
-	s.cfgMu.RLock()
-	oldCfg := s.cfg
-	s.cfgMu.RUnlock()
+	s.configOpMu.Lock()
+	defer s.configOpMu.Unlock()
 
-	// 处理 apiKey：如果前端传回的是脱敏值，保留原值
+	s.cfgMu.Lock()
+	oldCfg := s.cfg
+	var revisionErr error
+	if s.revision == "" {
+		s.revision, revisionErr = s.issueConfigRevision()
+	}
+	currentRevision := s.revision
+	s.cfgMu.Unlock()
+	if revisionErr != nil {
+		writeJSONError(w, http.StatusInternalServerError, "gateway_error", "生成配置 revision 失败: "+revisionErr.Error())
+		return
+	}
+	if ifMatch := normalizeETag(r.Header.Get("If-Match")); ifMatch != "" && ifMatch != "*" && ifMatch != currentRevision {
+		writeJSONError(w, http.StatusConflict, "revision_conflict", "配置已被其他操作更新，请重新加载")
+		return
+	}
+
 	for name, p := range newCfg.Providers {
-		if oldP, exists := oldCfg.Providers[name]; exists {
-			if strings.Contains(p.APIKey, "****") {
-				p.APIKey = oldP.APIKey
-			}
+		if p.APIKey != config.APIKeyKeepSentinel {
+			continue
 		}
+		oldProvider, exists := oldCfg.Providers[name]
+		if !exists || oldProvider.APIKey == "" || !config.SameProviderIdentity(oldProvider, p) {
+			writeJSONError(w, http.StatusBadRequest, "config_validation_error", fmt.Sprintf("providers.%s 无法保留已有 apiKey：provider 身份已变化或密钥不存在", name))
+			return
+		}
+		p.APIKey = oldProvider.APIKey
 	}
 
 	// 设置路径并保存
 	newCfg.Path = oldCfg.Path
+	revision, err := s.issueConfigRevision()
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "gateway_error", "生成配置 revision 失败: "+err.Error())
+		return
+	}
 	if err := config.Save(newCfg); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "gateway_error", "保存配置失败: "+err.Error())
 		return
 	}
-	// 热重载：更新配置和队列管理器
-	s.cfgMu.Lock()
-	s.cfg = newCfg
-	s.cfgMu.Unlock()
-
-	// 更新队列管理器的 provider 限速器
-	for name, p := range newCfg.Providers {
-		s.qm.UpdateProvider(name, p.MaxConcurrent, p.MaxPerSecond)
-	}
+	restartRequired := s.applyRuntimeConfig(newCfg, revision)
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{
-		"status":  "success",
-		"message": "配置已保存，服务已热重载",
+	w.Header().Set("ETag", strconv.Quote(revision))
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"status":          "success",
+		"message":         "配置已保存，服务已热重载",
+		"revision":        revision,
+		"restartRequired": restartRequired,
 	})
 }
 
 // handleReloadConfig 从磁盘重新加载配置
 func (s *server) handleReloadConfig(w http.ResponseWriter, r *http.Request) {
-	newCfg, err := config.Load()
+	s.configOpMu.Lock()
+	defer s.configOpMu.Unlock()
+
+	s.cfgMu.RLock()
+	oldCfg := s.cfg
+	s.cfgMu.RUnlock()
+	raw, err := config.ReadRaw(oldCfg)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "gateway_error", "重新加载配置失败: "+err.Error())
 		return
 	}
-
-	s.cfgMu.Lock()
-	s.cfg = newCfg
-	s.cfgMu.Unlock()
-
-	// 更新队列管理器的 provider 限速器
-	for name, p := range newCfg.Providers {
-		s.qm.UpdateProvider(name, p.MaxConcurrent, p.MaxPerSecond)
+	newCfg, err := config.DecodeAndValidate(raw)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "gateway_error", "重新加载配置失败: "+err.Error())
+		return
+	}
+	newCfg.Path = oldCfg.Path
+	revision, err := s.issueConfigRevision()
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "gateway_error", "生成配置 revision 失败: "+err.Error())
+		return
 	}
 
+	restartRequired := s.applyRuntimeConfig(newCfg, revision)
+
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{
-		"status":  "success",
-		"message": "配置已从磁盘重新加载",
+	w.Header().Set("ETag", strconv.Quote(revision))
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"status":          "success",
+		"message":         "配置已从磁盘重新加载",
+		"revision":        revision,
+		"restartRequired": restartRequired,
 	})
+}
+
+func (s *server) applyRuntimeConfig(newCfg *config.Config, revision string) []string {
+	limits := make(map[string]queue.Limits, len(newCfg.Providers))
+	for name, provider := range newCfg.Providers {
+		limits[name] = queue.Limits{MaxConcurrent: provider.MaxConcurrent, MaxPerSecond: provider.MaxPerSecond}
+	}
+
+	s.cfgMu.Lock()
+	oldCfg := s.cfg
+	if s.listenHost == "" {
+		s.listenHost = oldCfg.Host
+	}
+	if s.listenPort == 0 {
+		s.listenPort = oldCfg.Port
+	}
+	restartRequired := restartRequiredFields(newCfg, s.listenHost, s.listenPort)
+	if s.qm != nil {
+		s.qm.Reconcile(limits)
+	}
+	if s.providerHealth != nil {
+		s.providerHealth.InvalidateChanged(oldCfg, newCfg)
+	}
+	if s.translator != nil {
+		s.translator.SetDirectMode(newCfg.DirectMode)
+	}
+	s.cfg = newCfg
+	s.revision = revision
+	s.cfgMu.Unlock()
+
+	if s.cache != nil {
+		if _, err := s.cache.Cleanup(newCfg.Cache.MaxAgeDays, newCfg.Cache.MaxRecords); err != nil {
+			logSystem("按新配置清理缓存失败: %s", err)
+		}
+	}
+	return restartRequired
+}
+
+func restartRequiredFields(cfg *config.Config, listenHost string, listenPort int) []string {
+	fields := make([]string, 0, 2)
+	if cfg.Host != listenHost {
+		fields = append(fields, "host")
+	}
+	if cfg.Port != listenPort {
+		fields = append(fields, "port")
+	}
+	return fields
+}
+
+func (s *server) issueConfigRevision() (string, error) {
+	if s.revisionSource != nil {
+		revision, err := s.revisionSource()
+		if err != nil {
+			return "", err
+		}
+		if revision == "" {
+			return "", errors.New("revision 为空")
+		}
+		return revision, nil
+	}
+	return newConfigRevision()
+}
+
+func newConfigRevision() (string, error) {
+	var value [16]byte
+	if _, err := rand.Read(value[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(value[:]), nil
+}
+
+func normalizeETag(value string) string {
+	value = strings.TrimSpace(value)
+	if strings.HasPrefix(value, "W/") {
+		value = strings.TrimSpace(strings.TrimPrefix(value, "W/"))
+	}
+	return strings.Trim(value, `"`)
 }

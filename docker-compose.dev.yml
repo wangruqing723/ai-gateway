@@ -1,0 +1,7 @@
+services:
+  gateway:
+    volumes:
+      # 仅开发模式挂载前端目录并启用 SSE 热加载。
+      - ./cmd/gateway/web:/app/web:ro
+    environment:
+      - AI_GATEWAY_WEB_DIR=/app/web

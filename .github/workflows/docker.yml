@@ -21,7 +21,63 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23.x'
+          cache: true
+
+      - name: Test
+        run: go test ./...
+
+      - name: Race test
+        run: go test -race ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Validate vendored web runtime
+        shell: bash
+        run: |
+          printf '%s  %s\n' \
+            '3ed1eed252488921df65e363d6715deb04d7f92aaedb9e52199fdf73cb1e0ad3' 'cmd/gateway/web/vendor/alpine.min.js' \
+            '176e894661aa9cdc9a5cba6c720044cbbf7b8bd80d1c9a142a7c24b1b6c50d15' 'cmd/gateway/web/vendor/tailwindcss.js' \
+            | sha256sum --check -
+          node --check cmd/gateway/web/vendor/alpine.min.js
+          node --check cmd/gateway/web/vendor/tailwindcss.js
+          node <<'NODE'
+          const fs = require('fs');
+          const html = fs.readFileSync('cmd/gateway/web/index.html', 'utf8');
+          const scripts = [...html.matchAll(/<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/gi)]
+            .map((match) => match[1].trim())
+            .filter(Boolean);
+          if (scripts.length === 0) throw new Error('expected at least one inline script');
+          scripts.forEach((script, index) => {
+            try {
+              new Function(script);
+            } catch (error) {
+              throw new Error(`inline script ${index + 1} is invalid: ${error.message}`);
+            }
+          });
+          NODE
+
+      - name: Validate production Compose
+        run: docker compose config --quiet
+
+      - name: Validate development Compose override
+        run: docker compose -f docker-compose.yml -f docker-compose.dev.yml config --quiet
+
   build:
+    needs: test
     runs-on: ubuntu-latest
     permissions:
       contents: read

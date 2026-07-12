@@ -12,14 +12,85 @@ import (
 const (
 	defaultCapacity = 1000
 	windowDuration  = time.Minute
+	metricBuckets   = 61
 )
 
-// Collector 保存最近一段请求记录。写入只做环形追加，聚合在读取时基于快照计算。
+var latencyBounds = [...]int64{0, 1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 30000, 60000, 120000, 300000, 600000}
+
+type latencyHistogram struct {
+	counts [len(latencyBounds)]int
+	total  int
+}
+
+func (h *latencyHistogram) add(value int64) {
+	if value < 0 {
+		value = 0
+	}
+	idx := len(latencyBounds) - 1
+	for i, bound := range latencyBounds {
+		if value <= bound {
+			idx = i
+			break
+		}
+	}
+	h.counts[idx]++
+	h.total++
+}
+
+func (h *latencyHistogram) merge(other latencyHistogram) {
+	for i, count := range other.counts {
+		h.counts[i] += count
+	}
+	h.total += other.total
+}
+
+func (h latencyHistogram) percentile(p int) int64 {
+	if h.total == 0 {
+		return 0
+	}
+	rank := (h.total*p + 99) / 100
+	seen := 0
+	for i, count := range h.counts {
+		seen += count
+		if seen >= rank {
+			return latencyBounds[i]
+		}
+	}
+	return latencyBounds[len(latencyBounds)-1]
+}
+
+type providerBucket struct {
+	requests int
+	errors   int
+	latency  latencyHistogram
+}
+
+type metricBucket struct {
+	second      int64
+	requests    int
+	successes   int
+	statusCodes map[string]int
+	latency     latencyHistogram
+	providers   map[string]*providerBucket
+}
+
+func (b *metricBucket) reset(second int64) {
+	b.second = second
+	b.requests = 0
+	b.successes = 0
+	b.statusCodes = make(map[string]int)
+	b.latency = latencyHistogram{}
+	b.providers = make(map[string]*providerBucket)
+}
+
+// Collector 保存有界请求日志，并用秒级时间桶维护不受日志容量影响的最近一分钟指标。
 type Collector struct {
-	mu      sync.RWMutex
-	records []RequestLog
-	next    int
-	full    bool
+	mu            sync.RWMutex
+	records       []RequestLog
+	next          int
+	full          bool
+	totalRequests uint64
+	buckets       [metricBuckets]metricBucket
 }
 
 // RequestLog 是单次请求的观测记录。
@@ -89,8 +160,9 @@ func NewCollector(capacity int) *Collector {
 
 // Add 追加一条记录。
 func (c *Collector) Add(record RequestLog) {
+	observedAt := time.Now()
 	if record.Started.IsZero() {
-		record.Started = time.Now()
+		record.Started = observedAt
 	}
 	if record.StartedAt == "" {
 		record.StartedAt = record.Started.Format(time.RFC3339Nano)
@@ -104,6 +176,8 @@ func (c *Collector) Add(record RequestLog) {
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.totalRequests++
+	c.addMetricLocked(record, observedAt)
 	if len(c.records) < cap(c.records) {
 		c.records = append(c.records, record)
 		return
@@ -111,6 +185,47 @@ func (c *Collector) Add(record RequestLog) {
 	c.records[c.next] = record
 	c.next = (c.next + 1) % len(c.records)
 	c.full = true
+}
+
+func (c *Collector) addMetricLocked(record RequestLog, observedAt time.Time) {
+	if record.Started.After(observedAt) {
+		// 异常的未来开始时间保留在日志中，但不允许污染当前分钟桶。
+		return
+	}
+	second := record.Started.Unix()
+	idx := int(second % metricBuckets)
+	if idx < 0 {
+		idx += metricBuckets
+	}
+	bucket := &c.buckets[idx]
+	if bucket.statusCodes != nil && bucket.second > second {
+		// 慢请求可能晚于同槽的新请求完成，不能让迟到记录倒退覆盖新桶。
+		return
+	}
+	if bucket.second != second || bucket.statusCodes == nil {
+		bucket.reset(second)
+	}
+	bucket.requests++
+	if isSuccess(record) {
+		bucket.successes++
+	}
+	bucket.statusCodes[strconv.Itoa(record.Status)]++
+	bucket.latency.add(record.DurationMs)
+
+	name := record.Provider
+	if name == "" {
+		name = "(未匹配)"
+	}
+	provider := bucket.providers[name]
+	if provider == nil {
+		provider = &providerBucket{}
+		bucket.providers[name] = provider
+	}
+	provider.requests++
+	if !isSuccess(record) {
+		provider.errors++
+	}
+	provider.latency.add(record.DurationMs)
 }
 
 // Logs 返回按时间倒序排列的记录，支持轻量筛选。
@@ -139,61 +254,75 @@ func (c *Collector) Logs(filter LogFilter) []RequestLog {
 
 // Metrics 聚合最近一分钟的请求指标，并保留历史 provider 排行和最近错误摘要。
 func (c *Collector) Metrics(now time.Time) Response {
-	records := c.snapshot()
-	cutoff := now.Add(-windowDuration)
-	window := make([]RequestLog, 0, len(records))
-	for _, r := range records {
-		if !r.Started.IsZero() && !r.Started.Before(cutoff) {
-			window = append(window, r)
-		}
-	}
-	providerBase := window
-	if len(providerBase) == 0 {
-		providerBase = records
-	}
-
+	c.mu.RLock()
+	records := c.snapshotLocked()
 	resp := Response{
 		Summary: Summary{
-			RequestsPerMinute: len(window),
-			TotalRequests:     len(records),
+			TotalRequests: int(c.totalRequests),
 		},
 		StatusCodes: make(map[string]int),
 	}
-	if len(records) == 0 {
-		resp.Providers = []ProviderStats{}
-		resp.RecentErrors = []RequestLog{}
-		return resp
-	}
-
-	latencies := make([]int64, 0, len(window))
+	cutoffSecond := now.Add(-windowDuration).Unix()
+	nowSecond := now.Unix()
+	var latency latencyHistogram
 	successes := 0
-	for _, r := range window {
-		latencies = append(latencies, r.DurationMs)
-		if isSuccess(r) {
-			successes++
+	providerTotals := make(map[string]*providerBucket)
+	for i := range c.buckets {
+		bucket := &c.buckets[i]
+		if bucket.requests == 0 || bucket.second < cutoffSecond || bucket.second > nowSecond {
+			continue
 		}
-		resp.StatusCodes[strconv.Itoa(r.Status)]++
+		resp.Summary.RequestsPerMinute += bucket.requests
+		successes += bucket.successes
+		latency.merge(bucket.latency)
+		for status, count := range bucket.statusCodes {
+			resp.StatusCodes[status] += count
+		}
+		for name, stats := range bucket.providers {
+			total := providerTotals[name]
+			if total == nil {
+				total = &providerBucket{}
+				providerTotals[name] = total
+			}
+			total.requests += stats.requests
+			total.errors += stats.errors
+			total.latency.merge(stats.latency)
+		}
 	}
-	resp.Summary.SuccessRate = ratio(successes, len(window))
-	if len(window) > 0 {
+	c.mu.RUnlock()
+
+	resp.Summary.SuccessRate = ratio(successes, resp.Summary.RequestsPerMinute)
+	if resp.Summary.RequestsPerMinute > 0 {
 		resp.Summary.ErrorRate = 1 - resp.Summary.SuccessRate
 	}
-	resp.Summary.P50LatencyMs = percentile(latencies, 50)
-	resp.Summary.P95LatencyMs = percentile(latencies, 95)
-	resp.Summary.P99LatencyMs = percentile(latencies, 99)
+	resp.Summary.P50LatencyMs = latency.percentile(50)
+	resp.Summary.P95LatencyMs = latency.percentile(95)
+	resp.Summary.P99LatencyMs = latency.percentile(99)
 
-	providerMap := make(map[string][]RequestLog)
-	for _, r := range providerBase {
-		name := r.Provider
-		if name == "" {
-			name = "(未匹配)"
-		}
-		providerMap[name] = append(providerMap[name], r)
+	resp.Providers = make([]ProviderStats, 0, len(providerTotals))
+	for name, stats := range providerTotals {
+		resp.Providers = append(resp.Providers, ProviderStats{
+			Name:         name,
+			Requests:     stats.requests,
+			Errors:       stats.errors,
+			SuccessRate:  ratio(stats.requests-stats.errors, stats.requests),
+			P50LatencyMs: stats.latency.percentile(50),
+			P95LatencyMs: stats.latency.percentile(95),
+			P99LatencyMs: stats.latency.percentile(99),
+		})
 	}
-
-	resp.Providers = make([]ProviderStats, 0, len(providerMap))
-	for name, rows := range providerMap {
-		resp.Providers = append(resp.Providers, providerStats(name, rows))
+	if len(resp.Providers) == 0 {
+		providerMap := make(map[string][]RequestLog)
+		for _, record := range records {
+			name := record.Provider
+			if name == "" {
+				name = "(未匹配)"
+			}
+			providerMap[name] = append(providerMap[name], record)
+		}
+		for name, rows := range providerMap {
+			resp.Providers = append(resp.Providers, providerStats(name, rows))
+		}
 	}
 	sort.Slice(resp.Providers, func(i, j int) bool {
 		return resp.Providers[i].P95LatencyMs > resp.Providers[j].P95LatencyMs
@@ -218,6 +347,10 @@ type LogFilter struct {
 func (c *Collector) snapshot() []RequestLog {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
+	return c.snapshotLocked()
+}
+
+func (c *Collector) snapshotLocked() []RequestLog {
 	if len(c.records) == 0 {
 		return []RequestLog{}
 	}

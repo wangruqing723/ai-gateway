@@ -3,15 +3,23 @@ package providerhealth
 
 import (
 	"context"
+	"crypto/sha256"
+	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"ai-gateway/internal/config"
 )
 
-const checkTimeout = 5 * time.Second
+const (
+	checkTimeout        = 5 * time.Second
+	checkConcurrency    = 4
+	checkResultCooldown = time.Second
+)
 
 // Status 是单个 provider 的最近健康检测结果。
 type Status struct {
@@ -27,11 +35,35 @@ type Status struct {
 // Checker 保存最近一次检测结果。
 type Checker struct {
 	mu       sync.RWMutex
-	statuses map[string]Status
+	statuses map[string]cachedStatus
+	sem      chan struct{}
+
+	runMu           sync.Mutex
+	inflight        *checkRun
+	currentConfig   string
+	lastFingerprint string
+	lastCompleted   time.Time
+	generation      atomic.Uint64
+}
+
+type cachedStatus struct {
+	status      Status
+	fingerprint string
+}
+
+type checkRun struct {
+	fingerprint string
+	generation  uint64
+	ctx         context.Context
+	cancel      context.CancelFunc
+	done        chan struct{}
 }
 
 func NewChecker() *Checker {
-	return &Checker{statuses: make(map[string]Status)}
+	return &Checker{
+		statuses: make(map[string]cachedStatus),
+		sem:      make(chan struct{}, checkConcurrency),
+	}
 }
 
 // Snapshot 返回所有配置 provider 的最近检测状态。
@@ -40,9 +72,10 @@ func (c *Checker) Snapshot(cfg *config.Config) map[string]Status {
 	defer c.mu.RUnlock()
 
 	out := make(map[string]Status, len(cfg.Providers))
-	for name := range cfg.Providers {
-		if st, ok := c.statuses[name]; ok {
-			out[name] = st
+	for name, provider := range cfg.Providers {
+		fingerprint := providerFingerprint(name, provider)
+		if cached, ok := c.statuses[name]; ok && cached.fingerprint == fingerprint {
+			out[name] = cached.status
 		} else {
 			out[name] = Status{Name: name, Status: "unchecked", Message: "未检测"}
 		}
@@ -52,30 +85,103 @@ func (c *Checker) Snapshot(cfg *config.Config) map[string]Status {
 
 // CheckAll 并发检测所有 provider，返回检测后的快照。
 func (c *Checker) CheckAll(ctx context.Context, cfg *config.Config, client *http.Client) map[string]Status {
-	type result struct {
-		name   string
-		status Status
+	fingerprint := configFingerprint(cfg)
+	for {
+		generation := c.generation.Load()
+		c.runMu.Lock()
+		if c.currentConfig == "" {
+			c.currentConfig = fingerprint
+		}
+		if fingerprint != c.currentConfig {
+			c.runMu.Unlock()
+			return c.Snapshot(cfg)
+		}
+		if c.inflight != nil {
+			done := c.inflight.done
+			c.runMu.Unlock()
+			select {
+			case <-done:
+				continue
+			case <-ctx.Done():
+				return c.Snapshot(cfg)
+			}
+		}
+		if fingerprint == c.lastFingerprint && time.Since(c.lastCompleted) < checkResultCooldown {
+			c.runMu.Unlock()
+			return c.Snapshot(cfg)
+		}
+		batches := (len(cfg.Providers) + checkConcurrency - 1) / checkConcurrency
+		if batches < 1 {
+			batches = 1
+		}
+		runCtx, cancel := context.WithTimeout(context.Background(), time.Duration(batches)*checkTimeout+time.Second)
+		run := &checkRun{
+			fingerprint: fingerprint,
+			generation:  generation,
+			ctx:         runCtx,
+			cancel:      cancel,
+			done:        make(chan struct{}),
+		}
+		c.inflight = run
+		c.runMu.Unlock()
+
+		cfgCopy := copyConfig(cfg)
+		go c.executeRun(run, cfgCopy, client)
+		select {
+		case <-run.done:
+			return c.Snapshot(cfg)
+		case <-ctx.Done():
+			return c.Snapshot(cfg)
+		}
 	}
-	sem := make(chan struct{}, 4)
+}
+
+func (c *Checker) executeRun(run *checkRun, cfg *config.Config, client *http.Client) {
+	defer run.cancel()
+	c.checkAll(run.ctx, cfg, client, run.generation)
+
+	c.runMu.Lock()
+	if c.inflight == run {
+		if c.generation.Load() == run.generation {
+			c.lastFingerprint = run.fingerprint
+			c.lastCompleted = time.Now()
+		}
+		c.inflight = nil
+	}
+	close(run.done)
+	c.runMu.Unlock()
+}
+
+func (c *Checker) checkAll(ctx context.Context, cfg *config.Config, client *http.Client, generation uint64) {
+	type result struct {
+		name        string
+		status      Status
+		fingerprint string
+	}
 	results := make(chan result, len(cfg.Providers))
 	var wg sync.WaitGroup
 
 	for name, p := range cfg.Providers {
+		if p == nil {
+			results <- result{name: name, status: errorStatus(name, "", "provider 配置为空", 0), fingerprint: providerFingerprint(name, nil)}
+			continue
+		}
 		pCopy := *p
 		if pCopy.Name == "" {
 			pCopy.Name = name
 		}
+		fingerprint := providerFingerprint(name, &pCopy)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			select {
-			case sem <- struct{}{}:
-				defer func() { <-sem }()
+			case c.sem <- struct{}{}:
+				defer func() { <-c.sem }()
 			case <-ctx.Done():
-				results <- result{name: pCopy.Name, status: errorStatus(pCopy.Name, "", ctx.Err().Error(), 0)}
+				results <- result{name: pCopy.Name, status: errorStatus(pCopy.Name, "", ctx.Err().Error(), 0), fingerprint: fingerprint}
 				return
 			}
-			results <- result{name: pCopy.Name, status: checkOne(ctx, &pCopy, client)}
+			results <- result{name: pCopy.Name, status: checkOne(ctx, &pCopy, client), fingerprint: fingerprint}
 		}()
 	}
 
@@ -83,11 +189,82 @@ func (c *Checker) CheckAll(ctx context.Context, cfg *config.Config, client *http
 	close(results)
 
 	c.mu.Lock()
-	for res := range results {
-		c.statuses[res.name] = res.status
+	if c.generation.Load() == generation {
+		for res := range results {
+			c.statuses[res.name] = cachedStatus{status: res.status, fingerprint: res.fingerprint}
+		}
 	}
 	c.mu.Unlock()
-	return c.Snapshot(cfg)
+}
+
+// InvalidateChanged 清理被删除或身份字段发生变化的 provider 健康状态。
+func (c *Checker) InvalidateChanged(oldCfg *config.Config, newCfg *config.Config) {
+	oldFingerprint := configFingerprint(oldCfg)
+	newFingerprint := configFingerprint(newCfg)
+	fingerprintChanged := oldFingerprint != newFingerprint
+	c.mu.Lock()
+	if fingerprintChanged {
+		c.generation.Add(1)
+	}
+	for name, cached := range c.statuses {
+		provider, ok := newCfg.Providers[name]
+		if !ok || cached.fingerprint != providerFingerprint(name, provider) {
+			delete(c.statuses, name)
+		}
+	}
+	c.mu.Unlock()
+
+	c.runMu.Lock()
+	c.currentConfig = newFingerprint
+	var cancel context.CancelFunc
+	if fingerprintChanged {
+		c.lastFingerprint = ""
+		c.lastCompleted = time.Time{}
+		if c.inflight != nil {
+			cancel = c.inflight.cancel
+		}
+	}
+	c.runMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+func copyConfig(cfg *config.Config) *config.Config {
+	copyCfg := *cfg
+	copyCfg.Providers = make(map[string]*config.Provider, len(cfg.Providers))
+	for name, provider := range cfg.Providers {
+		if provider == nil {
+			copyCfg.Providers[name] = nil
+			continue
+		}
+		providerCopy := *provider
+		copyCfg.Providers[name] = &providerCopy
+	}
+	return &copyCfg
+}
+
+func configFingerprint(cfg *config.Config) string {
+	names := make([]string, 0, len(cfg.Providers))
+	for name := range cfg.Providers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	h := sha256.New()
+	for _, name := range names {
+		fmt.Fprintln(h, providerFingerprint(name, cfg.Providers[name]))
+	}
+	return fmt.Sprintf("%x", h.Sum(nil))
+}
+
+func providerFingerprint(name string, provider *config.Provider) string {
+	h := sha256.New()
+	if provider == nil {
+		fmt.Fprintf(h, "%s\x00<nil>", name)
+	} else {
+		fmt.Fprintf(h, "%s\x00%s\x00%s\x00%s", name, provider.BaseURL, provider.Format, provider.APIKey)
+	}
+	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
 func checkOne(parent context.Context, p *config.Provider, client *http.Client) Status {

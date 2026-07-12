@@ -3,11 +3,15 @@ package main
 import (
 	"crypto/sha1"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -15,6 +19,13 @@ import (
 	"ai-gateway/internal/config"
 	"ai-gateway/internal/httputil"
 )
+
+const (
+	maxConfigBodyBytes = 1 << 20
+	maxProxyBodyBytes  = 32 << 20
+)
+
+var errRequestBodyTooLarge = errors.New("请求体超过大小限制")
 
 // 包级缓存时区，避免每条日志重复加载
 var beijingLoc = func() *time.Location {
@@ -38,10 +49,95 @@ func logSystem(format string, args ...any) {
 	logf("system", format, args...)
 }
 
-// readBody 读取请求体
-func readBody(r *http.Request) ([]byte, error) {
+// readBodyLimited 读取有明确上限的请求体。
+func readBodyLimited(r *http.Request, limit int64) ([]byte, error) {
 	defer r.Body.Close()
-	return io.ReadAll(r.Body)
+	if r.ContentLength > limit {
+		return nil, errRequestBodyTooLarge
+	}
+	reader := &io.LimitedReader{R: r.Body, N: limit + 1}
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > limit {
+		return nil, errRequestBodyTooLarge
+	}
+	return data, nil
+}
+
+func requestMediaType(r *http.Request) string {
+	value := strings.TrimSpace(r.Header.Get("Content-Type"))
+	if value == "" {
+		return ""
+	}
+	mediaType, _, err := mime.ParseMediaType(value)
+	if err != nil {
+		return ""
+	}
+	return strings.ToLower(mediaType)
+}
+
+func isAllowedConfigMediaType(value string) bool {
+	switch value {
+	case "application/json", "application/yaml", "application/x-yaml", "text/yaml":
+		return true
+	default:
+		return false
+	}
+}
+
+func isCrossSiteRequest(r *http.Request) bool {
+	if strings.EqualFold(strings.TrimSpace(r.Header.Get("Sec-Fetch-Site")), "cross-site") {
+		return true
+	}
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	if origin == "" {
+		return false
+	}
+	parsed, err := url.Parse(origin)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return true
+	}
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	if !strings.EqualFold(parsed.Scheme, scheme) || !strings.EqualFold(parsed.Host, r.Host) {
+		return true
+	}
+	return !isLoopbackHostname(parsed.Hostname())
+}
+
+func isLoopbackHostname(host string) bool {
+	if strings.EqualFold(strings.TrimSpace(host), "localhost") {
+		return true
+	}
+	ip := net.ParseIP(strings.TrimSpace(host))
+	return ip != nil && ip.IsLoopback()
+}
+
+func setSecurityHeaders(w http.ResponseWriter) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'")
+}
+
+func writeMethodNotAllowed(w http.ResponseWriter, allowed ...string) {
+	w.Header().Set("Allow", strings.Join(allowed, ", "))
+	writeJSONError(w, http.StatusMethodNotAllowed, "method_not_allowed", "不支持的 HTTP method")
+}
+
+func writeForbiddenOrigin(w http.ResponseWriter) {
+	writeJSONError(w, http.StatusForbidden, "forbidden_origin", "拒绝跨站请求")
+}
+
+func staticContentType(path string) string {
+	if value := mime.TypeByExtension(filepath.Ext(path)); value != "" {
+		return value
+	}
+	return "application/octet-stream"
 }
 
 // writeJSONError 统一 JSON 错误响应（委托 httputil 共享实现）
@@ -75,6 +171,11 @@ func (r *statusRecorder) Flush() {
 	if f, ok := r.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
 	}
+}
+
+// Unwrap 让 http.ResponseController 能把 deadline/flush 传给真实连接 writer。
+func (r *statusRecorder) Unwrap() http.ResponseWriter {
+	return r.ResponseWriter
 }
 
 func (r *statusRecorder) Status() int {

@@ -12,15 +12,15 @@ streamActivityTimeout: 60000   # 流式活跃超时（毫秒），流式响应�
 # 默认关闭；不写这些字段即为关闭，保持队列行为。
 directMode: false
 # 直通模式下的三类超时（毫秒），仅 directMode: true 时生效：
-directTimeoutNoStream: 60000      # 非流式：从发请求到收完整响应的整体超时，超时返回 504
-directTimeoutStreamHeader: 60000  # 流式：等上游返回响应头(首字前)的超时，超时返回 504
-directTimeoutStreamActive: 120000 # 流式：流已开始后，中途多久无新数据就断开（给思考/工具调用留足停顿空间）
+directTimeoutNoStream: 60000      # 非流式整体超时，1000-300000
+directTimeoutStreamHeader: 60000  # 流式响应头超时，1000-300000
+directTimeoutStreamActive: 120000 # 流式活跃超时，5000-600000
 
 # ── 缓存配置 ──────────────────────────────────────────────
 # 图片识别结果持久化缓存（SQLite）
 cache:
-  maxAgeDays: 7        # 缓存过期天数（默认 7 天）
-  maxRecords: 1000     # 最大记录数（默认 1000 条）
+  maxAgeDays: 7        # 缓存过期天数（默认 7，范围 1-3650）
+  maxRecords: 1000     # 最大记录数（默认 1000，范围 1-1000000）
 
 # ── Provider 定义 ────────────────────────────────────────
 # format: anthropic | openai
@@ -30,9 +30,9 @@ providers:
     baseUrl: "https://token-plan-cn.xiaomimimo.com"
     apiKey: "sk-xxx"
     format: anthropic
-    maxConcurrent: 3      # 最大并发请求数（默认 5）
-    maxPerSecond: 2       # 每秒最多请求数（默认不限制）
-    maxQueueWait: 30000   # 队列最大等待时间毫秒（默认 30 秒）
+    maxConcurrent: 3      # 最大并发请求数（默认 5，范围 1-100）
+    maxPerSecond: 2       # 每秒最多请求数（默认 0，范围 0-100）
+    maxQueueWait: 30000   # 队列最大等待毫秒（默认 30000，范围 1-600000）
 
   mimo_vision:
     baseUrl: "https://api.xiaomimimo.com"

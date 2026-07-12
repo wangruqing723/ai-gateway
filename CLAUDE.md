@@ -13,7 +13,7 @@ This file provides guidance to AI coding assistants (Claude Code, Codex, and oth
 仓库当前以 Go 实现为主：
 
 - **Go 版（当前主版本）**：根目录是 Go module（Go 1.23），所有新功能与修复优先在这里完成。
-- **Node.js 版（历史参考）**：最后版本已固化为 Git tag `v1.0.0-node`。Go 内部包刻意与历史 Node 对应模块逐函数对齐，修改 converter、router、queue、proxy、vision、cache、config 时可通过该 tag 参考行为等价性。
+- **Node.js 版（历史参考）**：最后版本已固化为 Git tag `v1.0.0-node`。修改 converter、router、proxy、vision、cache 时可用该 tag 核对兼容语义；Go 版的严格配置校验、动态 FIFO、三协议转换和运行时 hardening 属于有意演进，不要求逐函数照搬历史实现。
 
 Go 源码注释、日志、README 主要使用中文；新增说明请保持这一约定。
 
@@ -29,7 +29,7 @@ Go 源码注释、日志、README 主要使用中文；新增说明请保持这�
 - `internal/cache/`：基于 `modernc.org/sqlite` 的纯 Go 图片缓存。
 - `internal/metrics/`：内存环形请求日志与运行指标聚合，支持 P95、成功率、Provider 排行。
 - `internal/providerhealth/`：上游 Provider 健康检测，探测 `/v1/models` 端点。
-- `cmd/gateway/web/`：嵌入式前端资源，路径需匹配 `//go:embed web/index.html`。
+- `cmd/gateway/web/`：嵌入式前端资源与固定版本 vendor 脚本，路径需匹配 `//go:embed web/index.html web/vendor/*`。
 - 前端开发热加载：本地 compose 挂载 `./cmd/gateway/web:/app/web:ro` 并设置 `AI_GATEWAY_WEB_DIR=/app/web`；该变量存在时服务从磁盘读取 `index.html` 并通过 SSE 自动刷新浏览器，生产环境不设置时使用 `go:embed`。
 - `TODO-review.md`：Go 版问题修复跟踪。
 - `config.example.yaml`：配置模板；本地复制为 `config.yaml`。
@@ -60,11 +60,11 @@ Go 静态构建必须设置 `CGO_ENABLED=0`，以保持 distroless 镜像和纯 
 
 Go 代码使用 `gofmt` 默认格式和 idiomatic Go 命名。包名保持短小，导出标识符只在跨包需要时使用，错误信息要带足上下文。共享逻辑放在 `internal/*` 对应包内，`cmd/gateway` 只放启动、路由入口和服务组装逻辑。
 
-配置字段使用 lower camelCase，并同步更新 `config.example.yaml`、`internal/config.applyDefaults` 与 `validate`。涉及格式转换时，优先保持与 tag `v1.0.0-node` 中对应模块的行为对齐。
+配置字段使用 lower camelCase，并同步更新 `config.example.yaml`、`internal/config.applyDefaults` 与 `validate`。涉及格式转换时应保留已记录的客户端兼容语义；安全边界、错误终态和新增协议能力以当前 Go 测试与文档为准。
 
 ## Testing Guidelines
 
-当前仓库没有既有 `*_test.go` 测试套件。新增测试时放在被测包旁边，文件名使用 `*_test.go`，优先写 table-driven tests。重点覆盖 converter 跨格式转换、流式 SSE、router 通配匹配、config 校验、queue 限速/并发和 proxy 超时边界。
+仓库已有覆盖 converter、queue、proxy、vision、config、metrics、Provider 健康检测和 `cmd/gateway` HTTP 边界的 `*_test.go` 套件。新增测试放在被测包旁边，优先使用 table-driven tests，并为并发改动运行 race detector。
 
 运行全部测试：
 
@@ -78,7 +78,7 @@ go test ./...
 go test ./internal/<pkg>/ -run TestName -v
 ```
 
-流式或真实 provider 行为变更应补充手工 smoke test，例如 `./test-stream.sh`，并在 PR 中说明所需本地配置。
+流式或真实 provider 行为变更应补充明确记录命令的本地 smoke test，并在 PR 中说明所需假配置或本地配置；仓库当前没有固定的 `test-stream.sh`。
 
 ## Request Flow & Runtime Conventions
 
@@ -86,23 +86,24 @@ go test ./internal/<pkg>/ -run TestName -v
 
 1. 特殊路由：`HEAD`、`GET /`、`/api/config*`、`GET /health`、`GET /v1/models`。
 - 观测 API：`GET /api/metrics`（聚合指标）、`GET /api/logs`（请求日志，支持筛选）、`POST /api/providers/health`（触发 Provider 健康检测）。
-2. `converter.DetectClientFormat(urlPath)` 按路径识别客户端格式。
-3. `FromAnthropic`、`FromOpenAIChat`、`FromOpenAIResponses` 规范化为 `*converter.Internal`。
-4. `router.MatchRoute(model, cfg)` 按 `routes` 顺序匹配，支持 `*`/`?` 且大小写不敏感。
-5. `router.ResolveAPIKey` 优先使用 provider 配置，其次从 `x-api-key` 或 `Authorization: Bearer` 读取。
-6. 若配置 `vision` 且消息含图片，`vision.Translator.Translate` 先调用视觉模型替换图片块为文本描述。
-7. 按 provider `format` 转为 Anthropic 或 OpenAI Chat 上游请求。
-8. 非直通模式通过 `queue.Manager.Acquire` 获取执行槽并 `defer release()`。
-9. `proxy.Forward` 转发请求，并把响应转换回客户端格式。
+2. HTTP 边界校验 method、Origin、`Content-Type` 和请求体大小；无 Origin 的本机 CLI 请求保持兼容。
+3. `converter.DetectClientFormat(urlPath)` 按路径识别客户端格式。
+4. `FromAnthropic`、`FromOpenAIChat`、`FromOpenAIResponses` 规范化为 `*converter.Internal`，转换错误必须在路由前返回。
+5. `router.MatchRoute(model, cfg)` 按 `routes` 顺序匹配，支持 `*`/`?` 且大小写不敏感。
+6. `router.ResolveAPIKey` 优先使用 provider 配置，其次从 `x-api-key` 或 `Authorization: Bearer` 读取。
+7. 若配置 `vision` 且消息含图片，`vision.Translator.Translate` 先调用视觉模型替换图片块为文本描述。
+8. 按 provider `format` 通过 checked API 转为 Anthropic 或 OpenAI Chat 上游请求。
+9. 非直通模式通过 `queue.Manager.Acquire` 获取执行槽并 `defer release()`。
+10. `proxy.Forward` 转发请求，并把响应转换回客户端格式。
 
 ## Key Mechanisms
 
 - **直通模式**：`config.DirectMode=true` 时跳过队列，限流交给上游 429 透传，仅保留 `directTimeout*` 三档超时。
-- **队列模式**：默认模式，使用 per-provider 并发信号量、滑动窗口限速和 `maxQueueWait`。
+- **队列模式**：默认模式，使用 per-provider 动态 FIFO admission、滑动窗口限速和覆盖完整等待阶段的 `maxQueueWait`。
 - **流式转发**：同格式直接透传；跨格式使用 `converter.NewStreamTransformer` 逐行转换，避免 `bufio.Scanner` 的大行限制。
 - **超时控制**：`internal/proxy` 统一用 `context` 收口；流式超时后会补发合规 SSE 收尾事件。
-- **配置热重载**：`/api/config` 支持脱敏读取、校验落盘、从磁盘 reload；`server.cfg` 由 `cfgMu` 保护。
-- **请求观测**：`internal/metrics` 维护最近 1000 条代理请求的环形日志；`/api/metrics` 在读取时聚合 P95、成功率等指标；`/api/logs` 支持按状态/Provider/模型/流式/关键词筛选。只记录真实代理转发请求，静态资源和管理 API 不进日志。
+- **配置热重载**：`/api/config` 使用严格 YAML 解码、结构化脱敏、revision/ETag 与串行事务；`host`、`port` 只报告 `restartRequired`，其他运行时组件统一动态传播。
+- **请求观测**：最近 1000 条请求日志使用环形缓冲；累计与最近一分钟指标使用独立有界秒桶和固定延迟直方图，不受日志容量限制。
 - **Provider 健康检测**：`internal/providerhealth` 通过探测 `/v1/models` 判断上游是否可用；手动触发 `POST /api/providers/health` 后结果缓存在内存中，`/health` 响应携带缓存状态。
 
 ## Commit & Pull Request Guidelines
@@ -111,6 +112,6 @@ go test ./internal/<pkg>/ -run TestName -v
 
 ## Security & Configuration Tips
 
-不要提交真实 API Key、token 或本地 `config.yaml`。`config.Load` 查找顺序是当前工作目录 `config.yaml`，然后 `~/.config/ai-gateway/config.yaml`。Docker 环境需设置 `host: "0.0.0.0"`，并确保挂载的 `data/` 对 distroless nonroot 用户（UID 65532）可写。
+不要提交真实 API Key、token 或本地 `config.yaml`。`config.Load` 查找顺序是当前工作目录 `config.yaml`，然后 `~/.config/ai-gateway/config.yaml`。Docker 环境需保持容器内 `host: "0.0.0.0"`、`port: 7789` 与默认 Compose target 一致，并确保 `config.yaml`、`data/` 对 Compose 配置的运行 UID/GID 可写。
 
-`/api/config` 的 `PUT` 与 `reload` 可改写磁盘配置并热重载，当前无内置鉴权；当监听地址不止 `127.0.0.1` 时，必须在部署层增加访问控制。
+`/api/config` 的 `PUT` 与 `reload` 可改写磁盘配置并热重载，当前无强制 gateway token；默认 Compose 仅发布到 `127.0.0.1`。浏览器管理接口只允许 `localhost`/loopback Origin，不支持远程域名反向代理后直接操作；跨机器管理应使用 SSH 本地端口转发。无 Origin 的 API 客户端仍需由前置代理提供认证、TLS 和访问控制，应用内 method/Origin/media-type/body-limit 防护不等价于公网鉴权。

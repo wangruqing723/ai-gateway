@@ -4,8 +4,9 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AI Gateway 配置管理</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3/dist/cdn.min.js"></script>
+    <link rel="icon" href="data:,">
+    <script src="/vendor/tailwindcss.js"></script>
+    <script defer src="/vendor/alpine.min.js"></script>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600;700&family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,400..700,0..1,0&display=swap" rel="stylesheet">
@@ -191,13 +192,14 @@
                             <span class="h-2 w-2 rounded-full bg-good shadow-[0_0_12px_rgba(52,211,153,.8)]"></span>
                             在线
                             <span class="text-line">|</span>
-                            <span>端口 <span class="font-mono text-text" x-text="config.port || '--'"></span></span>
+                            <span>监听 <span class="font-mono text-text" x-text="health?.listenAddress || '--'"></span></span>
+                            <span x-show="restartRequired.length" x-cloak class="text-warn">需重启</span>
                         </div>
-                        <button @click="reloadConfig()" :disabled="loading" class="btn btn-secondary">
+                        <button x-show="isConfigTab()" x-cloak @click="reloadConfig()" :disabled="loading" class="btn btn-secondary">
                             <span class="material-symbols-outlined">sync</span>
                             <span class="hidden sm:inline">重载</span>
                         </button>
-                        <button @click="saveConfig()" :disabled="loading" class="btn btn-primary">
+                        <button x-show="isConfigTab()" x-cloak @click="saveConfig()" :disabled="loading || !isDirty()" class="btn btn-primary">
                             <span class="material-symbols-outlined">save</span>
                             <span class="hidden sm:inline">保存</span>
                         </button>
@@ -232,19 +234,20 @@
                 </div>
             </div>
 
-            <main class="flex-1 overflow-y-auto px-4 py-5 sm:px-6 lg:h-[calc(100vh-4rem)] lg:overflow-hidden lg:px-8">
-                <div x-show="statusMessage" x-transition x-cloak
-                     :class="statusType === 'success' ? 'border-good/40 bg-good/10 text-emerald-100' : 'border-danger/40 bg-danger/10 text-rose-100'"
-                     class="mb-5 flex items-start justify-between gap-4 rounded-lg border px-4 py-3 shadow-glow">
-                    <div class="flex items-center gap-3">
-                        <span class="material-symbols-outlined" x-text="statusType === 'success' ? 'check_circle' : 'error'"></span>
-                        <span class="text-sm font-semibold" x-text="statusMessage"></span>
-                    </div>
-                    <button @click="statusMessage = ''" class="text-current opacity-70 hover:opacity-100">
-                        <span class="material-symbols-outlined">close</span>
-                    </button>
+			<div x-show="statusMessage" x-transition x-cloak role="status" aria-live="polite"
+				 :class="statusType === 'success' ? 'border-good/40 bg-good/10 text-emerald-100' : 'border-danger/40 bg-danger/10 text-rose-100'"
+				 style="top: 5rem"
+				 class="fixed left-4 right-4 z-40 flex items-start justify-between gap-4 rounded-lg border px-4 py-3 shadow-glow lg:left-80 lg:right-8">
+                <div class="flex min-w-0 items-center gap-3">
+                    <span class="material-symbols-outlined shrink-0" x-text="statusType === 'success' ? 'check_circle' : 'error'"></span>
+                    <span class="min-w-0 break-words text-sm font-semibold" x-text="statusMessage"></span>
                 </div>
+                <button @click="statusMessage = ''" class="shrink-0 text-current opacity-70 hover:opacity-100" title="关闭通知">
+                    <span class="material-symbols-outlined">close</span>
+                </button>
+            </div>
 
+            <main class="flex-1 overflow-y-auto px-4 py-5 sm:px-6 lg:h-[calc(100vh-4rem)] lg:overflow-hidden lg:px-8">
                 <section x-show="isConfigTab()" x-transition class="lg:flex lg:h-full lg:min-h-0 lg:flex-col">
                     <div class="mb-5 grid shrink-0 grid-cols-1 gap-4 xl:grid-cols-4">
                         <div class="glass rounded-lg p-4">
@@ -458,7 +461,7 @@
                                             <div class="grid grid-cols-2 gap-3 text-xs">
                                                 <div class="rounded-lg bg-panel2 p-3">
                                                     <div class="text-muted">API Key</div>
-                                                    <div class="mt-1 truncate font-mono text-text" x-text="provider.apiKey || '(未配置)'"></div>
+                                                    <div class="mt-1 truncate font-mono text-text" x-text="provider.apiKeyConfigured ? '已配置' : '从请求头读取'"></div>
                                                 </div>
                                                 <div class="rounded-lg bg-panel2 p-3">
                                                     <div class="text-muted">并发</div>
@@ -548,7 +551,7 @@
                                 <span class="material-symbols-outlined" :class="health?.status === 'ok' ? 'text-good' : 'text-danger'">monitor_heart</span>
                             </div>
                             <div class="text-3xl font-extrabold text-white" x-text="health?.status || '未知'"></div>
-                            <div class="mt-1 truncate text-xs text-muted" x-text="(config.host || '127.0.0.1') + ':' + (config.port || 7789) + ' · ' + (config.directMode ? '直通模式' : '队列模式')"></div>
+                            <div class="mt-1 truncate text-xs text-muted" x-text="(health?.listenAddress || '监听地址未知') + ' · ' + (config.directMode ? '直通模式' : '队列模式')"></div>
                         </article>
                     </div>
 
@@ -832,10 +835,16 @@
                     <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">Base URL</span>
                     <input type="text" x-model="providerForm.baseUrl" placeholder="https://api.example.com" class="field">
                 </label>
-                <label class="block md:col-span-2">
-                    <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">API Key</span>
-                    <input type="password" x-model="providerForm.apiKey" placeholder="留空则从客户端请求头提取" class="field">
-                </label>
+                <div class="block md:col-span-2">
+                    <label for="provider-api-key" class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">API Key</label>
+                    <input id="provider-api-key" type="password" x-model="providerForm.apiKey"
+                           :placeholder="providerForm.apiKeyConfigured ? (providerIdentityChanged() ? '地址或格式已变更，请重新输入密钥' : '已配置，留空保持不变') : '留空则从客户端请求头提取'"
+                           class="field">
+                    <label for="provider-clear-api-key" x-show="providerForm.apiKeyConfigured" x-cloak class="mt-2 flex items-center gap-2 text-xs text-muted">
+                        <input id="provider-clear-api-key" type="checkbox" x-model="providerForm.clearApiKey" class="h-4 w-4 rounded border-line bg-panel text-cyan2 focus:ring-cyan2">
+                        清除已有密钥，改用客户端请求头
+                    </label>
+                </div>
                 <label class="block">
                     <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">最大并发</span>
                     <input type="number" x-model.number="providerForm.maxConcurrent" class="field">
@@ -919,6 +928,10 @@
                 statusMessage: '',
                 statusType: 'success',
                 configPath: '',
+                revision: '',
+                restartRequired: [],
+                originalConfig: '',
+                originalYaml: '',
                 config: {
                     port: 7789,
                     host: '127.0.0.1',
@@ -952,7 +965,11 @@
                     format: 'anthropic',
                     maxConcurrent: 5,
                     maxPerSecond: 0,
-                    maxQueueWait: 30000
+                    maxQueueWait: 30000,
+                    apiKeyConfigured: false,
+                    clearApiKey: false,
+                    originalBaseUrl: '',
+                    originalFormat: ''
                 },
                 showRouteModal: false,
                 editingRouteIndex: -1,
@@ -980,6 +997,7 @@
                             name: pick(p, 'name', 'Name') || name,
                             baseUrl: pick(p, 'baseUrl', 'BaseURL') || '',
                             apiKey: pick(p, 'apiKey', 'APIKey') || '',
+                            apiKeyConfigured: !!pick(p, 'apiKeyConfigured', 'APIKeyConfigured'),
                             format: pick(p, 'format', 'Format') || 'anthropic',
                             maxConcurrent: pick(p, 'maxConcurrent', 'MaxConcurrent') || 5,
                             maxPerSecond: pick(p, 'maxPerSecond', 'MaxPerSecond') || 0,
@@ -1037,9 +1055,12 @@
                         const res = await fetch('/api/config');
                         if (!res.ok) throw new Error('加载配置失败');
                         const data = await res.json();
+                        this.revision = data.revision || (res.headers.get('ETag') || '').replace(/^W\//, '').replaceAll('"', '');
+                        this.restartRequired = data.restartRequired || [];
                         this.config = this.normalizeConfig(data);
                         this.configPath = this.config.path || '未知';
                         this.ensureConfigShape();
+                        this.originalConfig = JSON.stringify(this.configPayload());
                     } catch (err) {
                         this.showStatus('加载配置失败: ' + err.message, 'error');
                     }
@@ -1050,6 +1071,7 @@
                         const res = await fetch('/api/config/raw');
                         if (!res.ok) throw new Error('加载 YAML 失败');
                         this.yamlContent = await res.text();
+                        this.originalYaml = this.yamlContent;
                     } catch (err) {
                         this.showStatus('加载 YAML 失败: ' + err.message, 'error');
                     }
@@ -1126,10 +1148,13 @@
                 async saveConfig() {
                     this.loading = true;
                     try {
-                        const body = this.editMode === 'yaml' ? this.yamlContent : JSON.stringify(this.config);
+                        const yamlMode = this.editMode === 'yaml';
+                        const body = yamlMode ? this.yamlContent : JSON.stringify(this.configPayload());
+                        const headers = { 'Content-Type': yamlMode ? 'application/yaml' : 'application/json' };
+                        if (this.revision) headers['If-Match'] = `"${this.revision}"`;
                         const res = await fetch('/api/config', {
                             method: 'PUT',
-                            headers: { 'Content-Type': 'application/json' },
+                            headers,
                             body
                         });
 
@@ -1139,7 +1164,7 @@
                         }
 
                         const result = await res.json();
-                        this.showStatus(result.message || '配置已保存', 'success');
+                        this.showStatus((result.message || '配置已保存') + this.restartSuffix(result), 'success');
                         await this.loadConfig();
                         if (this.editMode === 'yaml') await this.loadYamlConfig();
                     } catch (err) {
@@ -1155,7 +1180,7 @@
                         const res = await fetch('/api/config/reload', { method: 'POST' });
                         if (!res.ok) throw new Error('重载失败');
                         const result = await res.json();
-                        this.showStatus(result.message || '配置已重载', 'success');
+                        this.showStatus((result.message || '配置已重载') + this.restartSuffix(result), 'success');
                         await this.loadConfig();
                         if (this.editMode === 'yaml') await this.loadYamlConfig();
                     } catch (err) {
@@ -1163,6 +1188,11 @@
                     } finally {
                         this.loading = false;
                     }
+                },
+
+                restartSuffix(result) {
+                    const fields = result?.restartRequired || [];
+                    return fields.length ? `；需重启生效: ${fields.join(', ')}` : '';
                 },
 
                 showStatus(message, type) {
@@ -1192,6 +1222,41 @@
 
                 isConfigTab() {
                     return ['providers', 'routes', 'settings'].includes(this.activeTab);
+                },
+
+                configPayload() {
+                    const providers = {};
+                    Object.entries(this.config.providers || {}).forEach(([name, provider]) => {
+                        providers[name] = {
+                            baseUrl: provider.baseUrl || '',
+                            apiKey: provider.apiKey || '',
+                            format: provider.format || 'anthropic',
+                            maxConcurrent: provider.maxConcurrent || 5,
+                            maxPerSecond: provider.maxPerSecond || 0,
+                            maxQueueWait: provider.maxQueueWait || 30000
+                        };
+                    });
+                    return {
+                        host: this.config.host || '127.0.0.1',
+                        port: this.config.port || 7789,
+                        timeout: this.config.timeout || 120000,
+                        streamActivityTimeout: this.config.streamActivityTimeout || 60000,
+                        cache: {
+                            maxAgeDays: this.config.cache?.maxAgeDays || 7,
+                            maxRecords: this.config.cache?.maxRecords || 1000
+                        },
+                        directMode: !!this.config.directMode,
+                        directTimeoutNoStream: this.config.directTimeoutNoStream || 60000,
+                        directTimeoutStreamHeader: this.config.directTimeoutStreamHeader || 60000,
+                        directTimeoutStreamActive: this.config.directTimeoutStreamActive || 120000,
+                        providers,
+                        routes: JSON.parse(JSON.stringify(this.config.routes || []))
+                    };
+                },
+
+                isDirty() {
+                    if (this.editMode === 'yaml') return this.yamlContent !== this.originalYaml;
+                    return JSON.stringify(this.configPayload()) !== this.originalConfig;
                 },
 
                 providerCount() {
@@ -1447,7 +1512,11 @@
                         format: 'anthropic',
                         maxConcurrent: 5,
                         maxPerSecond: 0,
-                        maxQueueWait: 30000
+                        maxQueueWait: 30000,
+                        apiKeyConfigured: false,
+                        clearApiKey: false,
+                        originalBaseUrl: '',
+                        originalFormat: ''
                     };
                     this.showProviderModal = true;
                 },
@@ -1458,13 +1527,24 @@
                     this.providerForm = {
                         name,
                         baseUrl: p.baseUrl,
-                        apiKey: p.apiKey,
+                        apiKey: '',
                         format: p.format,
                         maxConcurrent: p.maxConcurrent,
                         maxPerSecond: p.maxPerSecond,
-                        maxQueueWait: p.maxQueueWait
+                        maxQueueWait: p.maxQueueWait,
+                        apiKeyConfigured: !!p.apiKeyConfigured,
+                        clearApiKey: false,
+                        originalBaseUrl: p.baseUrl,
+                        originalFormat: p.format
                     };
                     this.showProviderModal = true;
+                },
+
+                providerIdentityChanged() {
+                    return !!this.editingProvider && (
+                        this.providerForm.baseUrl !== this.providerForm.originalBaseUrl ||
+                        this.providerForm.format !== this.providerForm.originalFormat
+                    );
                 },
 
                 saveProvider() {
@@ -1473,9 +1553,20 @@
                         return;
                     }
 
+                    const existing = this.editingProvider ? this.config.providers[this.editingProvider] : null;
+                    let apiKey = this.providerForm.apiKey;
+                    if (!apiKey && this.providerForm.apiKeyConfigured && this.providerIdentityChanged() && !this.providerForm.clearApiKey) {
+                        this.showStatus('修改 URL 或格式后，请重新输入 API Key 或明确清除已有密钥', 'error');
+                        return;
+                    }
+                    if (!apiKey && this.providerForm.apiKeyConfigured && !this.providerForm.clearApiKey) {
+                        apiKey = existing?.apiKey || '';
+                    }
+                    if (this.providerForm.clearApiKey) apiKey = '';
                     this.config.providers[this.providerForm.name] = {
                         baseUrl: this.providerForm.baseUrl,
-                        apiKey: this.providerForm.apiKey,
+                        apiKey,
+                        apiKeyConfigured: apiKey !== '',
                         format: this.providerForm.format,
                         maxConcurrent: this.providerForm.maxConcurrent || 5,
                         maxPerSecond: this.providerForm.maxPerSecond || 0,

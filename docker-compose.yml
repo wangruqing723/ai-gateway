@@ -1,11 +1,11 @@
 services:
   gateway:
     # ── 方式一：使用 GitHub 自动构建的镜像（推荐）──
-    #image: ghcr.io/wangruqing723/ai-gateway:latest
+    image: ghcr.io/wangruqing723/ai-gateway:latest
 
     # ── 方式二：本地构建 ──────────────────────────
-    build: .
-    image: ai-gateway:local
+    #build: .
+    #image: ai-gateway:local
 
     container_name: ai-gateway
     #restart: unless-stopped
