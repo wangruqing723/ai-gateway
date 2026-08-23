@@ -24,6 +24,20 @@ const (
 	maxCacheAgeDays = 3650
 	maxCacheRecords = 1_000_000
 	maxQueueWaitMs  = 600_000
+
+	// maxRouteTargets 单条路由的候选上限，避免最坏耗时不可控。
+	maxRouteTargets = 5
+	// maxFailoverAttempts failover.maxAttempts 上限。
+	maxFailoverAttempts = 5
+	// maxRetryAfterCapMs Retry-After 阈值上限，借 Portkey 的 60 秒。
+	maxRetryAfterCapMs = 60_000
+
+	// maxBreakerFailures breaker.consecutiveFailures 上限。
+	maxBreakerFailures = 100
+	// maxBreakerOpenMs 熔断打开时长上限（10 分钟），超过这个量级不如直接改配置。
+	maxBreakerOpenMs = 600_000
+	// maxBreakerHalfOpenProbes 半开探测放行数上限。
+	maxBreakerHalfOpenProbes = 10
 )
 
 var (
@@ -49,12 +63,109 @@ type Vision struct {
 	Model    string `yaml:"model" json:"model"`
 }
 
-// Route 路由规则，按顺序匹配，首条命中生效
+// Target 是路由的一个候选上游目标（provider + 该 provider 上的模型名）。
+// 候选必须整对出现：不同上游的模型名不通用（如 mimo-v2.5-pro 与 deepseek-chat）。
+type Target struct {
+	Provider string `yaml:"provider" json:"provider"`
+	Model    string `yaml:"model" json:"model"`
+}
+
+// Route 路由规则，按顺序匹配，首条命中生效。
+//
+// 目标有两种写法，互斥：
+//   - 单目标（存量写法）：provider + model
+//   - 多目标：targets 列表，按顺序作为故障转移候选
 type Route struct {
-	Match    string  `yaml:"match" json:"match"`
-	Provider string  `yaml:"provider" json:"provider"`
-	Model    string  `yaml:"model" json:"model"`
-	Vision   *Vision `yaml:"vision" json:"vision,omitempty"`
+	Match    string   `yaml:"match" json:"match"`
+	Provider string   `yaml:"provider" json:"provider,omitempty"`
+	Model    string   `yaml:"model" json:"model,omitempty"`
+	Targets  []Target `yaml:"targets" json:"targets,omitempty"`
+	Vision   *Vision  `yaml:"vision" json:"vision,omitempty"`
+}
+
+// TargetList 返回统一形态的候选列表。
+// 不做 applyDefaults 归一化：/api/config 的 PUT 会把结构写回磁盘，
+// 归一化会把用户的单目标写法擅自重写成 targets 形态。
+func (r *Route) TargetList() []Target {
+	if len(r.Targets) > 0 {
+		out := make([]Target, len(r.Targets))
+		copy(out, r.Targets)
+		return out
+	}
+	return []Target{{Provider: r.Provider, Model: r.Model}}
+}
+
+// Failover 故障转移配置。默认关闭，保持「不重试」的既有语义。
+//
+// OnXxx 一律用 *bool：nil 表示用户未设置，由 applyDefaults 填默认值。
+// 若用 bool，零值 false 与「用户显式写 false」不可区分，
+// applyDefaults 里的 `if !x { x = true }` 会静默改回用户关掉的开关。
+type Failover struct {
+	Enabled bool `yaml:"enabled" json:"enabled"`
+	// MaxAttempts 含首次尝试的总次数上限，1-5。
+	MaxAttempts int `yaml:"maxAttempts" json:"maxAttempts"`
+	// OnTransportError 连接失败 / DNS / TLS 错误时转移。默认 true。
+	OnTransportError *bool `yaml:"onTransportError" json:"onTransportError,omitempty"`
+	// OnServerError 上游 5xx 时转移。默认 true。
+	OnServerError *bool `yaml:"onServerError" json:"onServerError,omitempty"`
+	// OnRateLimit 上游 429 时转移。候选为不同厂商/账号时有效。默认 true。
+	OnRateLimit *bool `yaml:"onRateLimit" json:"onRateLimit,omitempty"`
+	// OnQueueTimeout 本地队列等待超时时转移。默认 true。
+	OnQueueTimeout *bool `yaml:"onQueueTimeout" json:"onQueueTimeout,omitempty"`
+	// OnStreamHeaderTimeout 流式等响应头超时时转移。默认 true。
+	// 该阶段客户端尚未收到任何字节，转移边界干净。
+	// 非流式整体超时与流式活跃超时不可配置转移：会让总耗时翻倍。
+	OnStreamHeaderTimeout *bool `yaml:"onStreamHeaderTimeout" json:"onStreamHeaderTimeout,omitempty"`
+	// OnAuthError 401 / 403 时转移。默认 false：那通常是配置问题，转移会掩盖它。
+	OnAuthError *bool `yaml:"onAuthError" json:"onAuthError,omitempty"`
+	// MaxRetryAfterMs 上游 429 携带 Retry-After 且超过该值时，直接跳过该候选。
+	MaxRetryAfterMs int `yaml:"maxRetryAfterMs" json:"maxRetryAfterMs"`
+}
+
+// BoolOr 读取 *bool，nil 时返回 def。
+func BoolOr(p *bool, def bool) bool {
+	if p == nil {
+		return def
+	}
+	return *p
+}
+
+func boolPtr(v bool) *bool { return &v }
+
+// TransferOnTransportError 传输错误是否转移。
+func (f *Failover) TransferOnTransportError() bool { return BoolOr(f.OnTransportError, true) }
+
+// TransferOnServerError 上游 5xx 是否转移。
+func (f *Failover) TransferOnServerError() bool { return BoolOr(f.OnServerError, true) }
+
+// TransferOnRateLimit 上游 429 是否转移。
+func (f *Failover) TransferOnRateLimit() bool { return BoolOr(f.OnRateLimit, true) }
+
+// TransferOnQueueTimeout 队列等待超时是否转移。
+func (f *Failover) TransferOnQueueTimeout() bool { return BoolOr(f.OnQueueTimeout, true) }
+
+// TransferOnStreamHeaderTimeout 流式响应头超时是否转移。
+func (f *Failover) TransferOnStreamHeaderTimeout() bool {
+	return BoolOr(f.OnStreamHeaderTimeout, true)
+}
+
+// TransferOnAuthError 401 / 403 是否转移。
+func (f *Failover) TransferOnAuthError() bool { return BoolOr(f.OnAuthError, false) }
+
+// Breaker 熔断配置。全局一份，不做 per-provider 覆盖。
+//
+// 计入失败：传输错误、5xx、超时。
+// 不计入：429（上游正常限流，判故障比不熔断更糟）、401/403（配置问题，熔断修不了还会掩盖密钥过期）。
+type Breaker struct {
+	Enabled bool `yaml:"enabled" json:"enabled"`
+	// ConsecutiveFailures 连续失败达该值即打开熔断，默认 3。
+	// 用连续失败而非错误率：错误率需要最小样本数，否则首次失败就触发（LiteLLM #17418）。
+	ConsecutiveFailures int `yaml:"consecutiveFailures" json:"consecutiveFailures"`
+	// OpenMs 熔断打开后的冷却时长（毫秒），默认 30000。冷却结束转半开。
+	OpenMs int `yaml:"openMs" json:"openMs"`
+	// HalfOpenProbes 半开状态放行的探测请求数，默认 1。
+	// 探针用下一个真实入站请求，不用 /v1/models：那个端点通不代表聊天端点可用。
+	HalfOpenProbes int `yaml:"halfOpenProbes" json:"halfOpenProbes"`
 }
 
 // Cache 缓存配置
@@ -72,6 +183,8 @@ type Config struct {
 	Cache                 Cache                `yaml:"cache" json:"cache"`
 	Providers             map[string]*Provider `yaml:"providers" json:"providers"`
 	Routes                []Route              `yaml:"routes" json:"routes"`
+	Failover              Failover             `yaml:"failover" json:"failover"`
+	Breaker               Breaker              `yaml:"breaker" json:"breaker"`
 	Path                  string               `yaml:"-" json:"path,omitempty"`
 
 	// ── 直通模式（direct mode）──────────────────────────────
@@ -159,6 +272,50 @@ func applyDefaults(c *Config) {
 		if p.MaxQueueWait == 0 {
 			p.MaxQueueWait = 30000
 		}
+	}
+	applyFailoverDefaults(&c.Failover)
+	applyBreakerDefaults(&c.Breaker)
+}
+
+// applyFailoverDefaults 只在字段未设置时填默认值。
+// OnXxx 是 *bool，nil 才填；用户显式写的 false 必须原样保留。
+func applyFailoverDefaults(f *Failover) {
+	if f.MaxAttempts == 0 {
+		f.MaxAttempts = 2
+	}
+	if f.MaxRetryAfterMs == 0 {
+		f.MaxRetryAfterMs = 5000
+	}
+	if f.OnTransportError == nil {
+		f.OnTransportError = boolPtr(true)
+	}
+	if f.OnServerError == nil {
+		f.OnServerError = boolPtr(true)
+	}
+	if f.OnRateLimit == nil {
+		f.OnRateLimit = boolPtr(true)
+	}
+	if f.OnQueueTimeout == nil {
+		f.OnQueueTimeout = boolPtr(true)
+	}
+	if f.OnStreamHeaderTimeout == nil {
+		f.OnStreamHeaderTimeout = boolPtr(true)
+	}
+	if f.OnAuthError == nil {
+		f.OnAuthError = boolPtr(false)
+	}
+}
+
+// applyBreakerDefaults 只在字段未设置时填默认值。
+func applyBreakerDefaults(b *Breaker) {
+	if b.ConsecutiveFailures == 0 {
+		b.ConsecutiveFailures = 3
+	}
+	if b.OpenMs == 0 {
+		b.OpenMs = 30000
+	}
+	if b.HalfOpenProbes == 0 {
+		b.HalfOpenProbes = 1
 	}
 }
 
@@ -548,14 +705,8 @@ func validate(c *Config) error {
 		if strings.TrimSpace(r.Match) == "" {
 			return fmt.Errorf("route 缺少 match 字段")
 		}
-		if strings.TrimSpace(r.Provider) == "" {
-			return fmt.Errorf("route %q 缺少 provider 字段", r.Match)
-		}
-		if _, ok := c.Providers[r.Provider]; !ok {
-			return fmt.Errorf("route %q 引用了未定义的 provider: %s", r.Match, r.Provider)
-		}
-		if strings.TrimSpace(r.Model) == "" {
-			return fmt.Errorf("route %q 缺少 model 字段", r.Match)
+		if err := validateRouteTargets(c, &r); err != nil {
+			return err
 		}
 		if r.Vision != nil {
 			if strings.TrimSpace(r.Vision.Provider) == "" {
@@ -568,6 +719,82 @@ func validate(c *Config) error {
 				return fmt.Errorf("route %q.vision 缺少 model 字段", r.Match)
 			}
 		}
+	}
+	if err := validateFailover(&c.Failover); err != nil {
+		return err
+	}
+	if err := validateBreaker(&c.Breaker); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateRouteTargets 校验单条路由的目标写法：单目标（provider/model）与多目标（targets）互斥。
+func validateRouteTargets(c *Config, r *Route) error {
+	hasSingle := strings.TrimSpace(r.Provider) != ""
+	hasTargets := len(r.Targets) > 0
+
+	switch {
+	case hasSingle && hasTargets:
+		return fmt.Errorf("route %q 不能同时配置 provider 与 targets，二者互斥", r.Match)
+	case !hasSingle && !hasTargets:
+		return fmt.Errorf("route %q 缺少 provider 或 targets 字段", r.Match)
+	}
+
+	if hasSingle {
+		if _, ok := c.Providers[r.Provider]; !ok {
+			return fmt.Errorf("route %q 引用了未定义的 provider: %s", r.Match, r.Provider)
+		}
+		if strings.TrimSpace(r.Model) == "" {
+			return fmt.Errorf("route %q 缺少 model 字段", r.Match)
+		}
+		return nil
+	}
+
+	if len(r.Targets) > maxRouteTargets {
+		return fmt.Errorf("route %q.targets 最多 %d 个候选", r.Match, maxRouteTargets)
+	}
+	// 拒绝完全重复的 (provider, model) 对；同 provider 不同 model 合法（降级到便宜模型）
+	seen := make(map[Target]struct{}, len(r.Targets))
+	for i, t := range r.Targets {
+		if strings.TrimSpace(t.Provider) == "" {
+			return fmt.Errorf("route %q.targets[%d] 缺少 provider 字段", r.Match, i)
+		}
+		if _, ok := c.Providers[t.Provider]; !ok {
+			return fmt.Errorf("route %q.targets[%d] 引用了未定义的 provider: %s", r.Match, i, t.Provider)
+		}
+		if strings.TrimSpace(t.Model) == "" {
+			return fmt.Errorf("route %q.targets[%d] 缺少 model 字段", r.Match, i)
+		}
+		if _, dup := seen[t]; dup {
+			return fmt.Errorf("route %q.targets 存在重复候选: %s/%s", r.Match, t.Provider, t.Model)
+		}
+		seen[t] = struct{}{}
+	}
+	return nil
+}
+
+// validateFailover 校验 failover 的数值边界。
+func validateFailover(f *Failover) error {
+	if f.MaxAttempts < 1 || f.MaxAttempts > maxFailoverAttempts {
+		return fmt.Errorf("failover.maxAttempts 应在 1-%d 之间", maxFailoverAttempts)
+	}
+	if f.MaxRetryAfterMs < 0 || f.MaxRetryAfterMs > maxRetryAfterCapMs {
+		return fmt.Errorf("failover.maxRetryAfterMs 应在 0-%d 之间", maxRetryAfterCapMs)
+	}
+	return nil
+}
+
+// validateBreaker 校验 breaker 的数值边界。
+func validateBreaker(b *Breaker) error {
+	if b.ConsecutiveFailures < 1 || b.ConsecutiveFailures > maxBreakerFailures {
+		return fmt.Errorf("breaker.consecutiveFailures 应在 1-%d 之间", maxBreakerFailures)
+	}
+	if b.OpenMs < 1 || b.OpenMs > maxBreakerOpenMs {
+		return fmt.Errorf("breaker.openMs 应在 1-%d 之间", maxBreakerOpenMs)
+	}
+	if b.HalfOpenProbes < 1 || b.HalfOpenProbes > maxBreakerHalfOpenProbes {
+		return fmt.Errorf("breaker.halfOpenProbes 应在 1-%d 之间", maxBreakerHalfOpenProbes)
 	}
 	return nil
 }

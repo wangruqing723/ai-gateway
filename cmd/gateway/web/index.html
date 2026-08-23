@@ -336,9 +336,22 @@
                                                         <span class="font-mono text-sm font-bold text-cyan" x-text="route.match"></span>
                                                     </td>
                                                     <td class="px-4 py-4">
-                                                        <span class="chip bg-white/[.05] text-text" x-text="route.provider"></span>
+                                                        <div class="flex flex-wrap items-center gap-1.5">
+                                                            <template x-for="(target, ti) in routeTargets(route)" :key="ti">
+                                                                <span class="inline-flex items-center gap-1.5">
+                                                                    <span x-show="ti > 0" class="text-xs text-muted">→</span>
+                                                                    <span class="chip bg-white/[.05] text-text" x-text="target.provider"></span>
+                                                                </span>
+                                                            </template>
+                                                        </div>
                                                     </td>
-                                                    <td class="px-4 py-4 font-mono text-sm text-emerald-200" x-text="route.model"></td>
+                                                    <td class="px-4 py-4">
+                                                        <div class="flex flex-col gap-1 font-mono text-sm text-emerald-200">
+                                                            <template x-for="(target, ti) in routeTargets(route)" :key="ti">
+                                                                <span x-text="target.model || '(沿用请求模型)'"></span>
+                                                            </template>
+                                                        </div>
+                                                    </td>
                                                     <td class="px-4 py-4">
                                                         <span x-show="route.vision" class="chip border-cyan2/35 bg-cyan2/10 text-cyan">
                                                             <span class="material-symbols-outlined text-[16px]">visibility</span>
@@ -566,17 +579,22 @@
                                     <button @click="checkProviderHealth()" class="btn btn-secondary px-2 py-2" title="检测 Provider">
                                         <span class="material-symbols-outlined text-[18px]">health_and_safety</span>
                                     </button>
+                                    <!-- 熔断未启用时后端返回 breakers: null，此时隐藏重置按钮 -->
+                                    <button x-show="health?.breakers" @click="resetBreakers()" class="btn btn-secondary px-2 py-2" title="重置全部熔断器">
+                                        <span class="material-symbols-outlined text-[18px]">restart_alt</span>
+                                    </button>
                                     <button @click="refreshMonitor()" class="btn btn-secondary px-2 py-2" title="刷新仪表盘">
                                         <span class="material-symbols-outlined text-[18px]">refresh</span>
                                     </button>
                                 </div>
                             </div>
                             <div class="overflow-x-auto">
-                                <table class="w-full min-w-[860px] border-collapse text-left">
+                                <table class="w-full min-w-[960px] border-collapse text-left">
                                     <thead class="bg-panel2 text-xs uppercase tracking-wide text-muted">
                                         <tr>
                                             <th class="px-4 py-3 font-bold">Provider</th>
                                             <th class="px-4 py-3 font-bold">健康</th>
+                                            <th class="px-4 py-3 font-bold">熔断</th>
                                             <th class="px-4 py-3 font-bold">格式</th>
                                             <th class="px-4 py-3 font-bold">运行中</th>
                                             <th class="px-4 py-3 font-bold">排队</th>
@@ -592,6 +610,9 @@
                                                 <td class="px-4 py-4">
                                                     <span class="chip" :class="row.healthClass" :title="row.healthTitle" x-text="row.healthLabel"></span>
                                                 </td>
+                                                <td class="px-4 py-4">
+                                                    <span class="chip" :class="row.breakerClass" :title="row.breakerTitle" x-text="row.breakerLabel"></span>
+                                                </td>
                                                 <td class="px-4 py-4"><span class="chip bg-white/[.05] text-text" x-text="row.format"></span></td>
                                                 <td class="px-4 py-4 font-mono text-sm text-text" x-text="row.running"></td>
                                                 <td class="px-4 py-4 font-mono text-sm" :class="row.queued > 0 ? 'text-warn' : 'text-muted'" x-text="row.queued"></td>
@@ -603,7 +624,7 @@
                                             </tr>
                                         </template>
                                         <tr x-show="providerStatusRows().length === 0">
-                                            <td colspan="8" class="px-4 py-10 text-center text-sm text-muted">还没有 Provider</td>
+                                            <td colspan="9" class="px-4 py-10 text-center text-sm text-muted">还没有 Provider</td>
                                         </tr>
                                     </tbody>
                                 </table>
@@ -696,6 +717,7 @@
                                         <th class="px-4 py-3 font-bold">格式</th>
                                         <th class="px-4 py-3 font-bold">模型</th>
                                         <th class="px-4 py-3 font-bold">Provider</th>
+                                        <th class="px-4 py-3 font-bold">转移轨迹</th>
                                         <th class="px-4 py-3 font-bold">耗时</th>
                                         <th class="px-4 py-3 font-bold">错误</th>
                                     </tr>
@@ -711,12 +733,13 @@
                                             <td class="px-4 py-4 text-sm text-text" x-text="log.format || log.clientFormat || '--'"></td>
                                             <td class="px-4 py-4 font-mono text-sm text-cyan" x-text="log.model || '--'"></td>
                                             <td class="px-4 py-4 font-mono text-sm text-text" x-text="log.provider || '--'"></td>
+                                            <td class="px-4 py-4 max-w-[16rem] truncate font-mono text-xs" :class="log.attemptTrail ? 'text-warn' : 'text-muted'" :title="log.attemptTrail || ''" x-text="attemptTrailText(log)"></td>
                                             <td class="px-4 py-4 font-mono text-sm text-text" x-text="durationText(log.durationMs || log.latencyMs)"></td>
                                             <td class="px-4 py-4 max-w-[18rem] truncate text-sm text-muted" x-text="log.error || ''"></td>
                                         </tr>
                                     </template>
                                     <tr x-show="requestLogs.length === 0">
-                                        <td colspan="10" class="px-4 py-10 text-center text-sm text-muted">暂无请求明细</td>
+                                        <td colspan="11" class="px-4 py-10 text-center text-sm text-muted">暂无请求明细</td>
                                     </tr>
                                 </tbody>
                             </table>
@@ -779,6 +802,7 @@
                                     <th class="px-4 py-3 font-bold">格式</th>
                                     <th class="px-4 py-3 font-bold">模型</th>
                                     <th class="px-4 py-3 font-bold">Provider</th>
+                                    <th class="px-4 py-3 font-bold">转移轨迹</th>
                                     <th class="px-4 py-3 font-bold">耗时</th>
                                     <th class="px-4 py-3 font-bold">请求 ID</th>
                                     <th class="px-4 py-3 font-bold">错误</th>
@@ -795,13 +819,14 @@
                                         <td class="px-4 py-4 text-sm text-text" x-text="log.format || log.clientFormat || '--'"></td>
                                         <td class="px-4 py-4 font-mono text-sm text-cyan" x-text="log.model || '--'"></td>
                                         <td class="px-4 py-4 font-mono text-sm text-text" x-text="log.provider || '--'"></td>
+                                        <td class="px-4 py-4 max-w-[18rem] truncate font-mono text-xs" :class="log.attemptTrail ? 'text-warn' : 'text-muted'" :title="log.attemptTrail || ''" x-text="attemptTrailText(log)"></td>
                                         <td class="px-4 py-4 font-mono text-sm text-text" x-text="durationText(log.durationMs || log.latencyMs)"></td>
                                         <td class="px-4 py-4 font-mono text-xs text-muted" x-text="log.id || log.requestId || '--'"></td>
                                         <td class="px-4 py-4 max-w-[22rem] truncate text-sm text-muted" x-text="log.error || ''"></td>
                                     </tr>
                                 </template>
                                 <tr x-show="requestLogs.length === 0">
-                                    <td colspan="11" class="px-4 py-12 text-center text-sm text-muted">暂无请求明细</td>
+                                    <td colspan="12" class="px-4 py-12 text-center text-sm text-muted">暂无请求明细</td>
                                 </tr>
                             </tbody>
                         </table>
@@ -878,18 +903,41 @@
                     <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">匹配模式</span>
                     <input type="text" x-model="routeForm.match" placeholder="例如: claude-* 或 gpt-4" class="field font-mono">
                 </label>
-                <label class="block">
-                    <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">Provider</span>
-                    <select x-model="routeForm.provider" class="field">
-                        <template x-for="(provider, name) in config.providers" :key="name">
-                            <option :value="name" x-text="name"></option>
+                <div class="md:col-span-2">
+                    <div class="mb-1.5 flex items-center justify-between">
+                        <span class="text-xs font-bold uppercase tracking-wide text-muted">目标候选</span>
+                        <span class="text-xs text-muted">按顺序尝试，第一个为主目标</span>
+                    </div>
+                    <div class="space-y-2">
+                        <template x-for="(target, ti) in routeForm.targets" :key="ti">
+                            <div class="flex items-center gap-2">
+                                <span class="w-6 shrink-0 font-mono text-xs text-muted" x-text="'#' + (ti + 1)"></span>
+                                <select x-model="target.provider" class="field w-1/3">
+                                    <template x-for="(provider, name) in config.providers" :key="name">
+                                        <option :value="name" x-text="name"></option>
+                                    </template>
+                                </select>
+                                <input type="text" x-model="target.model" placeholder="上游实际使用的模型名" class="field flex-1 font-mono">
+                                <button @click="moveRouteTarget(ti, -1)" :disabled="ti === 0" class="btn btn-secondary px-2 py-2" title="上移">
+                                    <span class="material-symbols-outlined text-[18px]">keyboard_arrow_up</span>
+                                </button>
+                                <button @click="moveRouteTarget(ti, 1)" :disabled="ti === routeForm.targets.length - 1" class="btn btn-secondary px-2 py-2" title="下移">
+                                    <span class="material-symbols-outlined text-[18px]">keyboard_arrow_down</span>
+                                </button>
+                                <button @click="removeRouteTarget(ti)" :disabled="routeForm.targets.length <= 1" class="btn btn-secondary px-2 py-2" title="删除该候选">
+                                    <span class="material-symbols-outlined text-[18px]">delete</span>
+                                </button>
+                            </div>
                         </template>
-                    </select>
-                </label>
-                <label class="block md:col-span-2">
-                    <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">目标模型</span>
-                    <input type="text" x-model="routeForm.model" placeholder="上游实际使用的模型名" class="field font-mono">
-                </label>
+                    </div>
+                    <button @click="addRouteTarget()" :disabled="routeForm.targets.length >= maxRouteTargets" class="btn btn-secondary mt-2 text-xs">
+                        <span class="material-symbols-outlined text-[16px]">add</span>
+                        <span x-text="'添加候选（最多 ' + maxRouteTargets + ' 个）'"></span>
+                    </button>
+                    <p x-show="routeForm.targets.length > 1" x-cloak class="mt-2 text-xs text-muted">
+                        多候选需在「基础设置」开启 failover 才会真正转移，否则只用第一个候选。
+                    </p>
+                </div>
                 <div class="rounded-lg border border-cyan2/20 bg-cyan2/5 p-4 md:col-span-2">
                     <label class="mb-4 flex cursor-pointer items-center gap-3">
                         <input type="checkbox" x-model="routeForm.enableVision" class="h-4 w-4 rounded border-line bg-panel text-cyan2 focus:ring-cyan2">
@@ -975,12 +1023,13 @@
                 editingRouteIndex: -1,
                 routeForm: {
                     match: '',
-                    provider: '',
-                    model: '',
+                    // 目标候选列表，按顺序作为故障转移的尝试顺序；至少 1 个，最多 5 个
+                    targets: [{ provider: '', model: '' }],
                     enableVision: false,
                     visionProvider: '',
                     visionModel: ''
                 },
+                maxRouteTargets: 5,
 
                 async init() {
                     await this.loadConfig();
@@ -1007,11 +1056,21 @@
 
                     const routes = (pick(data, 'routes', 'Routes') || []).map((r) => {
                         const vision = pick(r, 'vision', 'Vision');
+                        const rawTargets = pick(r, 'targets', 'Targets');
                         const route = {
                             match: pick(r, 'match', 'Match') || '',
                             provider: pick(r, 'provider', 'Provider') || '',
                             model: pick(r, 'model', 'Model') || ''
                         };
+                        // 多目标写法：保留 targets 原样，后端两种写法互斥，不能同时下发
+                        if (Array.isArray(rawTargets) && rawTargets.length) {
+                            route.targets = rawTargets.map((t) => ({
+                                provider: pick(t, 'provider', 'Provider') || '',
+                                model: pick(t, 'model', 'Model') || ''
+                            }));
+                            route.provider = '';
+                            route.model = '';
+                        }
                         if (vision) {
                             route.vision = {
                                 provider: pick(vision, 'provider', 'Provider') || '',
@@ -1116,6 +1175,24 @@
                         this.showStatus('Provider 健康检测完成', 'success');
                     } catch (err) {
                         this.showStatus('Provider 健康检测失败: ' + err.message, 'error');
+                    } finally {
+                        this.loading = false;
+                    }
+                },
+
+                // resetBreakers 手动闭合全部熔断器。不复用 checkProviderHealth：
+                // 后端两个端点判据不同，合并会让「为什么这个上游被放行」难以解释。
+                async resetBreakers() {
+                    this.loading = true;
+                    try {
+                        const res = await fetch('/api/providers/breaker/reset', { method: 'POST' });
+                        if (!res.ok) throw new Error('HTTP ' + res.status);
+                        const data = await res.json();
+                        this.health = this.health || {};
+                        this.health.breakers = data.breakers || {};
+                        this.showStatus(`已重置 ${Number(data.reset) || 0} 个熔断器`, 'success');
+                    } catch (err) {
+                        this.showStatus('重置熔断器失败: ' + err.message, 'error');
                     } finally {
                         this.loading = false;
                     }
@@ -1286,6 +1363,12 @@
                     return `${Math.round(Number(value) || 0)} ms`;
                 },
 
+                // attemptTrailText 只在发生过候选转移时显示轨迹，单次直达显示 '--'
+                attemptTrailText(log) {
+                    if (log?.attemptTrail) return log.attemptTrail;
+                    return (Number(log?.attempts) || 0) > 1 ? `${log.attempts} 次尝试` : '--';
+                },
+
                 formatBytes(value) {
                     const bytes = Number(value) || 0;
                     if (bytes < 1024) return `${bytes} B`;
@@ -1321,9 +1404,14 @@
                 providerStatusRows() {
                     const queues = this.health?.queues || {};
                     const health = this.health?.providerHealth || {};
+                    // 熔断未启用时后端返回 breakers: null，和「全部闭合」是两种语义，
+                    // 这里保留 null 往下传，由 breakerLabel 区分展示。
+                    const breakers = this.health?.breakers || null;
                     return Object.entries(this.config.providers || {}).map(([name, provider]) => {
                         const q = queues[name] || {};
                         const h = health[name] || { status: 'unchecked', message: '未检测' };
+                        // 已启用但该 provider 还没被记录过，等价于闭合。
+                        const b = breakers ? (breakers[name] || { state: 'closed' }) : null;
                         const running = Number(q.running || 0);
                         const queued = Number(q.queued || 0);
                         let status = '空闲';
@@ -1348,6 +1436,9 @@
                             healthLabel: this.providerHealthLabel(h),
                             healthClass: this.providerHealthClass(h.status),
                             healthTitle: this.providerHealthTitle(h),
+                            breakerLabel: this.breakerLabel(b),
+                            breakerClass: this.breakerClass(b),
+                            breakerTitle: this.breakerTitle(b),
                             status,
                             statusClass
                         };
@@ -1375,6 +1466,33 @@
                     if (health.latencyMs) parts.push(health.latencyMs + ' ms');
                     if (health.checkedAt) parts.push(health.checkedAt);
                     return parts.join(' · ') || '未检测';
+                },
+
+                // 以下三个 helper 里 b 为 null 表示熔断未启用，必须与「已启用且闭合」分开显示，
+                // 否则看不出这套机制到底有没有生效。
+                breakerLabel(b) {
+                    if (!b) return '未启用';
+                    if (b.state === 'open') return '已熔断';
+                    if (b.state === 'half_open') return '半开探测';
+                    return '正常';
+                },
+
+                breakerClass(b) {
+                    if (!b) return 'bg-white/[.05] text-muted';
+                    if (b.state === 'open') return 'border-danger/35 bg-danger/10 text-rose-100';
+                    if (b.state === 'half_open') return 'border-warn/35 bg-warn/10 text-amber-100';
+                    return 'border-good/35 bg-good/10 text-emerald-100';
+                },
+
+                breakerTitle(b) {
+                    if (!b) return '熔断未启用';
+                    const parts = [];
+                    if (b.state === 'open' && b.retryAfterMs > 0) parts.push('剩余冷却 ' + Math.ceil(b.retryAfterMs / 1000) + ' s');
+                    if (b.state === 'half_open' && b.probesInFlight > 0) parts.push('探测中 ' + b.probesInFlight);
+                    if (b.consecutiveFailures > 0) parts.push('连续失败 ' + b.consecutiveFailures);
+                    if (b.openedAt) parts.push('打开于 ' + b.openedAt);
+                    if (b.totalOpens > 0) parts.push('累计打开 ' + b.totalOpens + ' 次');
+                    return parts.join(' · ') || '闭合，无失败记录';
                 },
 
                 configIssues() {
@@ -1480,11 +1598,17 @@
 
                 routesYaml() {
                     return (this.config.routes || []).map((r) => {
-                        const base = [
-                            `  - match: "${r.match || ''}"`,
-                            `    provider: ${r.provider || ''}`,
-                            `    model: "${r.model || ''}"`
-                        ];
+                        const base = [`  - match: "${r.match || ''}"`];
+                        if (Array.isArray(r.targets) && r.targets.length) {
+                            base.push('    targets:');
+                            r.targets.forEach((t) => {
+                                base.push(`      - provider: ${t.provider || ''}`);
+                                base.push(`        model: "${t.model || ''}"`);
+                            });
+                        } else {
+                            base.push(`    provider: ${r.provider || ''}`);
+                            base.push(`    model: "${r.model || ''}"`);
+                        }
                         if (r.vision) {
                             base.push('    vision:');
                             base.push(`      provider: ${r.vision.provider || ''}`);
@@ -1578,8 +1702,28 @@
                 removeProvider(name) {
                     if (confirm(`确定删除 Provider "${name}"？相关路由也会被删除。`)) {
                         delete this.config.providers[name];
-                        this.config.routes = this.config.routes.filter(r => r.provider !== name && r.vision?.provider !== name);
+                        // 多候选路由只删掉引用该 provider 的候选；候选清空或视觉引用命中才整条删除
+                        this.config.routes = this.config.routes.reduce((kept, r) => {
+                            if (r.vision?.provider === name) return kept;
+                            if (Array.isArray(r.targets) && r.targets.length) {
+                                const targets = r.targets.filter((t) => t.provider !== name);
+                                if (!targets.length) return kept;
+                                kept.push(targets.length === 1
+                                    ? { ...r, targets: undefined, provider: targets[0].provider, model: targets[0].model }
+                                    : { ...r, targets });
+                                return kept;
+                            }
+                            if (r.provider === name) return kept;
+                            kept.push(r);
+                            return kept;
+                        }, []);
                     }
+                },
+
+                // routeTargets 统一读取路由的候选列表：写了 targets 用 targets，否则退化成单目标
+                routeTargets(route) {
+                    if (Array.isArray(route?.targets) && route.targets.length) return route.targets;
+                    return [{ provider: route?.provider || '', model: route?.model || '' }];
                 },
 
                 addRoute() {
@@ -1587,8 +1731,7 @@
                     const providers = Object.keys(this.config.providers || {});
                     this.routeForm = {
                         match: '',
-                        provider: providers[0] || '',
-                        model: '',
+                        targets: [{ provider: providers[0] || '', model: '' }],
                         enableVision: false,
                         visionProvider: providers[0] || '',
                         visionModel: ''
@@ -1601,8 +1744,7 @@
                     const route = this.config.routes[index];
                     this.routeForm = {
                         match: route.match,
-                        provider: route.provider,
-                        model: route.model,
+                        targets: this.routeTargets(route).map((t) => ({ provider: t.provider || '', model: t.model || '' })),
                         enableVision: !!route.vision,
                         visionProvider: route.vision?.provider || '',
                         visionModel: route.vision?.model || ''
@@ -1610,10 +1752,47 @@
                     this.showRouteModal = true;
                 },
 
+                addRouteTarget() {
+                    if (this.routeForm.targets.length >= this.maxRouteTargets) return;
+                    const providers = Object.keys(this.config.providers || {});
+                    this.routeForm.targets.push({ provider: providers[0] || '', model: '' });
+                },
+
+                removeRouteTarget(index) {
+                    if (this.routeForm.targets.length <= 1) return;
+                    this.routeForm.targets.splice(index, 1);
+                },
+
+                moveRouteTarget(index, direction) {
+                    const newIndex = index + direction;
+                    if (newIndex < 0 || newIndex >= this.routeForm.targets.length) return;
+                    const temp = this.routeForm.targets[index];
+                    this.routeForm.targets[index] = this.routeForm.targets[newIndex];
+                    this.routeForm.targets[newIndex] = temp;
+                },
+
                 saveRoute() {
-                    if (!this.routeForm.match || !this.routeForm.provider || !this.routeForm.model) {
-                        this.showStatus('匹配模式、Provider 和模型不能为空', 'error');
+                    if (!this.routeForm.match) {
+                        this.showStatus('匹配模式不能为空', 'error');
                         return;
+                    }
+                    const targets = (this.routeForm.targets || []).map((t) => ({
+                        provider: (t.provider || '').trim(),
+                        model: (t.model || '').trim()
+                    }));
+                    if (!targets.length || targets.some((t) => !t.provider || !t.model)) {
+                        this.showStatus('每个候选的 Provider 和模型都不能为空', 'error');
+                        return;
+                    }
+                    // 后端拒绝完全重复的 (provider, model) 对，这里先挡一层
+                    const seen = new Set();
+                    for (const t of targets) {
+                        const key = t.provider + ' ' + t.model;
+                        if (seen.has(key)) {
+                            this.showStatus(`候选重复: ${t.provider} / ${t.model}`, 'error');
+                            return;
+                        }
+                        seen.add(key);
                     }
 
                     if (this.routeForm.enableVision && (!this.routeForm.visionProvider || !this.routeForm.visionModel)) {
@@ -1621,11 +1800,10 @@
                         return;
                     }
 
-                    const route = {
-                        match: this.routeForm.match,
-                        provider: this.routeForm.provider,
-                        model: this.routeForm.model
-                    };
+                    // 单候选沿用 provider/model 写法，避免把用户配置擅自改成 targets 形态
+                    const route = targets.length === 1
+                        ? { match: this.routeForm.match, provider: targets[0].provider, model: targets[0].model }
+                        : { match: this.routeForm.match, targets };
                     if (this.routeForm.enableVision) {
                         route.vision = {
                             provider: this.routeForm.visionProvider,

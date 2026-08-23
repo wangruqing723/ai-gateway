@@ -95,29 +95,33 @@ type Collector struct {
 
 // RequestLog 是单次请求的观测记录。
 type RequestLog struct {
-	ID             string    `json:"id"`
-	Time           string    `json:"time"`
-	StartedAt      string    `json:"startedAt"`
-	Method         string    `json:"method"`
-	Path           string    `json:"path"`
-	ClientIP       string    `json:"clientIp,omitempty"`
-	KeySource      string    `json:"keySource,omitempty"`
-	KeyFingerprint string    `json:"keyFingerprint,omitempty"`
-	Status         int       `json:"status"`
-	ClientFormat   string    `json:"clientFormat"`
-	Format         string    `json:"format"`
-	Model          string    `json:"model"`
-	Route          string    `json:"route,omitempty"`
-	Provider       string    `json:"provider"`
-	TargetModel    string    `json:"targetModel,omitempty"`
-	Stream         bool      `json:"stream"`
-	DurationMs     int64     `json:"durationMs"`
-	QueueWaitMs    int64     `json:"queueWaitMs,omitempty"`
-	Error          string    `json:"error,omitempty"`
-	Vision         bool      `json:"vision,omitempty"`
-	ResponseBytes  int64     `json:"responseBytes,omitempty"`
-	UpstreamStatus int       `json:"upstreamStatus,omitempty"`
-	Started        time.Time `json:"-"`
+	ID             string `json:"id"`
+	Time           string `json:"time"`
+	StartedAt      string `json:"startedAt"`
+	Method         string `json:"method"`
+	Path           string `json:"path"`
+	ClientIP       string `json:"clientIp,omitempty"`
+	KeySource      string `json:"keySource,omitempty"`
+	KeyFingerprint string `json:"keyFingerprint,omitempty"`
+	Status         int    `json:"status"`
+	ClientFormat   string `json:"clientFormat"`
+	Format         string `json:"format"`
+	Model          string `json:"model"`
+	Route          string `json:"route,omitempty"`
+	Provider       string `json:"provider"`
+	TargetModel    string `json:"targetModel,omitempty"`
+	Stream         bool   `json:"stream"`
+	DurationMs     int64  `json:"durationMs"`
+	QueueWaitMs    int64  `json:"queueWaitMs,omitempty"`
+	Error          string `json:"error,omitempty"`
+	Vision         bool   `json:"vision,omitempty"`
+	ResponseBytes  int64  `json:"responseBytes,omitempty"`
+	UpstreamStatus int    `json:"upstreamStatus,omitempty"`
+	// Attempts 本次请求实际发起的上游尝试次数，1 表示首个候选即成功。
+	Attempts int `json:"attempts,omitempty"`
+	// AttemptTrail 故障转移轨迹，例如 "mimo:429/ratelimit → deepseek:200"。
+	AttemptTrail string    `json:"attemptTrail,omitempty"`
+	Started      time.Time `json:"-"`
 }
 
 // Summary 是仪表盘顶部指标。

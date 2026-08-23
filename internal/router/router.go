@@ -8,11 +8,18 @@ import (
 	"ai-gateway/internal/config"
 )
 
-// Match 路由匹配结果
+// Candidate 是一次路由匹配得到的单个候选上游目标。
+// Provider 为值拷贝，隔离并发请求对 APIKey 等字段的写入。
+type Candidate struct {
+	Provider    *config.Provider
+	TargetModel string
+}
+
+// Match 路由匹配结果。
+// Candidates 至少 1 个，按配置顺序排列，作为故障转移的尝试顺序。
 type Match struct {
-	Provider       *config.Provider
 	RouteMatch     string
-	TargetModel    string
+	Candidates     []Candidate
 	VisionProvider *config.Provider // 可能为 nil
 	VisionModel    string
 }
@@ -20,22 +27,37 @@ type Match struct {
 // MatchRoute 根据模型名匹配路由规则，首条命中生效（对齐 minimatch nocase）。
 func MatchRoute(model string, cfg *config.Config) *Match {
 	for _, route := range cfg.Routes {
-		if globMatch(strings.ToLower(route.Match), strings.ToLower(model)) {
-			// 复制 Provider 结构体，避免并发请求修改共享指针字段（如 APIKey）
-			pSrc := cfg.Providers[route.Provider]
-			pCopy := *pSrc
-			target := route.Model
-			if target == "" {
-				target = model
+		if !globMatch(strings.ToLower(route.Match), strings.ToLower(model)) {
+			continue
+		}
+		targets := route.TargetList()
+		candidates := make([]Candidate, 0, len(targets))
+		for _, target := range targets {
+			src := cfg.Providers[target.Provider]
+			if src == nil {
+				// 校验期已拦截未定义 provider；此处保守跳过，避免运行时 panic。
+				continue
 			}
-			m := &Match{Provider: &pCopy, RouteMatch: route.Match, TargetModel: target}
-			if route.Vision != nil {
-				vpCopy := *cfg.Providers[route.Vision.Provider]
+			// 复制 Provider 结构体，避免并发请求修改共享指针字段（如 APIKey）
+			pCopy := *src
+			targetModel := target.Model
+			if targetModel == "" {
+				targetModel = model
+			}
+			candidates = append(candidates, Candidate{Provider: &pCopy, TargetModel: targetModel})
+		}
+		if len(candidates) == 0 {
+			continue
+		}
+		m := &Match{RouteMatch: route.Match, Candidates: candidates}
+		if route.Vision != nil {
+			if vSrc := cfg.Providers[route.Vision.Provider]; vSrc != nil {
+				vpCopy := *vSrc
 				m.VisionProvider = &vpCopy
 				m.VisionModel = route.Vision.Model
 			}
-			return m
 		}
+		return m
 	}
 	return nil
 }

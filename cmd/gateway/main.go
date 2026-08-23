@@ -27,6 +27,7 @@ import (
 	"time"
 	_ "time/tzdata" // 嵌入时区数据库，使 distroless 等无 tzdata 的镜像也能解析 Asia/Shanghai
 
+	"ai-gateway/internal/breaker"
 	"ai-gateway/internal/cache"
 	"ai-gateway/internal/config"
 	"ai-gateway/internal/converter"
@@ -99,6 +100,7 @@ func main() {
 		translator:     translator,
 		metrics:        metrics.NewCollector(1000),
 		providerHealth: providerhealth.NewChecker(),
+		breaker:        breaker.New(breakerSettings(cfg)),
 		webDevDir:      os.Getenv("AI_GATEWAY_WEB_DIR"),
 	}
 	initialLimits := make(map[string]queue.Limits, len(cfg.Providers))
@@ -188,6 +190,7 @@ type server struct {
 	translator     visionRuntime
 	metrics        *metrics.Collector
 	providerHealth providerHealthRuntime
+	breaker        *breaker.Breaker
 	webDevDir      string
 }
 
@@ -258,6 +261,21 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.handleProviderHealthCheck(w, r)
+		return
+	}
+
+	// 手动重置熔断器。不与 /api/providers/health 合并：两者判据不同，
+	// 耦合起来「为什么这个上游被放行了」会变得难以解释。
+	if urlPath == "/api/providers/breaker/reset" {
+		if r.Method != http.MethodPost {
+			writeMethodNotAllowed(w, http.MethodPost)
+			return
+		}
+		if isCrossSiteRequest(r) {
+			writeForbiddenOrigin(w)
+			return
+		}
+		s.handleBreakerReset(w, r)
 		return
 	}
 
@@ -366,7 +384,7 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 	reqLog.Model = model
 	reqLog.Stream = internal.Stream
 
-	// 路由匹配
+	// 路由匹配：得到按配置顺序排列的候选列表，作为故障转移的尝试顺序
 	matched := router.MatchRoute(model, cfg)
 	if matched == nil {
 		reqLog.Error = fmt.Sprintf("没有匹配 model %q 的路由规则", model)
@@ -374,30 +392,22 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	reqLog.Route = matched.RouteMatch
-	reqLog.Provider = matched.Provider.Name
-	reqLog.TargetModel = matched.TargetModel
-	p := matched.Provider
-	apiKey, keySource := router.ResolveAPIKeyWithSource(p, r.Header)
-	p.APIKey = apiKey
-	reqLog.KeySource = keySource
-	reqLog.KeyFingerprint = keyFingerprint(apiKey)
 
 	// 是否需要视觉识别：路由配了 vision 且消息含图片
 	needVision := matched.VisionProvider != nil && vision.HasImages(internal.Messages)
-	isPassthrough := converter.IsPassthrough(p.Format, clientFormat)
-	if internal.Err != nil && !isPassthrough {
-		reqLog.Error = "请求协议转换失败: " + internal.Err.Error()
-		writeJSONError(w, http.StatusBadRequest, "conversion_error", reqLog.Error)
-		return
-	}
 	reqLog.Vision = needVision
-	displayModel := matched.TargetModel
+
+	// 首个候选决定日志与提示里的展示信息（真实使用的候选在循环里逐次覆盖）
+	first := matched.Candidates[0]
+	reqLog.Provider = first.Provider.Name
+	reqLog.TargetModel = first.TargetModel
+	displayModel := first.TargetModel
 	if needVision {
 		displayModel = matched.VisionModel
 	}
 	logf(reqID, "→ %s → %s [%d msgs, stream=%v]", model, displayModel, len(internal.Messages), internal.Stream)
 
-	// 图片翻译：把图片块替换为视觉模型生成的文字描述
+	// 图片翻译放在候选循环之外：产出的是文字描述，与具体目标无关，重复调用纯浪费
 	if needVision {
 		vp := matched.VisionProvider
 		vp.APIKey = router.ResolveAPIKey(vp, r.Header)
@@ -405,56 +415,231 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 			func(f string, a ...any) { logf(reqID, f, a...) })
 	}
 
+	// 候选尝试范围：failover 关闭时只试首个候选，行为与单目标时代一致
+	attemptLimit := 1
+	if cfg.Failover.Enabled && len(matched.Candidates) > 1 {
+		attemptLimit = cfg.Failover.MaxAttempts
+		if attemptLimit > len(matched.Candidates) {
+			attemptLimit = len(matched.Candidates)
+		}
+		if attemptLimit < 1 {
+			attemptLimit = 1
+		}
+	}
+
+	var (
+		trail         []string
+		buildErr      string
+		attempts      int
+		lastAbandoned bool
+		breakerSkips  int
+		soonestRetry  time.Duration
+	)
+	// 遍历全部候选，但真实尝试次数受 attemptLimit 约束：
+	// 被熔断跳过的候选不消耗尝试额度，否则熔断反而会削弱可用性。
+	for i := 0; i < len(matched.Candidates) && attempts < attemptLimit; i++ {
+		candidate := matched.Candidates[i]
+		name := candidate.Provider.Name
+
+		// 熔断过滤：开路的 provider 直接跳过，不占用尝试额度
+		if s.breaker != nil {
+			allowed, retryAfter := s.breaker.Allow(name)
+			if !allowed {
+				breakerSkips++
+				trail = append(trail, name+":breaker_open")
+				if retryAfter > 0 && (soonestRetry == 0 || retryAfter < soonestRetry) {
+					soonestRetry = retryAfter
+				}
+				logf(reqID, "  候选 %s 已熔断，跳过（剩余冷却 %dms）", name, retryAfter.Milliseconds())
+				continue
+			}
+		}
+
+		// 是否还有后续候选可试：额度未用尽且后面还有候选
+		hasNext := attempts+1 < attemptLimit && i+1 < len(matched.Candidates)
+
+		outcome := s.forwardAttempt(w, r, forwardAttemptInput{
+			cfg:           cfg,
+			reqID:         reqID,
+			start:         start,
+			clientFormat:  clientFormat,
+			originalModel: model,
+			internal:      internal,
+			rawBody:       body,
+			needVision:    needVision,
+			candidate:     candidate,
+			allowRetry:    hasNext,
+			attemptNo:     attempts + 1,
+			reqLog:        &reqLog,
+		})
+
+		if outcome.buildErr != "" {
+			// 该候选构建不出上游请求（协议不兼容等）：跳过，换下一个。
+			// 未发起网络请求，须归还熔断的探针额度。
+			if s.breaker != nil {
+				s.breaker.Report(name, breaker.OutcomeIgnored)
+			}
+			buildErr = outcome.buildErr
+			trail = append(trail, fmt.Sprintf("%s:build_error", name))
+			logf(reqID, "  候选 %s 构建失败，跳过: %s", name, outcome.buildErr)
+			continue
+		}
+
+		if s.breaker != nil {
+			s.breaker.Report(name, outcome.breakerOutcome)
+		}
+		attempts++
+		trail = append(trail, outcome.trail)
+		lastAbandoned = outcome.abandoned
+		if !outcome.abandoned {
+			break
+		}
+		logf(reqID, "  候选 %s 放弃（%s），尝试下一个", name, outcome.trail)
+	}
+
+	reqLog.Attempts = attempts
+	if len(trail) > 1 {
+		reqLog.AttemptTrail = strings.Join(trail, " → ")
+	}
+
+	switch {
+	case attempts == 0 && breakerSkips > 0:
+		// 全部候选被熔断：给出最早恢复者的剩余冷却，让客户端知道何时重试
+		reqLog.AttemptTrail = strings.Join(trail, " → ")
+		reqLog.Error = "全部候选上游已熔断"
+		if soonestRetry > 0 {
+			seconds := int(soonestRetry.Seconds())
+			if seconds < 1 {
+				seconds = 1
+			}
+			w.Header().Set("retry-after", strconv.Itoa(seconds))
+		}
+		writeJSONError(w, http.StatusServiceUnavailable, "breaker_open", reqLog.Error)
+	case attempts == 0:
+		// 全部候选都构建失败：此时没有任何一次真实转发，需自行写终态
+		reqLog.Error = "上游请求协议转换失败: " + buildErr
+		reqLog.AttemptTrail = strings.Join(trail, " → ")
+		writeJSONError(w, http.StatusBadRequest, "conversion_error", reqLog.Error)
+	case lastAbandoned:
+		// 兜底：最后一次尝试被放弃却没有后续候选可试（例如剩余候选全被熔断）。
+		// 放弃时未向客户端写入任何字节，必须在这里补一个终态响应。
+		reqLog.Error = "全部候选上游均不可用"
+		writeJSONError(w, http.StatusBadGateway, "all_candidates_failed", reqLog.Error)
+	}
+}
+
+// forwardAttemptInput 单次候选尝试的输入，字段在循环内不被修改。
+type forwardAttemptInput struct {
+	cfg           *config.Config
+	reqID         string
+	start         time.Time
+	clientFormat  string
+	originalModel string
+	internal      *converter.Internal
+	rawBody       map[string]any
+	needVision    bool
+	candidate     router.Candidate
+	attemptNo     int // 从 1 开始，用于 x-ai-gateway-attempts
+	allowRetry    bool
+	reqLog        *metrics.RequestLog
+}
+
+// forwardAttemptOutcome 单次尝试结果。
+// buildErr 非空表示该候选无法构建上游请求，未发起任何网络请求；
+// abandoned 表示已发起请求但按 failover 策略放弃，且未向客户端写入任何字节。
+type forwardAttemptOutcome struct {
+	buildErr  string
+	abandoned bool
+	trail     string // "provider:429/ratelimit"
+	// breakerOutcome 本次尝试对熔断计数的影响，由调用方汇报给 breaker。
+	breakerOutcome breaker.Outcome
+}
+
+// forwardAttempt 执行单个候选的一次转发尝试。
+// 队列 slot 的 release 收在本函数的 defer 里，循环多次尝试也不会累积占用。
+func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwardAttemptInput) forwardAttemptOutcome {
+	cfg := in.cfg
+	reqID := in.reqID
+	p := in.candidate.Provider
+	targetModel := in.candidate.TargetModel
+
+	apiKey, keySource := router.ResolveAPIKeyWithSource(p, r.Header)
+	p.APIKey = apiKey
+
+	isPassthrough := converter.IsPassthrough(p.Format, in.clientFormat)
+	if in.internal.Err != nil && !isPassthrough {
+		return forwardAttemptOutcome{buildErr: "请求协议转换失败: " + in.internal.Err.Error()}
+	}
+
 	// 内部格式 → 上游 provider 请求体
-	var upstreamMap map[string]any
+	var (
+		upstreamMap map[string]any
+		err         error
+	)
 	if isPassthrough {
 		// 同格式请求无需 canonical 重建；保留 provider 原生扩展字段，只替换路由后的 model。
-		upstreamMap = body
-		upstreamMap["model"] = matched.TargetModel
-		if needVision {
+		// 必须浅拷贝：直接改 in.rawBody 会污染后续候选的输入。
+		upstreamMap = make(map[string]any, len(in.rawBody)+1)
+		for key, value := range in.rawBody {
+			upstreamMap[key] = value
+		}
+		upstreamMap["model"] = targetModel
+		if in.needVision {
 			// 图片翻译只覆盖 messages，system/tools 等 provider 原生扩展仍保留原值。
 			var translated map[string]any
 			if p.Format == "anthropic" {
-				translated = converter.ToAnthropicBody(internal, matched.TargetModel)
+				translated = converter.ToAnthropicBody(in.internal, targetModel)
 			} else {
-				translated = converter.ToOpenAIChatBody(internal, matched.TargetModel)
+				translated = converter.ToOpenAIChatBody(in.internal, targetModel)
 			}
-			upstreamMap["messages"] = mergeTranslatedMessageContent(body["messages"], translated["messages"])
+			upstreamMap["messages"] = mergeTranslatedMessageContent(in.rawBody["messages"], translated["messages"])
 		}
 	} else if p.Format == "anthropic" {
-		upstreamMap, err = converter.ToAnthropicBodyChecked(internal, matched.TargetModel)
+		upstreamMap, err = converter.ToAnthropicBodyChecked(in.internal, targetModel)
 	} else {
-		upstreamMap, err = converter.ToOpenAIChatBodyChecked(internal, matched.TargetModel)
+		upstreamMap, err = converter.ToOpenAIChatBodyChecked(in.internal, targetModel)
 	}
 	if err != nil {
-		reqLog.Error = "上游请求协议转换失败: " + err.Error()
-		writeJSONError(w, http.StatusBadRequest, "conversion_error", reqLog.Error)
-		return
+		return forwardAttemptOutcome{buildErr: err.Error()}
 	}
 	upstreamBody, err := json.Marshal(upstreamMap)
 	if err != nil {
-		reqLog.Error = "上游请求体序列化失败: " + err.Error()
-		writeJSONError(w, http.StatusInternalServerError, "gateway_error", reqLog.Error)
-		return
+		in.reqLog.Error = "上游请求体序列化失败: " + err.Error()
+		writeJSONError(w, http.StatusInternalServerError, "gateway_error", in.reqLog.Error)
+		// 网关侧序列化失败，与上游健康无关
+		return forwardAttemptOutcome{trail: p.Name + ":serialize_error", breakerOutcome: breaker.OutcomeIgnored}
 	}
+
+	// 本次尝试真正会用到该候选，更新日志归属
+	in.reqLog.Provider = p.Name
+	in.reqLog.TargetModel = targetModel
+	in.reqLog.KeySource = keySource
+	in.reqLog.KeyFingerprint = keyFingerprint(apiKey)
 
 	// 直通模式：跳过队列（并发/限速/排队），请求直接转发；超时用 direct* 配置。
 	// 非直通模式：先经队列获取执行槽位（并发 + 限速 + 等待超时）。
 	if !cfg.DirectMode {
 		release, waitMs, err := s.qm.Acquire(r.Context(), p.Name, p.MaxConcurrent, p.MaxPerSecond, p.MaxQueueWait)
-		reqLog.QueueWaitMs = waitMs
+		in.reqLog.QueueWaitMs += waitMs
 		if err != nil {
-			reqLog.Error = err.Error()
 			logf(reqID, "  队列处理异常: %s", err.Error())
 			if err == queue.ErrQueueTimeout {
+				// 排队超时且允许转移：换下一个候选，别把客户端 503 掉
+				if in.allowRetry && config.BoolOr(cfg.Failover.OnQueueTimeout, true) && cfg.Failover.Enabled {
+					// 本地队列背压，不是上游故障
+					return forwardAttemptOutcome{abandoned: true, trail: p.Name + ":queue_timeout", breakerOutcome: breaker.OutcomeIgnored}
+				}
+				in.reqLog.Error = err.Error()
 				writeJSONError(w, http.StatusServiceUnavailable, "queue_timeout", err.Error())
 			} else if r.Context().Err() != nil {
 				// 客户端已断开，net/http 会忽略写入，无需也不应写响应
+				in.reqLog.Error = err.Error()
 				logf(reqID, "  客户端已断开，跳过响应")
 			} else {
+				in.reqLog.Error = err.Error()
 				writeJSONError(w, http.StatusBadGateway, "gateway_error", "队列错误: "+err.Error())
 			}
-			return
+			return forwardAttemptOutcome{trail: p.Name + ":queue_error", breakerOutcome: breaker.OutcomeIgnored}
 		}
 		defer release()
 	}
@@ -469,32 +654,167 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		activityTimeoutMs = cfg.DirectTimeoutStreamActive
 	}
 
+	// 告知客户端实际服务的候选与尝试次数（对齐 Cloudflare 的 cf-aig-step 思路）。
+	// 所有放弃都发生在 WriteHeader 之前，因此这里覆盖写入是安全的，流式响应也能带上。
+	h := w.Header()
+	h.Set("x-ai-gateway-provider", p.Name)
+	h.Set("x-ai-gateway-attempts", strconv.Itoa(in.attemptNo))
+
+	var (
+		abandonReason  atomic.Value // string
+		abandonBreaker atomic.Value // breaker.Outcome
+		// attemptStatus 本次尝试拿到的上游状态码，0 表示上游没给出响应头。
+		// 必须用本次尝试的局部变量，不能直接读 in.reqLog.UpstreamStatus：后者跨候选
+		// 共享，候选 1 的 502 会在候选 2 传输失败（不上报）时被当成候选 2 的状态码。
+		attemptStatus int
+	)
 	opts := &proxy.Options{
 		ClientReq:             r,
 		ClientRes:             w,
 		UpstreamBody:          upstreamBody,
 		Provider:              p,
-		ClientFormat:          clientFormat,
-		OriginalModel:         model,
-		IsStreaming:           internal.Stream,
+		ClientFormat:          in.clientFormat,
+		OriginalModel:         in.originalModel,
+		IsStreaming:           in.internal.Stream,
 		Log:                   func(f string, a ...any) { logf(reqID, f, a...) },
-		StartTime:             start,
+		StartTime:             in.start,
 		TimeoutMs:             timeoutMs,
 		HeaderTimeoutMs:       headerTimeoutMs,
 		StreamActivityTimeout: activityTimeoutMs,
 		HTTPClient:            s.httpClient,
+		// 记录真实上游状态码：熔断判据和请求日志都要用。proxy 只在确实拿到
+		// 响应头时回调，因此 0 恒表示「上游没给状态码」而非「上游返回 0」。
+		// 回调与 Forward 同 goroutine 同步执行，无需额外同步。
+		OnUpstreamStatus: func(code int) {
+			attemptStatus = code
+			in.reqLog.UpstreamStatus = code
+		},
 	}
-	if err := proxy.Forward(opts); err != nil {
-		reqLog.Error = err.Error()
-		// 区分客户端断开、超时、其他错误，避免把正常断开误报为异常
-		if errors.Is(err, context.Canceled) {
-			logf(reqID, "  客户端断开连接")
-		} else if errors.Is(err, context.DeadlineExceeded) {
-			logf(reqID, "  转发超时（%d秒）: %s", timeoutMs/1000, err.Error())
-		} else {
-			logf(reqID, "  转发结束（异常）: %s", err.Error())
+	if in.allowRetry {
+		opts.ShouldRetry = func(upstreamCode int, retryAfter time.Duration, err error) bool {
+			reason, ok := failoverReason(&cfg.Failover, upstreamCode, retryAfter, err)
+			if !ok {
+				return false
+			}
+			abandonReason.Store(reason)
+			abandonBreaker.Store(breakerOutcomeFor(upstreamCode, err))
+			return true
 		}
 	}
+
+	forwardErr := proxy.Forward(opts)
+	if errors.Is(forwardErr, proxy.ErrAttemptAbandoned) {
+		reason, _ := abandonReason.Load().(string)
+		if reason == "" {
+			reason = "abandoned"
+		}
+		outcome, ok := abandonBreaker.Load().(breaker.Outcome)
+		if !ok {
+			outcome = breaker.OutcomeIgnored
+		}
+		return forwardAttemptOutcome{abandoned: true, trail: p.Name + ":" + reason, breakerOutcome: outcome}
+	}
+
+	upstreamStatus := attemptStatus
+	if forwardErr != nil {
+		in.reqLog.Error = forwardErr.Error()
+		// 区分客户端断开、超时、其他错误，避免把正常断开误报为异常
+		if errors.Is(forwardErr, context.Canceled) {
+			logf(reqID, "  客户端断开连接")
+		} else if errors.Is(forwardErr, context.DeadlineExceeded) {
+			logf(reqID, "  转发超时（%d秒）: %s", timeoutMs/1000, forwardErr.Error())
+		} else {
+			logf(reqID, "  转发结束（异常）: %s", forwardErr.Error())
+		}
+	}
+	status := upstreamStatus
+	if status == 0 {
+		status = statusFromRecorder(w)
+	}
+	// 熔断判据用 upstreamStatus 而非 status：后者在上游无响应时会回落到网关自己写的
+	// 状态码，据此判断会把网关侧错误算到上游头上。upstreamStatus 为 0 时按 forwardErr
+	// 分类，正好覆盖传输错误与超时。
+	//
+	// 这里必须显式赋值：OutcomeSuccess 是零值，漏赋会让最后一个候选（allowRetry=false，
+	// 不触发放弃）的 5xx 被当成成功上报，既开不了路还会清零此前累积的失败streak。
+	return forwardAttemptOutcome{
+		trail:          fmt.Sprintf("%s:%d", p.Name, status),
+		breakerOutcome: breakerOutcomeFor(upstreamStatus, forwardErr),
+	}
+}
+
+// failoverReason 按 failover 配置判定一次失败能否转移，返回 trail 用的分类名。
+func failoverReason(f *config.Failover, upstreamCode int, retryAfter time.Duration, err error) (string, bool) {
+	if !f.Enabled {
+		return "", false
+	}
+	if upstreamCode == 0 {
+		// 传输层失败：连接错误 / 超时
+		switch {
+		case errors.Is(err, proxy.ErrStreamHeaderTimeout):
+			return "header_timeout", f.TransferOnStreamHeaderTimeout()
+		case errors.Is(err, proxy.ErrRequestTimeout), errors.Is(err, context.DeadlineExceeded):
+			return "timeout", f.TransferOnTransportError()
+		default:
+			return "transport_error", f.TransferOnTransportError()
+		}
+	}
+	switch {
+	case upstreamCode == http.StatusTooManyRequests:
+		if !f.TransferOnRateLimit() {
+			return "", false
+		}
+		// Retry-After 超过阈值说明该 provider 短期没戏，同样转移
+		return "429/ratelimit", true
+	case upstreamCode == http.StatusUnauthorized || upstreamCode == http.StatusForbidden:
+		// 默认关闭：key 配错时转移只会连锁失败，且掩盖真实原因
+		return fmt.Sprintf("%d/auth", upstreamCode), f.TransferOnAuthError()
+	case upstreamCode >= 500:
+		return fmt.Sprintf("%d/server", upstreamCode), f.TransferOnServerError()
+	default:
+		// 4xx 业务错误（400 参数错、404 模型不存在等）换 provider 也是同样结果
+		return "", false
+	}
+}
+
+// breakerOutcomeFor 把一次尝试结果归类成熔断判据。
+//
+// 计入失败：传输错误、超时、5xx。
+// 不计入：429（上游正常限流，判成故障比不熔断更糟）、401/403（配置问题，熔断修不了
+// 还会掩盖密钥过期）、客户端主动断开、普通 4xx（请求本身的问题）。
+func breakerOutcomeFor(upstreamCode int, err error) breaker.Outcome {
+	if upstreamCode == 0 {
+		switch {
+		case errors.Is(err, context.Canceled):
+			// 客户端断开，与上游健康无关
+			return breaker.OutcomeIgnored
+		case err != nil:
+			return breaker.OutcomeFailure
+		default:
+			return breaker.OutcomeIgnored
+		}
+	}
+	switch {
+	case upstreamCode == http.StatusTooManyRequests:
+		return breaker.OutcomeIgnored
+	case upstreamCode == http.StatusUnauthorized || upstreamCode == http.StatusForbidden:
+		return breaker.OutcomeIgnored
+	case upstreamCode >= 500:
+		return breaker.OutcomeFailure
+	case upstreamCode >= 200 && upstreamCode < 400:
+		return breaker.OutcomeSuccess
+	default:
+		// 普通 4xx：上游是健康的，只是这个请求它不接受
+		return breaker.OutcomeIgnored
+	}
+}
+
+// statusFromRecorder 读取已写回客户端的状态码，用于 trail 记录。
+func statusFromRecorder(w http.ResponseWriter) int {
+	if rec, ok := w.(*statusRecorder); ok {
+		return rec.Status()
+	}
+	return 0
 }
 
 func mergeTranslatedMessageContent(original, translated any) any {
@@ -556,6 +876,8 @@ func (s *server) handleHealth(w http.ResponseWriter, head bool) {
 			"total":       cs.Total,
 			"contentSize": cs.ContentSize,
 		},
+		// breakers 为 null 表示熔断未启用，与「全部健康」区分开
+		"breakers": s.breakerSnapshot(),
 		"memory": map[string]any{
 			"heapAllocMB": m.HeapAlloc / 1024 / 1024,
 			"sysMB":       m.Sys / 1024 / 1024,
@@ -572,6 +894,39 @@ func (s *server) handleHealth(w http.ResponseWriter, head bool) {
 	if !head {
 		_, _ = w.Write(out)
 	}
+}
+
+// breakerSnapshot 返回熔断状态快照，未启用或未构造时返回 nil。
+func (s *server) breakerSnapshot() map[string]breaker.State {
+	if s.breaker == nil {
+		return nil
+	}
+	return s.breaker.Snapshot()
+}
+
+// handleBreakerReset 手动闭合熔断器。带 provider 参数时只重置该 provider，否则全部重置。
+//
+// 不与 POST /api/providers/health 合并：两者判据不同（一个探 /v1/models，
+// 一个看真实请求结果），耦合起来行为难解释。
+func (s *server) handleBreakerReset(w http.ResponseWriter, r *http.Request) {
+	if s.breaker == nil {
+		writeJSONError(w, http.StatusServiceUnavailable, "gateway_error", "熔断器未启用")
+		return
+	}
+	provider := r.URL.Query().Get("provider")
+	payload := map[string]any{}
+	if provider != "" {
+		payload["provider"] = provider
+		payload["reset"] = s.breaker.Reset(provider)
+	} else {
+		payload["reset"] = s.breaker.ResetAll()
+	}
+	payload["breakers"] = s.breaker.Snapshot()
+	out, _ := json.MarshalIndent(payload, "", "  ")
+	w.Header().Set("content-type", "application/json")
+	w.Header().Set("content-length", fmt.Sprintf("%d", len(out)))
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(out)
 }
 
 func (s *server) handleProviderHealthCheck(w http.ResponseWriter, r *http.Request) {
@@ -1045,6 +1400,14 @@ func (s *server) applyRuntimeConfig(newCfg *config.Config, revision string) []st
 	if s.translator != nil {
 		s.translator.SetDirectMode(newCfg.DirectMode)
 	}
+	if s.breaker != nil {
+		s.breaker.SetSettings(breakerSettings(newCfg))
+		active := make(map[string]struct{}, len(newCfg.Providers))
+		for name := range newCfg.Providers {
+			active[name] = struct{}{}
+		}
+		s.breaker.Reconcile(active)
+	}
 	s.cfg = newCfg
 	s.revision = revision
 	s.cfgMu.Unlock()
@@ -1055,6 +1418,16 @@ func (s *server) applyRuntimeConfig(newCfg *config.Config, revision string) []st
 		}
 	}
 	return restartRequired
+}
+
+// breakerSettings 把配置里的 breaker 块映射成熔断器参数。
+func breakerSettings(cfg *config.Config) breaker.Settings {
+	return breaker.Settings{
+		Enabled:             cfg.Breaker.Enabled,
+		ConsecutiveFailures: cfg.Breaker.ConsecutiveFailures,
+		OpenMs:              cfg.Breaker.OpenMs,
+		HalfOpenProbes:      cfg.Breaker.HalfOpenProbes,
+	}
 }
 
 func restartRequiredFields(cfg *config.Config, listenHost string, listenPort int) []string {

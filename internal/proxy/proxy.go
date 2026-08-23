@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -28,13 +29,39 @@ const (
 	maxResponseBodyBytes = 32 << 20
 	maxErrorBodyBytes    = 1 << 20
 	maxSSEEventBytes     = 8 << 20
+	// maxDrainBytes 放弃尝试时最多 drain 的响应体字节数，用于保住连接复用。
+	maxDrainBytes = 64 << 10
 )
 
 var (
 	errResponseBodyTooLarge  = errors.New("上游响应体超过大小限制")
 	errSSEEventTooLarge      = errors.New("上游 SSE 事件超过大小限制")
 	errStreamActivityTimeout = errors.New("流式传输活跃超时")
+
+	// ErrAttemptAbandoned 表示 ShouldRetry 判定放弃本次尝试，未向客户端写入任何字节。
+	// 调用方应据此换下一个候选重试，或在候选耗尽后自行写终态响应。
+	ErrAttemptAbandoned = errors.New("本次尝试已放弃，交由调用方重试")
+	// ErrStreamHeaderTimeout 流式阶段等待上游响应头超时，此时客户端尚未收到任何字节。
+	ErrStreamHeaderTimeout = errors.New("上游响应头超时")
+	// ErrRequestTimeout 非流式整体超时。
+	ErrRequestTimeout = errors.New("上游请求超时")
 )
+
+// ShouldRetryFunc 判定一次失败的尝试能否放弃并交给调用方重试。
+//
+// 只在「尚未向客户端写入任何字节」时调用：
+//   - 返回 true：Forward 立即放弃本次尝试并返回 ErrAttemptAbandoned，不写客户端响应
+//   - 返回 false 或钩子为 nil：按既有逻辑把错误 / 上游响应写回客户端
+//
+// upstreamCode 为上游状态码（传输层失败时为 0），retryAfter 为解析后的
+// Retry-After（缺失或无法解析时为 0），err 为传输层错误（有响应时为 nil）。
+type ShouldRetryFunc func(upstreamCode int, retryAfter time.Duration, err error) bool
+
+// UpstreamStatusFunc 上报本次尝试真实拿到的上游状态码。
+//
+// 只在确实收到上游响应头时调用；传输错误、超时等没有响应的情况不调用，
+// 让调用方能用「未上报」区分「上游没给状态码」和「上游给了 5xx」。
+type UpstreamStatusFunc func(upstreamCode int)
 
 // Options 转发选项
 type Options struct {
@@ -51,6 +78,56 @@ type Options struct {
 	HeaderTimeoutMs       int // 流式：等上游响应头的超时（毫秒）。为 0 时回退用 TimeoutMs，保证非直通调用方行为不变
 	StreamActivityTimeout int
 	HTTPClient            *http.Client
+	// ShouldRetry 为 nil 时行为与不支持转移的旧版本完全一致。
+	// 流式响应一旦开始写入（handleStream）就不再询问：已发出的 SSE 字节不可回收。
+	ShouldRetry ShouldRetryFunc
+	// OnUpstreamStatus 收到上游响应头后上报状态码，可为 nil。
+	// 与 ShouldRetry 分开：后者只在「可放弃」的时机询问，拿不到最后一个候选
+	// （不允许转移）的状态码，而熔断判据恰恰需要它。
+	OnUpstreamStatus UpstreamStatusFunc
+}
+
+// recordUpstreamStatus 上报上游状态码，供调用方做熔断判据与请求日志。
+func recordUpstreamStatus(opts *Options, code int) {
+	if opts.OnUpstreamStatus != nil {
+		opts.OnUpstreamStatus(code)
+	}
+}
+
+// abandonAttempt 在尚未写入客户端时询问是否放弃本次尝试。
+func abandonAttempt(opts *Options, upstreamCode int, retryAfter time.Duration, err error) bool {
+	if opts.ShouldRetry == nil {
+		return false
+	}
+	return opts.ShouldRetry(upstreamCode, retryAfter, err)
+}
+
+// drainBody 限量 drain 响应体以保住连接复用；Close 由调用方的 defer 负责。
+func drainBody(resp *http.Response) {
+	if resp == nil || resp.Body == nil {
+		return
+	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxDrainBytes))
+}
+
+// parseRetryAfter 解析 Retry-After：整数秒或 HTTP-date。缺失或无法解析返回 0。
+func parseRetryAfter(h http.Header, now time.Time) time.Duration {
+	value := strings.TrimSpace(h.Get("Retry-After"))
+	if value == "" {
+		return 0
+	}
+	if seconds, err := strconv.Atoi(value); err == nil {
+		if seconds <= 0 {
+			return 0
+		}
+		return time.Duration(seconds) * time.Second
+	}
+	if deadline, err := http.ParseTime(value); err == nil {
+		if delay := deadline.Sub(now); delay > 0 {
+			return delay
+		}
+	}
+	return 0
 }
 
 // Forward 执行转发。返回时表示响应已完成（或已失败），调用方可释放队列 slot。
@@ -102,7 +179,16 @@ func Forward(opts *Options) error {
 				return nil
 			}
 			opts.Log("转发失败: %s", err.Error())
-			if headerTimedOut.Load() || errors.Is(err, context.DeadlineExceeded) {
+			isHeaderTimeout := headerTimedOut.Load() || errors.Is(err, context.DeadlineExceeded)
+			// 此处尚未向客户端写入任何字节，可安全放弃本次尝试交给调用方换候选。
+			retryErr := err
+			if isHeaderTimeout {
+				retryErr = fmt.Errorf("%w: %v", ErrStreamHeaderTimeout, err)
+			}
+			if abandonAttempt(opts, 0, 0, retryErr) {
+				return ErrAttemptAbandoned
+			}
+			if isHeaderTimeout {
 				writeJSONError(opts.ClientRes, http.StatusGatewayTimeout, "timeout_error", fmt.Sprintf("上游响应头超时 (%d秒)", headerTimeoutMs/1000))
 				return err
 			}
@@ -112,8 +198,14 @@ func Forward(opts *Options) error {
 		defer resp.Body.Close()
 
 		elapsed := time.Since(opts.StartTime).Milliseconds()
+		recordUpstreamStatus(opts, resp.StatusCode)
 		if resp.StatusCode >= 400 {
 			opts.Log("← HTTP %d [%dms]", resp.StatusCode, elapsed)
+			// 错误响应体还没读、客户端还没写，可放弃本次尝试。
+			if abandonAttempt(opts, resp.StatusCode, parseRetryAfter(resp.Header, time.Now()), nil) {
+				drainBody(resp)
+				return ErrAttemptAbandoned
+			}
 			return handleStreamError(ctx, cancel, resp, opts)
 		}
 		opts.Log("← %d [%dms]", resp.StatusCode, elapsed)
@@ -138,7 +230,15 @@ func Forward(opts *Options) error {
 			return nil
 		}
 		opts.Log("转发失败: %s", err.Error())
-		if errors.Is(err, context.DeadlineExceeded) {
+		isTimeout := errors.Is(err, context.DeadlineExceeded)
+		retryErr := err
+		if isTimeout {
+			retryErr = fmt.Errorf("%w: %v", ErrRequestTimeout, err)
+		}
+		if abandonAttempt(opts, 0, 0, retryErr) {
+			return ErrAttemptAbandoned
+		}
+		if isTimeout {
 			writeJSONError(opts.ClientRes, http.StatusGatewayTimeout, "timeout_error", fmt.Sprintf("上游请求超时 (%d秒)", opts.TimeoutMs/1000))
 			return err
 		}
@@ -148,8 +248,13 @@ func Forward(opts *Options) error {
 	defer resp.Body.Close()
 
 	elapsed := time.Since(opts.StartTime).Milliseconds()
+	recordUpstreamStatus(opts, resp.StatusCode)
 	if resp.StatusCode >= 400 {
 		opts.Log("← HTTP %d [%dms]", resp.StatusCode, elapsed)
+		if abandonAttempt(opts, resp.StatusCode, parseRetryAfter(resp.Header, time.Now()), nil) {
+			drainBody(resp)
+			return ErrAttemptAbandoned
+		}
 		return handleError(ctx, resp, opts.ClientRes, opts.Log)
 	}
 	opts.Log("← %d [%dms]", resp.StatusCode, elapsed)

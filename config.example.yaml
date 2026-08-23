@@ -16,6 +16,49 @@ directTimeoutNoStream: 60000      # 非流式整体超时，1000-300000
 directTimeoutStreamHeader: 60000  # 流式响应头超时，1000-300000
 directTimeoutStreamActive: 120000 # 流式活跃超时，5000-600000
 
+# ── 故障转移（failover，可选）─────────────────────────────────
+# 给路由配多个候选目标（见下方 routes 的 targets 写法）后，某个候选失败时
+# 自动换下一个候选重试。默认关闭；不写这个字段即为关闭，行为与单目标完全一致。
+#
+# 注意最坏耗时：每个候选各自享有完整的队列等待与超时预算，
+# maxAttempts: 2 且 maxQueueWait: 30000 + timeout: 120000 时，
+# 最坏情况客户端要等约 2 × 150 秒。候选数与各档超时要一起算。
+#
+# 转移只发生在「尚未向客户端写出任何字节」之前。流式响应一旦开始下发 SSE
+# 就不再转移（已发出的字节无法回收），中途失败仍补合规收尾事件。
+failover:
+  enabled: false          # 总开关，默认 false
+  maxAttempts: 2          # 单个请求最多尝试几个候选（1-5，默认 2）
+  maxRetryAfterMs: 5000   # 429 的 Retry-After 超过此值视为该 provider 短期无望（0-60000，默认 5000）
+  # 下面几项控制哪些失败允许转移，不写则用括号内默认值：
+  onTransportError: true       # 连接失败、上游不可达（默认 true）
+  onServerError: true          # 上游 5xx（默认 true）
+  onRateLimit: true            # 上游 429（默认 true）
+  onQueueTimeout: true         # 本地排队等待超时（默认 true）
+  onStreamHeaderTimeout: true  # 流式等响应头超时，此时客户端还没收到字节（默认 true）
+  onAuthError: false           # 上游 401/403（默认 false：key 配错时转移只会连锁失败并掩盖真实原因）
+
+# ── 熔断（breaker，可选）──────────────────────────────────────
+# 连续失败的 provider 会被暂时摘掉，后续请求直接跳过它换下一个候选，
+# 不必每次都等它超时。默认关闭；不写这个字段即为关闭。
+#
+# 判据只认「上游真的坏了」：传输错误、超时、5xx 计入失败；
+# 429 不计（上游正常限流，交给 failover 的 Retry-After 处理），
+# 401/403 不计（配置问题，熔断修不了还会掩盖密钥过期），
+# 本地队列超时不计（网关侧背压，与上游健康无关）。
+#
+# 状态机：closed →（连续失败达阈值）→ open →（冷却结束）→ half_open →（探测结果）→ closed / open。
+# 半开探针直接用下一个真实入站请求，不额外探 /v1/models —— 那个端点通了不代表聊天端点可用。
+#
+# 被熔断跳过的候选不消耗 failover 的 maxAttempts 额度，否则熔断反而会削弱可用性。
+# 全部候选都在熔断中时返回 503 + retry-after（取最早恢复者的剩余冷却）。
+# 状态可在 /health 的 breakers 字段查看，手动闭合用 POST /api/providers/breaker/reset[?provider=名字]。
+breaker:
+  enabled: false            # 总开关，默认 false
+  consecutiveFailures: 3    # 连续失败多少次打开熔断（1-100，默认 3）
+  openMs: 30000             # 打开后的冷却毫秒数，冷却结束转半开（1-600000，默认 30000）
+  halfOpenProbes: 1         # 半开状态放行几个探测请求（1-10，默认 1）
+
 # ── 缓存配置 ──────────────────────────────────────────────
 # 图片识别结果持久化缓存（SQLite）
 cache:
@@ -72,6 +115,16 @@ routes:
   - match: "claude-3-haiku*"
     provider: deepseek
     model: "deepseek-chat"
+
+  # 多目标写法：与上面的 provider/model 单目标写法互斥，二者只能选一种。
+  # 需要 failover.enabled: true 才会在首个候选失败时往下试；否则只用第一个。
+  # 候选按顺序尝试，最多 5 个；同 provider 换不同 model 也合法（降级到便宜模型）。
+  # - match: "claude-sonnet-4*"
+  #   targets:
+  #     - provider: mimo
+  #       model: "mimo-v2.5-pro"
+  #     - provider: deepseek
+  #       model: "deepseek-chat"
 
   - match: "*"
     provider: mimo
