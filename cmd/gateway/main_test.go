@@ -1095,6 +1095,168 @@ routes:
 `, host, port, baseURL, apiKey, maxConcurrent)
 }
 
+// TestModelsListDescribesMultiTargetRoutes 锁定 /v1/models 不再直接读 route.Provider。
+//
+// 多候选写法下校验强制 route.Provider / route.Model 为空，直接读会让每条 targets 路由
+// 输出 owned_by: ""、target_model: ""。
+func TestModelsListDescribesMultiTargetRoutes(t *testing.T) {
+	yaml := `host: "127.0.0.1"
+port: 7789
+providers:
+  primary:
+    baseUrl: "https://a.example.com"
+    apiKey: "k1"
+    format: openai
+    maxConcurrent: 5
+    maxPerSecond: 0
+    maxQueueWait: 30000
+  backup:
+    baseUrl: "https://b.example.com"
+    apiKey: "k2"
+    format: anthropic
+    maxConcurrent: 5
+    maxPerSecond: 0
+    maxQueueWait: 30000
+routes:
+  - match: "multi-*"
+    targets:
+      - provider: primary
+        model: model-a
+      - provider: backup
+        model: model-b
+    strategy: round-robin
+  - match: "single-*"
+    provider: primary
+    model: model-c
+`
+	srv := newConfigTestServer(t, yaml)
+	recorder := httptest.NewRecorder()
+	srv.handle(recorder, httptest.NewRequest(http.MethodGet, "http://gateway.test/v1/models", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d; body=%s", recorder.Code, recorder.Body.String())
+	}
+	var body struct {
+		Data []struct {
+			ID          string `json:"id"`
+			OwnedBy     string `json:"owned_by"`
+			TargetModel string `json:"target_model"`
+			Strategy    string `json:"strategy"`
+			Targets     []struct {
+				Provider string `json:"provider"`
+				Model    string `json:"model"`
+			} `json:"targets"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	byID := map[string]int{}
+	for i, entry := range body.Data {
+		byID[entry.ID] = i
+	}
+	multi, ok := byID["multi-*"]
+	if !ok {
+		t.Fatalf("缺少 multi-* 条目: body=%s", recorder.Body.String())
+	}
+	m := body.Data[multi]
+	if m.OwnedBy != "primary" || m.TargetModel != "model-a" {
+		t.Errorf("multi-* owned_by/target_model = %q/%q, 期望 primary/model-a", m.OwnedBy, m.TargetModel)
+	}
+	if len(m.Targets) != 2 || m.Targets[1].Provider != "backup" || m.Targets[1].Model != "model-b" {
+		t.Errorf("multi-* targets = %#v, 期望 2 个候选且第二个是 backup/model-b", m.Targets)
+	}
+	if m.Strategy != "round-robin" {
+		t.Errorf("multi-* strategy = %q, 期望 round-robin", m.Strategy)
+	}
+
+	single, ok := byID["single-*"]
+	if !ok {
+		t.Fatalf("缺少 single-* 条目: body=%s", recorder.Body.String())
+	}
+	s := body.Data[single]
+	if s.OwnedBy != "primary" || s.TargetModel != "model-c" {
+		t.Errorf("single-* owned_by/target_model = %q/%q, 期望 primary/model-c", s.OwnedBy, s.TargetModel)
+	}
+	if len(s.Targets) != 0 || s.Strategy != "" {
+		t.Errorf("单候选不应输出 targets/strategy，实际 targets=%#v strategy=%q", s.Targets, s.Strategy)
+	}
+}
+
+// TestGetConfigExposesFailoverAndBreaker 锁定「GET 必须吐出 failover / breaker」这半边契约。
+//
+// PUT /api/config 是全量替换、不与旧配置合并，所以前端只能靠 GET 读到这两块再原样回传。
+// 一旦 GET 不再返回它们，任何一次表单保存都会把用户手写的配置抹成零值
+// （applyDefaults 填出 enabled: false），且界面仍提示保存成功。
+func TestGetConfigExposesFailoverAndBreaker(t *testing.T) {
+	yaml := testConfigYAML("127.0.0.1", 7789, "https://api.example.com", "secret", 5) + `failover:
+  enabled: true
+  maxAttempts: 3
+breaker:
+  enabled: true
+  consecutiveFailures: 4
+`
+	srv := newConfigTestServer(t, yaml)
+	recorder := httptest.NewRecorder()
+	srv.handle(recorder, httptest.NewRequest(http.MethodGet, "http://gateway.test/api/config", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d; body=%s", recorder.Code, recorder.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	failover, ok := body["failover"].(map[string]any)
+	if !ok {
+		t.Fatalf("响应缺少 failover 块: body=%s", recorder.Body.String())
+	}
+	if failover["enabled"] != true {
+		t.Errorf("failover.enabled = %#v, 期望 true", failover["enabled"])
+	}
+	if failover["maxAttempts"] != float64(3) {
+		t.Errorf("failover.maxAttempts = %#v, 期望 3", failover["maxAttempts"])
+	}
+	brk, ok := body["breaker"].(map[string]any)
+	if !ok {
+		t.Fatalf("响应缺少 breaker 块: body=%s", recorder.Body.String())
+	}
+	if brk["enabled"] != true {
+		t.Errorf("breaker.enabled = %#v, 期望 true", brk["enabled"])
+	}
+	if brk["consecutiveFailures"] != float64(4) {
+		t.Errorf("breaker.consecutiveFailures = %#v, 期望 4", brk["consecutiveFailures"])
+	}
+}
+
+// TestPutConfigWithoutFailoverBlockDisablesIt 把「全量替换」的后果固化成测试。
+//
+// 这不是缺陷而是 PUT 的既定语义（严格解码 + 全量替换，便于用 API 关掉功能）：
+// 省略 failover 就等于关掉它。前端因此必须原样回传，见 configPayload()。
+func TestPutConfigWithoutFailoverBlockDisablesIt(t *testing.T) {
+	yaml := testConfigYAML("127.0.0.1", 7789, "https://api.example.com", "secret", 5) + `failover:
+  enabled: true
+  maxAttempts: 3
+`
+	srv := newConfigTestServer(t, yaml)
+	srv.cfgMu.RLock()
+	before := srv.cfg.Failover.Enabled
+	srv.cfgMu.RUnlock()
+	if !before {
+		t.Fatal("前置条件不成立：failover 应处于启用状态")
+	}
+
+	// 不带 failover 块的完整配置
+	recorder := putConfig(t, srv, testConfigYAML("127.0.0.1", 7789, "https://api.example.com", config.APIKeyKeepSentinel, 5), "")
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("PUT status = %d; body=%s", recorder.Code, recorder.Body.String())
+	}
+	srv.cfgMu.RLock()
+	after := srv.cfg.Failover.Enabled
+	srv.cfgMu.RUnlock()
+	if after {
+		t.Error("failover.enabled 仍为 true；PUT 应是全量替换")
+	}
+}
+
 func putConfig(t *testing.T, srv *server, body, ifMatch string) *httptest.ResponseRecorder {
 	t.Helper()
 	recorder := httptest.NewRecorder()

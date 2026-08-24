@@ -38,10 +38,14 @@ func newFailoverTestServer(providers map[string]*config.Provider, route config.R
 func defaultTestFailover() config.Failover {
 	on := true
 	off := false
+	attempts := 2
+	retryAfterCap := 5000
 	return config.Failover{
-		Enabled: true, MaxAttempts: 2, MaxRetryAfterMs: 5000,
+		Enabled: true, MaxAttempts: &attempts, MaxRetryAfterMs: &retryAfterCap,
 		OnTransportError: &on, OnServerError: &on, OnRateLimit: &on,
 		OnQueueTimeout: &on, OnStreamHeaderTimeout: &on, OnAuthError: &off,
+		// 非流式整体超时默认不转移，与 config.applyDefaults 一致
+		OnRequestTimeout: &off,
 	}
 }
 
@@ -260,8 +264,11 @@ func TestFailoverAuthErrorRespectsSwitch(t *testing.T) {
 	}
 }
 
-// TestFailoverRateLimitSkipsCandidateOverRetryAfterCap
-// 429 的 Retry-After 超过 maxRetryAfterMs 时跳过该候选，不做无谓等待。
+// TestFailoverRateLimitTransfersOnRetryAfter 429 且 Retry-After 在 maxRetryAfterMs 之内：
+// 正常转移，并且**消耗**一次尝试额度。
+//
+// 这里的 Retry-After: 1（1 秒，低于默认 5000ms 上限）就是「阈值之内」那一档；
+// 超阈值的不计额度路径由 TestFailoverRateLimitOverCapDoesNotConsumeAttempt 覆盖。
 func TestFailoverRateLimitTransfersOnRetryAfter(t *testing.T) {
 	var secondHits atomic.Int32
 	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -296,6 +303,268 @@ func TestFailoverRateLimitTransfersOnRetryAfter(t *testing.T) {
 	logs := srv.metrics.Logs(metrics.LogFilter{Limit: 10})
 	if len(logs) == 0 || !strings.Contains(logs[0].AttemptTrail, "limited:429/ratelimit") {
 		t.Fatalf("AttemptTrail 未记录 429 分类: %#v", logs)
+	}
+	// 阈值之内：这次 429 要计入额度，attempts 为 2
+	if logs[0].Attempts != 2 {
+		t.Errorf("Attempts = %d, 期望 2（阈值内的 429 消耗额度）", logs[0].Attempts)
+	}
+}
+
+// TestFailoverRateLimitOverCapDoesNotConsumeAttempt 429 的 Retry-After 超过
+// maxRetryAfterMs 时，该候选不消耗尝试额度。
+//
+// 回归点：maxRetryAfterMs 原先完全没有运行时读取点，配了等于没配。
+// 语义与熔断跳过一致 —— 上游明确说了这段时间不可用，那这次失败不该占掉
+// maxAttempts 里的一格，否则一个自曝限流的上游会挤掉本来还能试的健康候选。
+func TestFailoverRateLimitOverCapDoesNotConsumeAttempt(t *testing.T) {
+	var secondHits, thirdHits atomic.Int32
+	// Retry-After: 45 秒，远超默认 5000ms 上限
+	limited := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "45")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = io.WriteString(w, `{"error":"rate limited"}`)
+	}))
+	defer limited.Close()
+	broken := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		secondHits.Add(1)
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = io.WriteString(w, `{"error":"bad gateway"}`)
+	}))
+	defer broken.Close()
+	healthy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		thirdHits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, anthropicOKBody)
+	}))
+	defer healthy.Close()
+
+	providers := map[string]*config.Provider{
+		"limited": {Name: "limited", BaseURL: limited.URL, Format: "anthropic", MaxConcurrent: 1, MaxQueueWait: 500},
+		"broken":  {Name: "broken", BaseURL: broken.URL, Format: "anthropic", MaxConcurrent: 1, MaxQueueWait: 500},
+		"healthy": {Name: "healthy", BaseURL: healthy.URL, Format: "anthropic", MaxConcurrent: 1, MaxQueueWait: 500},
+	}
+	route := config.Route{Match: "*", Targets: []config.Target{
+		{Provider: "limited", Model: "m"}, {Provider: "broken", Model: "m"}, {Provider: "healthy", Model: "m"},
+	}}
+	// maxAttempts = 2：若 limited 消耗额度，broken 失败后就没机会试 healthy
+	failover := defaultTestFailover()
+	attempts := 2
+	failover.MaxAttempts = &attempts
+	srv := newFailoverTestServer(providers, route, limited.Client(), failover)
+
+	recorder := postInference(srv, "/v1/messages", `{"model":"client-model","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status/body = %d/%s, 期望 200（limited 不占额度，broken 之后还能试 healthy）", recorder.Code, recorder.Body.String())
+	}
+	if secondHits.Load() != 1 || thirdHits.Load() != 1 {
+		t.Fatalf("broken 命中 %d 次 / healthy 命中 %d 次, 期望各 1 次", secondHits.Load(), thirdHits.Load())
+	}
+	logs := srv.metrics.Logs(metrics.LogFilter{Limit: 10})
+	if len(logs) == 0 {
+		t.Fatal("没有请求日志")
+	}
+	if !strings.Contains(logs[0].AttemptTrail, "limited:429/retry_after_too_long") {
+		t.Errorf("AttemptTrail 未记录超阈值分类: %q", logs[0].AttemptTrail)
+	}
+	// limited 不计入，broken 与 healthy 各算一次
+	if logs[0].Attempts != 2 {
+		t.Errorf("Attempts = %d, 期望 2（limited 不消耗额度）", logs[0].Attempts)
+	}
+	if logs[0].Provider != "healthy" {
+		t.Errorf("Provider = %q, 期望 healthy", logs[0].Provider)
+	}
+}
+
+// TestFailoverRateLimitCapZeroMeansNoCap maxRetryAfterMs 显式写 0 表示不设上限，
+// 此时所有 429 照常消耗额度。
+//
+// 回归点：applyDefaults 原先用 `== 0` 判「未设置」，会把用户显式写的 0 改成 5000。
+func TestFailoverRateLimitCapZeroMeansNoCap(t *testing.T) {
+	var spareHits atomic.Int32
+	limited := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "45")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = io.WriteString(w, `{"error":"rate limited"}`)
+	}))
+	defer limited.Close()
+	spare := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		spareHits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, anthropicOKBody)
+	}))
+	defer spare.Close()
+
+	providers := map[string]*config.Provider{
+		"limited": {Name: "limited", BaseURL: limited.URL, Format: "anthropic", MaxConcurrent: 1, MaxQueueWait: 500},
+		"spare":   {Name: "spare", BaseURL: spare.URL, Format: "anthropic", MaxConcurrent: 1, MaxQueueWait: 500},
+	}
+	route := config.Route{Match: "*", Targets: []config.Target{
+		{Provider: "limited", Model: "m"}, {Provider: "spare", Model: "m"},
+	}}
+	failover := defaultTestFailover()
+	noCap := 0
+	failover.MaxRetryAfterMs = &noCap
+	srv := newFailoverTestServer(providers, route, limited.Client(), failover)
+
+	recorder := postInference(srv, "/v1/messages", `{"model":"client-model","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status/body = %d/%s, 期望 200", recorder.Code, recorder.Body.String())
+	}
+	if spareHits.Load() != 1 {
+		t.Fatalf("spare 命中 %d 次, 期望 1", spareHits.Load())
+	}
+	logs := srv.metrics.Logs(metrics.LogFilter{Limit: 10})
+	if len(logs) == 0 {
+		t.Fatal("没有请求日志")
+	}
+	// 不设上限：45 秒的 Retry-After 也走普通 429 分类并消耗额度
+	if !strings.Contains(logs[0].AttemptTrail, "limited:429/ratelimit") {
+		t.Errorf("AttemptTrail = %q, 期望普通 429 分类", logs[0].AttemptTrail)
+	}
+	if logs[0].Attempts != 2 {
+		t.Errorf("Attempts = %d, 期望 2", logs[0].Attempts)
+	}
+}
+
+// TestFailoverAllCandidatesRateLimitedReturns429 全部候选都自报超阈值限流时，
+// 客户端必须收到 429 而不是被误报成协议错误 400。
+//
+// 实际走的是「最后一个候选原样透传」这条路径：最后一个候选 allowRetry=false，
+// ShouldRetry 不会触发，proxy 直接把上游的 429 连同 Retry-After 写给客户端 ——
+// 比网关自己合成一个终态更准确。main.go 里的 all_candidates_rate_limited 分支
+// 只是防御性兜底。
+func TestFailoverAllCandidatesRateLimitedReturns429(t *testing.T) {
+	handler := func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "45")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = io.WriteString(w, `{"error":"rate limited"}`)
+	}
+	a := httptest.NewServer(http.HandlerFunc(handler))
+	defer a.Close()
+	b := httptest.NewServer(http.HandlerFunc(handler))
+	defer b.Close()
+
+	providers := map[string]*config.Provider{
+		"a": {Name: "a", BaseURL: a.URL, Format: "anthropic", MaxConcurrent: 1, MaxQueueWait: 500},
+		"b": {Name: "b", BaseURL: b.URL, Format: "anthropic", MaxConcurrent: 1, MaxQueueWait: 500},
+	}
+	route := config.Route{Match: "*", Targets: []config.Target{
+		{Provider: "a", Model: "m"}, {Provider: "b", Model: "m"},
+	}}
+	srv := newFailoverTestServer(providers, route, a.Client(), defaultTestFailover())
+
+	recorder := postInference(srv, "/v1/messages", `{"model":"client-model","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`)
+	if recorder.Code != http.StatusTooManyRequests {
+		t.Fatalf("status/body = %d/%s, 期望 429", recorder.Code, recorder.Body.String())
+	}
+	// 注：proxy.handleError 只回传状态码与响应体，不复制上游响应头，
+	// 因此上游的 Retry-After 目前不会到客户端手上。这是既有行为，与本次改动无关。
+	logs := srv.metrics.Logs(metrics.LogFilter{Limit: 10})
+	if len(logs) == 0 {
+		t.Fatal("没有请求日志")
+	}
+	// 第一个候选不计额度，第二个候选真实尝试一次
+	if logs[0].Attempts != 1 {
+		t.Errorf("Attempts = %d, 期望 1", logs[0].Attempts)
+	}
+	if !strings.Contains(logs[0].AttemptTrail, "a:429/retry_after_too_long") {
+		t.Errorf("AttemptTrail 未记录首个候选的超阈值跳过: %q", logs[0].AttemptTrail)
+	}
+}
+
+// TestFailoverRequestTimeoutHonorsOwnSwitch 非流式整体超时由独立的 onRequestTimeout
+// 控制，默认不转移。
+//
+// 回归点：原先它走 onTransportError（默认 true），与 config.go 里「非流式整体超时
+// 不可配置转移：会让总耗时翻倍」的注释直接矛盾，且想关掉就只能连带关掉真正的
+// 连接失败转移 —— 后者几乎不耗时，恰恰是 failover 最该覆盖的场景。
+func TestFailoverRequestTimeoutHonorsOwnSwitch(t *testing.T) {
+	cases := []struct {
+		name             string
+		onRequestTimeout bool
+		wantStatus       int
+		wantSpareHits    int32
+	}{
+		{"默认不转移：客户端拿到超时终态", false, http.StatusGatewayTimeout, 0},
+		{"显式开启后转移到下一个候选", true, http.StatusOK, 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var spareHits atomic.Int32
+			release := make(chan struct{})
+			slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				// 挂住直到测试结束或客户端超时断开，制造非流式整体超时
+				select {
+				case <-release:
+				case <-r.Context().Done():
+				}
+			}))
+			defer slow.Close()
+			defer close(release)
+			spare := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				spareHits.Add(1)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, anthropicOKBody)
+			}))
+			defer spare.Close()
+
+			providers := map[string]*config.Provider{
+				"slow":  {Name: "slow", BaseURL: slow.URL, Format: "anthropic", MaxConcurrent: 1, MaxQueueWait: 500},
+				"spare": {Name: "spare", BaseURL: spare.URL, Format: "anthropic", MaxConcurrent: 1, MaxQueueWait: 500},
+			}
+			route := config.Route{Match: "*", Targets: []config.Target{
+				{Provider: "slow", Model: "m"}, {Provider: "spare", Model: "m"},
+			}}
+			failover := defaultTestFailover()
+			failover.OnRequestTimeout = &tc.onRequestTimeout
+			srv := newFailoverTestServer(providers, route, slow.Client(), failover)
+			// 缩短超时，避免测试等满 1 秒
+			srv.cfg.DirectTimeoutNoStream = 150
+
+			recorder := postInference(srv, "/v1/messages", `{"model":"client-model","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`)
+			if recorder.Code != tc.wantStatus {
+				t.Fatalf("status/body = %d/%s, 期望 %d", recorder.Code, recorder.Body.String(), tc.wantStatus)
+			}
+			if spareHits.Load() != tc.wantSpareHits {
+				t.Fatalf("spare 命中 %d 次, 期望 %d", spareHits.Load(), tc.wantSpareHits)
+			}
+		})
+	}
+}
+
+// TestFailoverTransportErrorStillTransfersWithTimeoutOff 关掉超时转移不影响
+// 真正的连接失败转移 —— 这正是两者拆成独立开关的理由。
+func TestFailoverTransportErrorStillTransfersWithTimeoutOff(t *testing.T) {
+	var spareHits atomic.Int32
+	spare := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		spareHits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, anthropicOKBody)
+	}))
+	defer spare.Close()
+	// 起一个立刻关掉的服务拿到必然连不上的地址
+	dead := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	deadURL := dead.URL
+	dead.Close()
+
+	providers := map[string]*config.Provider{
+		"dead":  {Name: "dead", BaseURL: deadURL, Format: "anthropic", MaxConcurrent: 1, MaxQueueWait: 500},
+		"spare": {Name: "spare", BaseURL: spare.URL, Format: "anthropic", MaxConcurrent: 1, MaxQueueWait: 500},
+	}
+	route := config.Route{Match: "*", Targets: []config.Target{
+		{Provider: "dead", Model: "m"}, {Provider: "spare", Model: "m"},
+	}}
+	failover := defaultTestFailover()
+	off := false
+	failover.OnRequestTimeout = &off
+	srv := newFailoverTestServer(providers, route, spare.Client(), failover)
+
+	recorder := postInference(srv, "/v1/messages", `{"model":"client-model","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status/body = %d/%s, 期望 200（连接失败仍应转移）", recorder.Code, recorder.Body.String())
+	}
+	if spareHits.Load() != 1 {
+		t.Fatalf("spare 命中 %d 次, 期望 1", spareHits.Load())
 	}
 }
 

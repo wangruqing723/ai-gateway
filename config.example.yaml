@@ -29,13 +29,23 @@ directTimeoutStreamActive: 120000 # 流式活跃超时，5000-600000
 failover:
   enabled: false          # 总开关，默认 false
   maxAttempts: 2          # 单个请求最多尝试几个候选（1-5，默认 2）
-  maxRetryAfterMs: 5000   # 429 的 Retry-After 超过此值视为该 provider 短期无望（0-60000，默认 5000）
+  # 429 的 Retry-After 超过此值时，该候选「不消耗尝试额度」——
+  # 上游明确说了这段时间不可用，那这次失败不该占掉 maxAttempts 里的一格，
+  # 否则一个自曝限流的上游会挤掉本来还能试的健康候选（与熔断跳过同等待遇）。
+  # 范围 0-60000，默认 5000；显式写 0 表示不设上限（所有 429 照常消耗额度）。
+  maxRetryAfterMs: 5000
   # 下面几项控制哪些失败允许转移，不写则用括号内默认值：
   onTransportError: true       # 连接失败、上游不可达（默认 true）
   onServerError: true          # 上游 5xx（默认 true）
   onRateLimit: true            # 上游 429（默认 true）
   onQueueTimeout: true         # 本地排队等待超时（默认 true）
   onStreamHeaderTimeout: true  # 流式等响应头超时，此时客户端还没收到字节（默认 true）
+  # 非流式整体超时（默认 false）。开启后总耗时会接近翻倍（timeout × 候选数），
+  # 因为每个候选都要等满一整个 timeout 预算。单独一个开关而不并入
+  # onTransportError：后者覆盖的连接失败几乎不耗时，是 failover 最该管的场景，
+  # 不该为了关掉超时转移把它一起关掉。
+  # 流式活跃超时不可配置转移：那时字节已写给客户端，重发会污染流。
+  onRequestTimeout: false
   onAuthError: false           # 上游 401/403（默认 false：key 配错时转移只会连锁失败并掩盖真实原因）
 
 # ── 熔断（breaker，可选）──────────────────────────────────────
@@ -53,6 +63,8 @@ failover:
 # 被熔断跳过的候选不消耗 failover 的 maxAttempts 额度，否则熔断反而会削弱可用性。
 # 全部候选都在熔断中时返回 503 + retry-after（取最早恢复者的剩余冷却）。
 # 状态可在 /health 的 breakers 字段查看，手动闭合用 POST /api/providers/breaker/reset[?provider=名字]。
+#
+# 下面三项写 0 会直接报错而不是被当成「没写」：不写才用默认值。
 breaker:
   enabled: false            # 总开关，默认 false
   consecutiveFailures: 3    # 连续失败多少次打开熔断（1-100，默认 3）

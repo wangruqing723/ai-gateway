@@ -16,14 +16,14 @@ func TestExampleConfigPassesStrictDecode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("config.example.yaml 未通过严格解码/校验: %v", err)
 	}
-	if cfg.Breaker.ConsecutiveFailures != 3 {
-		t.Errorf("Breaker.ConsecutiveFailures = %d, 期望 3", cfg.Breaker.ConsecutiveFailures)
+	if got := cfg.Breaker.FailureThreshold(); got != 3 {
+		t.Errorf("Breaker.ConsecutiveFailures = %d, 期望 3", got)
 	}
-	if cfg.Breaker.OpenMs != 30000 {
-		t.Errorf("Breaker.OpenMs = %d, 期望 30000", cfg.Breaker.OpenMs)
+	if got := cfg.Breaker.CooldownMs(); got != 30000 {
+		t.Errorf("Breaker.OpenMs = %d, 期望 30000", got)
 	}
-	if cfg.Breaker.HalfOpenProbes != 1 {
-		t.Errorf("Breaker.HalfOpenProbes = %d, 期望 1", cfg.Breaker.HalfOpenProbes)
+	if got := cfg.Breaker.ProbeLimit(); got != 1 {
+		t.Errorf("Breaker.HalfOpenProbes = %d, 期望 1", got)
 	}
 	if cfg.Breaker.Enabled {
 		t.Error("Breaker.Enabled = true, 期望模板里默认关闭")

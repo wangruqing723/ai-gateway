@@ -20,6 +20,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // 策略取值。配置里的 route.strategy 与这些常量一一对应。
@@ -344,11 +346,42 @@ func StickyKey(system any, messages []any) string {
 		break
 	}
 	prefix := b.String()
-	if len(strings.TrimSpace(strings.ReplaceAll(prefix, "\x00", ""))) < stickyMinPrefixLen {
+	// 长度检查直接数，不要 ReplaceAll + TrimSpace：那会为一个 10-25 KB 的 system
+	// prompt 额外拷两份字符串，而这里只需要知道「去掉分隔符和首尾空白后够不够长」。
+	if visibleLen(prefix) < stickyMinPrefixLen {
 		return ""
 	}
 	sum := sha256.Sum256([]byte(prefix))
 	return hex.EncodeToString(sum[:])
+}
+
+// visibleLen 返回「剔除 NUL 分隔符、再去掉首尾空白」之后的字节数，不做任何分配。
+//
+// 语义等价于 len(strings.TrimSpace(strings.ReplaceAll(s, "\x00", "")))，
+// 但那种写法会为整段 system prompt 额外拷两份，而这里只是拿来和阈值比大小。
+func visibleLen(s string) int {
+	total, lead, trail := 0, 0, 0
+	seenNonSpace := false
+	for i := 0; i < len(s); {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		i += size
+		if r == 0 {
+			// NUL 是内部分隔符，不算内容；跳过后首尾空白判断才与 ReplaceAll 一致
+			continue
+		}
+		total += size
+		if unicode.IsSpace(r) {
+			if seenNonSpace {
+				trail += size
+			} else {
+				lead += size
+			}
+			continue
+		}
+		seenNonSpace = true
+		trail = 0
+	}
+	return total - lead - trail
 }
 
 // appendText 把 string / []any 内容块里的文本追加进 builder，其他类型忽略。

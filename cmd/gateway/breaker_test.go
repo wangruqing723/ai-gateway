@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -130,7 +132,8 @@ func TestBreakerSkipDoesNotConsumeAttemptBudget(t *testing.T) {
 		{Provider: "good", Model: "m3"},
 	}}
 	failover := defaultTestFailover()
-	failover.MaxAttempts = 2
+	attempts := 2
+	failover.MaxAttempts = &attempts
 	srv := newBreakerTestServer(providers, route, dead.Client(), failover, testBreakerSettings())
 
 	// 直接用公开 API 把 dead 打到开路，避免依赖额外请求造状态
@@ -416,5 +419,39 @@ func TestHealthExposesBreakerSnapshot(t *testing.T) {
 	}
 	if got := strings.TrimSpace(string(raw["breakers"])); got != "null" {
 		t.Errorf("breakers = %s, 期望 null", got)
+	}
+}
+
+// TestBreakerOutcomeForCountsPost2xxFailures 锁定「拿到成功响应头之后才失败」必须计入熔断。
+//
+// 回归点：早先的实现只在 upstreamCode == 0 时看 err，2xx 一律判成功。这会让流中途
+// 断掉的上游永远熔断不了（OutcomeSuccess 还会清零已累积的失败计数），并且因为粘性
+// 复用同一判据，会把会话钉在坏上游上。
+func TestBreakerOutcomeForCountsPost2xxFailures(t *testing.T) {
+	cases := []struct {
+		name string
+		code int
+		err  error
+		want breaker.Outcome
+	}{
+		{"2xx 干净结束", 200, nil, breaker.OutcomeSuccess},
+		{"2xx 后流被掐断", 200, io.ErrUnexpectedEOF, breaker.OutcomeFailure},
+		{"2xx 后活跃超时", 200, context.DeadlineExceeded, breaker.OutcomeFailure},
+		{"2xx 后响应转换失败", 200, errors.New("响应转换失败"), breaker.OutcomeFailure},
+		{"2xx 后客户端自己断开", 200, context.Canceled, breaker.OutcomeIgnored},
+		{"3xx 后失败", 302, io.ErrUnexpectedEOF, breaker.OutcomeFailure},
+		{"5xx", 502, nil, breaker.OutcomeFailure},
+		{"429 不计入", 429, nil, breaker.OutcomeIgnored},
+		{"401 不计入", 401, nil, breaker.OutcomeIgnored},
+		{"普通 4xx 不计入", 400, nil, breaker.OutcomeIgnored},
+		{"无响应头 + 传输错误", 0, io.ErrUnexpectedEOF, breaker.OutcomeFailure},
+		{"无响应头 + 客户端断开", 0, context.Canceled, breaker.OutcomeIgnored},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := breakerOutcomeFor(tc.code, tc.err); got != tc.want {
+				t.Errorf("breakerOutcomeFor(%d, %v) = %v, 期望 %v", tc.code, tc.err, got, tc.want)
+			}
+		})
 	}
 }

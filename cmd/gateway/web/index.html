@@ -1122,7 +1122,12 @@
                         directMode: !!pick(data, 'directMode', 'DirectMode'),
                         directTimeoutNoStream: pick(data, 'directTimeoutNoStream', 'DirectTimeoutNoStream') || 60000,
                         directTimeoutStreamHeader: pick(data, 'directTimeoutStreamHeader', 'DirectTimeoutStreamHeader') || 60000,
-                        directTimeoutStreamActive: pick(data, 'directTimeoutStreamActive', 'DirectTimeoutStreamActive') || 120000
+                        directTimeoutStreamActive: pick(data, 'directTimeoutStreamActive', 'DirectTimeoutStreamActive') || 120000,
+                        // failover / breaker 目前没有表单编辑器，但必须原样读出再原样回传：
+                        // PUT /api/config 是全量替换、不与旧配置合并，漏读会让任何一次
+                        // 表单保存把用户手写的这两个块连同 enabled 一起抹成零值。
+                        failover: pick(data, 'failover', 'Failover') || null,
+                        breaker: pick(data, 'breaker', 'Breaker') || null
                     };
                 },
 
@@ -1353,7 +1358,11 @@
                         directTimeoutStreamHeader: this.config.directTimeoutStreamHeader || 60000,
                         directTimeoutStreamActive: this.config.directTimeoutStreamActive || 120000,
                         providers,
-                        routes: JSON.parse(JSON.stringify(this.config.routes || []))
+                        routes: JSON.parse(JSON.stringify(this.config.routes || [])),
+                        // 原样回传 failover / breaker：界面不编辑它们，但 PUT 是全量替换，
+                        // 不带上就等于把用户手写的配置删掉（applyDefaults 会填成 enabled: false）
+                        ...(this.config.failover ? { failover: JSON.parse(JSON.stringify(this.config.failover)) } : {}),
+                        ...(this.config.breaker ? { breaker: JSON.parse(JSON.stringify(this.config.breaker)) } : {})
                     };
                 },
 
@@ -1635,6 +1644,11 @@
                             base.push(`    provider: ${r.provider || ''}`);
                             base.push(`    model: "${r.model || ''}"`);
                         }
+                        // strategy 要渲染出来，否则预览和实际保存的内容不一致，
+                        // 用户会以为策略没被记录
+                        if (r.strategy) {
+                            base.push(`    strategy: ${r.strategy}`);
+                        }
                         if (r.vision) {
                             base.push('    vision:');
                             base.push(`      provider: ${r.vision.provider || ''}`);
@@ -1734,8 +1748,11 @@
                             if (Array.isArray(r.targets) && r.targets.length) {
                                 const targets = r.targets.filter((t) => t.provider !== name);
                                 if (!targets.length) return kept;
+                                // 收缩成单候选时必须一并删掉 strategy：后端对「单候选 + 非
+                                // failover」直接报错，而策略下拉框只在候选数 > 1 时显示，
+                                // 带着它保存会撞校验且用户没有入口清掉
                                 kept.push(targets.length === 1
-                                    ? { ...r, targets: undefined, provider: targets[0].provider, model: targets[0].model }
+                                    ? { ...r, targets: undefined, strategy: undefined, provider: targets[0].provider, model: targets[0].model }
                                     : { ...r, targets });
                                 return kept;
                             }

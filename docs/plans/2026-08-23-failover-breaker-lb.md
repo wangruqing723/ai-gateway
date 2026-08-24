@@ -332,6 +332,21 @@ commit `d38e860 feat: 新增 provider 故障转移与熔断机制`（在 `dev` �
 
 顺带修掉 `saveRoute` 候选去重里的一个字面 NUL 字节（改写成等价的 `'\u0000'` 转义，运行时语义不变）—— 它让整个 `index.html` 在 BSD grep 眼里变成二进制文件，所有搜索静默返回空。此问题早于本阶段，已存在于 `d38e860`。
 
+### code review 后的修正
+
+三阶段代码走查发现 14 处问题，其中两条严重且静默、都无测试覆盖：
+
+1. **熔断把「2xx 之后才失败」记成成功**。`breakerOutcomeFor` 原先只在 `upstreamCode == 0` 时看 `err`，流中途断开 / 活跃超时 / 响应体转换失败一律判成功，而 `OutcomeSuccess` 会清零失败计数并强制闭合 —— 那类上游永远开不了路，粘性还会把会话钉在它上面。
+2. **网页表单保存会抹掉 `failover` / `breaker`**。`configPayload()` 是白名单式构造且没有这两块，而 `PUT /api/config` 是全量替换、不与旧配置合并。此问题始于阶段二 `d38e860`，界面还会提示保存成功。
+
+另外三条涉及语义决策，按以下口径落地：
+
+- **`maxRetryAfterMs` 原本是死配置**（无任何运行时读取点）。现定为「429 且 `Retry-After` 超过该值时该候选不消耗 `maxAttempts` 额度」，与熔断跳过同等待遇 —— 上游自报不可用不该挤掉本来还能试的健康候选。显式 0 表示不设上限。
+- **非流式整体超时的转移**原先走 `onTransportError`（默认 true），与 `config.go` 注释「不可配置转移：会让总耗时翻倍」矛盾，且关不掉。现拆出独立的 `onRequestTimeout`，默认 **false**；连接失败仍由 `onTransportError` 覆盖，两者不再互相牵连。
+- **`applyDefaults` 的 `== 0`** 无法区分「显式 0」与「未设置」。`Failover` / `Breaker` 的数值项改成 `*int`，读取统一走 accessor。副作用是 `maxAttempts: 0`、`breaker` 三项写 0 现在会正常报错，而不再被静默改成默认值（原先 `validate` 的下界检查是死代码）。
+
 ### 验证状态
 
-`gofmt`、`go vet`、`go test ./...` 全绿。`-race` 已补齐并覆盖全部 13 个包 —— 此前受阻是因为 `golang:1.23-alpine` 不含 C 工具链而 `apk add` 拉不到镜像源，改用完整 `golang:1.23` 镜像后解决，7 节的命令应按此更新。
+`gofmt`、`go vet`、`go test ./...`、`go test -race ./...` 全绿，覆盖 13 个包。`-race` 此前受阻是因为 `golang:1.23-alpine` 不含 C 工具链而 `apk add` 拉不到镜像源，改用完整 `golang:1.23` 镜像后解决，7 节的命令应按此更新。
+
+已知未处理：`proxy.handleError` 只回传状态码与响应体、不复制上游响应头，因此 429 透传时上游的 `Retry-After` 到不了客户端。属既有行为，与这三阶段无关。

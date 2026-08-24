@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -237,11 +239,14 @@ func TestFailoverDefaults(t *testing.T) {
 	if f.Enabled {
 		t.Error("failover 默认应关闭")
 	}
-	if f.MaxAttempts != 2 {
-		t.Errorf("maxAttempts = %d, 期望 2", f.MaxAttempts)
+	if got := f.AttemptLimit(); got != 2 {
+		t.Errorf("maxAttempts = %d, 期望 2", got)
 	}
-	if f.MaxRetryAfterMs != 5000 {
-		t.Errorf("maxRetryAfterMs = %d, 期望 5000", f.MaxRetryAfterMs)
+	if got := f.RetryAfterCapMs(); got != 5000 {
+		t.Errorf("maxRetryAfterMs = %d, 期望 5000", got)
+	}
+	if f.TransferOnRequestTimeout() {
+		t.Error("onRequestTimeout 默认应为 false：非流式整体超时转移会让总耗时接近翻倍")
 	}
 	if !f.TransferOnTransportError() {
 		t.Error("onTransportError 默认应为 true")
@@ -359,5 +364,144 @@ func TestFailoverAcceptsExactBounds(t *testing.T) {
 		if _, err := DecodeAndValidate([]byte(failoverConfigYAML(singleRoute, body))); err != nil {
 			t.Fatalf("边界值应合法 (%s): %v", body, err)
 		}
+	}
+}
+
+// TestExplicitZeroIsNotTreatedAsUnset 锁定「显式写 0」与「未设置」可区分。
+//
+// 回归点：applyDefaults 原先用 `== 0` 判未设置，导致
+//   - maxRetryAfterMs: 0（合法，表示不设上限）被静默改成 5000
+//   - maxAttempts / breaker 三项写 0 被静默改成默认值，
+//     validate 里对应的下界检查因此永远不触发，用户手误得不到任何提示
+func TestExplicitZeroIsNotTreatedAsUnset(t *testing.T) {
+	routes := `routes:
+  - match: "*"
+    provider: primary
+    model: model-a
+`
+
+	t.Run("maxRetryAfterMs 显式 0 保留为不设上限", func(t *testing.T) {
+		c, err := DecodeAndValidate([]byte(failoverConfigYAML(routes, `failover:
+  enabled: true
+  maxRetryAfterMs: 0
+`)))
+		if err != nil {
+			t.Fatalf("maxRetryAfterMs: 0 应合法: %v", err)
+		}
+		if got := c.Failover.RetryAfterCapMs(); got != 0 {
+			t.Errorf("RetryAfterCapMs() = %d, 期望 0（用户显式写的值必须保留）", got)
+		}
+	})
+
+	t.Run("未写 maxRetryAfterMs 时填默认值", func(t *testing.T) {
+		c, err := DecodeAndValidate([]byte(failoverConfigYAML(routes, `failover:
+  enabled: true
+`)))
+		if err != nil {
+			t.Fatalf("配置应合法: %v", err)
+		}
+		if got := c.Failover.RetryAfterCapMs(); got != 5000 {
+			t.Errorf("RetryAfterCapMs() = %d, 期望默认值 5000", got)
+		}
+	})
+
+	rejected := []struct {
+		name  string
+		extra string
+		want  string
+	}{
+		{"maxAttempts 显式 0 应报错", `failover:
+  enabled: true
+  maxAttempts: 0
+`, "failover.maxAttempts"},
+		{"breaker.consecutiveFailures 显式 0 应报错", `breaker:
+  enabled: true
+  consecutiveFailures: 0
+`, "breaker.consecutiveFailures"},
+		{"breaker.openMs 显式 0 应报错", `breaker:
+  enabled: true
+  openMs: 0
+`, "breaker.openMs"},
+		{"breaker.halfOpenProbes 显式 0 应报错", `breaker:
+  enabled: true
+  halfOpenProbes: 0
+`, "breaker.halfOpenProbes"},
+	}
+	for _, tc := range rejected {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := DecodeAndValidate([]byte(failoverConfigYAML(routes, tc.extra)))
+			if err == nil {
+				t.Fatal("期望报错，实际通过校验（说明 0 又被当成未设置）")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("错误信息 = %q, 期望含 %q", err.Error(), tc.want)
+			}
+		})
+	}
+}
+
+// TestBreakerDefaultsFilledWhenAbsent 未写 breaker 数值项时仍按默认值生效。
+func TestBreakerDefaultsFilledWhenAbsent(t *testing.T) {
+	routes := `routes:
+  - match: "*"
+    provider: primary
+    model: model-a
+`
+	c, err := DecodeAndValidate([]byte(failoverConfigYAML(routes, `breaker:
+  enabled: true
+`)))
+	if err != nil {
+		t.Fatalf("配置应合法: %v", err)
+	}
+	if got := c.Breaker.FailureThreshold(); got != 3 {
+		t.Errorf("FailureThreshold() = %d, 期望 3", got)
+	}
+	if got := c.Breaker.CooldownMs(); got != 30000 {
+		t.Errorf("CooldownMs() = %d, 期望 30000", got)
+	}
+	if got := c.Breaker.ProbeLimit(); got != 1 {
+		t.Errorf("ProbeLimit() = %d, 期望 1", got)
+	}
+}
+
+// TestSavePreservesExplicitZero 显式 0 必须能穿过落盘再重载。
+//
+// omitempty 对指针判的是 nil 而不是零值，所以指向 0 的 *int 应当照常写出。
+// 若 yaml.Marshal 把它省掉，重载时 applyDefaults 会填回 5000，
+// 用户显式写的「不设上限」就在一次保存后悄悄失效 —— 正是本次要修的那类问题。
+func TestSavePreservesExplicitZero(t *testing.T) {
+	routes := `routes:
+  - match: "*"
+    provider: primary
+    model: model-a
+`
+	c, err := DecodeAndValidate([]byte(failoverConfigYAML(routes, `failover:
+  enabled: true
+  maxRetryAfterMs: 0
+`)))
+	if err != nil {
+		t.Fatalf("配置应合法: %v", err)
+	}
+	if got := c.Failover.RetryAfterCapMs(); got != 0 {
+		t.Fatalf("解码后 RetryAfterCapMs() = %d, 期望 0", got)
+	}
+
+	c.Path = filepath.Join(t.TempDir(), "config.yaml")
+	if err := Save(c); err != nil {
+		t.Fatalf("Save 失败: %v", err)
+	}
+	data, err := os.ReadFile(c.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "maxRetryAfterMs: 0") {
+		t.Fatalf("落盘内容丢了显式 0:\n%s", data)
+	}
+	reloaded, err := DecodeAndValidate(data)
+	if err != nil {
+		t.Fatalf("重新解析失败: %v", err)
+	}
+	if got := reloaded.Failover.RetryAfterCapMs(); got != 0 {
+		t.Errorf("重载后 RetryAfterCapMs() = %d, 期望 0（显式 0 应穿过落盘）", got)
 	}
 }

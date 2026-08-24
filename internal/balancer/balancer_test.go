@@ -556,3 +556,35 @@ func equalInts(a, b []int) bool {
 	}
 	return true
 }
+
+// TestVisibleLenMatchesTrimmedStrip 锁定 visibleLen 与它替换掉的表达式语义一致。
+//
+// 原写法是 len(strings.TrimSpace(strings.ReplaceAll(s, "\x00", "")))，
+// 换成手写扫描是为了省掉两次整串拷贝，语义不能变。
+func TestVisibleLenMatchesTrimmedStrip(t *testing.T) {
+	cases := []string{
+		"",
+		"\x00",
+		"abc",
+		"\x00abc",
+		"abc\x00",
+		"a\x00b",
+		"  abc  ",
+		"\x00  abc",
+		"  \x00  abc",
+		"  abc\x00  ",
+		"  \x00  ",
+		"\t\n abc \r\n",
+		"中文内容\x00更多中文",
+		"  中文\x00  ",
+		"a b\x00c d",
+		" abc ",
+		strings.Repeat("x", 300) + "\x00" + strings.Repeat("y", 5),
+	}
+	for _, s := range cases {
+		want := len(strings.TrimSpace(strings.ReplaceAll(s, "\x00", "")))
+		if got := visibleLen(s); got != want {
+			t.Errorf("visibleLen(%q) = %d, 期望 %d", s, got, want)
+		}
+	}
+}

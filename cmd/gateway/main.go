@@ -402,9 +402,34 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 	needVision := matched.VisionProvider != nil && vision.HasImages(internal.Messages)
 	reqLog.Vision = needVision
 
+	// 协议规范化失败且没有任何候选是同格式（同格式走原样透传，不需要 canonical 重建）
+	// —— 此时无论试哪个候选都会失败，必须在 vision 之前返回：视觉翻译是一次真实的
+	// 上游调用，放在后面等于先花钱再拒绝。单候选时代这条检查就在 vision 之前，
+	// 多候选下的等价条件是「所有候选都不是透传」。
+	if internal.Err != nil {
+		anyPassthrough := false
+		for _, candidate := range matched.Candidates {
+			if converter.IsPassthrough(candidate.Provider.Format, clientFormat) {
+				anyPassthrough = true
+				break
+			}
+		}
+		if !anyPassthrough {
+			reqLog.Error = "请求协议转换失败: " + internal.Err.Error()
+			writeJSONError(w, http.StatusBadRequest, "conversion_error", reqLog.Error)
+			return
+		}
+	}
+
 	// 粘性键必须在 vision 翻译之前算：翻译会把图片块换成文字描述，
 	// 而描述随缓存命中情况变化，会让同一会话前后算出两个不同的键。
-	stickyKey := balancer.StickyKey(internal.System, internal.Messages)
+	//
+	// 只在真的会用到时才算：单候选路由和 failover 策略下 Select 根本不看这个键，
+	// 而默认配置正是这一档，没必要为每个请求把 10-25 KB 的 system prompt 过一遍 SHA-256。
+	stickyKey := ""
+	if len(matched.Candidates) > 1 && balancer.UsesSticky(matched.Strategy) {
+		stickyKey = balancer.StickyKey(internal.System, internal.Messages)
+	}
 	// 候选尝试顺序：strategy 决定「先试谁」，failover 决定「失败了还能试谁」，两者正交。
 	order := s.candidateOrder(matched, stickyKey)
 
@@ -431,7 +456,7 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 	// 表示「分流但不转移」——选中的那个失败就直接返回。
 	attemptLimit := 1
 	if cfg.Failover.Enabled && len(matched.Candidates) > 1 {
-		attemptLimit = cfg.Failover.MaxAttempts
+		attemptLimit = cfg.Failover.AttemptLimit()
 		if attemptLimit > len(matched.Candidates) {
 			attemptLimit = len(matched.Candidates)
 		}
@@ -446,7 +471,9 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		attempts      int
 		lastAbandoned bool
 		breakerSkips  int
-		soonestRetry  time.Duration
+		// freeSkips 因上游自报限流而放弃、且未消耗额度的次数
+		freeSkips    int
+		soonestRetry time.Duration
 	)
 	// 按 order 遍历全部候选，但真实尝试次数受 attemptLimit 约束：
 	// 被熔断跳过的候选不消耗尝试额度，否则熔断反而会削弱可用性。
@@ -501,6 +528,15 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		if s.breaker != nil {
 			s.breaker.Report(name, outcome.breakerOutcome)
 		}
+		if outcome.freeAttempt {
+			// 上游自报「这段时间不可用」（429 + 超阈值的 Retry-After）：与熔断跳过同等
+			// 待遇，不消耗额度，否则一个自曝限流的上游会挤掉本来还能试的健康候选。
+			freeSkips++
+			trail = append(trail, outcome.trail)
+			lastAbandoned = true
+			logf(reqID, "  候选 %s 放弃（%s），不计入尝试额度", name, outcome.trail)
+			continue
+		}
 		attempts++
 		trail = append(trail, outcome.trail)
 		lastAbandoned = outcome.abandoned
@@ -533,11 +569,22 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("retry-after", strconv.Itoa(seconds))
 		}
 		writeJSONError(w, http.StatusServiceUnavailable, "breaker_open", reqLog.Error)
-	case attempts == 0:
+	case attempts == 0 && freeSkips > 0:
+		// 全部候选都自报限流（429 + 超阈值 Retry-After）且都没消耗额度：
+		// 这不是协议错误，必须透传 429 语义，否则客户端会收到误导性的 400。
+		reqLog.AttemptTrail = strings.Join(trail, " → ")
+		reqLog.Error = "全部候选上游均在限流中"
+		writeJSONError(w, http.StatusTooManyRequests, "all_candidates_rate_limited", reqLog.Error)
+	case attempts == 0 && buildErr != "":
 		// 全部候选都构建失败：此时没有任何一次真实转发，需自行写终态
 		reqLog.Error = "上游请求协议转换失败: " + buildErr
 		reqLog.AttemptTrail = strings.Join(trail, " → ")
 		writeJSONError(w, http.StatusBadRequest, "conversion_error", reqLog.Error)
+	case attempts == 0:
+		// 兜底：一次都没真实尝试，但既没熔断跳过也没构建失败（理论上不可达）
+		reqLog.AttemptTrail = strings.Join(trail, " → ")
+		reqLog.Error = "没有可用的候选上游"
+		writeJSONError(w, http.StatusBadGateway, "all_candidates_failed", reqLog.Error)
 	case lastAbandoned:
 		// 兜底：最后一次尝试被放弃却没有后续候选可试（例如剩余候选全被熔断）。
 		// 放弃时未向客户端写入任何字节，必须在这里补一个终态响应。
@@ -618,6 +665,8 @@ type forwardAttemptOutcome struct {
 	trail     string // "provider:429/ratelimit"
 	// breakerOutcome 本次尝试对熔断计数的影响，由调用方汇报给 breaker。
 	breakerOutcome breaker.Outcome
+	// freeAttempt 本次放弃不消耗 maxAttempts 额度，见 failoverDecision.freeAttempt。
+	freeAttempt bool
 }
 
 // forwardAttempt 执行单个候选的一次转发尝试。
@@ -632,8 +681,10 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 	p.APIKey = apiKey
 
 	isPassthrough := converter.IsPassthrough(p.Format, in.clientFormat)
+	// 这里只兜住「部分候选是透传、部分不是」的情况：全部候选都不透传时 handle()
+	// 已在 vision 之前返回了。buildErr 不自带前缀，终态由调用方统一加。
 	if in.internal.Err != nil && !isPassthrough {
-		return forwardAttemptOutcome{buildErr: "请求协议转换失败: " + in.internal.Err.Error()}
+		return forwardAttemptOutcome{buildErr: in.internal.Err.Error()}
 	}
 
 	// 内部格式 → 上游 provider 请求体
@@ -690,7 +741,9 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 			logf(reqID, "  队列处理异常: %s", err.Error())
 			if err == queue.ErrQueueTimeout {
 				// 排队超时且允许转移：换下一个候选，别把客户端 503 掉
-				if in.allowRetry && config.BoolOr(cfg.Failover.OnQueueTimeout, true) && cfg.Failover.Enabled {
+				// 走访问器而不是直接 BoolOr：默认值只应写在 TransferOnXxx 一处，
+				// 否则改默认值时这里会静默不同步
+				if in.allowRetry && cfg.Failover.TransferOnQueueTimeout() && cfg.Failover.Enabled {
 					// 本地队列背压，不是上游故障
 					return forwardAttemptOutcome{abandoned: true, trail: p.Name + ":queue_timeout", breakerOutcome: breaker.OutcomeIgnored}
 				}
@@ -726,8 +779,14 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 	h.Set("x-ai-gateway-attempts", strconv.Itoa(in.attemptNo))
 
 	var (
-		abandonReason  atomic.Value // string
-		abandonBreaker atomic.Value // breaker.Outcome
+		// abandonReason / abandonBreaker / abandonFree 由 ShouldRetry 回调写、
+		// Forward 返回后读。与 OnUpstreamStatus 一样，回调与 Forward 同 goroutine
+		// 同步执行，用普通变量即可；atomic.Value 只会多一层装箱和类型断言的失败路径。
+		abandonReason string
+		abandonFree   bool
+		// 必须显式初始化成 OutcomeIgnored：Outcome 的零值是 OutcomeSuccess，
+		// 万一回调没写入就用零值，会把一次放弃当成成功上报给熔断器。
+		abandonBreaker = breaker.OutcomeIgnored
 		// attemptStatus 本次尝试拿到的上游状态码，0 表示上游没给出响应头。
 		// 必须用本次尝试的局部变量，不能直接读 in.reqLog.UpstreamStatus：后者跨候选
 		// 共享，候选 1 的 502 会在候选 2 传输失败（不上报）时被当成候选 2 的状态码。
@@ -757,27 +816,31 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 	}
 	if in.allowRetry {
 		opts.ShouldRetry = func(upstreamCode int, retryAfter time.Duration, err error) bool {
-			reason, ok := failoverReason(&cfg.Failover, upstreamCode, retryAfter, err)
-			if !ok {
+			decision := failoverReason(&cfg.Failover, upstreamCode, retryAfter, err)
+			if !decision.transfer {
 				return false
 			}
-			abandonReason.Store(reason)
-			abandonBreaker.Store(breakerOutcomeFor(upstreamCode, err))
+			abandonReason = decision.reason
+			abandonBreaker = breakerOutcomeFor(upstreamCode, err)
+			abandonFree = decision.freeAttempt
 			return true
 		}
 	}
 
 	forwardErr := proxy.Forward(opts)
 	if errors.Is(forwardErr, proxy.ErrAttemptAbandoned) {
-		reason, _ := abandonReason.Load().(string)
+		// ErrAttemptAbandoned 只可能由上面的回调返回 true 触发，此时三个变量必已写入；
+		// 兜底值仅防御 proxy 侧未来改动，不代表正常路径。
+		reason := abandonReason
 		if reason == "" {
 			reason = "abandoned"
 		}
-		outcome, ok := abandonBreaker.Load().(breaker.Outcome)
-		if !ok {
-			outcome = breaker.OutcomeIgnored
+		return forwardAttemptOutcome{
+			abandoned:      true,
+			trail:          p.Name + ":" + reason,
+			breakerOutcome: abandonBreaker,
+			freeAttempt:    abandonFree,
 		}
-		return forwardAttemptOutcome{abandoned: true, trail: p.Name + ":" + reason, breakerOutcome: outcome}
 	}
 
 	upstreamStatus := attemptStatus
@@ -808,45 +871,70 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 	}
 }
 
-// failoverReason 按 failover 配置判定一次失败能否转移，返回 trail 用的分类名。
-func failoverReason(f *config.Failover, upstreamCode int, retryAfter time.Duration, err error) (string, bool) {
+// failoverDecision 一次失败的转移判定结果。
+type failoverDecision struct {
+	// reason trail 里用的分类名，transfer 为 false 时无意义。
+	reason string
+	// transfer 是否放弃本候选、交给下一个。
+	transfer bool
+	// freeAttempt 本次失败不消耗 maxAttempts 额度。
+	//
+	// 仅用于「上游明确告知自己这段时间不可用」（429 且 Retry-After 超过
+	// failover.maxRetryAfterMs），语义与熔断跳过一致：否则一个自曝限流的上游
+	// 会挤掉本来还能试的健康候选。
+	freeAttempt bool
+}
+
+// failoverReason 按 failover 配置判定一次失败能否转移。
+func failoverReason(f *config.Failover, upstreamCode int, retryAfter time.Duration, err error) failoverDecision {
 	if !f.Enabled {
-		return "", false
+		return failoverDecision{}
 	}
 	if upstreamCode == 0 {
 		// 传输层失败：连接错误 / 超时
 		switch {
 		case errors.Is(err, proxy.ErrStreamHeaderTimeout):
-			return "header_timeout", f.TransferOnStreamHeaderTimeout()
+			return failoverDecision{reason: "header_timeout", transfer: f.TransferOnStreamHeaderTimeout()}
 		case errors.Is(err, proxy.ErrRequestTimeout), errors.Is(err, context.DeadlineExceeded):
-			return "timeout", f.TransferOnTransportError()
+			// 非流式整体超时单独一个开关，默认 false：已经等满一整个 timeout 预算，
+			// 转移会让总耗时接近翻倍。不能并入 onTransportError —— 真正的连接失败
+			// 几乎不耗时，是 failover 最该覆盖的场景，不该被一起关掉。
+			return failoverDecision{reason: "timeout", transfer: f.TransferOnRequestTimeout()}
 		default:
-			return "transport_error", f.TransferOnTransportError()
+			return failoverDecision{reason: "transport_error", transfer: f.TransferOnTransportError()}
 		}
 	}
 	switch {
 	case upstreamCode == http.StatusTooManyRequests:
 		if !f.TransferOnRateLimit() {
-			return "", false
+			return failoverDecision{}
 		}
-		// Retry-After 超过阈值说明该 provider 短期没戏，同样转移
-		return "429/ratelimit", true
+		// Retry-After 超过阈值：上游自己说了这段时间没戏，转移且不消耗额度。
+		// cap 为 0 表示不设上限，此时所有 429 照常消耗额度。
+		cap := f.RetryAfterCapMs()
+		if cap > 0 && retryAfter > time.Duration(cap)*time.Millisecond {
+			return failoverDecision{reason: "429/retry_after_too_long", transfer: true, freeAttempt: true}
+		}
+		return failoverDecision{reason: "429/ratelimit", transfer: true}
 	case upstreamCode == http.StatusUnauthorized || upstreamCode == http.StatusForbidden:
 		// 默认关闭：key 配错时转移只会连锁失败，且掩盖真实原因
-		return fmt.Sprintf("%d/auth", upstreamCode), f.TransferOnAuthError()
+		return failoverDecision{reason: fmt.Sprintf("%d/auth", upstreamCode), transfer: f.TransferOnAuthError()}
 	case upstreamCode >= 500:
-		return fmt.Sprintf("%d/server", upstreamCode), f.TransferOnServerError()
+		return failoverDecision{reason: fmt.Sprintf("%d/server", upstreamCode), transfer: f.TransferOnServerError()}
 	default:
 		// 4xx 业务错误（400 参数错、404 模型不存在等）换 provider 也是同样结果
-		return "", false
+		return failoverDecision{}
 	}
 }
 
 // breakerOutcomeFor 把一次尝试结果归类成熔断判据。
 //
-// 计入失败：传输错误、超时、5xx。
+// 计入失败：传输错误、超时、5xx、以及「拿到 2xx 响应头之后才失败」（流中途断开、
+// 流式活跃超时、响应体转换失败）。
 // 不计入：429（上游正常限流，判成故障比不熔断更糟）、401/403（配置问题，熔断修不了
 // 还会掩盖密钥过期）、客户端主动断开、普通 4xx（请求本身的问题）。
+//
+// err 在任何状态码下都要参与判定，不能只在 upstreamCode == 0 时看。
 func breakerOutcomeFor(upstreamCode int, err error) breaker.Outcome {
 	if upstreamCode == 0 {
 		switch {
@@ -867,7 +955,19 @@ func breakerOutcomeFor(upstreamCode int, err error) breaker.Outcome {
 	case upstreamCode >= 500:
 		return breaker.OutcomeFailure
 	case upstreamCode >= 200 && upstreamCode < 400:
-		return breaker.OutcomeSuccess
+		// 2xx/3xx 也要看 err：上游给了成功响应头之后仍可能中途失败（流被掐断、
+		// 流式活跃超时、响应体超限或转换失败）。只按状态码判会把这些记成成功，
+		// 而 OutcomeSuccess 会清零失败计数并强制闭合，导致一个每次都在流中途
+		// 崩掉的上游永远熔断不了；还会让粘性把整条会话钉在它上面。
+		switch {
+		case errors.Is(err, context.Canceled):
+			// 客户端自己断开，与上游健康无关
+			return breaker.OutcomeIgnored
+		case err != nil:
+			return breaker.OutcomeFailure
+		default:
+			return breaker.OutcomeSuccess
+		}
 	default:
 		// 普通 4xx：上游是健康的，只是这个请求它不接受
 		return breaker.OutcomeIgnored
@@ -1074,11 +1174,25 @@ func (s *server) handleModels(w http.ResponseWriter) {
 	for _, route := range cfg.Routes {
 		if !seen[route.Match] {
 			seen[route.Match] = true
+			// 必须走 TargetList()：多候选写法下 route.Provider / route.Model 恒为空
+			// （校验强制二者互斥），直接读会让所有 targets 路由输出空的 owned_by。
+			targets := route.TargetList()
 			entry := map[string]any{
 				"id":           route.Match,
 				"object":       "model",
-				"owned_by":     route.Provider,
-				"target_model": route.Model,
+				"owned_by":     targets[0].Provider,
+				"target_model": targets[0].Model,
+			}
+			if len(targets) > 1 {
+				// 多候选时额外列出全部目标，首个即默认起点（strategy 会改变实际顺序）
+				list := make([]map[string]any, 0, len(targets))
+				for _, t := range targets {
+					list = append(list, map[string]any{"provider": t.Provider, "model": t.Model})
+				}
+				entry["targets"] = list
+				if route.Strategy != "" {
+					entry["strategy"] = route.Strategy
+				}
 			}
 			// 如果配置了 vision，添加视觉模型信息
 			if route.Vision != nil {
@@ -1509,9 +1623,9 @@ func (s *server) applyRuntimeConfig(newCfg *config.Config, revision string) []st
 func breakerSettings(cfg *config.Config) breaker.Settings {
 	return breaker.Settings{
 		Enabled:             cfg.Breaker.Enabled,
-		ConsecutiveFailures: cfg.Breaker.ConsecutiveFailures,
-		OpenMs:              cfg.Breaker.OpenMs,
-		HalfOpenProbes:      cfg.Breaker.HalfOpenProbes,
+		ConsecutiveFailures: cfg.Breaker.FailureThreshold(),
+		OpenMs:              cfg.Breaker.CooldownMs(),
+		HalfOpenProbes:      cfg.Breaker.ProbeLimit(),
 	}
 }
 

@@ -217,7 +217,22 @@ func printBanner(cfg *config.Config, c *cache.Cache) {
 		if r.Vision != nil {
 			vis = fmt.Sprintf(" + vision(%s)", r.Vision.Model)
 		}
-		logSystem("    %-30s → %s/%s%s", r.Match, r.Provider, r.Model, vis)
+		// 走 TargetList()：多候选写法下 r.Provider / r.Model 恒为空，直接打会输出「→ /」，
+		// 而这里是运维在启动时唯一能看到解析后路由表的地方。
+		targets := r.TargetList()
+		parts := make([]string, 0, len(targets))
+		for _, t := range targets {
+			parts = append(parts, t.Provider+"/"+t.Model)
+		}
+		strategy := ""
+		if len(targets) > 1 {
+			s := r.Strategy
+			if s == "" {
+				s = "failover"
+			}
+			strategy = fmt.Sprintf(" [%s]", s)
+		}
+		logSystem("    %-30s → %s%s%s", r.Match, strings.Join(parts, ", "), strategy, vis)
 	}
 	logSystem("───────────────────────────────────────────")
 	cs := c.GetStats()

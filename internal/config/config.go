@@ -40,6 +40,13 @@ const (
 	maxBreakerOpenMs = 600_000
 	// maxBreakerHalfOpenProbes 半开探测放行数上限。
 	maxBreakerHalfOpenProbes = 10
+
+	// 默认值集中在此，供 applyDefaults 与各 accessor 共用一处来源。
+	defaultFailoverAttempts      = 2
+	defaultMaxRetryAfterMs       = 5000
+	defaultBreakerFailures       = 3
+	defaultBreakerOpenMs         = 30_000
+	defaultBreakerHalfOpenProbes = 1
 )
 
 var (
@@ -78,11 +85,13 @@ type Target struct {
 //   - 单目标（存量写法）：provider + model
 //   - 多目标：targets 列表，按顺序作为故障转移候选
 type Route struct {
+	// yaml tag 一律带 omitempty：落盘走 yaml.Marshal，缺了它每次保存都会给单目标路由
+	// 塞进 targets: []，给多目标路由塞进 provider: ""，把两种互斥写法混在同一条路由上。
 	Match    string   `yaml:"match" json:"match"`
-	Provider string   `yaml:"provider" json:"provider,omitempty"`
-	Model    string   `yaml:"model" json:"model,omitempty"`
-	Targets  []Target `yaml:"targets" json:"targets,omitempty"`
-	Vision   *Vision  `yaml:"vision" json:"vision,omitempty"`
+	Provider string   `yaml:"provider,omitempty" json:"provider,omitempty"`
+	Model    string   `yaml:"model,omitempty" json:"model,omitempty"`
+	Targets  []Target `yaml:"targets,omitempty" json:"targets,omitempty"`
+	Vision   *Vision  `yaml:"vision,omitempty" json:"vision,omitempty"`
 	// Strategy 候选选择策略：failover | round-robin | least-queue，空等同 failover。
 	//
 	// 只做路由级，不设全局默认：全局默认会让「这条路由到底用哪个策略」需要看两处，
@@ -90,7 +99,7 @@ type Route struct {
 	//
 	// 与 failover.enabled 正交：策略决定「先试谁」，failover 决定「失败了还能试谁」。
 	// failover 关闭 + round-robin 是合法组合，表示纯分流、不转移。
-	Strategy string `yaml:"strategy" json:"strategy,omitempty"`
+	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
 }
 
 // TargetList 返回统一形态的候选列表。
@@ -107,13 +116,15 @@ func (r *Route) TargetList() []Target {
 
 // Failover 故障转移配置。默认关闭，保持「不重试」的既有语义。
 //
-// OnXxx 一律用 *bool：nil 表示用户未设置，由 applyDefaults 填默认值。
-// 若用 bool，零值 false 与「用户显式写 false」不可区分，
-// applyDefaults 里的 `if !x { x = true }` 会静默改回用户关掉的开关。
+// OnXxx 一律用 *bool、数值项一律用 *int：nil 表示用户未设置，由 applyDefaults 填默认值。
+// 若用值类型，零值与「用户显式写 0 / false」不可区分，applyDefaults 里的
+// `if x == 0 { x = 默认值 }` 会静默改掉用户写的 0 —— 对 maxRetryAfterMs 这种
+// 「0 是合法且有含义的取值」尤其致命，而对不接受 0 的项则会让 validate 里
+// 对应的下界检查变成永不触发的死代码，用户手误写 0 得不到任何提示。
 type Failover struct {
 	Enabled bool `yaml:"enabled" json:"enabled"`
-	// MaxAttempts 含首次尝试的总次数上限，1-5。
-	MaxAttempts int `yaml:"maxAttempts" json:"maxAttempts"`
+	// MaxAttempts 含首次尝试的总次数上限，1-5。默认 2。
+	MaxAttempts *int `yaml:"maxAttempts,omitempty" json:"maxAttempts,omitempty"`
 	// OnTransportError 连接失败 / DNS / TLS 错误时转移。默认 true。
 	OnTransportError *bool `yaml:"onTransportError" json:"onTransportError,omitempty"`
 	// OnServerError 上游 5xx 时转移。默认 true。
@@ -124,12 +135,25 @@ type Failover struct {
 	OnQueueTimeout *bool `yaml:"onQueueTimeout" json:"onQueueTimeout,omitempty"`
 	// OnStreamHeaderTimeout 流式等响应头超时时转移。默认 true。
 	// 该阶段客户端尚未收到任何字节，转移边界干净。
-	// 非流式整体超时与流式活跃超时不可配置转移：会让总耗时翻倍。
 	OnStreamHeaderTimeout *bool `yaml:"onStreamHeaderTimeout" json:"onStreamHeaderTimeout,omitempty"`
+	// OnRequestTimeout 非流式整体超时时转移。默认 false。
+	//
+	// 单独一个开关而不是并入 OnTransportError：整体超时意味着已经等满了一整个
+	// timeout 预算，转移会让总耗时接近翻倍（timeout × 候选数）。但把它和真正的
+	// 连接失败绑在一起也不对 —— 那类错误几乎不耗时，是 failover 最该覆盖的场景，
+	// 用户不该为了关掉超时转移而连带关掉它。
+	//
+	// 流式活跃超时仍不可配置转移：那时字节已经写给客户端，重发会污染流。
+	OnRequestTimeout *bool `yaml:"onRequestTimeout" json:"onRequestTimeout,omitempty"`
 	// OnAuthError 401 / 403 时转移。默认 false：那通常是配置问题，转移会掩盖它。
 	OnAuthError *bool `yaml:"onAuthError" json:"onAuthError,omitempty"`
-	// MaxRetryAfterMs 上游 429 携带 Retry-After 且超过该值时，直接跳过该候选。
-	MaxRetryAfterMs int `yaml:"maxRetryAfterMs" json:"maxRetryAfterMs"`
+	// MaxRetryAfterMs 上游 429 携带 Retry-After 且超过该值时，该候选不消耗尝试额度。
+	//
+	// 语义与熔断跳过一致：上游明确告知「我这段时间不可用」，那这次失败就不该
+	// 占掉 maxAttempts 里的一格，否则一个自曝限流的上游会挤掉本来还能试的健康候选。
+	// 默认 5000。显式写 0 表示不设上限（所有 429 照常消耗额度），
+	// 因此这里必须用 *int：值类型分不清「写了 0」和「没写」。
+	MaxRetryAfterMs *int `yaml:"maxRetryAfterMs,omitempty" json:"maxRetryAfterMs,omitempty"`
 }
 
 // BoolOr 读取 *bool，nil 时返回 def。
@@ -141,6 +165,16 @@ func BoolOr(p *bool, def bool) bool {
 }
 
 func boolPtr(v bool) *bool { return &v }
+
+// IntOr 读取 *int，nil 时返回 def。
+func IntOr(p *int, def int) int {
+	if p == nil {
+		return def
+	}
+	return *p
+}
+
+func intPtr(v int) *int { return &v }
 
 // TransferOnTransportError 传输错误是否转移。
 func (f *Failover) TransferOnTransportError() bool { return BoolOr(f.OnTransportError, true) }
@@ -159,23 +193,49 @@ func (f *Failover) TransferOnStreamHeaderTimeout() bool {
 	return BoolOr(f.OnStreamHeaderTimeout, true)
 }
 
+// TransferOnRequestTimeout 非流式整体超时是否转移。默认 false：会让总耗时接近翻倍。
+func (f *Failover) TransferOnRequestTimeout() bool { return BoolOr(f.OnRequestTimeout, false) }
+
 // TransferOnAuthError 401 / 403 是否转移。
 func (f *Failover) TransferOnAuthError() bool { return BoolOr(f.OnAuthError, false) }
+
+// AttemptLimit 含首次尝试的总次数上限。
+func (f *Failover) AttemptLimit() int { return IntOr(f.MaxAttempts, defaultFailoverAttempts) }
+
+// RetryAfterCapMs 429 的 Retry-After 上限（毫秒），0 表示不设上限。
+func (f *Failover) RetryAfterCapMs() int {
+	return IntOr(f.MaxRetryAfterMs, defaultMaxRetryAfterMs)
+}
 
 // Breaker 熔断配置。全局一份，不做 per-provider 覆盖。
 //
 // 计入失败：传输错误、5xx、超时。
 // 不计入：429（上游正常限流，判故障比不熔断更糟）、401/403（配置问题，熔断修不了还会掩盖密钥过期）。
+// 数值项与 Failover 同理用 *int：这三项都不接受 0，值类型会让 validate 的下界检查
+// 变成死代码 —— 用户手误写 0 被 applyDefaults 静默改成默认值，永远看不到报错。
 type Breaker struct {
 	Enabled bool `yaml:"enabled" json:"enabled"`
 	// ConsecutiveFailures 连续失败达该值即打开熔断，默认 3。
 	// 用连续失败而非错误率：错误率需要最小样本数，否则首次失败就触发（LiteLLM #17418）。
-	ConsecutiveFailures int `yaml:"consecutiveFailures" json:"consecutiveFailures"`
+	ConsecutiveFailures *int `yaml:"consecutiveFailures,omitempty" json:"consecutiveFailures,omitempty"`
 	// OpenMs 熔断打开后的冷却时长（毫秒），默认 30000。冷却结束转半开。
-	OpenMs int `yaml:"openMs" json:"openMs"`
+	OpenMs *int `yaml:"openMs,omitempty" json:"openMs,omitempty"`
 	// HalfOpenProbes 半开状态放行的探测请求数，默认 1。
 	// 探针用下一个真实入站请求，不用 /v1/models：那个端点通不代表聊天端点可用。
-	HalfOpenProbes int `yaml:"halfOpenProbes" json:"halfOpenProbes"`
+	HalfOpenProbes *int `yaml:"halfOpenProbes,omitempty" json:"halfOpenProbes,omitempty"`
+}
+
+// FailureThreshold 连续失败开路阈值。
+func (b *Breaker) FailureThreshold() int {
+	return IntOr(b.ConsecutiveFailures, defaultBreakerFailures)
+}
+
+// CooldownMs 开路后的冷却时长（毫秒）。
+func (b *Breaker) CooldownMs() int { return IntOr(b.OpenMs, defaultBreakerOpenMs) }
+
+// ProbeLimit 半开状态放行的探测请求数。
+func (b *Breaker) ProbeLimit() int {
+	return IntOr(b.HalfOpenProbes, defaultBreakerHalfOpenProbes)
 }
 
 // Cache 缓存配置
@@ -288,13 +348,17 @@ func applyDefaults(c *Config) {
 }
 
 // applyFailoverDefaults 只在字段未设置时填默认值。
-// OnXxx 是 *bool，nil 才填；用户显式写的 false 必须原样保留。
+// 全部字段都是指针，nil 才填；用户显式写的 false / 0 必须原样保留，
+// 交给 validate 判合法性（maxAttempts: 0 应当报错，maxRetryAfterMs: 0 是合法的「不设上限」）。
 func applyFailoverDefaults(f *Failover) {
-	if f.MaxAttempts == 0 {
-		f.MaxAttempts = 2
+	if f.MaxAttempts == nil {
+		f.MaxAttempts = intPtr(defaultFailoverAttempts)
 	}
-	if f.MaxRetryAfterMs == 0 {
-		f.MaxRetryAfterMs = 5000
+	if f.MaxRetryAfterMs == nil {
+		f.MaxRetryAfterMs = intPtr(defaultMaxRetryAfterMs)
+	}
+	if f.OnRequestTimeout == nil {
+		f.OnRequestTimeout = boolPtr(false)
 	}
 	if f.OnTransportError == nil {
 		f.OnTransportError = boolPtr(true)
@@ -317,15 +381,16 @@ func applyFailoverDefaults(f *Failover) {
 }
 
 // applyBreakerDefaults 只在字段未设置时填默认值。
+// 同样 nil 才填：这三项都不接受 0，用户写了 0 要能从 validate 拿到报错。
 func applyBreakerDefaults(b *Breaker) {
-	if b.ConsecutiveFailures == 0 {
-		b.ConsecutiveFailures = 3
+	if b.ConsecutiveFailures == nil {
+		b.ConsecutiveFailures = intPtr(defaultBreakerFailures)
 	}
-	if b.OpenMs == 0 {
-		b.OpenMs = 30000
+	if b.OpenMs == nil {
+		b.OpenMs = intPtr(defaultBreakerOpenMs)
 	}
-	if b.HalfOpenProbes == 0 {
-		b.HalfOpenProbes = 1
+	if b.HalfOpenProbes == nil {
+		b.HalfOpenProbes = intPtr(defaultBreakerHalfOpenProbes)
 	}
 }
 
@@ -810,24 +875,27 @@ func validateRouteStrategy(r *Route) error {
 
 // validateFailover 校验 failover 的数值边界。
 func validateFailover(f *Failover) error {
-	if f.MaxAttempts < 1 || f.MaxAttempts > maxFailoverAttempts {
+	// 读 accessor 而不是解指针：validate 也会被 DecodeAndValidate 之外的路径调用，
+	// 此时指针可能还没被 applyDefaults 填上。
+	if attempts := f.AttemptLimit(); attempts < 1 || attempts > maxFailoverAttempts {
 		return fmt.Errorf("failover.maxAttempts 应在 1-%d 之间", maxFailoverAttempts)
 	}
-	if f.MaxRetryAfterMs < 0 || f.MaxRetryAfterMs > maxRetryAfterCapMs {
-		return fmt.Errorf("failover.maxRetryAfterMs 应在 0-%d 之间", maxRetryAfterCapMs)
+	// 0 合法，表示不设上限
+	if cap := f.RetryAfterCapMs(); cap < 0 || cap > maxRetryAfterCapMs {
+		return fmt.Errorf("failover.maxRetryAfterMs 应在 0-%d 之间（0 表示不设上限）", maxRetryAfterCapMs)
 	}
 	return nil
 }
 
 // validateBreaker 校验 breaker 的数值边界。
 func validateBreaker(b *Breaker) error {
-	if b.ConsecutiveFailures < 1 || b.ConsecutiveFailures > maxBreakerFailures {
+	if failures := b.FailureThreshold(); failures < 1 || failures > maxBreakerFailures {
 		return fmt.Errorf("breaker.consecutiveFailures 应在 1-%d 之间", maxBreakerFailures)
 	}
-	if b.OpenMs < 1 || b.OpenMs > maxBreakerOpenMs {
+	if openMs := b.CooldownMs(); openMs < 1 || openMs > maxBreakerOpenMs {
 		return fmt.Errorf("breaker.openMs 应在 1-%d 之间", maxBreakerOpenMs)
 	}
-	if b.HalfOpenProbes < 1 || b.HalfOpenProbes > maxBreakerHalfOpenProbes {
+	if probes := b.ProbeLimit(); probes < 1 || probes > maxBreakerHalfOpenProbes {
 		return fmt.Errorf("breaker.halfOpenProbes 应在 1-%d 之间", maxBreakerHalfOpenProbes)
 	}
 	return nil

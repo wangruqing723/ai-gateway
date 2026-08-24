@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -169,5 +171,63 @@ func TestRouteStrategyPerRoute(t *testing.T) {
 	}
 	if c.Routes[1].Strategy != "least-queue" {
 		t.Errorf("Routes[1].Strategy = %q, 期望 least-queue", c.Routes[1].Strategy)
+	}
+}
+
+// TestSaveDoesNotMixRouteForms 锁定 Route 的 yaml tag 必须带 omitempty。
+//
+// 落盘走 yaml.Marshal：缺 omitempty 时单目标路由会被塞进 targets: [] 和 strategy: ""，
+// 多目标路由会被塞进 provider: ""，把两种互斥写法混在同一条路由上，污染手写配置。
+func TestSaveDoesNotMixRouteForms(t *testing.T) {
+	routes := `routes:
+  - match: "single-*"
+    provider: primary
+    model: model-a
+  - match: "multi-*"
+    targets:
+      - provider: primary
+        model: model-b
+      - provider: backup
+        model: model-c
+    strategy: round-robin
+`
+	c, err := DecodeAndValidate([]byte(failoverConfigYAML(routes, "")))
+	if err != nil {
+		t.Fatalf("配置应合法: %v", err)
+	}
+	c.Path = filepath.Join(t.TempDir(), "config.yaml")
+	if err := Save(c); err != nil {
+		t.Fatalf("Save 失败: %v", err)
+	}
+	data, err := os.ReadFile(c.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(data)
+	for _, unwanted := range []string{"targets: []", `strategy: ""`, `provider: ""`, `model: ""`} {
+		if strings.Contains(got, unwanted) {
+			t.Errorf("落盘内容含 %q，说明缺 omitempty:\n%s", unwanted, got)
+		}
+	}
+
+	// 再读一遍：两种写法必须各自保持原样
+	reloaded, err := DecodeAndValidate(data)
+	if err != nil {
+		t.Fatalf("重新解析落盘配置失败: %v\n%s", err, got)
+	}
+	if len(reloaded.Routes) != 2 {
+		t.Fatalf("路由数 = %d, 期望 2", len(reloaded.Routes))
+	}
+	if len(reloaded.Routes[0].Targets) != 0 || reloaded.Routes[0].Provider != "primary" {
+		t.Errorf("单目标路由被改写: %#v", reloaded.Routes[0])
+	}
+	if reloaded.Routes[0].Strategy != "" {
+		t.Errorf("单目标路由多出 strategy = %q", reloaded.Routes[0].Strategy)
+	}
+	if len(reloaded.Routes[1].Targets) != 2 || reloaded.Routes[1].Provider != "" {
+		t.Errorf("多目标路由被改写: %#v", reloaded.Routes[1])
+	}
+	if reloaded.Routes[1].Strategy != "round-robin" {
+		t.Errorf("多目标路由 strategy = %q, 期望 round-robin", reloaded.Routes[1].Strategy)
 	}
 }
