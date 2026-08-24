@@ -27,6 +27,7 @@ import (
 	"time"
 	_ "time/tzdata" // 嵌入时区数据库，使 distroless 等无 tzdata 的镜像也能解析 Asia/Shanghai
 
+	"ai-gateway/internal/balancer"
 	"ai-gateway/internal/breaker"
 	"ai-gateway/internal/cache"
 	"ai-gateway/internal/config"
@@ -101,6 +102,7 @@ func main() {
 		metrics:        metrics.NewCollector(1000),
 		providerHealth: providerhealth.NewChecker(),
 		breaker:        breaker.New(breakerSettings(cfg)),
+		selector:       balancer.New(),
 		webDevDir:      os.Getenv("AI_GATEWAY_WEB_DIR"),
 	}
 	initialLimits := make(map[string]queue.Limits, len(cfg.Providers))
@@ -191,7 +193,10 @@ type server struct {
 	metrics        *metrics.Collector
 	providerHealth providerHealthRuntime
 	breaker        *breaker.Breaker
-	webDevDir      string
+	// selector 持有跨请求的候选选择状态（per-route 轮转计数器 + prompt cache 粘性映射）。
+	// router 是无状态纯函数，这些状态只能由 server 持有并显式传入。
+	selector  *balancer.Selector
+	webDevDir string
 }
 
 func (s *server) handle(w http.ResponseWriter, r *http.Request) {
@@ -397,8 +402,14 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 	needVision := matched.VisionProvider != nil && vision.HasImages(internal.Messages)
 	reqLog.Vision = needVision
 
+	// 粘性键必须在 vision 翻译之前算：翻译会把图片块换成文字描述，
+	// 而描述随缓存命中情况变化，会让同一会话前后算出两个不同的键。
+	stickyKey := balancer.StickyKey(internal.System, internal.Messages)
+	// 候选尝试顺序：strategy 决定「先试谁」，failover 决定「失败了还能试谁」，两者正交。
+	order := s.candidateOrder(matched, stickyKey)
+
 	// 首个候选决定日志与提示里的展示信息（真实使用的候选在循环里逐次覆盖）
-	first := matched.Candidates[0]
+	first := matched.Candidates[order[0]]
 	reqLog.Provider = first.Provider.Name
 	reqLog.TargetModel = first.TargetModel
 	displayModel := first.TargetModel
@@ -415,7 +426,9 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 			func(f string, a ...any) { logf(reqID, f, a...) })
 	}
 
-	// 候选尝试范围：failover 关闭时只试首个候选，行为与单目标时代一致
+	// 候选尝试范围：failover 关闭时只试首个候选，行为与单目标时代一致。
+	// 注意这里不看 strategy：round-robin 关掉 failover 是合法组合，
+	// 表示「分流但不转移」——选中的那个失败就直接返回。
 	attemptLimit := 1
 	if cfg.Failover.Enabled && len(matched.Candidates) > 1 {
 		attemptLimit = cfg.Failover.MaxAttempts
@@ -435,10 +448,10 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		breakerSkips  int
 		soonestRetry  time.Duration
 	)
-	// 遍历全部候选，但真实尝试次数受 attemptLimit 约束：
+	// 按 order 遍历全部候选，但真实尝试次数受 attemptLimit 约束：
 	// 被熔断跳过的候选不消耗尝试额度，否则熔断反而会削弱可用性。
-	for i := 0; i < len(matched.Candidates) && attempts < attemptLimit; i++ {
-		candidate := matched.Candidates[i]
+	for pos := 0; pos < len(order) && attempts < attemptLimit; pos++ {
+		candidate := matched.Candidates[order[pos]]
 		name := candidate.Provider.Name
 
 		// 熔断过滤：开路的 provider 直接跳过，不占用尝试额度
@@ -455,8 +468,8 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		// 是否还有后续候选可试：额度未用尽且后面还有候选
-		hasNext := attempts+1 < attemptLimit && i+1 < len(matched.Candidates)
+		// 是否还有后续候选可试：额度未用尽且 order 里后面还有候选
+		hasNext := attempts+1 < attemptLimit && pos+1 < len(order)
 
 		outcome := s.forwardAttempt(w, r, forwardAttemptInput{
 			cfg:           cfg,
@@ -492,6 +505,11 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		trail = append(trail, outcome.trail)
 		lastAbandoned = outcome.abandoned
 		if !outcome.abandoned {
+			// 只在确实成功后绑定粘性：绑定失败过的目标会把整条会话钉在坏上游上。
+			// 复用 breakerOutcome 判定成功，避免再写一份状态码分类。
+			if outcome.breakerOutcome == breaker.OutcomeSuccess {
+				s.rememberSticky(matched, stickyKey, candidate)
+			}
 			break
 		}
 		logf(reqID, "  候选 %s 放弃（%s），尝试下一个", name, outcome.trail)
@@ -526,6 +544,53 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		reqLog.Error = "全部候选上游均不可用"
 		writeJSONError(w, http.StatusBadGateway, "all_candidates_failed", reqLog.Error)
 	}
+}
+
+// candidateOrder 计算候选的尝试顺序（返回下标序列），长度恒等于候选数，不丢候选。
+//
+// 策略只改「先试谁」；剩余候选仍按该顺序留在后面，供 failover 继续转移。
+func (s *server) candidateOrder(matched *router.Match, stickyKey string) []int {
+	n := len(matched.Candidates)
+	if s.selector == nil || n <= 1 {
+		order := make([]int, n)
+		for i := range order {
+			order[i] = i
+		}
+		return order
+	}
+	keys := make([]string, n)
+	for i, c := range matched.Candidates {
+		keys[i] = candidateKey(c)
+	}
+	// load 取队列的真实在途量（running + queued），比轮询计数更准。
+	// directMode 下队列未被使用，StatusOf 恒返回 0，least-queue 因此自然退化成
+	// 轮询而不是静默退回配置顺序 —— 后者等于用户选的策略被忽略。
+	load := func(i int) int {
+		p := matched.Candidates[i].Provider
+		st := s.qm.StatusOf(p.Name, p.MaxConcurrent, p.MaxPerSecond)
+		return st.Running + st.Queued
+	}
+	return s.selector.Select(matched.RouteMatch, matched.Strategy, keys, stickyKey, load)
+}
+
+// candidateKey 候选的稳定身份，用作粘性映射的值。
+// 用 provider/model 而不是下标：热重载改了 targets 顺序后，下标会指向另一个上游。
+func candidateKey(c router.Candidate) string {
+	return c.Provider.Name + "/" + c.TargetModel
+}
+
+// rememberSticky 记下「该前缀下次仍走这个候选」，保住上游侧的 prompt cache 前缀。
+//
+// failover 策略跳过：它本来就按配置顺序，粘性没有作用对象，
+// 记了反而白占 LRU 容量、挤掉真正需要粘性的路由。
+func (s *server) rememberSticky(matched *router.Match, stickyKey string, c router.Candidate) {
+	if s.selector == nil || stickyKey == "" {
+		return
+	}
+	if !balancer.UsesSticky(matched.Strategy) {
+		return
+	}
+	s.selector.Remember(matched.RouteMatch, stickyKey, candidateKey(c))
 }
 
 // forwardAttemptInput 单次候选尝试的输入，字段在循环内不被修改。
@@ -878,6 +943,9 @@ func (s *server) handleHealth(w http.ResponseWriter, head bool) {
 		},
 		// breakers 为 null 表示熔断未启用，与「全部健康」区分开
 		"breakers": s.breakerSnapshot(),
+		// stickyMappings 当前有效的 prompt cache 粘性映射数，
+		// 用来判断粘性是否真的在生效（长期为 0 说明前缀太短或策略是 failover）
+		"stickyMappings": s.stickyMappings(),
 		"memory": map[string]any{
 			"heapAllocMB": m.HeapAlloc / 1024 / 1024,
 			"sysMB":       m.Sys / 1024 / 1024,
@@ -894,6 +962,14 @@ func (s *server) handleHealth(w http.ResponseWriter, head bool) {
 	if !head {
 		_, _ = w.Write(out)
 	}
+}
+
+// stickyMappings 返回当前有效的 prompt cache 粘性映射数，未装 selector 时返回 0。
+func (s *server) stickyMappings() int {
+	if s.selector == nil {
+		return 0
+	}
+	return s.selector.StickyMappings()
 }
 
 // breakerSnapshot 返回熔断状态快照，未启用或未构造时返回 nil。
@@ -1407,6 +1483,15 @@ func (s *server) applyRuntimeConfig(newCfg *config.Config, revision string) []st
 			active[name] = struct{}{}
 		}
 		s.breaker.Reconcile(active)
+	}
+	if s.selector != nil {
+		// 路由状态按 route.match 归属：热重载删掉或改名的路由，
+		// 其轮转计数器与粘性映射都该跟着走，否则 rr 会随历史 match 单调增长。
+		activeRoutes := make(map[string]struct{}, len(newCfg.Routes))
+		for _, route := range newCfg.Routes {
+			activeRoutes[route.Match] = struct{}{}
+		}
+		s.selector.Reconcile(activeRoutes)
 	}
 	s.cfg = newCfg
 	s.revision = revision

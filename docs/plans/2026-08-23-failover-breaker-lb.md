@@ -273,7 +273,12 @@ directMode 下没有队列，`least-queue` 退化成轮询，需在文档写明�
 docker run --pull never --rm --name ai-gateway-dev-verify -v "$PWD":/work -w /work golang:1.23-alpine gofmt -l ./cmd ./internal
 docker run --pull never --rm --name ai-gateway-dev-verify -v "$PWD":/work -w /work golang:1.23-alpine go vet ./...
 docker run --pull never --rm --name ai-gateway-dev-verify -v "$PWD":/work -w /work golang:1.23-alpine go test ./...
-docker run --pull never --rm --name ai-gateway-dev-verify -v "$PWD":/work -w /work golang:1.23-alpine go test -race ./internal/queue/ ./internal/proxy/
+```
+
+`-race` 必须用完整 `golang:1.23` 镜像，不能用 alpine：race detector 依赖 cgo，而 alpine 变体不含 C 工具链（`apk add gcc musl-dev` 又受镜像源可达性影响）。
+
+```bash
+docker run --rm -v "$PWD":/work -w /work -v ai-gateway-go-mod-cache:/go/pkg/mod golang:1.23 go test -race ./...
 ```
 
 新增测试：
@@ -297,19 +302,36 @@ docker run --pull never --rm --name ai-gateway-dev-verify -v "$PWD":/work -w /wo
 
 ## 9. 当前代码状态
 
-`internal/config/config.go` 已落盘（53 行新增，`git status` 中唯一被修改的文件）：
+> 本节随实施推进更新。上一版描述的是「只有 config.go 落盘」的起点状态，已过期。
 
-- `Target` 结构体
-- `Route.Targets` 字段 + `Provider`/`Model` 加 `omitempty`
-- `TargetList()` 方法
-- `Failover` 结构体（**`OnXxx` 是 `bool`，需按 4.1 改成 `*bool`**）
-- `Config.Failover` 字段
+### 阶段一、二：已提交
 
-**未落盘**：
+commit `d38e860 feat: 新增 provider 故障转移与熔断机制`（在 `dev` 分支，未推远程、未合 master）。
 
-- `applyDefaults` 里 Failover 的默认值
-- `validate` 里 Failover 与 route 的新校验
-- `maxRetryAfterCapMs` 常量
-- 4.2 之后的全部内容
+4.1–4.5 全部落盘，含 `Failover.OnXxx` 按 4.1 改成 `*bool` + `BoolOr` 辅助函数（区分「未写」与「显式 false」）。阶段二的 `internal/breaker/` 状态机与前端熔断列、手动闭合按钮一并在内。
 
-代码当前可编译（`Provider.Name` 未改动）。
+### 阶段三：已实现，未提交
+
+后端全部完成，`internal/balancer/` 是新落点（`Selector` 只认下标与身份字符串，不依赖 `router`/`config`，避免成环）：
+
+- `route.strategy` 三种取值 + 校验（取值表向 `balancer.ValidStrategy` 借，不另写一份）
+- `Match.Strategy` 透传，router 保持无状态
+- `server.candidateOrder` 出尝试顺序下标序列；`least-queue` 取 `queue.StatusOf` 的 `running+queued`
+- prompt cache 会话粘性（TTL 5 分钟 / LRU 1000 条 / 前缀下限 256 字符），只在成功后 `Remember`
+- `Selector.Reconcile`：热重载按 `route.match` 归属清理。**这是实施中发现的、计划里没写的缺陷** —— `rr` 计数器既无 TTL 也无 LRU 兜底，不清理会随历史 match 单调增长
+- `/health` 增 `stickyMappings`，用来判断粘性是否真的在生效
+
+单候选路由写非 `failover` 策略在启动校验时直接报错，不静默忽略（对应 2.2 的 LiteLLM #32425 教训）。
+
+**4.6 的前端改动已补齐。** `targets` 多候选编辑器（上移/下移/删除，上限 5 个）与请求日志的尝试链列在阶段一就已落盘，本阶段只缺 `strategy` 选择器，现已补上：
+
+- `routeForm.strategy` + `routeStrategies` 取值表，选择器只在候选数 > 1 时出现
+- `normalizeConfig` 读出 `strategy`（**原来漏读**：手写的策略会在页面加载时丢掉，下次保存静默抹除；这条早于阶段三，是阶段一 `saveRoute` 整体重建 route 对象带来的）
+- `saveRoute` 单候选时不写 `strategy`，避免用户删掉最后一个候选后撞后端校验
+- `directMode` + `least-queue` 时在表单里直接提示会退化成 round-robin
+
+顺带修掉 `saveRoute` 候选去重里的一个字面 NUL 字节（改写成等价的 `'\u0000'` 转义，运行时语义不变）—— 它让整个 `index.html` 在 BSD grep 眼里变成二进制文件，所有搜索静默返回空。此问题早于本阶段，已存在于 `d38e860`。
+
+### 验证状态
+
+`gofmt`、`go vet`、`go test ./...` 全绿。`-race` 已补齐并覆盖全部 13 个包 —— 此前受阻是因为 `golang:1.23-alpine` 不含 C 工具链而 `apk add` 拉不到镜像源，改用完整 `golang:1.23` 镜像后解决，7 节的命令应按此更新。

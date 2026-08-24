@@ -9,6 +9,9 @@
 - **多格式输入**：同时支持 Anthropic、OpenAI Chat、OpenAI Responses 三种格式
 - **模型名映射**：将客户端发来的模型名映射到实际 provider 模型
 - **多 Provider 路由**：不同模型走不同 provider，支持 Anthropic / OpenAI 兼容格式
+- **故障转移**：一条路由可配多个候选 (provider, model)，前一个失败自动换下一个；只在尚未向客户端写出字节时转移
+- **熔断保护**：连续失败的 provider 暂时摘掉，后续请求直接跳过它，冷却结束后用真实请求做半开探测
+- **负载均衡**：多候选路由可选 `round-robin` 轮转或 `least-queue` 按在途量分流，并按可缓存前缀做会话粘性，避免上游侧 prompt cache 反复失效
 - **视觉无缝衔接**：为纯文本模型配置视觉伴侣模型后，网关自动检测图片并先调用视觉模型生成描述
 - **格式自动转换**：请求/响应在不同格式之间自动转换，流式响应完整支持
 - **监控仪表盘**：实时请求速率、成功率、P95 延迟、Provider 队列状态、最近错误和系统资源
@@ -39,6 +42,10 @@ Codex CLI              ->  /v1/responses          (OpenAI Responses) ┘
 ├── internal/converter/ # Anthropic / OpenAI Chat / OpenAI Responses 互转
 ├── internal/vision/    # 图片检测、视觉模型翻译、SQLite 缓存和 singleflight 去重
 ├── internal/cache/     # 基于 modernc.org/sqlite 的纯 Go 图片缓存
+├── internal/breaker/   # per-provider 熔断状态机
+├── internal/balancer/  # 候选选择策略与 prompt cache 会话粘性
+├── internal/metrics/   # 内存环形请求日志与运行指标聚合
+├── internal/providerhealth/ # 上游 Provider 健康探测
 ├── cmd/gateway/web/    # 嵌入式管理页面资源
 ├── Dockerfile          # Go 主版本镜像构建入口
 ├── docker-compose.yml  # Go 主版本部署入口
@@ -239,7 +246,7 @@ Go 版用真正的 SQLite（`modernc.org/sqlite`），会用文件锁保证并�
 | 格式互转 converter | 已实现 | 三格式请求/响应/流式 SSE 双向转换 |
 | vision 图片识别 | 已实现 | 调用视觉模型 + SQLite 缓存复用 + 同图并发去重 |
 | SQLite 图片缓存 | 已实现 | 纯 Go SQLite，`CGO_ENABLED=0` 可编译 |
-| 健康检查 `/health` | 已实现 | 实际监听地址 + 队列状态 + Provider 状态 + 缓存与内存 |
+| 健康检查 `/health` | 已实现 | 实际监听地址 + 队列状态 + Provider 状态 + 熔断状态 + 粘性映射数 + 缓存与内存 |
 
 实测收益：镜像约 20MB 级别，启动后内存约个位数 MB；历史 Node 版镜像约 150MB 级别。
 

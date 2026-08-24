@@ -938,6 +938,21 @@
                         多候选需在「基础设置」开启 failover 才会真正转移，否则只用第一个候选。
                     </p>
                 </div>
+                <div x-show="routeForm.targets.length > 1" x-transition x-cloak class="md:col-span-2">
+                    <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">候选选择策略</span>
+                    <select x-model="routeForm.strategy" class="field">
+                        <template x-for="option in routeStrategies" :key="option.value">
+                            <option :value="option.value" x-text="option.label"></option>
+                        </template>
+                    </select>
+                    <p class="mt-2 text-xs text-muted">
+                        策略决定「先试谁」，failover 决定「失败了还能试谁」，两者互不影响。
+                        round-robin / least-queue 会按会话前缀做粘性，尽量让同一会话固定在一个上游。
+                    </p>
+                    <p x-show="routeForm.strategy === 'least-queue' && config.directMode" x-cloak class="mt-1 text-xs text-amber-300/90">
+                        直通模式下没有队列，在途量恒为 0，least-queue 会退化成 round-robin。
+                    </p>
+                </div>
                 <div class="rounded-lg border border-cyan2/20 bg-cyan2/5 p-4 md:col-span-2">
                     <label class="mb-4 flex cursor-pointer items-center gap-3">
                         <input type="checkbox" x-model="routeForm.enableVision" class="h-4 w-4 rounded border-line bg-panel text-cyan2 focus:ring-cyan2">
@@ -1025,11 +1040,19 @@
                     match: '',
                     // 目标候选列表，按顺序作为故障转移的尝试顺序；至少 1 个，最多 5 个
                     targets: [{ provider: '', model: '' }],
+                    // 候选选择策略，空等同 failover（按配置顺序）
+                    strategy: '',
                     enableVision: false,
                     visionProvider: '',
                     visionModel: ''
                 },
                 maxRouteTargets: 5,
+                // 与后端 balancer 的取值表对应；空选项表示不写 strategy 字段
+                routeStrategies: [
+                    { value: '', label: 'failover（默认，按顺序）' },
+                    { value: 'round-robin', label: 'round-robin（轮转分流）' },
+                    { value: 'least-queue', label: 'least-queue（按在途量）' }
+                ],
 
                 async init() {
                     await this.loadConfig();
@@ -1057,11 +1080,14 @@
                     const routes = (pick(data, 'routes', 'Routes') || []).map((r) => {
                         const vision = pick(r, 'vision', 'Vision');
                         const rawTargets = pick(r, 'targets', 'Targets');
+                        const strategy = pick(r, 'strategy', 'Strategy') || '';
                         const route = {
                             match: pick(r, 'match', 'Match') || '',
                             provider: pick(r, 'provider', 'Provider') || '',
                             model: pick(r, 'model', 'Model') || ''
                         };
+                        // strategy 必须读出来：漏读会让手写的策略在下次保存时被静默抹掉
+                        if (strategy) route.strategy = strategy;
                         // 多目标写法：保留 targets 原样，后端两种写法互斥，不能同时下发
                         if (Array.isArray(rawTargets) && rawTargets.length) {
                             route.targets = rawTargets.map((t) => ({
@@ -1732,6 +1758,7 @@
                     this.routeForm = {
                         match: '',
                         targets: [{ provider: providers[0] || '', model: '' }],
+                        strategy: '',
                         enableVision: false,
                         visionProvider: providers[0] || '',
                         visionModel: ''
@@ -1745,6 +1772,7 @@
                     this.routeForm = {
                         match: route.match,
                         targets: this.routeTargets(route).map((t) => ({ provider: t.provider || '', model: t.model || '' })),
+                        strategy: route.strategy || '',
                         enableVision: !!route.vision,
                         visionProvider: route.vision?.provider || '',
                         visionModel: route.vision?.model || ''
@@ -1787,7 +1815,7 @@
                     // 后端拒绝完全重复的 (provider, model) 对，这里先挡一层
                     const seen = new Set();
                     for (const t of targets) {
-                        const key = t.provider + ' ' + t.model;
+                        const key = t.provider + '\u0000' + t.model;
                         if (seen.has(key)) {
                             this.showStatus(`候选重复: ${t.provider} / ${t.model}`, 'error');
                             return;
@@ -1804,6 +1832,11 @@
                     const route = targets.length === 1
                         ? { match: this.routeForm.match, provider: targets[0].provider, model: targets[0].model }
                         : { match: this.routeForm.match, targets };
+                    // 单候选不写 strategy：后端对单候选 + 非 failover 直接报错，
+                    // 这里删干净比让用户在保存时撞校验更好（删掉最后一个候选是常见操作）
+                    if (targets.length > 1 && this.routeForm.strategy) {
+                        route.strategy = this.routeForm.strategy;
+                    }
                     if (this.routeForm.enableVision) {
                         route.vision = {
                             provider: this.routeForm.visionProvider,

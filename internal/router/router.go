@@ -16,9 +16,12 @@ type Candidate struct {
 }
 
 // Match 路由匹配结果。
-// Candidates 至少 1 个，按配置顺序排列，作为故障转移的尝试顺序。
+// Candidates 至少 1 个，按配置顺序排列。顺序是「默认尝试顺序」，
+// 真实尝试顺序由 balancer 按 Strategy 重排，router 本身保持无状态。
 type Match struct {
-	RouteMatch     string
+	RouteMatch string
+	// Strategy 该路由的候选选择策略，空字符串等同 failover（按配置顺序）。
+	Strategy       string
 	Candidates     []Candidate
 	VisionProvider *config.Provider // 可能为 nil
 	VisionModel    string
@@ -49,7 +52,7 @@ func MatchRoute(model string, cfg *config.Config) *Match {
 		if len(candidates) == 0 {
 			continue
 		}
-		m := &Match{RouteMatch: route.Match, Candidates: candidates}
+		m := &Match{RouteMatch: route.Match, Strategy: route.Strategy, Candidates: candidates}
 		if route.Vision != nil {
 			if vSrc := cfg.Providers[route.Vision.Provider]; vSrc != nil {
 				vpCopy := *vSrc

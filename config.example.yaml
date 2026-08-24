@@ -119,7 +119,17 @@ routes:
   # 多目标写法：与上面的 provider/model 单目标写法互斥，二者只能选一种。
   # 需要 failover.enabled: true 才会在首个候选失败时往下试；否则只用第一个。
   # 候选按顺序尝试，最多 5 个；同 provider 换不同 model 也合法（降级到便宜模型）。
+  #
+  # strategy 可选，决定「先试谁」，与 failover 的「失败了还能试谁」正交：
+  #   failover（默认）  按 targets 配置顺序，永远先试第一个
+  #   round-robin       每次请求轮转起点，把流量摊到各候选上
+  #   least-queue       选在途量（running+queued）最小的候选；相同时按轮转打散
+  # 只能写在有 2 个及以上候选的路由上，单候选路由写了会在启动时报错。
+  # round-robin / least-queue 会按可缓存前缀（system + 首条 user 消息）做 5 分钟
+  # 粘性，让同一会话尽量固定在一个上游，避免上游侧 prompt cache 反复失效。
+  # 注意 directMode: true 时没有队列，负载恒为 0，least-queue 会退化成 round-robin。
   # - match: "claude-sonnet-4*"
+  #   strategy: round-robin
   #   targets:
   #     - provider: mimo
   #       model: "mimo-v2.5-pro"

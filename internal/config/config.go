@@ -15,6 +15,8 @@ import (
 	"syscall"
 
 	"gopkg.in/yaml.v3"
+
+	"ai-gateway/internal/balancer"
 )
 
 const (
@@ -81,6 +83,14 @@ type Route struct {
 	Model    string   `yaml:"model" json:"model,omitempty"`
 	Targets  []Target `yaml:"targets" json:"targets,omitempty"`
 	Vision   *Vision  `yaml:"vision" json:"vision,omitempty"`
+	// Strategy 候选选择策略：failover | round-robin | least-queue，空等同 failover。
+	//
+	// 只做路由级，不设全局默认：全局默认会让「这条路由到底用哪个策略」需要看两处，
+	// 而路由数量本来不多。
+	//
+	// 与 failover.enabled 正交：策略决定「先试谁」，failover 决定「失败了还能试谁」。
+	// failover 关闭 + round-robin 是合法组合，表示纯分流、不转移。
+	Strategy string `yaml:"strategy" json:"strategy,omitempty"`
 }
 
 // TargetList 返回统一形态的候选列表。
@@ -708,6 +718,9 @@ func validate(c *Config) error {
 		if err := validateRouteTargets(c, &r); err != nil {
 			return err
 		}
+		if err := validateRouteStrategy(&r); err != nil {
+			return err
+		}
 		if r.Vision != nil {
 			if strings.TrimSpace(r.Vision.Provider) == "" {
 				return fmt.Errorf("route %q.vision 缺少 provider 字段", r.Match)
@@ -770,6 +783,27 @@ func validateRouteTargets(c *Config, r *Route) error {
 			return fmt.Errorf("route %q.targets 存在重复候选: %s/%s", r.Match, t.Provider, t.Model)
 		}
 		seen[t] = struct{}{}
+	}
+	return nil
+}
+
+// validateRouteStrategy 校验路由的候选选择策略。
+//
+// 取值表向 balancer 借，不在这里另写一份：两处各写一份必然会分叉。
+//
+// 单候选路由上写 strategy 直接报错而不是无声忽略：配置项被静默忽略
+// 正是 LiteLLM #32425 那类难查的 bug，宁可让用户在启动时就看到。
+func validateRouteStrategy(r *Route) error {
+	if r.Strategy == "" {
+		return nil
+	}
+	if !balancer.ValidStrategy(r.Strategy) {
+		return fmt.Errorf("route %q.strategy 须为 %s、%s 或 %s",
+			r.Match, balancer.StrategyFailover, balancer.StrategyRoundRobin, balancer.StrategyLeastQueue)
+	}
+	if len(r.TargetList()) < 2 && r.Strategy != balancer.StrategyFailover {
+		return fmt.Errorf("route %q 只有一个候选，strategy: %s 不会生效；请配置 targets 或删掉 strategy",
+			r.Match, r.Strategy)
 	}
 	return nil
 }
