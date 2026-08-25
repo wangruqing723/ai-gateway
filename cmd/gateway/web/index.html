@@ -111,6 +111,14 @@
             font-size: .75rem;
             font-weight: 700;
         }
+        /* 自己定义而不用 Tailwind 的 animate-spin：vendor 里是 Play CDN 的 JIT 编译器，
+           只出现在 Alpine :class 表达式里的类名不保证被扫描到，赌它等于赌图标不转。 */
+        @keyframes gw-spin { to { transform: rotate(360deg); } }
+        .gw-spin { animation: gw-spin 1s linear infinite; }
+        /* 同理：cursor-grab / cursor-grabbing / select-none 只出现在 :class 表达式里，
+           页面别处没静态用过，不能指望 JIT 扫到。 */
+        .gw-grab { cursor: grab; }
+        .gw-grabbing { cursor: grabbing; user-select: none; }
         ::-webkit-scrollbar { width: 10px; height: 10px; }
         ::-webkit-scrollbar-track { background: #0b0c12; }
         ::-webkit-scrollbar-thumb { background: #343846; border: 2px solid #0b0c12; border-radius: 999px; }
@@ -199,13 +207,36 @@
                             <span class="material-symbols-outlined">sync</span>
                             <span class="hidden sm:inline">重载</span>
                         </button>
-                        <button x-show="isConfigTab()" x-cloak @click="saveConfig()" :disabled="loading || !isDirty()" class="btn btn-primary">
+                        <button x-show="isConfigTab()" x-cloak @click="saveConfig()" :disabled="loading || !canSave()" class="btn btn-primary">
                             <span class="material-symbols-outlined">save</span>
                             <span class="hidden sm:inline">保存</span>
                         </button>
                     </div>
                 </div>
             </header>
+
+            <!-- 未保存提示：可拖拽浮层，默认右下角。
+                 不做成 inline 横幅是因为那会把整页内容往下推，每改一个字段页面就跳一次；
+                 也不放顶部，顶部浮层会盖住统计卡片（statusMessage 就是这个毛病）。
+                 弹窗开着时隐掉：弹窗保存自己落盘，这时提示未保存只是噪音。
+                 只针对全局设置、故障转移与熔断这些直接编辑的字段。
+                 顶部的保存按钮保持不变，这里只是提醒 + 快捷入口。 -->
+            <div x-ref="dirtyToast"
+                 x-show="canSave() && !showProviderModal && !showRouteModal" x-transition x-cloak
+                 role="status" aria-live="polite"
+                 @pointerdown="startDragDirty($event)"
+                 :style="dirtyToastStyle()"
+                 :class="draggingDirty ? 'gw-grabbing' : 'gw-grab'"
+                 class="fixed z-40 flex max-w-[calc(100vw-2.5rem)] items-center gap-3 rounded-full border border-warn/40 bg-warn/15 px-4 py-2.5 shadow-glow backdrop-blur-xl">
+                <span class="material-symbols-outlined shrink-0 text-base text-amber-200/70" title="按住可拖动">drag_indicator</span>
+                <span class="min-w-0 truncate text-sm font-semibold text-amber-100">有改动尚未写入磁盘</span>
+                <!-- 按钮上 stop 掉 pointerdown：否则按下按钮就开始拖，点击会被判成拖拽 -->
+                <button @click="saveConfig()" @pointerdown.stop :disabled="loading"
+                        class="btn btn-primary shrink-0 cursor-pointer rounded-full px-3 py-1.5 text-xs">
+                    <span class="material-symbols-outlined text-base">save</span>
+                    <span class="hidden sm:inline">立即保存</span>
+                </button>
+            </div>
 
             <div x-show="mobileNavOpen" x-transition.opacity x-cloak class="fixed inset-0 z-40 bg-black/60 lg:hidden" @click="mobileNavOpen = false"></div>
             <div x-show="mobileNavOpen" x-transition x-cloak class="fixed left-0 top-0 z-50 h-full w-72 border-r border-line bg-panel p-4 lg:hidden">
@@ -237,7 +268,7 @@
 			<div x-show="statusMessage" x-transition x-cloak role="status" aria-live="polite"
 				 :class="statusType === 'success' ? 'border-good/40 bg-good/10 text-emerald-100' : 'border-danger/40 bg-danger/10 text-rose-100'"
 				 style="top: 5rem"
-				 class="fixed left-4 right-4 z-40 flex items-start justify-between gap-4 rounded-lg border px-4 py-3 shadow-glow lg:left-80 lg:right-8">
+				 class="fixed left-4 right-4 z-[60] flex items-start justify-between gap-4 rounded-lg border px-4 py-3 shadow-glow lg:left-80 lg:right-8">
                 <div class="flex min-w-0 items-center gap-3">
                     <span class="material-symbols-outlined shrink-0" x-text="statusType === 'success' ? 'check_circle' : 'error'"></span>
                     <span class="min-w-0 break-words text-sm font-semibold" x-text="statusMessage"></span>
@@ -392,7 +423,7 @@
                                         <p class="mt-1 text-xs text-muted">监听、超时、缓存和直通模式</p>
                                     </div>
                                     <label class="flex cursor-pointer items-center gap-3 rounded-lg border border-line bg-ink px-3 py-2">
-                                        <input type="checkbox" x-model="config.directMode" class="h-4 w-4 rounded border-line bg-panel text-cyan2 focus:ring-cyan2">
+                                        <input autocomplete="off" type="checkbox" x-model="config.directMode" class="h-4 w-4 rounded border-line bg-panel text-cyan2 focus:ring-cyan2">
                                         <span class="text-sm font-bold">直通模式</span>
                                     </label>
                                 </div>
@@ -400,42 +431,42 @@
                                 <div class="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
                                     <label class="block">
                                         <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">Port</span>
-                                        <input type="number" x-model.number="config.port" class="field">
+                                        <input autocomplete="off" type="number" x-model.number="config.port" class="field">
                                     </label>
                                     <label class="block">
                                         <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">Host</span>
-                                        <input type="text" x-model="config.host" class="field">
+                                        <input autocomplete="off" type="text" x-model="config.host" class="field">
                                     </label>
                                     <label class="block">
                                         <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">请求超时 ms</span>
-                                        <input type="number" x-model.number="config.timeout" class="field">
+                                        <input autocomplete="off" type="number" x-model.number="config.timeout" class="field">
                                     </label>
                                     <label class="block">
                                         <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">流式活跃超时 ms</span>
-                                        <input type="number" x-model.number="config.streamActivityTimeout" class="field">
+                                        <input autocomplete="off" type="number" x-model.number="config.streamActivityTimeout" class="field">
                                     </label>
                                     <label class="block">
                                         <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">缓存最大天数</span>
-                                        <input type="number" x-model.number="config.cache.maxAgeDays" class="field">
+                                        <input autocomplete="off" type="number" x-model.number="config.cache.maxAgeDays" class="field">
                                     </label>
                                     <label class="block">
                                         <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">缓存最大记录数</span>
-                                        <input type="number" x-model.number="config.cache.maxRecords" class="field">
+                                        <input autocomplete="off" type="number" x-model.number="config.cache.maxRecords" class="field">
                                     </label>
                                 </div>
 
                                 <div x-show="config.directMode" x-transition x-cloak class="mt-4 grid grid-cols-1 gap-4 border-t border-line pt-4 md:grid-cols-3">
                                     <label class="block">
                                         <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">非流式超时 ms</span>
-                                        <input type="number" x-model.number="config.directTimeoutNoStream" class="field">
+                                        <input autocomplete="off" type="number" x-model.number="config.directTimeoutNoStream" class="field">
                                     </label>
                                     <label class="block">
                                         <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">流式头超时 ms</span>
-                                        <input type="number" x-model.number="config.directTimeoutStreamHeader" class="field">
+                                        <input autocomplete="off" type="number" x-model.number="config.directTimeoutStreamHeader" class="field">
                                     </label>
                                     <label class="block">
                                         <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">流式活跃超时 ms</span>
-                                        <input type="number" x-model.number="config.directTimeoutStreamActive" class="field">
+                                        <input autocomplete="off" type="number" x-model.number="config.directTimeoutStreamActive" class="field">
                                     </label>
                                 </div>
                             </section>
@@ -448,11 +479,11 @@
                                     </div>
                                     <div class="flex flex-wrap items-center gap-2">
                                         <label class="flex cursor-pointer items-center gap-3 rounded-lg border border-line bg-ink px-3 py-2">
-                                            <input type="checkbox" x-model="config.failover.enabled" class="h-4 w-4 rounded border-line bg-panel text-cyan2 focus:ring-cyan2">
+                                            <input autocomplete="off" type="checkbox" x-model="config.failover.enabled" class="h-4 w-4 rounded border-line bg-panel text-cyan2 focus:ring-cyan2">
                                             <span class="text-sm font-bold">故障转移</span>
                                         </label>
                                         <label class="flex cursor-pointer items-center gap-3 rounded-lg border border-line bg-ink px-3 py-2">
-                                            <input type="checkbox" x-model="config.breaker.enabled" class="h-4 w-4 rounded border-line bg-panel text-cyan2 focus:ring-cyan2">
+                                            <input autocomplete="off" type="checkbox" x-model="config.breaker.enabled" class="h-4 w-4 rounded border-line bg-panel text-cyan2 focus:ring-cyan2">
                                             <span class="text-sm font-bold">熔断</span>
                                         </label>
                                     </div>
@@ -462,12 +493,12 @@
                                     <div class="grid grid-cols-1 gap-4 md:grid-cols-2">
                                         <label class="block">
                                             <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">最大尝试次数</span>
-                                            <input type="number" min="1" max="5" x-model.number="config.failover.maxAttempts" class="field" placeholder="留空用默认值 2">
+                                            <input autocomplete="off" type="number" min="1" max="5" x-model.number="config.failover.maxAttempts" class="field" placeholder="留空用默认值 2">
                                             <span class="mt-1.5 block text-xs text-muted">含首次尝试，1-5。熔断跳过和下面的限流跳过都不消耗额度。</span>
                                         </label>
                                         <label class="block">
                                             <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">Retry-After 上限 ms</span>
-                                            <input type="number" min="0" max="60000" x-model.number="config.failover.maxRetryAfterMs" class="field" placeholder="留空用默认值 5000">
+                                            <input autocomplete="off" type="number" min="0" max="60000" x-model.number="config.failover.maxRetryAfterMs" class="field" placeholder="留空用默认值 5000">
                                             <span class="mt-1.5 block text-xs text-muted">上游 429 携带的 Retry-After 超过此值时，该候选不消耗尝试额度。填 0 表示不设上限。</span>
                                         </label>
                                     </div>
@@ -476,31 +507,31 @@
                                         <span class="mb-2 block text-xs font-bold uppercase tracking-wide text-muted">哪些失败允许转移</span>
                                         <div class="grid grid-cols-1 gap-2 sm:grid-cols-2">
                                             <label class="flex cursor-pointer items-start gap-3 rounded-lg border border-line bg-ink px-3 py-2">
-                                                <input type="checkbox" x-model="config.failover.onTransportError" class="mt-0.5 h-4 w-4 rounded border-line bg-panel text-cyan2 focus:ring-cyan2">
+                                                <input autocomplete="off" type="checkbox" x-model="config.failover.onTransportError" class="mt-0.5 h-4 w-4 rounded border-line bg-panel text-cyan2 focus:ring-cyan2">
                                                 <span class="text-xs"><span class="font-bold text-text">连接失败</span><span class="mt-0.5 block text-muted">DNS / TLS / 拒连，几乎不耗时</span></span>
                                             </label>
                                             <label class="flex cursor-pointer items-start gap-3 rounded-lg border border-line bg-ink px-3 py-2">
-                                                <input type="checkbox" x-model="config.failover.onServerError" class="mt-0.5 h-4 w-4 rounded border-line bg-panel text-cyan2 focus:ring-cyan2">
+                                                <input autocomplete="off" type="checkbox" x-model="config.failover.onServerError" class="mt-0.5 h-4 w-4 rounded border-line bg-panel text-cyan2 focus:ring-cyan2">
                                                 <span class="text-xs"><span class="font-bold text-text">上游 5xx</span><span class="mt-0.5 block text-muted">服务端错误</span></span>
                                             </label>
                                             <label class="flex cursor-pointer items-start gap-3 rounded-lg border border-line bg-ink px-3 py-2">
-                                                <input type="checkbox" x-model="config.failover.onRateLimit" class="mt-0.5 h-4 w-4 rounded border-line bg-panel text-cyan2 focus:ring-cyan2">
+                                                <input autocomplete="off" type="checkbox" x-model="config.failover.onRateLimit" class="mt-0.5 h-4 w-4 rounded border-line bg-panel text-cyan2 focus:ring-cyan2">
                                                 <span class="text-xs"><span class="font-bold text-text">上游 429</span><span class="mt-0.5 block text-muted">候选属不同厂商 / 账号时才有意义</span></span>
                                             </label>
                                             <label class="flex cursor-pointer items-start gap-3 rounded-lg border border-line bg-ink px-3 py-2">
-                                                <input type="checkbox" x-model="config.failover.onQueueTimeout" class="mt-0.5 h-4 w-4 rounded border-line bg-panel text-cyan2 focus:ring-cyan2">
+                                                <input autocomplete="off" type="checkbox" x-model="config.failover.onQueueTimeout" class="mt-0.5 h-4 w-4 rounded border-line bg-panel text-cyan2 focus:ring-cyan2">
                                                 <span class="text-xs"><span class="font-bold text-text">排队超时</span><span class="mt-0.5 block text-muted">本地队列背压，与上游健康无关</span></span>
                                             </label>
                                             <label class="flex cursor-pointer items-start gap-3 rounded-lg border border-line bg-ink px-3 py-2">
-                                                <input type="checkbox" x-model="config.failover.onStreamHeaderTimeout" class="mt-0.5 h-4 w-4 rounded border-line bg-panel text-cyan2 focus:ring-cyan2">
+                                                <input autocomplete="off" type="checkbox" x-model="config.failover.onStreamHeaderTimeout" class="mt-0.5 h-4 w-4 rounded border-line bg-panel text-cyan2 focus:ring-cyan2">
                                                 <span class="text-xs"><span class="font-bold text-text">流式响应头超时</span><span class="mt-0.5 block text-muted">客户端还没收到字节，转移边界干净</span></span>
                                             </label>
                                             <label class="flex cursor-pointer items-start gap-3 rounded-lg border border-line bg-ink px-3 py-2">
-                                                <input type="checkbox" x-model="config.failover.onRequestTimeout" class="mt-0.5 h-4 w-4 rounded border-line bg-panel text-cyan2 focus:ring-cyan2">
+                                                <input autocomplete="off" type="checkbox" x-model="config.failover.onRequestTimeout" class="mt-0.5 h-4 w-4 rounded border-line bg-panel text-cyan2 focus:ring-cyan2">
                                                 <span class="text-xs"><span class="font-bold text-warn">非流式整体超时</span><span class="mt-0.5 block text-muted">默认关闭：每个候选都要等满一整个超时预算，开启会让总耗时接近翻倍</span></span>
                                             </label>
                                             <label class="flex cursor-pointer items-start gap-3 rounded-lg border border-line bg-ink px-3 py-2 sm:col-span-2">
-                                                <input type="checkbox" x-model="config.failover.onAuthError" class="mt-0.5 h-4 w-4 rounded border-line bg-panel text-cyan2 focus:ring-cyan2">
+                                                <input autocomplete="off" type="checkbox" x-model="config.failover.onAuthError" class="mt-0.5 h-4 w-4 rounded border-line bg-panel text-cyan2 focus:ring-cyan2">
                                                 <span class="text-xs"><span class="font-bold text-warn">401 / 403</span><span class="mt-0.5 block text-muted">默认关闭：密钥配错时转移只会连锁失败，还会掩盖真实原因</span></span>
                                             </label>
                                         </div>
@@ -514,15 +545,15 @@
                                     <div class="grid grid-cols-1 gap-4 md:grid-cols-3">
                                         <label class="block">
                                             <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">连续失败阈值</span>
-                                            <input type="number" min="1" max="100" x-model.number="config.breaker.consecutiveFailures" class="field" placeholder="留空用默认值 3">
+                                            <input autocomplete="off" type="number" min="1" max="100" x-model.number="config.breaker.consecutiveFailures" class="field" placeholder="留空用默认值 3">
                                         </label>
                                         <label class="block">
                                             <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">冷却时长 ms</span>
-                                            <input type="number" min="1" max="600000" x-model.number="config.breaker.openMs" class="field" placeholder="留空用默认值 30000">
+                                            <input autocomplete="off" type="number" min="1" max="600000" x-model.number="config.breaker.openMs" class="field" placeholder="留空用默认值 30000">
                                         </label>
                                         <label class="block">
                                             <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">半开探针数</span>
-                                            <input type="number" min="1" max="10" x-model.number="config.breaker.halfOpenProbes" class="field" placeholder="留空用默认值 1">
+                                            <input autocomplete="off" type="number" min="1" max="10" x-model.number="config.breaker.halfOpenProbes" class="field" placeholder="留空用默认值 1">
                                         </label>
                                     </div>
                                     <p class="mt-2 text-xs text-muted">
@@ -622,7 +653,7 @@
                                 重新读取
                             </button>
                         </div>
-                        <textarea x-model="yamlContent"
+                        <textarea autocomplete="off" x-model="yamlContent"
                                   class="min-h-[680px] w-full resize-y rounded-b-lg border-0 bg-ink p-4 font-mono text-sm leading-6 text-slate-200 outline-none focus:ring-0 lg:min-h-0 lg:flex-1 lg:resize-none"
                                   placeholder="加载中..."></textarea>
                     </div>
@@ -672,15 +703,29 @@
                                     Provider 运行状态
                                 </div>
                                 <div class="flex gap-2">
-                                    <button @click="checkProviderHealth()" class="btn btn-secondary px-2 py-2" title="检测 Provider">
-                                        <span class="material-symbols-outlined text-[18px]">health_and_safety</span>
+                                    <!-- 检测要逐个探上游、每个 5 秒超时，整体可能跑十几秒。
+                                         必须就地给出「正在跑」的信号：只靠结束时的 toast，
+                                         这段时间里按钮毫无变化，点了像没反应。 -->
+                                    <button @click="checkProviderHealth()" :disabled="checkingHealth"
+                                            class="btn btn-secondary px-2 py-2 disabled:opacity-60"
+                                            :title="checkingHealth ? '检测中…' : '检测 Provider'">
+                                        <span class="material-symbols-outlined text-[18px]"
+                                              :class="checkingHealth && 'gw-spin'"
+                                              x-text="checkingHealth ? 'progress_activity' : 'health_and_safety'"></span>
                                     </button>
                                     <!-- 熔断未启用时后端返回 breakers: null，此时隐藏重置按钮 -->
-                                    <button x-show="health?.breakers" @click="resetBreakers()" class="btn btn-secondary px-2 py-2" title="重置全部熔断器">
-                                        <span class="material-symbols-outlined text-[18px]">restart_alt</span>
+                                    <button x-show="health?.breakers" @click="resetBreakers()" :disabled="resettingBreakers"
+                                            class="btn btn-secondary px-2 py-2 disabled:opacity-60"
+                                            :title="resettingBreakers ? '重置中…' : '重置全部熔断器'">
+                                        <span class="material-symbols-outlined text-[18px]"
+                                              :class="resettingBreakers && 'gw-spin'"
+                                              x-text="resettingBreakers ? 'progress_activity' : 'restart_alt'"></span>
                                     </button>
-                                    <button @click="refreshMonitor()" class="btn btn-secondary px-2 py-2" title="刷新仪表盘">
-                                        <span class="material-symbols-outlined text-[18px]">refresh</span>
+                                    <button @click="refreshMonitor()" :disabled="refreshingMonitor"
+                                            class="btn btn-secondary px-2 py-2 disabled:opacity-60"
+                                            :title="refreshingMonitor ? '刷新中…' : '刷新仪表盘'">
+                                        <span class="material-symbols-outlined text-[18px]"
+                                              :class="refreshingMonitor && 'gw-spin'">refresh</span>
                                     </button>
                                 </div>
                             </div>
@@ -704,10 +749,22 @@
                                             <tr class="bg-panel/35">
                                                 <td class="px-4 py-4 font-mono text-sm font-bold text-white" x-text="row.name"></td>
                                                 <td class="px-4 py-4">
-                                                    <span class="chip" :class="row.healthClass" :title="row.healthTitle" x-text="row.healthLabel"></span>
+                                                    <!-- 不用 title：原生 tooltip 有约 1-2 秒延迟且无法调，
+                                                         这两列的详情（剩余冷却、失败次数）是要一眼看到的。 -->
+                                                    <span class="chip" :class="row.healthClass" x-text="row.healthLabel"
+                                                          @mouseenter="showTip(row.healthTitle, $event)"
+                                                          @mouseleave="hideTip()"
+                                                          @focus="showTip(row.healthTitle, $event)"
+                                                          @blur="hideTip()"
+                                                          tabindex="0"></span>
                                                 </td>
                                                 <td class="px-4 py-4">
-                                                    <span class="chip" :class="row.breakerClass" :title="row.breakerTitle" x-text="row.breakerLabel"></span>
+                                                    <span class="chip" :class="row.breakerClass" x-text="row.breakerLabel"
+                                                          @mouseenter="showTip(row.breakerTitle, $event)"
+                                                          @mouseleave="hideTip()"
+                                                          @focus="showTip(row.breakerTitle, $event)"
+                                                          @blur="hideTip()"
+                                                          tabindex="0"></span>
                                                 </td>
                                                 <td class="px-4 py-4"><span class="chip bg-white/[.05] text-text" x-text="row.format"></span></td>
                                                 <td class="px-4 py-4 font-mono text-sm text-text" x-text="row.running"></td>
@@ -851,31 +908,31 @@
                             <p class="mt-1 text-xs text-muted" x-text="requestLogs.length ? '最近 ' + requestLogs.length + ' 条请求' : '暂无请求明细'"></p>
                         </div>
                         <div class="grid grid-cols-1 gap-3 md:grid-cols-6">
-                            <select x-model="logFilters.status" @change="loadRequestLogs()" class="field text-sm">
+                            <select autocomplete="off" x-model="logFilters.status" @change="loadRequestLogs()" class="field text-sm">
                                 <option value="">全部状态</option>
                                 <option value="success">成功</option>
                                 <option value="error">错误</option>
                                 <option value="4xx">4xx</option>
                                 <option value="5xx">5xx</option>
                             </select>
-                            <select x-model="logFilters.provider" @change="loadRequestLogs()" class="field text-sm">
+                            <select autocomplete="off" x-model="logFilters.provider" @change="loadRequestLogs()" class="field text-sm">
                                 <option value="">全部 Provider</option>
                                 <template x-for="(provider, name) in config.providers" :key="name">
                                     <option :value="name" x-text="name"></option>
                                 </template>
                             </select>
-                            <select x-model="logFilters.stream" @change="loadRequestLogs()" class="field text-sm">
+                            <select autocomplete="off" x-model="logFilters.stream" @change="loadRequestLogs()" class="field text-sm">
                                 <option value="">全部类型</option>
                                 <option value="true">流式</option>
                                 <option value="false">非流式</option>
                             </select>
-                            <select x-model="logFilters.model" @change="loadRequestLogs()" class="field text-sm md:col-span-1">
+                            <select autocomplete="off" x-model="logFilters.model" @change="loadRequestLogs()" class="field text-sm md:col-span-1">
                                 <option value="">全部模型</option>
                                 <template x-for="model in configuredModelOptions()" :key="model">
                                     <option :value="model" x-text="model"></option>
                                 </template>
                             </select>
-                            <input x-model="logFilters.q" @keydown.enter="loadRequestLogs()" class="field text-sm md:col-span-1" placeholder="关键词 / 请求 ID">
+                            <input autocomplete="off" x-model="logFilters.q" @keydown.enter="loadRequestLogs()" class="field text-sm md:col-span-1" placeholder="关键词 / 请求 ID">
                             <div class="flex gap-2">
                                 <button @click="loadRequestLogs()" class="btn btn-secondary flex-1 px-2" title="刷新">
                                     <span class="material-symbols-outlined">refresh</span>
@@ -943,40 +1000,40 @@
             <div class="grid grid-cols-1 gap-4 p-5 md:grid-cols-2">
                 <label class="block">
                     <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">名称</span>
-                    <input type="text" x-model="providerForm.name" :disabled="editingProvider" class="field">
+                    <input autocomplete="off" type="text" x-model="providerForm.name" :disabled="editingProvider" class="field">
                 </label>
                 <label class="block">
                     <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">格式</span>
-                    <select x-model="providerForm.format" class="field">
+                    <select autocomplete="off" x-model="providerForm.format" class="field">
                         <option value="anthropic">Anthropic</option>
                         <option value="openai">OpenAI</option>
                     </select>
                 </label>
                 <label class="block md:col-span-2">
                     <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">Base URL</span>
-                    <input type="text" x-model="providerForm.baseUrl" placeholder="https://api.example.com" class="field">
+                    <input autocomplete="off" type="text" x-model="providerForm.baseUrl" placeholder="https://api.example.com" class="field">
                 </label>
                 <div class="block md:col-span-2">
                     <label for="provider-api-key" class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">API Key</label>
-                    <input id="provider-api-key" type="password" x-model="providerForm.apiKey"
-                           :placeholder="providerForm.apiKeyConfigured ? (providerIdentityChanged() ? '地址或格式已变更，请重新输入密钥' : '已配置，留空保持不变') : '留空则从客户端请求头提取'"
+                    <input autocomplete="off" id="provider-api-key" type="password" x-model="providerForm.apiKey"
+                           :placeholder="providerForm.apiKeyConfigured ? '已配置，留空保持不变' : '留空则从客户端请求头提取'"
                            class="field">
                     <label for="provider-clear-api-key" x-show="providerForm.apiKeyConfigured" x-cloak class="mt-2 flex items-center gap-2 text-xs text-muted">
-                        <input id="provider-clear-api-key" type="checkbox" x-model="providerForm.clearApiKey" class="h-4 w-4 rounded border-line bg-panel text-cyan2 focus:ring-cyan2">
+                        <input autocomplete="off" id="provider-clear-api-key" type="checkbox" x-model="providerForm.clearApiKey" class="h-4 w-4 rounded border-line bg-panel text-cyan2 focus:ring-cyan2">
                         清除已有密钥，改用客户端请求头
                     </label>
                 </div>
                 <label class="block">
                     <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">最大并发</span>
-                    <input type="number" x-model.number="providerForm.maxConcurrent" class="field">
+                    <input autocomplete="off" type="number" x-model.number="providerForm.maxConcurrent" class="field">
                 </label>
                 <label class="block">
                     <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">每秒请求数</span>
-                    <input type="number" x-model.number="providerForm.maxPerSecond" placeholder="0 = 不限" class="field">
+                    <input autocomplete="off" type="number" x-model.number="providerForm.maxPerSecond" placeholder="0 = 不限" class="field">
                 </label>
                 <label class="block md:col-span-2">
                     <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">队列最大等待 ms</span>
-                    <input type="number" x-model.number="providerForm.maxQueueWait" class="field">
+                    <input autocomplete="off" type="number" x-model.number="providerForm.maxQueueWait" class="field">
                 </label>
             </div>
             <div class="flex justify-end gap-3 border-t border-line p-5">
@@ -997,7 +1054,7 @@
             <div class="grid grid-cols-1 gap-4 p-5 md:grid-cols-2">
                 <label class="block">
                     <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">匹配模式</span>
-                    <input type="text" x-model="routeForm.match" placeholder="例如: claude-* 或 gpt-4" class="field font-mono">
+                    <input autocomplete="off" type="text" x-model="routeForm.match" placeholder="例如: claude-* 或 gpt-4" class="field font-mono">
                 </label>
                 <div class="md:col-span-2">
                     <div class="mb-1.5 flex items-center justify-between">
@@ -1008,12 +1065,12 @@
                         <template x-for="(target, ti) in routeForm.targets" :key="ti">
                             <div class="flex items-center gap-2">
                                 <span class="w-6 shrink-0 font-mono text-xs text-muted" x-text="'#' + (ti + 1)"></span>
-                                <select x-model="target.provider" class="field w-1/3">
+                                <select autocomplete="off" x-model="target.provider" class="field w-1/3">
                                     <template x-for="(provider, name) in config.providers" :key="name">
                                         <option :value="name" x-text="name"></option>
                                     </template>
                                 </select>
-                                <input type="text" x-model="target.model" placeholder="上游实际使用的模型名" class="field flex-1 font-mono">
+                                <input autocomplete="off" type="text" x-model="target.model" placeholder="上游实际使用的模型名" class="field flex-1 font-mono">
                                 <button @click="moveRouteTarget(ti, -1)" :disabled="ti === 0" class="btn btn-secondary px-2 py-2" title="上移">
                                     <span class="material-symbols-outlined text-[18px]">keyboard_arrow_up</span>
                                 </button>
@@ -1036,7 +1093,7 @@
                 </div>
                 <div x-show="routeForm.targets.length > 1" x-transition x-cloak class="md:col-span-2">
                     <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">候选选择策略</span>
-                    <select x-model="routeForm.strategy" class="field">
+                    <select autocomplete="off" x-model="routeForm.strategy" class="field">
                         <template x-for="option in routeStrategies" :key="option.value">
                             <option :value="option.value" x-text="option.label"></option>
                         </template>
@@ -1051,13 +1108,13 @@
                 </div>
                 <div class="rounded-lg border border-cyan2/20 bg-cyan2/5 p-4 md:col-span-2">
                     <label class="mb-4 flex cursor-pointer items-center gap-3">
-                        <input type="checkbox" x-model="routeForm.enableVision" class="h-4 w-4 rounded border-line bg-panel text-cyan2 focus:ring-cyan2">
+                        <input autocomplete="off" type="checkbox" x-model="routeForm.enableVision" class="h-4 w-4 rounded border-line bg-panel text-cyan2 focus:ring-cyan2">
                         <span class="text-sm font-bold text-cyan">启用视觉伴随模型</span>
                     </label>
                     <div x-show="routeForm.enableVision" x-transition x-cloak class="grid grid-cols-1 gap-4 md:grid-cols-2">
                         <label class="block">
                             <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">视觉 Provider</span>
-                            <select x-model="routeForm.visionProvider" class="field">
+                            <select autocomplete="off" x-model="routeForm.visionProvider" class="field">
                                 <template x-for="(provider, name) in config.providers" :key="name">
                                     <option :value="name" x-text="name"></option>
                                 </template>
@@ -1065,7 +1122,7 @@
                         </label>
                         <label class="block">
                             <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">视觉模型</span>
-                            <input type="text" x-model="routeForm.visionModel" placeholder="例如: gpt-4o-mini" class="field font-mono">
+                            <input autocomplete="off" type="text" x-model="routeForm.visionModel" placeholder="例如: gpt-4o-mini" class="field font-mono">
                         </label>
                     </div>
                 </div>
@@ -1077,6 +1134,37 @@
         </div>
     </div>
 
+    <!-- 自定义 tooltip：fixed 定位而不是 CSS ::after，因为徽章所在表格外层是
+         overflow-x-auto，绝对定位的气泡会被滚动容器裁掉。z-[70] 在错误提示之上。 -->
+    <div x-show="tip.show" x-cloak role="tooltip"
+         :style="`left: ${tip.x}px; top: ${tip.y}px;`"
+         class="pointer-events-none fixed z-[70] max-w-xs -translate-x-1/2 -translate-y-full rounded-lg border border-line bg-panel3 px-3 py-2 text-xs font-semibold leading-relaxed text-text shadow-glow">
+        <span x-text="tip.text"></span>
+    </div>
+
+    <!-- 自定义确认弹窗，替代 window.confirm。
+         原生 confirm 阻塞主线程、样式不可控、在部分浏览器里可被用户永久屏蔽
+         （勾了「不再显示对话框」之后直接返回 false，删除会静默失效）。 -->
+    <div x-show="confirmDialog.open" x-transition.opacity x-cloak
+         class="fixed inset-0 z-[80] grid place-items-center bg-black/70 p-4"
+         @keydown.escape.window="resolveConfirm(false)">
+        <div class="glass w-full max-w-md rounded-lg shadow-glow" role="alertdialog" aria-modal="true"
+             @click.away="resolveConfirm(false)">
+            <div class="flex items-start gap-3 border-b border-line p-5">
+                <span class="material-symbols-outlined shrink-0 text-danger">warning</span>
+                <div class="min-w-0">
+                    <h3 class="text-base font-extrabold text-white" x-text="confirmDialog.title"></h3>
+                    <p class="mt-1 break-words text-sm text-muted" x-text="confirmDialog.message"></p>
+                </div>
+            </div>
+            <div class="flex justify-end gap-2 p-4">
+                <button @click="resolveConfirm(false)" class="btn btn-secondary">取消</button>
+                <button x-ref="confirmOk" @click="resolveConfirm(true)" class="btn btn-danger"
+                        x-text="confirmDialog.confirmText"></button>
+            </div>
+        </div>
+    </div>
+
     <script>
         function gatewayApp() {
             return {
@@ -1084,6 +1172,23 @@
                 editMode: 'visual',
                 mobileNavOpen: false,
                 loading: false,
+                // 监控页三个动作各自一个进行中标志，不复用 loading：
+                // loading 管配置保存，共用会让检测期间顶部保存按钮一起变灰。
+                checkingHealth: false,
+                resettingBreakers: false,
+                refreshingMonitor: false,
+                // 未保存浮层的拖拽状态。dirtyToastPos 为 null 表示没拖过，用默认右下角。
+                draggingDirty: false,
+                dirtyToastPos: null,
+                tip: { show: false, text: '', x: 0, y: 0 },
+                // _confirmResolve 存 Promise 的 resolve，让 confirm 从阻塞调用变成 await
+                confirmDialog: { open: false, title: '', message: '', confirmText: '删除' },
+                _confirmResolve: null,
+                // 最近一次 /api/config 的原始响应，供 load 后重放以抹掉表单恢复
+                _serverConfigData: null,
+                // 用户是否真的动过表单。浏览器的表单恢复不会产生 isTrusted 的
+                // pointerdown/keydown，靠这个把「恢复污染」和「真实编辑」分开。
+                _userEdited: false,
                 statusMessage: '',
                 statusType: 'success',
                 configPath: '',
@@ -1147,9 +1252,7 @@
                     maxPerSecond: 0,
                     maxQueueWait: 30000,
                     apiKeyConfigured: false,
-                    clearApiKey: false,
-                    originalBaseUrl: '',
-                    originalFormat: ''
+                    clearApiKey: false
                 },
                 showRouteModal: false,
                 editingRouteIndex: -1,
@@ -1175,6 +1278,36 @@
                     await this.loadConfig();
                     await this.refreshMonitor();
                     window.setInterval(() => this.refreshMonitor(false), 5000);
+                    // 直接编辑的字段仍需手动保存，关页面前拦一下，免得改了半天丢掉
+                    window.addEventListener('beforeunload', (e) => {
+                        if (this.canSave()) e.preventDefault();
+                    });
+                    // 软刷新（F5）时浏览器会把刷新前的表单值恢复进 DOM，x-model 的
+                    // input/change 监听再把它们写回 config。若这一步落在 loadConfig()
+                    // 之后，config 就和 originalConfig 对不上，未保存浮层会在刚打开页面时
+                    // 凭空出现 —— 而磁盘上其实什么都没改。
+                    //
+                    // autocomplete="off" 已加在所有表单控件上，但各浏览器对
+                    // session-history 恢复的处理并不一致，所以这里再兜一层重放。
+                    //
+                    // 两个坑：
+                    // 1. 不能用 readyState 当守卫。fetch 够快时 init() 跑完 load 已经触发过，
+                    //    监听器压根不会注册，重放永远不发生 —— 这正是「取消勾选再勾回来、
+                    //    刷新后浮层又出现」的直接原因。
+                    // 2. 不能就在 load 那一刻重放。部分浏览器的恢复发生在 load 之后，
+                    //    得再让出一帧等它落定。
+                    // 也不能用 isDirty() 当守卫：恢复污染时它正好是 true，一判就跳过修复。
+                    const markEdited = (e) => { if (e.isTrusted) this._userEdited = true; };
+                    window.addEventListener('pointerdown', markEdited, { capture: true });
+                    window.addEventListener('keydown', markEdited, { capture: true });
+                    this.scheduleRestoreGuard();
+                    this.loadDirtyToastPos();
+                    // 窗口变小后旧坐标可能落到视窗外，重新收进来
+                    window.addEventListener('resize', () => {
+                        if (this.dirtyToastPos) {
+                            this.dirtyToastPos = this.clampDirtyToast(this.dirtyToastPos.x, this.dirtyToastPos.y);
+                        }
+                    });
                 },
 
                 normalizeConfig(data) {
@@ -1295,6 +1428,31 @@
                     this.config.directTimeoutStreamActive = this.config.directTimeoutStreamActive || 120000;
                 },
 
+                // scheduleRestoreGuard 在页面彻底落定后重放一次服务端配置，
+                // 抹掉浏览器表单恢复对 config 的污染。
+                // 无条件排程：readyState 已是 complete 时也要跑，否则快加载路径没人兜。
+                scheduleRestoreGuard() {
+                    const replay = () => {
+                        // 让出两帧：恢复可能排在 load 之后，rAF 嵌套比 setTimeout(0) 更贴渲染时序
+                        requestAnimationFrame(() => requestAnimationFrame(() => {
+                            if (this._userEdited) return; // 真有人动过表单就别覆盖
+                            this.applyServerConfig();
+                        }));
+                    };
+                    if (document.readyState === 'complete') replay();
+                    else window.addEventListener('load', replay, { once: true });
+                },
+
+                // applyServerConfig 把最近一次 /api/config 响应铺进表单并重设脏基线。
+                // 抽出来是为了页面落定后能重放一次，抹掉浏览器的表单恢复，不必再发请求。
+                applyServerConfig() {
+                    if (!this._serverConfigData) return;
+                    this.config = this.normalizeConfig(this._serverConfigData);
+                    this.configPath = this.config.path || '未知';
+                    this.ensureConfigShape();
+                    this.originalConfig = JSON.stringify(this.configPayload());
+                },
+
                 async loadConfig() {
                     try {
                         const res = await fetch('/api/config');
@@ -1302,10 +1460,8 @@
                         const data = await res.json();
                         this.revision = data.revision || (res.headers.get('ETag') || '').replace(/^W\//, '').replaceAll('"', '');
                         this.restartRequired = data.restartRequired || [];
-                        this.config = this.normalizeConfig(data);
-                        this.configPath = this.config.path || '未知';
-                        this.ensureConfigShape();
-                        this.originalConfig = JSON.stringify(this.configPayload());
+                        this._serverConfigData = data;
+                        this.applyServerConfig();
                     } catch (err) {
                         this.showStatus('加载配置失败: ' + err.message, 'error');
                     }
@@ -1322,15 +1478,22 @@
                     }
                 },
 
+                // showErrors 兼作「是否手动触发」：每 5 秒的轮询传 false，
+                // 只有手动点刷新才转圈，否则按钮会跟着轮询一直闪。
                 async refreshMonitor(showErrors = true) {
-                    if (this.activeTab === 'logs') {
-                        await this.loadRequestLogs();
-                    } else {
-                        await Promise.all([
-                            this.loadHealth(showErrors),
-                            this.loadMetrics(),
-                            this.loadRequestLogs()
-                        ]);
+                    if (showErrors) this.refreshingMonitor = true;
+                    try {
+                        if (this.activeTab === 'logs') {
+                            await this.loadRequestLogs();
+                        } else {
+                            await Promise.all([
+                                this.loadHealth(showErrors),
+                                this.loadMetrics(),
+                                this.loadRequestLogs()
+                            ]);
+                        }
+                    } finally {
+                        if (showErrors) this.refreshingMonitor = false;
                     }
                 },
 
@@ -1351,25 +1514,32 @@
                 },
 
                 async checkProviderHealth() {
-                    this.loading = true;
+                    if (this.checkingHealth) return;
+                    this.checkingHealth = true;
+                    // 逐个探上游、每个 5 秒超时，先给个即时提示，别让用户干等
+                    this.showStatus('正在检测 Provider…', 'success');
                     try {
                         const res = await fetch('/api/providers/health', { method: 'POST' });
                         if (!res.ok) throw new Error('Provider 健康检测失败');
                         const data = await res.json();
+                        const providers = data.providers || {};
                         this.health = this.health || {};
-                        this.health.providerHealth = data.providers || {};
-                        this.showStatus('Provider 健康检测完成', 'success');
+                        this.health.providerHealth = providers;
+                        const total = Object.keys(providers).length;
+                        const ok = Object.values(providers).filter((p) => p.status === 'ok').length;
+                        this.showStatus(`Provider 检测完成：${ok}/${total} 可用`, ok === total ? 'success' : 'error');
                     } catch (err) {
                         this.showStatus('Provider 健康检测失败: ' + err.message, 'error');
                     } finally {
-                        this.loading = false;
+                        this.checkingHealth = false;
                     }
                 },
 
                 // resetBreakers 手动闭合全部熔断器。不复用 checkProviderHealth：
                 // 后端两个端点判据不同，合并会让「为什么这个上游被放行」难以解释。
                 async resetBreakers() {
-                    this.loading = true;
+                    if (this.resettingBreakers) return;
+                    this.resettingBreakers = true;
                     try {
                         const res = await fetch('/api/providers/breaker/reset', { method: 'POST' });
                         if (!res.ok) throw new Error('HTTP ' + res.status);
@@ -1380,7 +1550,7 @@
                     } catch (err) {
                         this.showStatus('重置熔断器失败: ' + err.message, 'error');
                     } finally {
-                        this.loading = false;
+                        this.resettingBreakers = false;
                     }
                 },
 
@@ -1408,7 +1578,10 @@
                     }
                 },
 
-                async saveConfig() {
+                // persistConfig 把当前配置写盘并热重载。
+                // 成功返回 true；失败返回 false 并已经弹过错误提示，调用方据此决定是否回滚。
+                // 弹窗保存与顶部保存共用这一条路径，避免两处各写一遍 PUT 逻辑。
+                async persistConfig() {
                     this.loading = true;
                     try {
                         const yamlMode = this.editMode === 'yaml';
@@ -1430,11 +1603,17 @@
                         this.showStatus((result.message || '配置已保存') + this.restartSuffix(result), 'success');
                         await this.loadConfig();
                         if (this.editMode === 'yaml') await this.loadYamlConfig();
+                        return true;
                     } catch (err) {
                         this.showStatus('保存失败: ' + err.message, 'error');
+                        return false;
                     } finally {
                         this.loading = false;
                     }
+                },
+
+                async saveConfig() {
+                    await this.persistConfig();
                 },
 
                 async reloadConfig() {
@@ -1559,6 +1738,153 @@
                 isDirty() {
                     if (this.editMode === 'yaml') return this.yamlContent !== this.originalYaml;
                     return JSON.stringify(this.configPayload()) !== this.originalConfig;
+                },
+
+                // canSave 是「有东西可保存」的唯一判据，右上角保存按钮与未保存浮层共用。
+                // 分成两个表达式写过一次，结果就是两边可能各说各话：
+                // 按钮灰着、浮层却在喊有改动。统一到一个函数上，不可能再不一致。
+                canSave() {
+                    return this.isConfigTab() && this.isDirty();
+                },
+
+                // ── 即时 tooltip ────────────────────────────────────
+                // 原生 title 有 1-2 秒延迟且不可配置，这里 mouseenter 即显示。
+
+                showTip(text, event) {
+                    if (!text) return;
+                    const rect = event.currentTarget.getBoundingClientRect();
+                    this.tip = {
+                        show: true,
+                        text,
+                        // 锚在徽章上边缘中点，气泡自身用 -translate 往上让开 8px
+                        x: rect.left + rect.width / 2,
+                        y: rect.top - 8
+                    };
+                },
+
+                hideTip() {
+                    this.tip.show = false;
+                },
+
+                // ── 自定义确认弹窗 ──────────────────────────────────
+                // 返回 Promise<boolean>，调用方 await 即可，语义和 confirm 一致。
+
+                askConfirm(message, { title = '确认操作', confirmText = '删除' } = {}) {
+                    // 上一个还没结、又开一个：先把旧的判成取消，避免 resolve 丢失导致
+                    // 调用方的 await 永远挂着
+                    if (this._confirmResolve) this._confirmResolve(false);
+                    this.confirmDialog = { open: true, title, message, confirmText };
+                    // 打开后把焦点移到确认按钮，键盘用户可直接回车/Esc
+                    this.$nextTick(() => this.$refs.confirmOk?.focus());
+                    return new Promise((resolve) => { this._confirmResolve = resolve; });
+                },
+
+                resolveConfirm(ok) {
+                    if (!this.confirmDialog.open) return;
+                    this.confirmDialog.open = false;
+                    const resolve = this._confirmResolve;
+                    this._confirmResolve = null;
+                    if (resolve) resolve(ok);
+                },
+
+                // ── 未保存浮层的拖拽 ────────────────────────────────
+                // 位置记在 localStorage：拖过一次说明默认位置挡着东西了，
+                // 每次刷新都要重拖比不能拖更烦。
+
+                // 必须返回对象，不能返回字符串。
+                // Alpine 对 :style 字符串走 setAttribute("style", ...)，整个属性覆写；
+                // 对象则逐条 style.setProperty()。而 x-show 隐藏元素靠的正是
+                // setProperty("display","none") —— 字符串写法每次重算都会把它一起抹掉，
+                // 于是 canSave() 已经是 false、浮层却还挂在屏幕上。
+                //
+                // 这个 bug 只在拖过一次之后出现：没拖过时 dirtyToastPos 为 null，
+                // 返回值恒定不变、Alpine 不重设属性；一旦 localStorage 里存了
+                // gw.dirtyToastPos，坐标参与求值，覆写就开始发生。
+                dirtyToastStyle() {
+                    const pos = this.dirtyToastPos;
+                    // 没拖过就用默认右下角；对象里显式给出四个方位，
+                    // 避免拖动前后残留上一次的定位属性
+                    if (!pos) return { right: '1.25rem', bottom: '1.25rem', left: '', top: '' };
+                    return { left: `${pos.x}px`, top: `${pos.y}px`, right: '', bottom: '' };
+                },
+
+                loadDirtyToastPos() {
+                    try {
+                        const raw = window.localStorage.getItem('gw.dirtyToastPos');
+                        if (!raw) return;
+                        const pos = JSON.parse(raw);
+                        if (Number.isFinite(pos?.x) && Number.isFinite(pos?.y)) {
+                            this.dirtyToastPos = this.clampDirtyToast(pos.x, pos.y);
+                        }
+                    } catch (err) {
+                        // localStorage 被禁用或内容损坏：忽略，回落到默认位置
+                    }
+                },
+
+                saveDirtyToastPos() {
+                    try {
+                        if (this.dirtyToastPos) {
+                            window.localStorage.setItem('gw.dirtyToastPos', JSON.stringify(this.dirtyToastPos));
+                        }
+                    } catch (err) {
+                        // 存不了不影响本次拖动结果，跳过
+                    }
+                },
+
+                // clampDirtyToast 把坐标限制在视窗内。
+                // 「拖到哪都行」不包括拖出屏幕：位置是持久化的，一旦拖丢，
+                // 下次打开它还在屏幕外，只能清 localStorage 才能找回来。
+                clampDirtyToast(x, y) {
+                    const el = this.$refs.dirtyToast;
+                    const w = el?.offsetWidth || 240;
+                    const h = el?.offsetHeight || 44;
+                    const margin = 4;
+                    const maxX = Math.max(margin, window.innerWidth - w - margin);
+                    const maxY = Math.max(margin, window.innerHeight - h - margin);
+                    return {
+                        x: Math.min(Math.max(x, margin), maxX),
+                        y: Math.min(Math.max(y, margin), maxY)
+                    };
+                },
+
+                startDragDirty(event) {
+                    // 只响应主键/单指，避免右键菜单和多指手势误触发拖动
+                    if (event.button !== undefined && event.button !== 0) return;
+                    const el = this.$refs.dirtyToast;
+                    if (!el) return;
+                    const rect = el.getBoundingClientRect();
+                    const offsetX = event.clientX - rect.left;
+                    const offsetY = event.clientY - rect.top;
+                    this.draggingDirty = true;
+                    // 从默认的 right/bottom 定位切到 left/top，交接时保持视觉位置不跳
+                    this.dirtyToastPos = this.clampDirtyToast(rect.left, rect.top);
+
+                    const onMove = (e) => {
+                        this.dirtyToastPos = this.clampDirtyToast(e.clientX - offsetX, e.clientY - offsetY);
+                    };
+                    const onUp = () => {
+                        this.draggingDirty = false;
+                        this.saveDirtyToastPos();
+                        window.removeEventListener('pointermove', onMove);
+                        window.removeEventListener('pointerup', onUp);
+                        window.removeEventListener('pointercancel', onUp);
+                    };
+                    window.addEventListener('pointermove', onMove);
+                    window.addEventListener('pointerup', onUp);
+                    // 指针被系统取消（切窗口、手势中断）也要收尾，否则监听器泄漏
+                    window.addEventListener('pointercancel', onUp);
+                },
+
+                // snapshotConfig / restoreConfig 只用于弹窗落盘失败时的回滚。
+                // 深拷贝走 JSON 往返：配置全是纯数据，量级也就几十个字段。
+                snapshotConfig() {
+                    return JSON.stringify({ providers: this.config.providers, routes: this.config.routes });
+                },
+
+                restoreConfig(snapshot) {
+                    const prev = JSON.parse(snapshot);
+                    this.config.providers = prev.providers;
+                    this.config.routes = prev.routes;
                 },
 
                 providerCount() {
@@ -1697,7 +2023,17 @@
                 // 否则看不出这套机制到底有没有生效。
                 breakerLabel(b) {
                     if (!b) return '未启用';
-                    if (b.state === 'open') return '已熔断';
+                    // 剩余冷却直接写进徽章：原来只放在 title 里，要悬停才看得见，
+                    // 而「还有多久恢复」恰恰是熔断打开时最需要立刻知道的一件事。
+                    //
+                    // retryAfterMs 缺失或为 0 不等于「马上恢复」：冷却结束后熔断器仍停在
+                    // open，要等下一个真实请求触发 Allow() 才转 half_open（后端不跑定时器）。
+                    // 所以这里写「待探测」而不是「冷却结束」，否则看着像卡住了。
+                    if (b.state === 'open') {
+                        return b.retryAfterMs > 0
+                            ? `已熔断 ${Math.ceil(b.retryAfterMs / 1000)}s`
+                            : '已熔断 待探测';
+                    }
                     if (b.state === 'half_open') return '半开探测';
                     return '正常';
                 },
@@ -1712,7 +2048,11 @@
                 breakerTitle(b) {
                     if (!b) return '熔断未启用';
                     const parts = [];
-                    if (b.state === 'open' && b.retryAfterMs > 0) parts.push('剩余冷却 ' + Math.ceil(b.retryAfterMs / 1000) + ' s');
+                    if (b.state === 'open') {
+                        parts.push(b.retryAfterMs > 0
+                            ? '剩余冷却 ' + Math.ceil(b.retryAfterMs / 1000) + ' s'
+                            : '冷却已过，等下一个请求充当半开探针');
+                    }
                     if (b.state === 'half_open' && b.probesInFlight > 0) parts.push('探测中 ' + b.probesInFlight);
                     if (b.consecutiveFailures > 0) parts.push('连续失败 ' + b.consecutiveFailures);
                     if (b.openedAt) parts.push('打开于 ' + b.openedAt);
@@ -1906,9 +2246,7 @@
                         maxPerSecond: 0,
                         maxQueueWait: 30000,
                         apiKeyConfigured: false,
-                        clearApiKey: false,
-                        originalBaseUrl: '',
-                        originalFormat: ''
+                        clearApiKey: false
                     };
                     this.showProviderModal = true;
                 },
@@ -1925,21 +2263,12 @@
                         maxPerSecond: p.maxPerSecond,
                         maxQueueWait: p.maxQueueWait,
                         apiKeyConfigured: !!p.apiKeyConfigured,
-                        clearApiKey: false,
-                        originalBaseUrl: p.baseUrl,
-                        originalFormat: p.format
+                        clearApiKey: false
                     };
                     this.showProviderModal = true;
                 },
 
-                providerIdentityChanged() {
-                    return !!this.editingProvider && (
-                        this.providerForm.baseUrl !== this.providerForm.originalBaseUrl ||
-                        this.providerForm.format !== this.providerForm.originalFormat
-                    );
-                },
-
-                saveProvider() {
+                async saveProvider() {
                     if (!this.providerForm.name || !this.providerForm.baseUrl) {
                         this.showStatus('名称和 URL 不能为空', 'error');
                         return;
@@ -1947,14 +2276,11 @@
 
                     const existing = this.editingProvider ? this.config.providers[this.editingProvider] : null;
                     let apiKey = this.providerForm.apiKey;
-                    if (!apiKey && this.providerForm.apiKeyConfigured && this.providerIdentityChanged() && !this.providerForm.clearApiKey) {
-                        this.showStatus('修改 URL 或格式后，请重新输入 API Key 或明确清除已有密钥', 'error');
-                        return;
-                    }
                     if (!apiKey && this.providerForm.apiKeyConfigured && !this.providerForm.clearApiKey) {
                         apiKey = existing?.apiKey || '';
                     }
                     if (this.providerForm.clearApiKey) apiKey = '';
+                    const snapshot = this.snapshotConfig();
                     this.config.providers[this.providerForm.name] = {
                         baseUrl: this.providerForm.baseUrl,
                         apiKey,
@@ -1964,11 +2290,19 @@
                         maxPerSecond: this.providerForm.maxPerSecond || 0,
                         maxQueueWait: this.providerForm.maxQueueWait || 30000
                     };
-                    this.showProviderModal = false;
+                    // 弹窗保存直接落盘：点这个按钮已经是一次明确确认，再要求点顶部保存
+                    // 等于同一件事确认两遍，实际结果是用户忘记第二步。
+                    // 失败时回滚内存并留着弹窗，避免界面显示的和磁盘上的不一致。
+                    if (await this.persistConfig()) {
+                        this.showProviderModal = false;
+                    } else {
+                        this.restoreConfig(snapshot);
+                    }
                 },
 
-                removeProvider(name) {
-                    if (confirm(`确定删除 Provider "${name}"？相关路由也会被删除。`)) {
+                async removeProvider(name) {
+                    if (await this.askConfirm(`删除 Provider「${name}」后，引用它的路由候选会一并清理。`,
+                        { title: '删除 Provider', confirmText: '删除' })) {
                         delete this.config.providers[name];
                         // 多候选路由只删掉引用该 provider 的候选；候选清空或视觉引用命中才整条删除
                         this.config.routes = this.config.routes.reduce((kept, r) => {
@@ -2044,7 +2378,7 @@
                     this.routeForm.targets[newIndex] = temp;
                 },
 
-                saveRoute() {
+                async saveRoute() {
                     if (!this.routeForm.match) {
                         this.showStatus('匹配模式不能为空', 'error');
                         return;
@@ -2089,16 +2423,25 @@
                         };
                     }
 
+                    const snapshot = this.snapshotConfig();
                     if (this.editingRouteIndex >= 0) {
                         this.config.routes[this.editingRouteIndex] = route;
                     } else {
                         this.config.routes.push(route);
                     }
-                    this.showRouteModal = false;
+                    // 与 saveProvider 同一套语义：落盘成功才关弹窗，失败回滚并留窗
+                    if (await this.persistConfig()) {
+                        this.showRouteModal = false;
+                    } else {
+                        this.restoreConfig(snapshot);
+                    }
                 },
 
-                removeRoute(index) {
-                    if (confirm('确定删除此路由规则？')) {
+                async removeRoute(index) {
+                    const route = this.config.routes[index];
+                    const label = route?.match ? `「${route.match}」` : '这条';
+                    if (await this.askConfirm(`删除 ${label} 路由规则后，命中它的请求会落到后面的规则上。`,
+                        { title: '删除路由', confirmText: '删除' })) {
                         this.config.routes.splice(index, 1);
                     }
                 },
