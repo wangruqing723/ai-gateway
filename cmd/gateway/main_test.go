@@ -394,7 +394,11 @@ func TestEmbeddedAdminPageUsesLocalAssetsAndSafeConfigState(t *testing.T) {
 		`src="/vendor/alpine.min.js"`,
 		`rel="icon" href="data:,"`,
 		`x-show="isConfigTab()"`,
-		`!isDirty()`,
+		// 保存按钮按脏状态禁用。canSave() 是 isConfigTab() && isDirty() 的封装，
+		// 保存按钮、未保存浮层与 beforeunload 三处共用它，避免各写一份判据后互相矛盾。
+		// 两个都断言：只查 canSave() 的话，脏比对被整个删掉也能过测试。
+		`!canSave()`,
+		`isDirty()`,
 		`apiKeyConfigured`,
 		`If-Match`,
 		`application/yaml`,
