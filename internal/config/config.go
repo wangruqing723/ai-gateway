@@ -429,7 +429,7 @@ func Save(c *Config) error {
 			return fmt.Errorf("创建临时文件失败: %w", err)
 		}
 		if directErr := saveDirect(c.Path, out); directErr != nil {
-			return fmt.Errorf("创建临时文件失败: %w；直接写入也失败: %w", err, directErr)
+			return fmt.Errorf("创建临时文件失败: %w；直接写入也失败: %w%s", err, directErr, mountPermHint(err, directErr))
 		}
 		return nil
 	}
@@ -459,7 +459,7 @@ func Save(c *Config) error {
 		}
 		if directErr := saveDirect(c.Path, out); directErr != nil {
 			keepTemp = false
-			return fmt.Errorf("替换配置文件失败: %w；直接写入也失败: %w；完整临时文件保留在 %s", err, directErr, tmpPath)
+			return fmt.Errorf("替换配置文件失败: %w；直接写入也失败: %w；完整临时文件保留在 %s%s", err, directErr, tmpPath, mountPermHint(directErr))
 		}
 		return nil
 	}
@@ -469,6 +469,19 @@ func Save(c *Config) error {
 
 func canDirectFallbackAfterCreate(err error) bool {
 	return errors.Is(err, os.ErrPermission) || errors.Is(err, syscall.EROFS)
+}
+
+// mountPermHint 在错误由权限不足引起时，补充 Docker 挂载属主对齐的排查提示。
+// 典型场景：容器进程以固定 UID/GID 运行，而 bind mount 的 config.yaml 属主不同
+// （macOS Docker Desktop 会自动映射，原生 Linux/WSL 则严格穿透宿主属主）。
+func mountPermHint(errs ...error) string {
+	for _, e := range errs {
+		if errors.Is(e, os.ErrPermission) {
+			return "；提示：容器进程 UID/GID 可能与挂载的 config.yaml 属主不一致，" +
+				"请用 scripts/up.sh 启动（自动对齐宿主用户），或手动对齐文件属主"
+		}
+	}
+	return ""
 }
 
 func canDirectFallbackAfterRename(err error) bool {

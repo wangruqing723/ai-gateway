@@ -1,4 +1,5 @@
 config.yaml
+.env
 *.swp
 .DS_Store
 data

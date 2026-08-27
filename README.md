@@ -167,6 +167,16 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
 
 ### Docker Compose
 
+跨平台（macOS / Linux·WSL）推荐用启动脚本，它会以「当前宿主用户」的 UID/GID 运行容器，保证管理页面能写回 `config.yaml`：
+
+```bash
+./scripts/up.sh        # 或 make up
+```
+
+脚本做三件事：把本机 `id -u`/`id -g` 写入 `.env`（compose 自动读取）；首次运行从模板生成 `config.yaml`；在 Linux 上把 `config.yaml`、`data` 属主对齐到当前用户（首次可能需要 sudo）。
+
+也可以直接用 compose：
+
 ```bash
 docker compose up -d
 ```
@@ -176,17 +186,20 @@ docker compose up -d
 - `./config.yaml:/app/config.yaml`
 - `./data:/app/data`
 
-`config.yaml` 需要可写权限，因为管理页面保存配置时会写回该文件并触发热重载。compose 默认用当前 macOS 用户的 UID/GID 运行容器：
+`config.yaml` 需要可写权限，因为管理页面保存配置时会写回该文件并触发热重载。compose 默认用 macOS 用户的 UID/GID 运行容器：
 
 ```yaml
 user: "${AI_GATEWAY_UID:-501}:${AI_GATEWAY_GID:-20}"
 ```
 
-如在其他机器运行，可设置：
+> **为什么 macOS 直接跑没问题、WSL/原生 Linux 会报 `permission denied`**：macOS Docker Desktop 的文件共享层会自动映射 bind mount 属主，任意容器 UID 都能写；原生 Linux/WSL 的 bind mount 严格穿透宿主属主，容器 UID（默认 501）与文件属主（常为 `root` 或你的用户）不一致时，只落到 others 只读权限，保存即失败。用 `./scripts/up.sh` 让容器 UID 与文件属主对齐即可解决。
+
+若不用脚本、手动在其它机器运行，需自行对齐两侧：
 
 ```bash
 export AI_GATEWAY_UID=$(id -u)
 export AI_GATEWAY_GID=$(id -g)
+sudo chown -R "$AI_GATEWAY_UID:$AI_GATEWAY_GID" config.yaml data   # 仅 Linux 需要
 docker compose up -d --build --force-recreate
 ```
 
@@ -294,11 +307,12 @@ Node.js 最后版本保留在 Git tag `v1.0.0-node`，镜像地址为 `ghcr.io/w
 
 | 操作 | 命令 |
 |---|---|
-| 启动 | `docker compose up -d` |
-| 停止 | `docker compose down` |
+| 启动（推荐，跨平台对齐属主） | `./scripts/up.sh` 或 `make up` |
+| 启动（原生 compose） | `docker compose up -d` |
+| 停止 | `docker compose down` 或 `make down` |
 | 重启 | `docker compose restart` |
 | 重建本地镜像 | `docker compose up -d --build --force-recreate` |
-| 查看日志 | `docker compose logs -f` |
+| 查看日志 | `docker compose logs -f` 或 `make logs` |
 
 开机自启动推荐使用 Docker Compose 的 `restart: unless-stopped`。
 

@@ -9,8 +9,10 @@ services:
 
     container_name: ai-gateway
     #restart: unless-stopped
-    # 本地配置页面支持保存 config.yaml；默认使用当前 macOS 用户 wyong 的 UID/GID。
-    # 如在其他机器运行，可设置 AI_GATEWAY_UID=$(id -u) AI_GATEWAY_GID=$(id -g)。
+    # 容器以宿主用户身份运行，管理页面才能写回挂载的 config.yaml。
+    # 跨平台（macOS / Linux·WSL）推荐用 ./scripts/up.sh 启动：
+    #   自动把本机 id -u/-g 写入 .env，并在 Linux 上对齐 config.yaml/data 属主。
+    # 默认值 501:20 面向 macOS；其它机器请设置 AI_GATEWAY_UID/GID（见 .env.example）。
     user: "${AI_GATEWAY_UID:-501}:${AI_GATEWAY_GID:-20}"
     ports:
       - "7789:7789"
