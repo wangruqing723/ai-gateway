@@ -401,6 +401,9 @@
                                                             <button @click="editRoute(index)" class="btn btn-secondary px-2 py-2" title="编辑">
                                                                 <span class="material-symbols-outlined text-[18px]">edit</span>
                                                             </button>
+                                                            <button @click="duplicateRoute(index)" class="btn btn-secondary px-2 py-2" title="复制为新路由">
+                                                                <span class="material-symbols-outlined text-[18px]">content_copy</span>
+                                                            </button>
                                                             <button @click="removeRoute(index)" class="btn btn-danger px-2 py-2" title="删除">
                                                                 <span class="material-symbols-outlined text-[18px]">delete</span>
                                                             </button>
@@ -592,6 +595,9 @@
                                                 <div class="flex gap-2">
                                                     <button @click="editProvider(name)" class="btn btn-secondary px-2 py-2" title="编辑 Provider">
                                                         <span class="material-symbols-outlined text-[18px]">edit</span>
+                                                    </button>
+                                                    <button @click="duplicateProvider(name)" class="btn btn-secondary px-2 py-2" title="复制为新 Provider">
+                                                        <span class="material-symbols-outlined text-[18px]">content_copy</span>
                                                     </button>
                                                     <button @click="removeProvider(name)" class="btn btn-danger px-2 py-2" title="删除 Provider">
                                                         <span class="material-symbols-outlined text-[18px]">delete</span>
@@ -989,8 +995,12 @@
         </div>
     </div>
 
-    <div x-show="showProviderModal" x-transition.opacity x-cloak class="fixed inset-0 z-50 grid place-items-center bg-black/70 p-4">
-        <div @click.away="showProviderModal = false" class="glass w-full max-w-2xl rounded-lg shadow-glow">
+    <!-- 不用 @click.away 关闭：表单填到一半点空白处就全丢了，代价和「点错一下」不对等。
+         关闭入口只留 ESC、右上角 X 和取消按钮。 -->
+    <div x-show="showProviderModal" x-transition.opacity x-cloak
+         @keydown.escape.window="escapeProviderModal()"
+         class="fixed inset-0 z-50 grid place-items-center bg-black/70 p-4">
+        <div class="glass w-full max-w-2xl rounded-lg shadow-glow">
             <div class="flex items-center justify-between border-b border-line p-5">
                 <h3 class="text-lg font-extrabold text-white" x-text="editingProvider ? '编辑 Provider' : '添加 Provider'"></h3>
                 <button @click="showProviderModal = false" class="btn btn-secondary px-2 py-2">
@@ -1043,8 +1053,11 @@
         </div>
     </div>
 
-    <div x-show="showRouteModal" x-transition.opacity x-cloak class="fixed inset-0 z-50 grid place-items-center bg-black/70 p-4">
-        <div @click.away="showRouteModal = false" class="glass w-full max-w-2xl rounded-lg shadow-glow">
+    <!-- 同 Provider 弹窗：不用 @click.away，只留 ESC / X / 取消 三个关闭入口 -->
+    <div x-show="showRouteModal" x-transition.opacity x-cloak
+         @keydown.escape.window="escapeRouteModal()"
+         class="fixed inset-0 z-50 grid place-items-center bg-black/70 p-4">
+        <div class="glass w-full max-w-2xl rounded-lg shadow-glow">
             <div class="flex items-center justify-between border-b border-line p-5">
                 <h3 class="text-lg font-extrabold text-white" x-text="editingRouteIndex >= 0 ? '编辑路由' : '添加路由'"></h3>
                 <button @click="showRouteModal = false" class="btn btn-secondary px-2 py-2">
@@ -1063,23 +1076,44 @@
                     </div>
                     <div class="space-y-2">
                         <template x-for="(target, ti) in routeForm.targets" :key="ti">
-                            <div class="flex items-center gap-2">
-                                <span class="w-6 shrink-0 font-mono text-xs text-muted" x-text="'#' + (ti + 1)"></span>
-                                <select autocomplete="off" x-model="target.provider" class="field w-1/3">
-                                    <template x-for="(provider, name) in config.providers" :key="name">
-                                        <option :value="name" x-text="name"></option>
+                            <div class="flex flex-col gap-1">
+                                <div class="flex items-center gap-2">
+                                    <span class="w-6 shrink-0 font-mono text-xs text-muted" x-text="'#' + (ti + 1)"></span>
+                                    <select autocomplete="off" x-model="target.provider" @change="onRouteTargetProviderChange(ti)" class="field w-1/3">
+                                        <template x-for="(provider, name) in config.providers" :key="name">
+                                            <option :value="name" x-text="name"></option>
+                                        </template>
+                                    </select>
+                                    <div class="relative flex flex-1">
+                                        <input autocomplete="off" type="text" x-model="target.model" placeholder="上游实际使用的模型名" class="field flex-1 font-mono pr-9">
+                                        <button type="button" @click="fetchProviderModels(ti)"
+                                                :disabled="!target.provider || target.modelsLoading"
+                                                :title="target.provider ? '查询该 Provider 的上游模型列表' : '请先选择 Provider'"
+                                                class="absolute right-1 top-1/2 -translate-y-1/2 rounded p-1 text-muted hover:text-cyan disabled:opacity-40">
+                                            <span class="material-symbols-outlined text-[18px]" x-show="!target.modelsLoading">search</span>
+                                            <span class="material-symbols-outlined animate-spin text-[18px]" x-show="target.modelsLoading" x-cloak>progress_activity</span>
+                                        </button>
+                                    </div>
+                                    <button @click="moveRouteTarget(ti, -1)" :disabled="ti === 0" class="btn btn-secondary px-2 py-2" title="上移">
+                                        <span class="material-symbols-outlined text-[18px]">keyboard_arrow_up</span>
+                                    </button>
+                                    <button @click="moveRouteTarget(ti, 1)" :disabled="ti === routeForm.targets.length - 1" class="btn btn-secondary px-2 py-2" title="下移">
+                                        <span class="material-symbols-outlined text-[18px]">keyboard_arrow_down</span>
+                                    </button>
+                                    <button @click="removeRouteTarget(ti)" :disabled="routeForm.targets.length <= 1" class="btn btn-secondary px-2 py-2" title="删除该候选">
+                                        <span class="material-symbols-outlined text-[18px]">delete</span>
+                                    </button>
+                                </div>
+                                <!-- 上游模型列表：查询成功后展开，点选填入；列表为空时收起 -->
+                                <ul x-show="target.models && target.models.length" x-cloak x-transition
+                                    @click.away="target.models = []"
+                                    class="ml-8 max-h-44 overflow-y-auto rounded border border-line bg-panel3 py-1 text-xs">
+                                    <template x-for="m in target.models" :key="m">
+                                        <li @click="target.model = m; target.models = []"
+                                            class="cursor-pointer px-3 py-1.5 font-mono hover:bg-cyan2/10"
+                                            x-text="m"></li>
                                     </template>
-                                </select>
-                                <input autocomplete="off" type="text" x-model="target.model" placeholder="上游实际使用的模型名" class="field flex-1 font-mono">
-                                <button @click="moveRouteTarget(ti, -1)" :disabled="ti === 0" class="btn btn-secondary px-2 py-2" title="上移">
-                                    <span class="material-symbols-outlined text-[18px]">keyboard_arrow_up</span>
-                                </button>
-                                <button @click="moveRouteTarget(ti, 1)" :disabled="ti === routeForm.targets.length - 1" class="btn btn-secondary px-2 py-2" title="下移">
-                                    <span class="material-symbols-outlined text-[18px]">keyboard_arrow_down</span>
-                                </button>
-                                <button @click="removeRouteTarget(ti)" :disabled="routeForm.targets.length <= 1" class="btn btn-secondary px-2 py-2" title="删除该候选">
-                                    <span class="material-symbols-outlined text-[18px]">delete</span>
-                                </button>
+                                </ul>
                             </div>
                         </template>
                     </div>
@@ -1259,7 +1293,8 @@
                 routeForm: {
                     match: '',
                     // 目标候选列表，按顺序作为故障转移的尝试顺序；至少 1 个，最多 5 个
-                    targets: [{ provider: '', model: '' }],
+                    // models/modelsLoading 是查询远程模型列表的瞬态状态，初始占位保证响应式
+                    targets: [{ provider: '', model: '', models: [], modelsLoading: false }],
                     // 候选选择策略，空等同 failover（按配置顺序）
                     strategy: '',
                     enableVision: false,
@@ -1456,7 +1491,7 @@
                 async loadConfig() {
                     try {
                         const res = await fetch('/api/config');
-                        if (!res.ok) throw new Error('加载配置失败');
+                        if (!res.ok) throw new Error(await this.errorText(res, '加载配置失败'));
                         const data = await res.json();
                         this.revision = data.revision || (res.headers.get('ETag') || '').replace(/^W\//, '').replaceAll('"', '');
                         this.restartRequired = data.restartRequired || [];
@@ -1470,7 +1505,7 @@
                 async loadYamlConfig() {
                     try {
                         const res = await fetch('/api/config/raw');
-                        if (!res.ok) throw new Error('加载 YAML 失败');
+                        if (!res.ok) throw new Error(await this.errorText(res, '加载 YAML 失败'));
                         this.yamlContent = await res.text();
                         this.originalYaml = this.yamlContent;
                     } catch (err) {
@@ -1500,7 +1535,7 @@
                 async loadHealth(showErrors = true) {
                     try {
                         const res = await fetch('/health');
-                        if (!res.ok) throw new Error('健康检查失败');
+                        if (!res.ok) throw new Error(await this.errorText(res, '健康检查失败'));
                         this.health = await res.json();
                     } catch (err) {
                         this.health = null;
@@ -1520,7 +1555,7 @@
                     this.showStatus('正在检测 Provider…', 'success');
                     try {
                         const res = await fetch('/api/providers/health', { method: 'POST' });
-                        if (!res.ok) throw new Error('Provider 健康检测失败');
+                        if (!res.ok) throw new Error(await this.errorText(res, 'Provider 健康检测失败'));
                         const data = await res.json();
                         const providers = data.providers || {};
                         this.health = this.health || {};
@@ -1542,7 +1577,7 @@
                     this.resettingBreakers = true;
                     try {
                         const res = await fetch('/api/providers/breaker/reset', { method: 'POST' });
-                        if (!res.ok) throw new Error('HTTP ' + res.status);
+                        if (!res.ok) throw new Error(await this.errorText(res, '重置熔断器失败'));
                         const data = await res.json();
                         this.health = this.health || {};
                         this.health.breakers = data.breakers || {};
@@ -1595,8 +1630,9 @@
                         });
 
                         if (!res.ok) {
-                            const err = await res.json().catch(() => ({}));
-                            throw new Error(err.message || '保存失败');
+                            // 直接抛后端原文（多为 config_validation_error 的具体字段说明），
+                            // 不再套一层「保存失败」把原因盖掉
+                            throw new Error(await this.errorText(res, '保存失败'));
                         }
 
                         const result = await res.json();
@@ -1620,7 +1656,7 @@
                     this.loading = true;
                     try {
                         const res = await fetch('/api/config/reload', { method: 'POST' });
-                        if (!res.ok) throw new Error('重载失败');
+                        if (!res.ok) throw new Error(await this.errorText(res, '重载失败'));
                         const result = await res.json();
                         this.showStatus((result.message || '配置已重载') + this.restartSuffix(result), 'success');
                         await this.loadConfig();
@@ -1637,11 +1673,61 @@
                     return fields.length ? `；需重启生效: ${fields.join(', ')}` : '';
                 },
 
+                // ESC 逐层退出，不一次关穿。确认弹窗（z-80）叠在编辑弹窗（z-50）之上时，
+                // 它自己的 escape 监听负责关它，这里必须让路，否则一次 ESC 会把两层一起关掉。
+                escapeProviderModal() {
+                    if (this.confirmDialog.open) return;
+                    this.showProviderModal = false;
+                },
+
+                // 路由弹窗多一层：候选的上游模型下拉展开时，ESC 先收下拉，再按才关弹窗。
+                escapeRouteModal() {
+                    if (this.confirmDialog.open) return;
+                    const open = (this.routeForm.targets || []).filter((t) => t.models && t.models.length);
+                    if (open.length) {
+                        open.forEach((t) => { t.models = []; });
+                        return;
+                    }
+                    this.showRouteModal = false;
+                },
+
                 showStatus(message, type) {
                     this.statusMessage = message;
                     this.statusType = type;
                     window.clearTimeout(this._statusTimer);
-                    this._statusTimer = window.setTimeout(() => { this.statusMessage = ''; }, 5000);
+                    // 错误信息通常是后端校验原文，比成功提示长得多，5 秒读不完。
+                    // 面板本身有关闭按钮，停留久一点不挡操作。
+                    const holdMs = type === 'error' ? 20000 : 5000;
+                    this._statusTimer = window.setTimeout(() => { this.statusMessage = ''; }, holdMs);
+                },
+
+                // errorText 从失败响应里榨出可读原因。
+                // 后端统一返回 {error:{type,message}}（httputil.WriteJSONError），
+                // 之前各处读的是顶层 err.message，恒为 undefined，所以永远只剩一句
+                // 笼统的「保存失败」，真实原因只能翻浏览器控制台。
+                // 这里按 error.message → message → error 字符串 → 纯文本 body → HTTP 状态
+                // 逐级回退，任何一层拿到东西就用它。
+                async errorText(res, fallback) {
+                    const raw = await res.text().catch(() => '');
+                    if (raw) {
+                        try {
+                            const data = JSON.parse(raw);
+                            const detail = data?.error?.message
+                                || data?.message
+                                || (typeof data?.error === 'string' ? data.error : '')
+                                || data?.detail;
+                            if (detail) {
+                                // 带上错误类型（如 config_validation_error）便于判断是哪类问题
+                                const kind = data?.error?.type;
+                                return kind ? `${detail}（${kind}）` : String(detail);
+                            }
+                        } catch {
+                            // 不是 JSON：可能是反向代理返回的 HTML 或纯文本，截断后直接用
+                            const text = raw.trim().replace(/\s+/g, ' ');
+                            if (text) return text.length > 300 ? text.slice(0, 300) + '…' : text;
+                        }
+                    }
+                    return `${fallback}（HTTP ${res.status} ${res.statusText || ''}`.trim() + '）';
                 },
 
                 pageTitle() {
@@ -2268,6 +2354,46 @@
                     this.showProviderModal = true;
                 },
 
+                // duplicateProvider 以现有 provider 为模板新建一个。
+                // editingProvider 必须留空，否则保存时会覆盖源 provider 而不是新增。
+                // apiKey 不继承：前端拿到的是脱敏值，而新名字在磁盘上没有已存密钥，
+                // 带 sentinel 保存会被后端拒（那是「凭空保留」）。所以清空让用户重填，
+                // 并把 apiKeyConfigured 一并置 false，避免输入框显示「已配置，留空保持不变」
+                // 这种在复制场景下不成立的提示。
+                duplicateProvider(name) {
+                    const p = this.config.providers?.[name];
+                    if (!p) return;
+                    this.editingProvider = null;
+                    this.providerForm = {
+                        name: this.nextCopyName(name, Object.keys(this.config.providers || {})),
+                        baseUrl: p.baseUrl,
+                        apiKey: '',
+                        format: p.format,
+                        maxConcurrent: p.maxConcurrent,
+                        maxPerSecond: p.maxPerSecond,
+                        maxQueueWait: p.maxQueueWait,
+                        apiKeyConfigured: false,
+                        clearApiKey: false
+                    };
+                    this.showProviderModal = true;
+                    if (p.apiKeyConfigured) {
+                        this.showStatus(`已按「${name}」预填，API Key 需重新填写`, 'success');
+                    }
+                },
+
+                // nextCopyName 生成不重名的副本名：foo → foo-copy → foo-copy-2 …
+                // 直接沿用原名会在保存时覆盖源对象，用户以为是新增、实际丢了一个。
+                nextCopyName(base, taken) {
+                    const used = new Set(taken || []);
+                    let candidate = `${base}-copy`;
+                    let n = 2;
+                    while (used.has(candidate)) {
+                        candidate = `${base}-copy-${n}`;
+                        n += 1;
+                    }
+                    return candidate;
+                },
+
                 async saveProvider() {
                     if (!this.providerForm.name || !this.providerForm.baseUrl) {
                         this.showStatus('名称和 URL 不能为空', 'error');
@@ -2336,7 +2462,7 @@
                     const providers = Object.keys(this.config.providers || {});
                     this.routeForm = {
                         match: '',
-                        targets: [{ provider: providers[0] || '', model: '' }],
+                        targets: [this.newRouteTarget(providers[0] || '')],
                         strategy: '',
                         enableVision: false,
                         visionProvider: providers[0] || '',
@@ -2350,7 +2476,7 @@
                     const route = this.config.routes[index];
                     this.routeForm = {
                         match: route.match,
-                        targets: this.routeTargets(route).map((t) => ({ provider: t.provider || '', model: t.model || '' })),
+                        targets: this.routeTargets(route).map((t) => this.newRouteTarget(t.provider || '', t.model || '')),
                         strategy: route.strategy || '',
                         enableVision: !!route.vision,
                         visionProvider: route.vision?.provider || '',
@@ -2359,15 +2485,105 @@
                     this.showRouteModal = true;
                 },
 
+                // duplicateRoute 以现有路由为模板新建一条，全部字段可改。
+                // editingRouteIndex = -1 让 saveRoute 走 push 而不是替换原条目。
+                // match 保持原样：路由按顺序匹配、首条命中，复制出的同 match 条目永远
+                // 匹配不到，所以提示用户改掉，但不擅自替用户改 match 值——那是路由的语义核心。
+                duplicateRoute(index) {
+                    const route = this.config.routes?.[index];
+                    if (!route) return;
+                    this.editingRouteIndex = -1;
+                    this.routeForm = {
+                        match: route.match || '',
+                        targets: this.routeTargets(route).map((t) => this.newRouteTarget(t.provider || '', t.model || '')),
+                        strategy: route.strategy || '',
+                        enableVision: !!route.vision,
+                        visionProvider: route.vision?.provider || '',
+                        visionModel: route.vision?.model || ''
+                    };
+                    this.showRouteModal = true;
+                    this.showStatus(`已按「${route.match || '(空)'}」预填，记得改匹配模式`, 'success');
+                },
+
+                // 候选 target 的运行时形状：provider/model 是落盘字段，
+                // models/modelsLoading 是查询远程模型列表的瞬态状态，saveRoute 不读它们。
+                newRouteTarget(provider, model = '') {
+                    return { provider, model, models: [], modelsLoading: false };
+                },
+
+                // 切换候选的 provider 后清掉已拉的模型列表：列表是上一个上游的，
+                // 留着只会让人选错模型。已填的 model 不清——那是用户意图。
+                onRouteTargetProviderChange(ti) {
+                    this.routeForm.targets[ti].models = [];
+                },
+
                 addRouteTarget() {
                     if (this.routeForm.targets.length >= this.maxRouteTargets) return;
                     const providers = Object.keys(this.config.providers || {});
-                    this.routeForm.targets.push({ provider: providers[0] || '', model: '' });
+                    this.routeForm.targets.push(this.newRouteTarget(providers[0] || ''));
                 },
 
                 removeRouteTarget(index) {
                     if (this.routeForm.targets.length <= 1) return;
                     this.routeForm.targets.splice(index, 1);
+                },
+
+                // 用已落盘 provider 配置里的 apiKey 拉上游 /v1/models。
+                // 结果按 provider 的 baseUrl+format 做指纹缓存到 localStorage，TTL 1 天：
+                // 同一上游反复查不重复打上游；改了 baseUrl/format 自动换 key 失效。
+                async fetchProviderModels(ti) {
+                    const target = this.routeForm.targets[ti];
+                    if (!target || !target.provider) return;
+                    const provider = this.config.providers?.[target.provider];
+                    if (!provider) return;
+
+                    const cacheKey = 'gw.models|' + [target.provider, provider.baseUrl, provider.format].join('|');
+                    const cached = this.readModelCache(cacheKey);
+                    if (cached) {
+                        target.models = cached;
+                        return;
+                    }
+
+                    target.modelsLoading = true;
+                    target.models = [];
+                    try {
+                        const res = await fetch(`/api/providers/models?provider=${encodeURIComponent(target.provider)}`);
+                        if (!res.ok) throw new Error(await this.errorText(res, '上游查询失败'));
+                        const data = await res.json();
+                        const models = Array.isArray(data.models) ? data.models : [];
+                        this.writeModelCache(cacheKey, models);
+                        target.models = models;
+                        if (!models.length) {
+                            this.showStatus('上游返回了空的模型列表', 'error');
+                        }
+                    } catch (err) {
+                        this.showStatus('查询模型列表失败: ' + err.message, 'error');
+                    } finally {
+                        target.modelsLoading = false;
+                    }
+                },
+
+                // 模型列表缓存读写：1 天 TTL，结构 {at: 时间戳, models: [...]}。
+                // localStorage 可能被禁用，try/catch 兜底为 no-op，不影响查询功能本身。
+                readModelCache(key) {
+                    try {
+                        const raw = window.localStorage.getItem(key);
+                        if (!raw) return null;
+                        const entry = JSON.parse(raw);
+                        if (!entry || typeof entry.at !== 'number') return null;
+                        if (Date.now() - entry.at > 24 * 60 * 60 * 1000) return null;
+                        return Array.isArray(entry.models) ? entry.models : null;
+                    } catch {
+                        return null;
+                    }
+                },
+
+                writeModelCache(key, models) {
+                    try {
+                        window.localStorage.setItem(key, JSON.stringify({ at: Date.now(), models }));
+                    } catch {
+                        // 禁用或超配额：忽略，下次查询会重新打上游。
+                    }
                 },
 
                 moveRouteTarget(index, direction) {
@@ -2381,6 +2597,14 @@
                 async saveRoute() {
                     if (!this.routeForm.match) {
                         this.showStatus('匹配模式不能为空', 'error');
+                        return;
+                    }
+                    // 路由按顺序匹配、首条命中，match 撞车的后一条永远匹配不到。
+                    // 复制路由后忘记改 match 是最容易踩的，这里直接挡住而不是静默存一条死规则。
+                    const duplicate = (this.config.routes || []).some((r, i) =>
+                        i !== this.editingRouteIndex && r.match === this.routeForm.match);
+                    if (duplicate) {
+                        this.showStatus(`匹配模式「${this.routeForm.match}」已被其他路由占用，改一个再保存`, 'error');
                         return;
                     }
                     const targets = (this.routeForm.targets || []).map((t) => ({
