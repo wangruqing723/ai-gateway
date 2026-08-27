@@ -393,22 +393,6 @@ routes:
 	}
 }
 
-func TestSameProviderIdentity(t *testing.T) {
-	base := &Provider{BaseURL: "https://api.example.com", Format: "openai", APIKey: "old"}
-	if !SameProviderIdentity(base, &Provider{BaseURL: base.BaseURL, Format: base.Format, APIKey: "new"}) {
-		t.Fatal("API key change must not change provider identity")
-	}
-	if SameProviderIdentity(base, &Provider{BaseURL: "https://evil.example.com", Format: base.Format}) {
-		t.Fatal("base URL change must change provider identity")
-	}
-	if SameProviderIdentity(base, &Provider{BaseURL: base.BaseURL, Format: "anthropic"}) {
-		t.Fatal("format change must change provider identity")
-	}
-	if SameProviderIdentity(nil, base) || SameProviderIdentity(base, nil) {
-		t.Fatal("nil provider must not have the same identity")
-	}
-}
-
 func TestSaveUsesUniqueAtomicFilesAndMode0600(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")

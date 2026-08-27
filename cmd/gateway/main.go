@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -281,6 +282,21 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.handleBreakerReset(w, r)
+		return
+	}
+
+	// 拉取某 provider 上游的 /v1/models 真实模型列表（非网关自己的 /v1/models）。
+	// 用已落盘配置里的 apiKey 探测；供前端配置路由时选择目标模型。
+	if urlPath == "/api/providers/models" {
+		if r.Method != http.MethodGet {
+			writeMethodNotAllowed(w, http.MethodGet)
+			return
+		}
+		if isCrossSiteRequest(r) {
+			writeForbiddenOrigin(w)
+			return
+		}
+		s.handleProviderModels(w, r)
 		return
 	}
 
@@ -1120,6 +1136,114 @@ func (s *server) handleProviderHealthCheck(w http.ResponseWriter, r *http.Reques
 	w.Write(out)
 }
 
+// handleProviderModels 拉取指定 provider 上游的真实 /v1/models 列表。
+//
+// 用已落盘配置里的 apiKey 探测，不复用 providerhealth：那个只判断状态码、
+// 不解析模型列表，且带结果缓存与并发节流，语义不匹配。这里是一次性透传查询，
+// 供前端配置路由时选择目标模型。失败时返回 502 并带上上游状态码与消息，
+// 前端据此弹提示、保留手动输入。
+func (s *server) handleProviderModels(w http.ResponseWriter, r *http.Request) {
+	name := r.URL.Query().Get("provider")
+	if name == "" {
+		writeJSONError(w, http.StatusBadRequest, "gateway_error", "缺少 provider 参数")
+		return
+	}
+
+	s.cfgMu.RLock()
+	cfg := s.cfg
+	provider, ok := cfg.Providers[name]
+	s.cfgMu.RUnlock()
+	if !ok || provider == nil {
+		writeJSONError(w, http.StatusNotFound, "gateway_error", fmt.Sprintf("未找到 provider: %s", name))
+		return
+	}
+
+	models, err := fetchUpstreamModels(r.Context(), provider, s.httpClient)
+	if err != nil {
+		writeJSONError(w, http.StatusBadGateway, "upstream_error", err.Error())
+		return
+	}
+
+	out, _ := json.MarshalIndent(map[string]any{
+		"provider": name,
+		"models":   models,
+	}, "", "  ")
+	w.Header().Set("content-type", "application/json")
+	w.Header().Set("content-length", fmt.Sprintf("%d", len(out)))
+	w.WriteHeader(http.StatusOK)
+	w.Write(out)
+}
+
+// fetchUpstreamModels 用 provider 配置的 apiKey 调上游 /v1/models，返回模型 id 列表。
+func fetchUpstreamModels(parent context.Context, p *config.Provider, client *http.Client) ([]string, error) {
+	endpoint := modelsEndpoint(p.BaseURL)
+	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("构建请求失败: %w", err)
+	}
+	req.Header.Set("accept", "application/json")
+	if p.APIKey != "" {
+		if p.Format == "anthropic" {
+			req.Header.Set("x-api-key", p.APIKey)
+			req.Header.Set("anthropic-version", "2023-06-01")
+		} else {
+			req.Header.Set("authorization", "Bearer "+p.APIKey)
+		}
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("上游不可达: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		msg := fmt.Sprintf("上游返回 %d", resp.StatusCode)
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			msg = "上游鉴权失败（apiKey 无效或无权访问 /v1/models）"
+		} else if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed {
+			msg = "上游不支持 /v1/models 端点"
+		}
+		return nil, errors.New(msg)
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxConfigBodyBytes))
+	if err != nil {
+		return nil, fmt.Errorf("读取上游响应失败: %w", err)
+	}
+
+	// OpenAI 与 Anthropic 的 /v1/models 都是 {data:[{id:"..."}, ...]}
+	var payload struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, fmt.Errorf("解析上游模型列表失败: %w", err)
+	}
+	models := make([]string, 0, len(payload.Data))
+	for _, m := range payload.Data {
+		if m.ID != "" {
+			models = append(models, m.ID)
+		}
+	}
+	return models, nil
+}
+
+// modelsEndpoint 由 baseURL 拼出标准 /v1/models 路径。
+func modelsEndpoint(baseURL string) string {
+	base := baseURL
+	if !strings.HasPrefix(base, "http") {
+		base = "https://" + base
+	}
+	base = strings.TrimRight(base, "/")
+	base = strings.TrimSuffix(base, "/v1")
+	return base + "/v1/models"
+}
+
 func (s *server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	out, _ := json.MarshalIndent(s.metrics.Metrics(time.Now()), "", "  ")
 	w.Header().Set("content-type", "application/json")
@@ -1498,9 +1622,14 @@ func (s *server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 		if p.APIKey != config.APIKeyKeepSentinel {
 			continue
 		}
+		// 只校验磁盘上该 provider 名确有密钥可保留，不再用 SameProviderIdentity
+		// 限制「url/format 必须没变」：编辑 provider 改了 url 或格式时，
+		// 只要用户在弹窗里把 apiKey 留空（发回 sentinel），就沿用原密钥，
+		// 不强制重新填写。若该 provider 是新加的、磁盘上没有已存密钥，照旧拒绝——
+		// 那是凭空带 sentinel，不该静默吞成空密钥。
 		oldProvider, exists := oldCfg.Providers[name]
-		if !exists || oldProvider.APIKey == "" || !config.SameProviderIdentity(oldProvider, p) {
-			writeJSONError(w, http.StatusBadRequest, "config_validation_error", fmt.Sprintf("providers.%s 无法保留已有 apiKey：provider 身份已变化或密钥不存在", name))
+		if !exists || oldProvider.APIKey == "" {
+			writeJSONError(w, http.StatusBadRequest, "config_validation_error", fmt.Sprintf("providers.%s 无法保留已有 apiKey：磁盘上没有已存密钥", name))
 			return
 		}
 		p.APIKey = oldProvider.APIKey

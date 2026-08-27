@@ -620,24 +620,44 @@ func TestPutConfigSecretRoundTripAndIdentityGuard(t *testing.T) {
 		}
 	})
 
-	t.Run("identity change cannot reuse secret", func(t *testing.T) {
+	t.Run("url change preserves secret", func(t *testing.T) {
 		srv := newConfigTestServer(t, testConfigYAML("127.0.0.1", 7789, "https://api.example.com", "super-secret", 5))
 		body := testConfigYAML("127.0.0.1", 7789, "https://redirect.example.com", config.APIKeyKeepSentinel, 5)
 		recorder := putConfig(t, srv, body, "")
-		if recorder.Code != http.StatusBadRequest {
-			t.Fatalf("status = %d, want 400; body=%s", recorder.Code, recorder.Body.String())
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body=%s", recorder.Code, recorder.Body.String())
 		}
 		srv.cfgMu.RLock()
 		got := srv.cfg.Providers["primary"]
 		srv.cfgMu.RUnlock()
-		if got.BaseURL != "https://api.example.com" || got.APIKey != "super-secret" {
-			t.Fatalf("rejected update mutated runtime config: %#v", got)
+		// url 变了但 apiKey 留空（sentinel），旧密钥应仍被保留：
+		// 不再强制用户在改 url 时重新填写 apiKey。
+		if got.BaseURL != "https://redirect.example.com" || got.APIKey != "super-secret" {
+			t.Fatalf("saved provider = %#v, want new url with preserved secret", got)
 		}
 	})
 
-	t.Run("format change cannot reuse secret", func(t *testing.T) {
+	t.Run("format change preserves secret", func(t *testing.T) {
 		srv := newConfigTestServer(t, testConfigYAML("127.0.0.1", 7789, "https://api.example.com", "super-secret", 5))
 		body := strings.Replace(testConfigYAML("127.0.0.1", 7789, "https://api.example.com", config.APIKeyKeepSentinel, 5), "format: openai", "format: anthropic", 1)
+		recorder := putConfig(t, srv, body, "")
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body=%s", recorder.Code, recorder.Body.String())
+		}
+		srv.cfgMu.RLock()
+		got := srv.cfg.Providers["primary"]
+		srv.cfgMu.RUnlock()
+		if got.Format != "anthropic" || got.APIKey != "super-secret" {
+			t.Fatalf("saved provider = %#v, want new format with preserved secret", got)
+		}
+	})
+
+	t.Run("sentinel without existing secret rejected", func(t *testing.T) {
+		// 全新 provider 名带上 sentinel：磁盘上没有已存密钥可保留，必须拒绝，
+		// 否则会被静默吞成空密钥。把 provider 名连同路由引用一并改成 brand-new，
+		// 让校验能走到 sentinel 保留环节。
+		srv := newConfigTestServer(t, testConfigYAML("127.0.0.1", 7789, "https://api.example.com", "super-secret", 5))
+		body := strings.ReplaceAll(testConfigYAML("127.0.0.1", 7789, "https://api.example.com", config.APIKeyKeepSentinel, 5), "primary", "brand-new")
 		recorder := putConfig(t, srv, body, "")
 		if recorder.Code != http.StatusBadRequest {
 			t.Fatalf("status = %d, want 400; body=%s", recorder.Code, recorder.Body.String())
@@ -1395,3 +1415,108 @@ func bareConfigDigest(srv *server) string {
 type shutdownFunc func(context.Context) error
 
 func (fn shutdownFunc) Shutdown(ctx context.Context) error { return fn(ctx) }
+
+// TestHandleProviderModels 覆盖前端「查询远程模型列表」依赖的后端端点：
+// 成功解析上游 /v1/models 的 data[].id；上游不支持该端点时返回 502 与可读消息；
+// 按provider 格式带上正确的鉴权头（openai 走 Bearer，anthropic 走 x-api-key）。
+func TestHandleProviderModels(t *testing.T) {
+	t.Run("openai models returned", func(t *testing.T) {
+		var gotAuth string
+		var gotPath string
+		up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			gotPath = r.URL.Path
+			gotAuth = r.Header.Get("authorization")
+			w.Header().Set("content-type", "application/json")
+			_, _ = w.Write([]byte(`{"data":[{"id":"gpt-4o"},{"id":"gpt-4o-mini"}]}`))
+		}))
+		defer up.Close()
+
+		srv := newConfigTestServer(t, testConfigYAML("127.0.0.1", 7789, up.URL, "test-secret", 5))
+		rec := callProviderModels(t, srv, "primary")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		}
+		if gotPath != "/v1/models" {
+			t.Fatalf("upstream path = %q, want /v1/models", gotPath)
+		}
+		if gotAuth != "Bearer test-secret" {
+			t.Fatalf("auth header = %q, want Bearer test-secret", gotAuth)
+		}
+		var resp struct {
+			Provider string   `json:"provider"`
+			Models   []string `json:"models"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatal(err)
+		}
+		if resp.Provider != "primary" || len(resp.Models) != 2 || resp.Models[0] != "gpt-4o" {
+			t.Fatalf("unexpected response: %#v", resp)
+		}
+	})
+
+	t.Run("anthropic uses x-api-key header", func(t *testing.T) {
+		var gotAPIKey, gotVersion string
+		up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			gotAPIKey = r.Header.Get("x-api-key")
+			gotVersion = r.Header.Get("anthropic-version")
+			w.Header().Set("content-type", "application/json")
+			_, _ = w.Write([]byte(`{"data":[{"id":"claude-3-5-sonnet"}]}`))
+		}))
+		defer up.Close()
+
+		raw := strings.Replace(testConfigYAML("127.0.0.1", 7789, up.URL, "anthropic-secret", 5), "format: openai", "format: anthropic", 1)
+		srv := newConfigTestServer(t, raw)
+		rec := callProviderModels(t, srv, "primary")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		}
+		if gotAPIKey != "anthropic-secret" {
+			t.Fatalf("x-api-key = %q, want anthropic-secret", gotAPIKey)
+		}
+		if gotVersion != "2023-06-01" {
+			t.Fatalf("anthropic-version = %q, want 2023-06-01", gotVersion)
+		}
+	})
+
+	t.Run("upstream unsupported endpoint surfaces 502", func(t *testing.T) {
+		up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusNotFound)
+		}))
+		defer up.Close()
+
+		srv := newConfigTestServer(t, testConfigYAML("127.0.0.1", 7789, up.URL, "secret", 5))
+		rec := callProviderModels(t, srv, "primary")
+		if rec.Code != http.StatusBadGateway {
+			t.Fatalf("status = %d, want 502; body=%s", rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), "不支持") {
+			t.Fatalf("body should mention unsupported endpoint: %s", rec.Body.String())
+		}
+	})
+
+	t.Run("missing provider parameter rejected", func(t *testing.T) {
+		srv := newConfigTestServer(t, testConfigYAML("127.0.0.1", 7789, "https://api.example.com", "secret", 5))
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodGet, "http://gateway.test/api/providers/models", nil)
+		srv.handle(recorder, request)
+		if recorder.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", recorder.Code)
+		}
+	})
+
+	t.Run("unknown provider rejected", func(t *testing.T) {
+		srv := newConfigTestServer(t, testConfigYAML("127.0.0.1", 7789, "https://api.example.com", "secret", 5))
+		rec := callProviderModels(t, srv, "no-such-provider")
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("status = %d, want 404", rec.Code)
+		}
+	})
+}
+
+func callProviderModels(t *testing.T, srv *server, provider string) *httptest.ResponseRecorder {
+	t.Helper()
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "http://gateway.test/api/providers/models?provider="+provider, nil)
+	srv.handle(recorder, request)
+	return recorder
+}

@@ -87,7 +87,7 @@ go test ./internal/<pkg>/ -run TestName -v
 `cmd/gateway/main.go` 的 `server.handle()` 按顺序处理：
 
 1. 特殊路由：`HEAD`、`GET /`、`/api/config*`、`GET /health`、`GET /v1/models`。
-- 观测 API：`GET /api/metrics`（聚合指标）、`GET /api/logs`（请求日志，支持筛选）、`POST /api/providers/health`（触发 Provider 健康检测）、`POST /api/providers/breaker/reset`（手动闭合熔断器，可带 `?provider=`）。
+- 观测 API：`GET /api/metrics`（聚合指标）、`GET /api/logs`（请求日志，支持筛选）、`POST /api/providers/health`（触发 Provider 健康检测）、`POST /api/providers/breaker/reset`（手动闭合熔断器，可带 `?provider=`）、`GET /api/providers/models?provider=`（用已落盘配置里的 apiKey 透传查询该 provider 上游的真实 `/v1/models` 模型列表，供前端配置路由时选择目标模型）。
 2. HTTP 边界校验 method、Origin、`Content-Type` 和请求体大小；无 Origin 的本机 CLI 请求保持兼容。
 3. `converter.DetectClientFormat(urlPath)` 按路径识别客户端格式。
 4. `FromAnthropic`、`FromOpenAIChat`、`FromOpenAIResponses` 规范化为 `*converter.Internal`，转换错误必须在路由前返回。

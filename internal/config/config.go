@@ -595,11 +595,6 @@ func LoadAndValidate(data []byte) (*Config, error) {
 	return DecodeAndValidate(data)
 }
 
-// SameProviderIdentity 判断两个 provider 是否指向同一协议端点。
-func SameProviderIdentity(a, b *Provider) bool {
-	return a != nil && b != nil && a.BaseURL == b.BaseURL && a.Format == b.Format
-}
-
 // RedactYAML 使用 YAML AST 脱敏 providers 下所有已配置的 apiKey。
 func RedactYAML(data []byte, sentinel string) ([]byte, error) {
 	if sentinel == "" {
