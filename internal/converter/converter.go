@@ -594,7 +594,12 @@ func validateOpenAIChatToolResultContent(content any) error {
 		if !ok {
 			return fmt.Errorf("content block must be text, got %T", value)
 		}
-		if blockType := getString(block, "type"); blockType != "text" {
+		switch blockType := getString(block, "type"); blockType {
+		case "text":
+		case "tool_reference", "tool-reference":
+			// toOpenAIContent 会把它降级成 text，转换得出来就不该在这里拦。
+			// 工具搜索场景的客户端会在 tool_result.content 里回放这种占位块。
+		default:
 			return fmt.Errorf("tool_result %s content is unsupported", blockType)
 		}
 	}
@@ -774,6 +779,11 @@ func toOpenAIContent(content any) any {
 	if !ok {
 		return content
 	}
+	// tool_reference 先降级成 text，再判断能不能合并成字符串：顺序反了的话，
+	// 「只含一个 tool_reference」会因为降级前 type 不是 text 而错过合并分支，
+	// 输出数组形式的 tool 消息 content，部分上游不接受。
+	arr = degradeToolReferences(arr)
+
 	// 全是文本块则合并为字符串（对齐 Node）
 	allText := true
 	for _, b := range arr {
@@ -813,6 +823,51 @@ func toOpenAIContent(content any) any {
 		}
 	}
 	return out
+}
+
+// degradeToolReferences 把工具搜索（Tool Search / MCP 工具发现）场景的 tool_reference
+// 占位块换成等价文本。这种块只引用某个工具定义、不承载结果文本，而 OpenAI Chat 的
+// tool 消息 content 只接受字符串或 text part，原样透传必然被上游拒。
+// 没有 tool_reference 时原样返回，不做多余拷贝。
+func degradeToolReferences(arr []any) []any {
+	found := false
+	for _, b := range arr {
+		if block, ok := b.(map[string]any); ok {
+			if t := block["type"]; t == "tool_reference" || t == "tool-reference" {
+				found = true
+				break
+			}
+		}
+	}
+	if !found {
+		return arr
+	}
+	out := make([]any, 0, len(arr))
+	for _, b := range arr {
+		block, ok := b.(map[string]any)
+		if !ok {
+			out = append(out, b)
+			continue
+		}
+		if t := block["type"]; t == "tool_reference" || t == "tool-reference" {
+			out = append(out, map[string]any{"type": "text", "text": toolReferenceText(block)})
+			continue
+		}
+		out = append(out, block)
+	}
+	return out
+}
+
+// toolReferenceText 把 tool_reference 占位块压成一行可读文本。
+// 字段名各客户端不统一（ai-sdk 用 toolName，桥接层也见过 tool_name / name），
+// 依次取第一个非空的；都没有就退回类型名，不产出空 text 块。
+func toolReferenceText(block map[string]any) string {
+	for _, key := range []string{"toolName", "tool_name", "name"} {
+		if value := getString(block, key); value != "" {
+			return "[tool_reference: " + value + "]"
+		}
+	}
+	return "[tool_reference]"
 }
 
 // extractText 提取 Anthropic content 数组里的纯文本拼接。

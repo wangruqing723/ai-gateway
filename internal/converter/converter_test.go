@@ -415,3 +415,96 @@ func TestResponsesURLImageToolOutputUsesTargetAwareCheckedBodies(t *testing.T) {
 		t.Fatal("legacy ToOpenAIChatBody must remain available")
 	}
 }
+
+// TestToolResultToolReferenceDegradesToText 锁定工具搜索场景的 tool_reference 占位块
+// 不再让整条请求失败：校验放行，转换时降级成一行文本。
+// 原来这里会报 "tool_result tool_reference content is unsupported" 并跳过候选。
+func TestToolResultToolReferenceDegradesToText(t *testing.T) {
+	newInternal := func(block map[string]any) *Internal {
+		return &Internal{
+			Model: "any",
+			Messages: []any{
+				map[string]any{"role": "assistant", "content": []any{
+					map[string]any{"type": "tool_use", "id": "call_search", "name": "ToolSearch", "input": map[string]any{}},
+				}},
+				map[string]any{"role": "user", "content": []any{
+					map[string]any{"type": "tool_result", "tool_use_id": "call_search", "content": []any{block}},
+				}},
+			},
+		}
+	}
+
+	tests := []struct {
+		name  string
+		block map[string]any
+		want  string
+	}{
+		{"toolName", map[string]any{"type": "tool_reference", "toolName": "get_weather"}, "[tool_reference: get_weather]"},
+		{"tool_name", map[string]any{"type": "tool_reference", "tool_name": "get_forecast"}, "[tool_reference: get_forecast]"},
+		{"name", map[string]any{"type": "tool_reference", "name": "get_temp"}, "[tool_reference: get_temp]"},
+		{"hyphenated", map[string]any{"type": "tool-reference", "toolName": "hyphen_tool"}, "[tool_reference: hyphen_tool]"},
+		{"no name field", map[string]any{"type": "tool_reference"}, "[tool_reference]"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			in := newInternal(tt.block)
+			body, err := ToOpenAIChatBodyChecked(in, "gpt-upstream")
+			if err != nil {
+				t.Fatalf("checked body error = %v, want nil", err)
+			}
+			messages, _ := body["messages"].([]any)
+			if len(messages) < 2 {
+				t.Fatalf("messages = %#v, want at least 2", messages)
+			}
+			// 单个 tool_reference 降级成唯一的 text 块后，toOpenAIContent 的
+			// 「全是文本就合并成字符串」分支会把它压成纯字符串。
+			requireJSONEqual(t, map[string]any{
+				"role": "tool", "tool_call_id": "call_search", "content": tt.want,
+			}, messages[1])
+		})
+	}
+}
+
+// TestToolResultToolReferenceMixedWithText 覆盖 tool_reference 与真实文本混排：
+// 两者都要保留，顺序不变。
+func TestToolResultToolReferenceMixedWithText(t *testing.T) {
+	in := &Internal{
+		Model: "any",
+		Messages: []any{
+			map[string]any{"role": "user", "content": []any{
+				map[string]any{"type": "tool_result", "tool_use_id": "call_search", "content": []any{
+					map[string]any{"type": "text", "text": "found 2 tools"},
+					map[string]any{"type": "tool_reference", "toolName": "get_weather"},
+				}},
+			}},
+		},
+	}
+	body, err := ToOpenAIChatBodyChecked(in, "gpt-upstream")
+	if err != nil {
+		t.Fatalf("checked body error = %v, want nil", err)
+	}
+	messages, _ := body["messages"].([]any)
+	requireJSONEqual(t, map[string]any{
+		"role": "tool", "tool_call_id": "call_search",
+		"content": "found 2 tools\n[tool_reference: get_weather]",
+	}, messages[0])
+}
+
+// TestToolResultUnknownBlockStillRejected 确认放行只针对 tool_reference，
+// 其他不认识的 block 仍要在转换前报错，而不是塞给上游让它 400。
+func TestToolResultUnknownBlockStillRejected(t *testing.T) {
+	in := &Internal{
+		Model: "any",
+		Messages: []any{
+			map[string]any{"role": "user", "content": []any{
+				map[string]any{"type": "tool_result", "tool_use_id": "call_x", "content": []any{
+					map[string]any{"type": "some_future_block"},
+				}},
+			}},
+		},
+	}
+	if _, err := ToOpenAIChatBodyChecked(in, "gpt-upstream"); err == nil || !strings.Contains(err.Error(), "some_future_block") {
+		t.Fatalf("checked body error = %v, want unsupported some_future_block", err)
+	}
+}
