@@ -220,6 +220,39 @@ func TestDecodeAndValidateProviderAndRouteFields(t *testing.T) {
 	}
 }
 
+// provider 名称长度按 rune 计：中文名按字节算会只剩三分之一额度。
+// 边界两侧都要测，否则把 > 写成 >= 也能过。
+func TestDecodeAndValidateProviderNameLength(t *testing.T) {
+	tests := []struct {
+		name    string
+		runes   int
+		char    string
+		wantErr bool
+	}{
+		{name: "ascii at limit", runes: maxProviderNameRunes, char: "a"},
+		{name: "ascii over limit", runes: maxProviderNameRunes + 1, char: "a", wantErr: true},
+		{name: "cjk at limit", runes: maxProviderNameRunes, char: "名"},
+		{name: "cjk over limit", runes: maxProviderNameRunes + 1, char: "名", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// 同时替换 providers 的键和 routes 的引用，否则会撞上「provider 未定义」
+			name := strings.Repeat(tt.char, tt.runes)
+			raw := strings.ReplaceAll(validConfigYAML(), "primary", name)
+			_, err := DecodeAndValidate([]byte(raw))
+			if tt.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "名称长度") {
+					t.Fatalf("DecodeAndValidate() error = %v, want containing %q", err, "名称长度")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("DecodeAndValidate() error = %v, want nil for %d 字符名称", err, tt.runes)
+			}
+		})
+	}
+}
+
 func TestDecodeAndValidateVisionAndNestedKnownFields(t *testing.T) {
 	withVision := strings.Replace(validConfigYAML(), "    model: upstream-model", `    model: upstream-model
     vision:

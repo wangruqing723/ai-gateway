@@ -11,9 +11,20 @@ import (
 
 const (
 	defaultCapacity = 1000
-	windowDuration  = time.Minute
-	metricBuckets   = 61
+	// DefaultWindowMinutes 是统计窗口的默认分钟数。
+	// 取 15 而不是 1：低流量下 1 分钟窗口往往只有个位数样本，
+	// 拿它算 P50/P95/P99 得到的是噪声——一次超时就能把 P95 拽到 30s。
+	DefaultWindowMinutes = 15
+	// MaxWindowMinutes 统计窗口上限。桶按秒分配，每桶还带 per-provider 直方图，
+	// 60 分钟约 3601 个桶、十兆量级，再大对本地网关不划算。
+	MaxWindowMinutes = 60
 )
+
+// bucketsForWindow 返回容纳 minutes 分钟所需的桶数。
+// 多留一个桶：写入按 second%len 取模，满格会让当前秒和最旧一秒撞同一个下标。
+func bucketsForWindow(minutes int) int {
+	return minutes*60 + 1
+}
 
 var latencyBounds = [...]int64{0, 1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 30000, 60000, 120000, 300000, 600000}
 
@@ -83,14 +94,16 @@ func (b *metricBucket) reset(second int64) {
 	b.providers = make(map[string]*providerBucket)
 }
 
-// Collector 保存有界请求日志，并用秒级时间桶维护不受日志容量影响的最近一分钟指标。
+// Collector 保存有界请求日志，并用秒级时间桶维护不受日志容量影响的最近窗口指标。
 type Collector struct {
 	mu            sync.RWMutex
 	records       []RequestLog
 	next          int
 	full          bool
 	totalRequests uint64
-	buckets       [metricBuckets]metricBucket
+	// buckets 是环形秒桶，长度 = 窗口分钟数×60+1，构造后不变。
+	buckets       []metricBucket
+	windowSeconds int64
 }
 
 // RequestLog 是单次请求的观测记录。
@@ -126,13 +139,16 @@ type RequestLog struct {
 
 // Summary 是仪表盘顶部指标。
 type Summary struct {
-	RequestsPerMinute int     `json:"requestsPerMinute"`
-	TotalRequests     int     `json:"totalRequests"`
-	SuccessRate       float64 `json:"successRate"`
-	ErrorRate         float64 `json:"errorRate"`
-	P50LatencyMs      int64   `json:"p50LatencyMs"`
-	P95LatencyMs      int64   `json:"p95LatencyMs"`
-	P99LatencyMs      int64   `json:"p99LatencyMs"`
+	// WindowRequests 是统计窗口内的请求数；WindowMinutes 是窗口大小（分钟），
+	// 供前端渲染「最近 N 分钟」而不必把窗口长度写死在文案里。
+	WindowRequests int     `json:"windowRequests"`
+	WindowMinutes  int     `json:"windowMinutes"`
+	TotalRequests  int     `json:"totalRequests"`
+	SuccessRate    float64 `json:"successRate"`
+	ErrorRate      float64 `json:"errorRate"`
+	P50LatencyMs   int64   `json:"p50LatencyMs"`
+	P95LatencyMs   int64   `json:"p95LatencyMs"`
+	P99LatencyMs   int64   `json:"p99LatencyMs"`
 }
 
 // ProviderStats 是按 provider 聚合的指标。
@@ -154,12 +170,77 @@ type Response struct {
 	RecentErrors []RequestLog    `json:"recentErrors"`
 }
 
-// NewCollector 创建固定容量的内存采集器。
+// NewCollector 创建固定容量的内存采集器，统计窗口取默认值。
 func NewCollector(capacity int) *Collector {
+	return NewCollectorWithWindow(capacity, DefaultWindowMinutes)
+}
+
+// NewCollectorWithWindow 创建采集器并指定统计窗口分钟数。
+// windowMinutes 超出 [1, MaxWindowMinutes] 会被夹到边界，0 或负数回落默认值。
+func NewCollectorWithWindow(capacity, windowMinutes int) *Collector {
 	if capacity <= 0 {
 		capacity = defaultCapacity
 	}
-	return &Collector{records: make([]RequestLog, 0, capacity)}
+	if windowMinutes <= 0 {
+		windowMinutes = DefaultWindowMinutes
+	}
+	if windowMinutes > MaxWindowMinutes {
+		windowMinutes = MaxWindowMinutes
+	}
+	return &Collector{
+		records:       make([]RequestLog, 0, capacity),
+		buckets:       make([]metricBucket, bucketsForWindow(windowMinutes)),
+		windowSeconds: int64(windowMinutes) * 60,
+	}
+}
+
+// WindowMinutes 返回当前统计窗口的分钟数。
+func (c *Collector) WindowMinutes() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return int(c.windowSeconds / 60)
+}
+
+// SetWindow 调整统计窗口，供配置热重载调用。窗口未变时直接返回。
+//
+// 桶数组按新窗口重建，但仍落在新窗口内的历史桶会按新下标搬过去，
+// 不整份丢弃：保存一次配置就把刚才的指标清零，会让「改配置」和
+// 「指标归零」在界面上难以区分。窗口缩小时超出范围的桶自然被丢掉。
+func (c *Collector) SetWindow(windowMinutes int) {
+	if windowMinutes <= 0 {
+		windowMinutes = DefaultWindowMinutes
+	}
+	if windowMinutes > MaxWindowMinutes {
+		windowMinutes = MaxWindowMinutes
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	windowSeconds := int64(windowMinutes) * 60
+	if windowSeconds == c.windowSeconds {
+		return
+	}
+
+	size := bucketsForWindow(windowMinutes)
+	rebuilt := make([]metricBucket, size)
+	cutoff := time.Now().Unix() - windowSeconds
+	for i := range c.buckets {
+		old := &c.buckets[i]
+		if old.statusCodes == nil || old.requests == 0 || old.second < cutoff {
+			continue
+		}
+		idx := int(old.second % int64(size))
+		if idx < 0 {
+			idx += size
+		}
+		// 同下标只保留较新的那个桶：窗口缩小时多个旧秒会映射到同一格
+		if rebuilt[idx].statusCodes != nil && rebuilt[idx].second >= old.second {
+			continue
+		}
+		rebuilt[idx] = *old
+	}
+	c.buckets = rebuilt
+	c.windowSeconds = windowSeconds
 }
 
 // Add 追加一条记录。
@@ -197,9 +278,10 @@ func (c *Collector) addMetricLocked(record RequestLog, observedAt time.Time) {
 		return
 	}
 	second := record.Started.Unix()
-	idx := int(second % metricBuckets)
+	n := int64(len(c.buckets))
+	idx := int(second % n)
 	if idx < 0 {
-		idx += metricBuckets
+		idx += int(n)
 	}
 	bucket := &c.buckets[idx]
 	if bucket.statusCodes != nil && bucket.second > second {
@@ -256,17 +338,18 @@ func (c *Collector) Logs(filter LogFilter) []RequestLog {
 	return out
 }
 
-// Metrics 聚合最近一分钟的请求指标，并保留历史 provider 排行和最近错误摘要。
+// Metrics 聚合最近窗口内的请求指标，并保留历史 provider 排行和最近错误摘要。
 func (c *Collector) Metrics(now time.Time) Response {
 	c.mu.RLock()
 	records := c.snapshotLocked()
 	resp := Response{
 		Summary: Summary{
 			TotalRequests: int(c.totalRequests),
+			WindowMinutes: int(c.windowSeconds / 60),
 		},
 		StatusCodes: make(map[string]int),
 	}
-	cutoffSecond := now.Add(-windowDuration).Unix()
+	cutoffSecond := now.Add(-time.Duration(c.windowSeconds) * time.Second).Unix()
 	nowSecond := now.Unix()
 	var latency latencyHistogram
 	successes := 0
@@ -276,7 +359,7 @@ func (c *Collector) Metrics(now time.Time) Response {
 		if bucket.requests == 0 || bucket.second < cutoffSecond || bucket.second > nowSecond {
 			continue
 		}
-		resp.Summary.RequestsPerMinute += bucket.requests
+		resp.Summary.WindowRequests += bucket.requests
 		successes += bucket.successes
 		latency.merge(bucket.latency)
 		for status, count := range bucket.statusCodes {
@@ -295,8 +378,8 @@ func (c *Collector) Metrics(now time.Time) Response {
 	}
 	c.mu.RUnlock()
 
-	resp.Summary.SuccessRate = ratio(successes, resp.Summary.RequestsPerMinute)
-	if resp.Summary.RequestsPerMinute > 0 {
+	resp.Summary.SuccessRate = ratio(successes, resp.Summary.WindowRequests)
+	if resp.Summary.WindowRequests > 0 {
 		resp.Summary.ErrorRate = 1 - resp.Summary.SuccessRate
 	}
 	resp.Summary.P50LatencyMs = latency.percentile(50)

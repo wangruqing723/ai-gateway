@@ -100,7 +100,7 @@ func main() {
 		httpClient:     httpClient,
 		cache:          imgCache,
 		translator:     translator,
-		metrics:        metrics.NewCollector(1000),
+		metrics:        metrics.NewCollectorWithWindow(1000, cfg.Metrics.WindowMinutes),
 		providerHealth: providerhealth.NewChecker(),
 		breaker:        breaker.New(breakerSettings(cfg)),
 		selector:       balancer.New(),
@@ -1735,6 +1735,10 @@ func (s *server) applyRuntimeConfig(newCfg *config.Config, revision string) []st
 			activeRoutes[route.Match] = struct{}{}
 		}
 		s.selector.Reconcile(activeRoutes)
+	}
+	if s.metrics != nil {
+		// 窗口变了才重建桶；SetWindow 内部会保留仍落在新窗口内的历史桶
+		s.metrics.SetWindow(newCfg.Metrics.WindowMinutes)
 	}
 	s.cfg = newCfg
 	s.revision = revision

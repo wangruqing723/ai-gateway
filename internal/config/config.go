@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
 
@@ -40,6 +41,17 @@ const (
 	maxBreakerOpenMs = 600_000
 	// maxBreakerHalfOpenProbes 半开探测放行数上限。
 	maxBreakerHalfOpenProbes = 10
+
+	// 指标统计窗口的默认值与上限（分钟）。
+	// 默认 15：低流量下 1 分钟窗口只有个位数样本，P95 会被单次超时主导。
+	// 上限 60：桶按秒分配且每桶带 per-provider 直方图，再大对本地网关不划算。
+	defaultMetricsWindowMinutes = 15
+	maxMetricsWindowMinutes     = 60
+
+	// maxProviderNameRunes provider 名称长度上限，按字符（rune）而非字节计：
+	// 名称多为中文，按字节算一个汉字占 3 字节，100 字节只剩 33 个汉字可用。
+	// 名称会进日志、响应头 x-ai-gateway-provider 和前端表格，需要有个上限。
+	maxProviderNameRunes = 100
 
 	// 默认值集中在此，供 applyDefaults 与各 accessor 共用一处来源。
 	defaultFailoverAttempts      = 2
@@ -244,6 +256,13 @@ type Cache struct {
 	MaxRecords int `yaml:"maxRecords" json:"maxRecords"`
 }
 
+// Metrics 观测指标配置。
+type Metrics struct {
+	// WindowMinutes 顶部指标（请求数、成功率、P95）的统计窗口分钟数。
+	// 低流量下窗口太短会让分位数变成噪声，默认 15 分钟。
+	WindowMinutes int `yaml:"windowMinutes" json:"windowMinutes"`
+}
+
 // Config 顶层配置
 type Config struct {
 	Port                  int                  `yaml:"port" json:"port"`
@@ -251,6 +270,7 @@ type Config struct {
 	Timeout               int                  `yaml:"timeout" json:"timeout"`                             // 请求超时（毫秒）
 	StreamActivityTimeout int                  `yaml:"streamActivityTimeout" json:"streamActivityTimeout"` // 流式活跃超时（毫秒）
 	Cache                 Cache                `yaml:"cache" json:"cache"`
+	Metrics               Metrics              `yaml:"metrics" json:"metrics"`
 	Providers             map[string]*Provider `yaml:"providers" json:"providers"`
 	Routes                []Route              `yaml:"routes" json:"routes"`
 	Failover              Failover             `yaml:"failover" json:"failover"`
@@ -330,6 +350,11 @@ func applyDefaults(c *Config) {
 	}
 	if c.Cache.MaxRecords == 0 {
 		c.Cache.MaxRecords = 1000
+	}
+	// 与 Cache 同样用「0 视为未写」：窗口不接受 0（0 分钟窗口没有意义），
+	// 所以这里不需要 Failover/Breaker 那套 *int 区分「写了 0」和「没写」。
+	if c.Metrics.WindowMinutes == 0 {
+		c.Metrics.WindowMinutes = defaultMetricsWindowMinutes
 	}
 	for name, p := range c.Providers {
 		if p == nil {
@@ -760,12 +785,18 @@ func validate(c *Config) error {
 	if c.Cache.MaxRecords < 1 || c.Cache.MaxRecords > maxCacheRecords {
 		return fmt.Errorf("cache.maxRecords 应在 1-%d 之间", maxCacheRecords)
 	}
+	if c.Metrics.WindowMinutes < 1 || c.Metrics.WindowMinutes > maxMetricsWindowMinutes {
+		return fmt.Errorf("metrics.windowMinutes 应在 1-%d 之间", maxMetricsWindowMinutes)
+	}
 	for name, p := range c.Providers {
 		if p == nil {
 			return fmt.Errorf("providers.%s 不能为空", name)
 		}
 		if strings.TrimSpace(name) == "" {
 			return fmt.Errorf("provider 名称不能为空")
+		}
+		if n := utf8.RuneCountInString(name); n > maxProviderNameRunes {
+			return fmt.Errorf("provider 名称长度应不超过 %d 个字符（当前 %d）", maxProviderNameRunes, n)
 		}
 		parsedURL, err := url.ParseRequestURI(p.BaseURL)
 		if err != nil || parsedURL.Host == "" || parsedURL.Scheme != "http" && parsedURL.Scheme != "https" {

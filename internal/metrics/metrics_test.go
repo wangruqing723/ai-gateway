@@ -5,6 +5,88 @@ import (
 	"time"
 )
 
+// 窗口可配：桶数按窗口分配，超界值夹到边界，0 回落默认值。
+func TestNewCollectorWithWindowClampsRange(t *testing.T) {
+	tests := []struct {
+		name  string
+		input int
+		want  int
+	}{
+		{name: "零值取默认", input: 0, want: DefaultWindowMinutes},
+		{name: "负值取默认", input: -5, want: DefaultWindowMinutes},
+		{name: "下界", input: 1, want: 1},
+		{name: "上界", input: MaxWindowMinutes, want: MaxWindowMinutes},
+		{name: "超上界夹住", input: MaxWindowMinutes + 100, want: MaxWindowMinutes},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := NewCollectorWithWindow(10, tt.input)
+			if got := c.WindowMinutes(); got != tt.want {
+				t.Fatalf("WindowMinutes() = %d, want %d", got, tt.want)
+			}
+			if got := len(c.buckets); got != bucketsForWindow(tt.want) {
+				t.Fatalf("桶数 = %d, want %d", got, bucketsForWindow(tt.want))
+			}
+		})
+	}
+}
+
+// 窗口出现在响应里，前端据此渲染「最近 N 分钟」文案，不把长度写死。
+func TestMetricsReportsWindowMinutes(t *testing.T) {
+	c := NewCollectorWithWindow(10, 5)
+	now := time.Date(2026, 8, 28, 10, 0, 0, 0, time.UTC)
+	if got := c.Metrics(now).Summary.WindowMinutes; got != 5 {
+		t.Fatalf("Summary.WindowMinutes = %d, want 5", got)
+	}
+}
+
+// 放大窗口时，仍落在新窗口内的历史桶要搬过去而不是清零：
+// 保存一次配置就把指标归零，会让「改配置」和「指标归零」在界面上分不清。
+func TestSetWindowGrowKeepsInWindowHistory(t *testing.T) {
+	c := NewCollectorWithWindow(10, 1)
+	now := time.Now()
+	c.Add(RequestLog{ID: "a", Started: now.Add(-30 * time.Second), Status: 200, Provider: "p", DurationMs: 10})
+	c.Add(RequestLog{ID: "b", Started: now.Add(-20 * time.Second), Status: 200, Provider: "p", DurationMs: 20})
+
+	if got := c.Metrics(now).Summary.WindowRequests; got != 2 {
+		t.Fatalf("放大前窗口内请求数 = %d, want 2", got)
+	}
+	c.SetWindow(10)
+	if got := c.WindowMinutes(); got != 10 {
+		t.Fatalf("SetWindow(10) 后 WindowMinutes() = %d", got)
+	}
+	if got := c.Metrics(now).Summary.WindowRequests; got != 2 {
+		t.Fatalf("放大窗口后历史桶丢失: WindowRequests = %d, want 2", got)
+	}
+}
+
+// 缩小窗口时，落在新窗口外的桶要丢掉，不能让旧数据继续算进汇总。
+func TestSetWindowShrinkDropsOutOfWindowHistory(t *testing.T) {
+	c := NewCollectorWithWindow(10, 10)
+	now := time.Now()
+	c.Add(RequestLog{ID: "old", Started: now.Add(-5 * time.Minute), Status: 200, Provider: "p", DurationMs: 10})
+	c.Add(RequestLog{ID: "new", Started: now.Add(-10 * time.Second), Status: 200, Provider: "p", DurationMs: 20})
+
+	if got := c.Metrics(now).Summary.WindowRequests; got != 2 {
+		t.Fatalf("缩小前窗口内请求数 = %d, want 2", got)
+	}
+	c.SetWindow(1)
+	if got := c.Metrics(now).Summary.WindowRequests; got != 1 {
+		t.Fatalf("缩小窗口后应只剩 1 条（5 分钟前那条已出窗）, got %d", got)
+	}
+}
+
+// 窗口未变时 SetWindow 是空操作，不重建桶、不丢数据。
+func TestSetWindowNoopWhenUnchanged(t *testing.T) {
+	c := NewCollectorWithWindow(10, 5)
+	now := time.Now()
+	c.Add(RequestLog{ID: "a", Started: now.Add(-10 * time.Second), Status: 200, Provider: "p", DurationMs: 10})
+	c.SetWindow(5)
+	if got := c.Metrics(now).Summary.WindowRequests; got != 1 {
+		t.Fatalf("同值 SetWindow 不该动数据: WindowRequests = %d, want 1", got)
+	}
+}
+
 func TestCollectorLogsFiltersAndRing(t *testing.T) {
 	c := NewCollector(2)
 	base := time.Date(2026, 6, 27, 10, 0, 0, 0, time.UTC)
@@ -44,8 +126,8 @@ func TestCollectorMetrics(t *testing.T) {
 	c.Add(RequestLog{ID: "c", Started: now.Add(-8 * time.Second), Status: 503, Provider: "p2", DurationMs: 100, Error: "upstream"})
 
 	m := c.Metrics(now)
-	if m.Summary.RequestsPerMinute != 3 {
-		t.Fatalf("expected rpm 3, got %d", m.Summary.RequestsPerMinute)
+	if m.Summary.WindowRequests != 3 {
+		t.Fatalf("expected rpm 3, got %d", m.Summary.WindowRequests)
 	}
 	if m.Summary.SuccessRate != 1.0/3.0 {
 		t.Fatalf("unexpected success rate: %f", m.Summary.SuccessRate)
@@ -59,13 +141,15 @@ func TestCollectorMetrics(t *testing.T) {
 }
 
 func TestCollectorMetricsKeepsSummaryRecent(t *testing.T) {
-	c := NewCollector(10)
+	// 显式取 1 分钟窗口：这个测试验的是「超出窗口的桶不进汇总」，
+	// 跟着默认窗口走会让断言依赖那个默认值（现为 15 分钟），改默认就误报。
+	c := NewCollectorWithWindow(10, 1)
 	now := time.Date(2026, 6, 27, 10, 2, 0, 0, time.UTC)
 	c.Add(RequestLog{ID: "old", Started: now.Add(-2 * time.Minute), Status: 200, Provider: "p1", DurationMs: 75})
 
 	m := c.Metrics(now)
-	if m.Summary.RequestsPerMinute != 0 {
-		t.Fatalf("expected empty recent window, got rpm %d", m.Summary.RequestsPerMinute)
+	if m.Summary.WindowRequests != 0 {
+		t.Fatalf("expected empty recent window, got rpm %d", m.Summary.WindowRequests)
 	}
 	if m.Summary.SuccessRate != 0 || m.Summary.P95LatencyMs != 0 {
 		t.Fatalf("summary should not use stale history: %#v", m.Summary)
@@ -99,8 +183,8 @@ func TestCollectorMetricsAreIndependentFromLogCapacity(t *testing.T) {
 	if m.Summary.TotalRequests != 1500 {
 		t.Fatalf("total requests must not be capped by the log ring: %d", m.Summary.TotalRequests)
 	}
-	if m.Summary.RequestsPerMinute != 1500 {
-		t.Fatalf("rpm must not be capped by the log ring: %d", m.Summary.RequestsPerMinute)
+	if m.Summary.WindowRequests != 1500 {
+		t.Fatalf("rpm must not be capped by the log ring: %d", m.Summary.WindowRequests)
 	}
 	if m.StatusCodes["200"] != 1200 || m.StatusCodes["503"] != 300 {
 		t.Fatalf("unexpected status aggregation: %#v", m.StatusCodes)
@@ -125,13 +209,15 @@ func TestCollectorMetricsAreIndependentFromLogCapacity(t *testing.T) {
 
 func TestCollectorMetricsMinuteBoundaryAndZeroStarted(t *testing.T) {
 	t.Run("minute boundary", func(t *testing.T) {
-		c := NewCollector(10)
+		// 固定 1 分钟窗口：验的是「窗口边界上那一秒算进、再早一秒算出」，
+		// 用默认窗口会让这两条记录都落在窗口内。
+		c := NewCollectorWithWindow(10, 1)
 		now := time.Now().Truncate(time.Second)
 		c.Add(RequestLog{ID: "included", Started: now.Add(-60 * time.Second), Status: 200, Provider: "p", DurationMs: 10})
 		c.Add(RequestLog{ID: "excluded", Started: now.Add(-61 * time.Second), Status: 503, Provider: "p", DurationMs: 20})
 
 		m := c.Metrics(now)
-		if m.Summary.TotalRequests != 2 || m.Summary.RequestsPerMinute != 1 {
+		if m.Summary.TotalRequests != 2 || m.Summary.WindowRequests != 1 {
 			t.Fatalf("minute boundary totals = %#v", m.Summary)
 		}
 		if m.StatusCodes["200"] != 1 || m.StatusCodes["503"] != 0 {
@@ -147,14 +233,15 @@ func TestCollectorMetricsMinuteBoundaryAndZeroStarted(t *testing.T) {
 			t.Fatalf("zero Started was not normalized: %#v", logs)
 		}
 		m := c.Metrics(time.Now())
-		if m.Summary.TotalRequests != 1 || m.Summary.RequestsPerMinute != 1 || m.StatusCodes["201"] != 1 {
+		if m.Summary.TotalRequests != 1 || m.Summary.WindowRequests != 1 || m.StatusCodes["201"] != 1 {
 			t.Fatalf("normalized zero Started missing from metrics: %#v", m)
 		}
 	})
 }
 
 func TestCollectorMetricsWindowExpiresWithoutResettingTotal(t *testing.T) {
-	c := NewCollector(1)
+	// 同上：验的是过期语义，窗口固定 1 分钟才与断言自洽
+	c := NewCollectorWithWindow(1, 1)
 	now := time.Date(2026, 7, 11, 10, 0, 0, 0, time.UTC)
 	c.Add(RequestLog{ID: "old", Started: now.Add(-2 * time.Minute), Status: 200, Provider: "p", DurationMs: 10})
 	c.Add(RequestLog{ID: "recent", Started: now.Add(-5 * time.Second), Status: 500, Provider: "p", DurationMs: 20, Error: "failed"})
@@ -163,24 +250,28 @@ func TestCollectorMetricsWindowExpiresWithoutResettingTotal(t *testing.T) {
 	if m.Summary.TotalRequests != 2 {
 		t.Fatalf("expected cumulative total 2, got %d", m.Summary.TotalRequests)
 	}
-	if m.Summary.RequestsPerMinute != 0 || len(m.StatusCodes) != 0 {
+	if m.Summary.WindowRequests != 0 || len(m.StatusCodes) != 0 {
 		t.Fatalf("expired minute buckets must be empty: %#v", m)
 	}
 }
 
 func TestCollectorLateCompletionDoesNotEraseNewerBucket(t *testing.T) {
-	c := NewCollector(10)
+	// 固定 1 分钟窗口，并让时间差恰好等于桶数——只有这样两条记录才会
+	// 落进同一个环形槽，也就是这个测试要覆盖的场景。偏移量从
+	// bucketsForWindow 推导而不是写死 61，改桶数公式时测试跟着走。
+	c := NewCollectorWithWindow(10, 1)
+	collide := time.Duration(bucketsForWindow(1)) * time.Second
 	now := time.Date(2026, 7, 11, 10, 0, 0, 0, time.UTC)
 
-	// 两条请求的开始时间相差 61 秒，落入同一个环形槽；新请求先完成并上报。
+	// 两条请求的开始时间相差一整圈，落入同一个环形槽；新请求先完成并上报。
 	c.Add(RequestLog{ID: "new", Started: now, Status: 200, Provider: "p", DurationMs: 10})
-	c.Add(RequestLog{ID: "slow", Started: now.Add(-61 * time.Second), Status: 200, Provider: "p", DurationMs: 61_000})
+	c.Add(RequestLog{ID: "slow", Started: now.Add(-collide), Status: 200, Provider: "p", DurationMs: 61_000})
 
 	m := c.Metrics(now)
 	if m.Summary.TotalRequests != 2 {
 		t.Fatalf("expected cumulative total 2, got %d", m.Summary.TotalRequests)
 	}
-	if m.Summary.RequestsPerMinute != 1 || m.StatusCodes["200"] != 1 {
+	if m.Summary.WindowRequests != 1 || m.StatusCodes["200"] != 1 {
 		t.Fatalf("late completion must not erase the newer metric bucket: %#v", m)
 	}
 }
@@ -197,7 +288,7 @@ func TestCollectorFutureTimestampDoesNotPoisonCurrentBucket(t *testing.T) {
 	if m.Summary.TotalRequests != 2 {
 		t.Fatalf("expected cumulative total 2, got %d", m.Summary.TotalRequests)
 	}
-	if m.Summary.RequestsPerMinute != 1 || m.StatusCodes["200"] != 1 || m.StatusCodes["503"] != 0 {
+	if m.Summary.WindowRequests != 1 || m.StatusCodes["200"] != 1 || m.StatusCodes["503"] != 0 {
 		t.Fatalf("future timestamp must not poison the current metric bucket: %#v", m)
 	}
 }
