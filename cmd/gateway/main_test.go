@@ -1375,6 +1375,9 @@ func (s *runtimeHealthSpy) Snapshot(*config.Config) map[string]providerhealth.St
 func (s *runtimeHealthSpy) CheckAll(context.Context, *config.Config, *http.Client) map[string]providerhealth.Status {
 	return map[string]providerhealth.Status{}
 }
+func (s *runtimeHealthSpy) CheckProvider(_ context.Context, _ *config.Config, _ *http.Client, name string) (providerhealth.Status, bool) {
+	return providerhealth.Status{Name: name}, true
+}
 func (s *runtimeHealthSpy) InvalidateChanged(oldCfg, newCfg *config.Config) {
 	s.calls++
 	s.oldCfg = oldCfg

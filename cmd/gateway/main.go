@@ -157,6 +157,7 @@ type visionRuntime interface {
 type providerHealthRuntime interface {
 	Snapshot(*config.Config) map[string]providerhealth.Status
 	CheckAll(context.Context, *config.Config, *http.Client) map[string]providerhealth.Status
+	CheckProvider(context.Context, *config.Config, *http.Client, string) (providerhealth.Status, bool)
 	InvalidateChanged(*config.Config, *config.Config)
 }
 
@@ -1121,10 +1122,31 @@ func (s *server) handleBreakerReset(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(out)
 }
 
+// handleProviderHealthCheck 触发健康检测。
+//
+// 带 ?provider= 时只检测该 provider，用于表格里的单行检测按钮：
+// provider 一多时整表检测要等最慢的那个，而用户往往只关心刚改过的那一个。
+// 响应结构与整表检测保持一致（都返回 providers 映射），前端只需合并同一份数据。
 func (s *server) handleProviderHealthCheck(w http.ResponseWriter, r *http.Request) {
 	s.cfgMu.RLock()
 	cfg := s.cfg
 	s.cfgMu.RUnlock()
+
+	if name := r.URL.Query().Get("provider"); name != "" {
+		status, ok := s.providerHealth.CheckProvider(r.Context(), cfg, s.httpClient, name)
+		if !ok {
+			writeJSONError(w, http.StatusNotFound, "gateway_error", fmt.Sprintf("未找到 provider: %s", name))
+			return
+		}
+		out, _ := json.MarshalIndent(map[string]any{
+			"providers": map[string]providerhealth.Status{name: status},
+		}, "", "  ")
+		w.Header().Set("content-type", "application/json")
+		w.Header().Set("content-length", fmt.Sprintf("%d", len(out)))
+		w.WriteHeader(http.StatusOK)
+		w.Write(out)
+		return
+	}
 
 	statuses := s.providerHealth.CheckAll(r.Context(), cfg, s.httpClient)
 	out, _ := json.MarshalIndent(map[string]any{

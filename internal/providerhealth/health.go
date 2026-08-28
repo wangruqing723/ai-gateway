@@ -197,6 +197,58 @@ func (c *Checker) checkAll(ctx context.Context, cfg *config.Config, client *http
 	c.mu.Unlock()
 }
 
+// CheckProvider 只检测一个 provider，返回它的检测结果。
+//
+// 不复用 CheckAll 的去重与冷却：那套是为「整表刷新」设计的，
+// 按整份配置指纹判定，而单点检测是用户对着某一行明确点的，
+// 撞上冷却窗口就什么也不做、界面毫无反应，比多探一次更糟。
+// 并发上限仍走同一个 sem，避免绕开全局节流。
+//
+// generation 判据保留：配置在探测期间被改掉时结果直接丢弃，
+// 否则会把旧上游的结论写到新配置的名字上。
+func (c *Checker) CheckProvider(ctx context.Context, cfg *config.Config, client *http.Client, name string) (Status, bool) {
+	provider, ok := cfg.Providers[name]
+	if !ok {
+		return Status{}, false
+	}
+
+	generation := c.generation.Load()
+	if provider == nil {
+		status := errorStatus(name, "", "provider 配置为空", 0)
+		c.storeStatus(name, status, providerFingerprint(name, nil), generation)
+		return status, true
+	}
+
+	pCopy := *provider
+	if pCopy.Name == "" {
+		pCopy.Name = name
+	}
+	fingerprint := providerFingerprint(name, &pCopy)
+
+	select {
+	case c.sem <- struct{}{}:
+		defer func() { <-c.sem }()
+	case <-ctx.Done():
+		// 没拿到槽位就退出：不写缓存，避免把「网关侧排队超时」
+		// 记成上游异常，那会让用户以为上游挂了。
+		return Status{}, false
+	}
+
+	status := checkOne(ctx, &pCopy, client)
+	c.storeStatus(name, status, fingerprint, generation)
+	return status, true
+}
+
+// storeStatus 在 generation 未变时写入检测结果。
+func (c *Checker) storeStatus(name string, status Status, fingerprint string, generation uint64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.generation.Load() != generation {
+		return
+	}
+	c.statuses[name] = cachedStatus{status: status, fingerprint: fingerprint}
+}
+
 // InvalidateChanged 清理被删除或身份字段发生变化的 provider 健康状态。
 func (c *Checker) InvalidateChanged(oldCfg *config.Config, newCfg *config.Config) {
 	oldFingerprint := configFingerprint(oldCfg)

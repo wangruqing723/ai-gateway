@@ -41,6 +41,86 @@ func TestCheckAllMapsStatuses(t *testing.T) {
 	}
 }
 
+// CheckProvider 只探被点的那一个，且结果要进缓存（Snapshot 能读到），
+// 其余 provider 保持未检测——整表检测在 provider 多时太慢，这是单点检测存在的理由。
+func TestCheckProviderChecksOnlyRequestedProvider(t *testing.T) {
+	var mu sync.Mutex
+	probed := map[string]int{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		probed[r.Header.Get("authorization")]++
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	cfg := &config.Config{Providers: map[string]*config.Provider{
+		"a": {Name: "a", BaseURL: server.URL, APIKey: "key-a", Format: "openai"},
+		"b": {Name: "b", BaseURL: server.URL, APIKey: "key-b", Format: "openai"},
+	}}
+
+	checker := NewChecker()
+	status, ok := checker.CheckProvider(context.Background(), cfg, server.Client(), "a")
+	if !ok {
+		t.Fatal("CheckProvider() ok = false, want true for existing provider")
+	}
+	if status.Status != "ok" {
+		t.Fatalf("status = %#v, want ok", status)
+	}
+
+	mu.Lock()
+	countB := probed["Bearer key-b"]
+	mu.Unlock()
+	if countB != 0 {
+		t.Fatalf("provider b probed %d times, want 0", countB)
+	}
+
+	snap := checker.Snapshot(cfg)
+	if snap["a"].Status != "ok" {
+		t.Fatalf("snapshot for a = %#v, want cached ok", snap["a"])
+	}
+	if snap["b"].Status != "unchecked" {
+		t.Fatalf("snapshot for b = %#v, want unchecked", snap["b"])
+	}
+}
+
+// 未知名字必须报 false，让 HTTP 层能回 404 而不是静默当成一次成功检测。
+func TestCheckProviderReportsMissingProvider(t *testing.T) {
+	cfg := &config.Config{Providers: map[string]*config.Provider{}}
+	if _, ok := NewChecker().CheckProvider(context.Background(), cfg, http.DefaultClient, "nope"); ok {
+		t.Fatal("CheckProvider() ok = true for unknown provider, want false")
+	}
+}
+
+// 单点检测不受整表检测的冷却影响：用户对着一行连点两次，第二次也要真探。
+// CheckAll 的冷却是为「整表刷新」设的，套到单行上会让界面毫无反应。
+func TestCheckProviderIgnoresCheckAllCooldown(t *testing.T) {
+	var probes atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		probes.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	cfg := &config.Config{Providers: map[string]*config.Provider{
+		"a": {Name: "a", BaseURL: server.URL, APIKey: "key-a", Format: "openai"},
+	}}
+
+	checker := NewChecker()
+	checker.CheckAll(context.Background(), cfg, server.Client())
+	before := probes.Load()
+
+	// 紧接着两次单点检测，都应真的发出请求
+	for i := 0; i < 2; i++ {
+		if _, ok := checker.CheckProvider(context.Background(), cfg, server.Client(), "a"); !ok {
+			t.Fatalf("CheckProvider() call %d ok = false", i+1)
+		}
+	}
+	if added := probes.Load() - before; added != 2 {
+		t.Fatalf("单点检测发出 %d 次探测，want 2（不应被 CheckAll 冷却挡住）", added)
+	}
+}
+
 func TestSnapshotInvalidatesStatusWhenProviderIdentityChanges(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
