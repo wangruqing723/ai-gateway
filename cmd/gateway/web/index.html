@@ -334,8 +334,10 @@
                         </div>
                     </div>
 
+                    <!-- 9/3 而不是 8/4：provider 和路由都是宽表格，右侧配置预览是只读概览、
+                         窄一点照样能读，但表格少一列宽度就要横向滚动、操作列被裁掉。 -->
                     <div x-show="editMode === 'visual'" x-transition class="grid grid-cols-1 gap-5 xl:grid-cols-12 lg:min-h-0 lg:flex-1 lg:overflow-hidden">
-                        <div class="space-y-5 xl:col-span-8 lg:min-h-0 lg:overflow-y-auto lg:pr-2">
+                        <div class="space-y-5 xl:col-span-9 lg:min-h-0 lg:overflow-y-auto lg:pr-2">
                             <section x-show="activeTab === 'routes'" x-transition class="glass rounded-lg">
                                 <div class="flex flex-col gap-3 border-b border-line p-4 sm:flex-row sm:items-center sm:justify-between">
                                     <div>
@@ -348,63 +350,74 @@
                                     </button>
                                 </div>
                                 <div class="overflow-x-auto">
-                                    <table class="w-full min-w-[760px] border-collapse text-left">
+                                    <table class="w-full min-w-[560px] border-collapse text-left">
                                         <thead class="bg-panel2 text-xs uppercase tracking-wide text-muted">
                                             <tr>
-                                                <th class="px-4 py-3 font-bold">优先级</th>
-                                                <th class="px-4 py-3 font-bold">匹配模式</th>
-                                                <th class="px-4 py-3 font-bold">Provider</th>
-                                                <th class="px-4 py-3 font-bold">目标模型</th>
-                                                <th class="px-4 py-3 font-bold">视觉伴随</th>
-                                                <th class="px-4 py-3 text-right font-bold">操作</th>
+                                                <th class="whitespace-nowrap px-3 py-3 font-bold">#</th>
+                                                <th class="whitespace-nowrap px-3 py-3 font-bold">匹配模式</th>
+                                                <th class="whitespace-nowrap px-3 py-3 font-bold">候选（按尝试顺序）</th>
+                                                <th class="whitespace-nowrap px-3 py-3 font-bold">视觉</th>
+                                                <th class="whitespace-nowrap px-3 py-3 text-right font-bold">操作</th>
                                             </tr>
                                         </thead>
                                         <tbody class="divide-y divide-line">
                                             <template x-for="(route, index) in config.routes" :key="index">
                                                 <tr class="group bg-panel/35 transition hover:bg-white/[.04]">
-                                                    <td class="px-4 py-4 font-mono text-xs text-muted" x-text="'#' + (index + 1)"></td>
-                                                    <td class="px-4 py-4">
-                                                        <span class="font-mono text-sm font-bold text-cyan" x-text="route.match"></span>
+                                                    <td class="w-px whitespace-nowrap px-3 py-2.5 align-top font-mono text-xs text-muted" x-text="index + 1"></td>
+                                                    <td class="w-px px-3 py-2.5 align-top">
+                                                        <span class="whitespace-nowrap font-mono text-sm font-bold text-cyan" x-text="route.match"></span>
+                                                        <!-- 策略只在多候选时有意义，单候选写非 failover 后端会直接报错 -->
+                                                        <span x-show="routeTargets(route).length > 1" x-cloak
+                                                              class="mt-0.5 block whitespace-nowrap text-[11px] text-muted"
+                                                              x-text="(route.strategy || 'failover') + ' · ' + routeTargets(route).length + ' 个候选'"></span>
                                                     </td>
-                                                    <td class="px-4 py-4">
-                                                        <div class="flex flex-wrap items-center gap-1.5">
+                                                    <!-- Provider 和目标模型合成一列、且流式换行：
+                                                         原来拆两列各自纵向排列，两列条目对不齐、看不出配对关系；
+                                                         改成一候选一项后若强制每项独占一行，5 个候选会把行撑到 250px 高、
+                                                         右侧大片留白浪费。这里用 flex-wrap，宽度够就并排、不够才换行。 -->
+                                                    <!-- w-full + max-w-0 让这一列吃掉剩余宽度并允许收缩到 0：
+                                                         不加的话候选内容会把 table 撑出容器、横向滚动条回来、操作列被裁。
+                                                         内层再套一个 min-w-0 的容器——td 的 max-w-0 不会自动传导给
+                                                         flex 子项，缺了它 flex-wrap 在某些宽度（实测 1600px）算出的
+                                                         可用宽度仍是内容宽度，于是排成一行把表撑到 1039px。 -->
+                                                    <td class="w-full max-w-0 px-3 py-2.5 align-top">
+                                                        <div class="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1.5">
                                                             <template x-for="(target, ti) in routeTargets(route)" :key="ti">
-                                                                <span class="inline-flex items-center gap-1.5">
-                                                                    <span x-show="ti > 0" class="text-xs text-muted">→</span>
+                                                                <div class="flex items-center gap-1.5 whitespace-nowrap">
+                                                                    <span class="font-mono text-[11px] text-muted" x-text="(ti + 1) + '.'"></span>
                                                                     <span class="chip bg-white/[.05] text-text" x-text="target.provider"></span>
-                                                                </span>
+                                                                    <span class="text-[11px] text-muted">→</span>
+                                                                    <span class="font-mono text-xs text-emerald-200" x-text="target.model || '(沿用请求模型)'"></span>
+                                                                </div>
                                                             </template>
                                                         </div>
                                                     </td>
-                                                    <td class="px-4 py-4">
-                                                        <div class="flex flex-col gap-1 font-mono text-sm text-emerald-200">
-                                                            <template x-for="(target, ti) in routeTargets(route)" :key="ti">
-                                                                <span x-text="target.model || '(沿用请求模型)'"></span>
-                                                            </template>
-                                                        </div>
-                                                    </td>
-                                                    <td class="px-4 py-4">
-                                                        <span x-show="route.vision" class="chip border-cyan2/35 bg-cyan2/10 text-cyan">
+                                                    <td class="w-px px-3 py-2.5 align-top">
+                                                        <span x-show="route.vision" class="chip whitespace-nowrap border-cyan2/35 bg-cyan2/10 text-cyan"
+                                                              :title="'视觉伴随: ' + route.vision?.provider + ' / ' + route.vision?.model">
                                                             <span class="material-symbols-outlined text-[16px]">visibility</span>
-                                                            <span x-text="route.vision?.provider + ' / ' + route.vision?.model"></span>
+                                                            <span class="font-mono text-[11px]" x-text="route.vision?.model"></span>
                                                         </span>
-                                                        <span x-show="!route.vision" class="text-sm italic text-muted">未启用</span>
+                                                        <!-- 未启用用短横线：11 行里重复 11 遍「未启用」是纯噪声，一眼扫下来只需要知道「这里没配」 -->
+                                                        <span x-show="!route.vision" class="text-sm text-muted" title="未启用视觉伴随">—</span>
                                                     </td>
-                                                    <td class="px-4 py-4">
-                                                        <div class="flex justify-end gap-2">
-                                                            <button @click="moveRoute(index, -1)" :disabled="index === 0" class="btn btn-secondary px-2 py-2" title="上移">
+                                                    <!-- w-px 让这列收缩到内容宽度：不限制的话它会连同 w-full 一起
+                                                         抢剩余空间（实测吃到 726px），把候选列挤到 92px 反而溢出。 -->
+                                                    <td class="w-px whitespace-nowrap px-3 py-2.5 align-top">
+                                                        <div class="flex justify-end gap-1.5">
+                                                            <button @click="moveRoute(index, -1)" :disabled="index === 0" class="btn btn-secondary px-2 py-1.5" title="上移">
                                                                 <span class="material-symbols-outlined text-[18px]">keyboard_arrow_up</span>
                                                             </button>
-                                                            <button @click="moveRoute(index, 1)" :disabled="index === config.routes.length - 1" class="btn btn-secondary px-2 py-2" title="下移">
+                                                            <button @click="moveRoute(index, 1)" :disabled="index === config.routes.length - 1" class="btn btn-secondary px-2 py-1.5" title="下移">
                                                                 <span class="material-symbols-outlined text-[18px]">keyboard_arrow_down</span>
                                                             </button>
-                                                            <button @click="editRoute(index)" class="btn btn-secondary px-2 py-2" title="编辑">
+                                                            <button @click="editRoute(index)" class="btn btn-secondary px-2 py-1.5" title="编辑">
                                                                 <span class="material-symbols-outlined text-[18px]">edit</span>
                                                             </button>
-                                                            <button @click="duplicateRoute(index)" class="btn btn-secondary px-2 py-2" title="复制为新路由">
+                                                            <button @click="duplicateRoute(index)" class="btn btn-secondary px-2 py-1.5" title="复制为新路由">
                                                                 <span class="material-symbols-outlined text-[18px]">content_copy</span>
                                                             </button>
-                                                            <button @click="removeRoute(index)" class="btn btn-danger px-2 py-2" title="删除">
+                                                            <button @click="removeRoute(index)" class="btn btn-danger px-2 py-1.5" title="删除">
                                                                 <span class="material-symbols-outlined text-[18px]">delete</span>
                                                             </button>
                                                         </div>
@@ -412,7 +425,7 @@
                                                 </tr>
                                             </template>
                                             <tr x-show="!config.routes || config.routes.length === 0">
-                                                <td colspan="6" class="px-4 py-10 text-center text-sm text-muted">还没有路由规则</td>
+                                                <td colspan="5" class="px-3 py-10 text-center text-sm text-muted">还没有路由规则</td>
                                             </tr>
                                         </tbody>
                                     </table>
@@ -581,57 +594,83 @@
                                         添加 Provider
                                     </button>
                                 </div>
-                                <div class="grid grid-cols-1 gap-3 p-4 lg:grid-cols-2">
-                                    <template x-for="(provider, name) in config.providers" :key="name">
-                                        <article class="rounded-lg border border-line bg-ink p-4">
-                                            <div class="mb-3 flex items-start justify-between gap-3">
-                                                <div class="min-w-0">
-                                                    <div class="flex items-center gap-2">
-                                                        <h3 class="truncate font-mono text-sm font-bold text-white" x-text="name"></h3>
-                                                        <span class="chip" :class="provider.format === 'anthropic' ? 'border-violet/40 bg-violet/10 text-violet' : 'border-good/40 bg-good/10 text-good'" x-text="provider.format"></span>
-                                                    </div>
-                                                    <p class="mt-2 truncate text-xs text-muted" x-text="provider.baseUrl"></p>
-                                                </div>
-                                                <div class="flex gap-2">
-                                                    <button @click="editProvider(name)" class="btn btn-secondary px-2 py-2" title="编辑 Provider">
-                                                        <span class="material-symbols-outlined text-[18px]">edit</span>
-                                                    </button>
-                                                    <button @click="duplicateProvider(name)" class="btn btn-secondary px-2 py-2" title="复制为新 Provider">
-                                                        <span class="material-symbols-outlined text-[18px]">content_copy</span>
-                                                    </button>
-                                                    <button @click="removeProvider(name)" class="btn btn-danger px-2 py-2" title="删除 Provider">
-                                                        <span class="material-symbols-outlined text-[18px]">delete</span>
-                                                    </button>
-                                                </div>
-                                            </div>
-                                            <div class="grid grid-cols-2 gap-3 text-xs">
-                                                <div class="rounded-lg bg-panel2 p-3">
-                                                    <div class="text-muted">API Key</div>
-                                                    <div class="mt-1 truncate font-mono text-text" x-text="provider.apiKeyConfigured ? '已配置' : '从请求头读取'"></div>
-                                                </div>
-                                                <div class="rounded-lg bg-panel2 p-3">
-                                                    <div class="text-muted">并发</div>
-                                                    <div class="mt-1 font-mono text-text" x-text="provider.maxConcurrent || 5"></div>
-                                                </div>
-                                                <div class="rounded-lg bg-panel2 p-3">
-                                                    <div class="text-muted">限速</div>
-                                                    <div class="mt-1 font-mono text-text" x-text="(provider.maxPerSecond || 0) + ' req/s'"></div>
-                                                </div>
-                                                <div class="rounded-lg bg-panel2 p-3">
-                                                    <div class="text-muted">队列等待</div>
-                                                    <div class="mt-1 font-mono text-text" x-text="(provider.maxQueueWait || 30000) + ' ms'"></div>
-                                                </div>
-                                            </div>
-                                        </article>
-                                    </template>
-                                    <div x-show="!config.providers || Object.keys(config.providers).length === 0" class="rounded-lg border border-dashed border-line p-8 text-center text-sm text-muted lg:col-span-2">
-                                        还没有 Provider
-                                    </div>
+                                <!-- 表格而不是卡片网格：provider 的字段都是短标量，卡片把每个字段
+                                     包成一个小方块后纵向占地是表格的几倍，数量一多就要来回滚动比对。
+                                     表格同列对齐，扫一眼就能横向比较各上游的并发和限速。 -->
+                                <div class="overflow-x-auto">
+                                    <!-- 列宽预算很紧：这块在 xl:col-span-8 里，右侧还有配置预览栏。
+                                         并发/限速/队列等待三个数值合并成一列「限流」，否则每列都要留出
+                                         表头「队列等待」的宽度，表格会宽到必须横向滚动、操作列被裁掉。
+                                         表头和数值都 nowrap，避免「API KEY」「队列等待」被折成两行把行高撑高。 -->
+                                    <table class="w-full min-w-[600px] border-collapse text-left">
+                                        <thead class="bg-panel2 text-xs uppercase tracking-wide text-muted">
+                                            <tr>
+                                                <th class="whitespace-nowrap px-3 py-3 font-bold">名称</th>
+                                                <th class="whitespace-nowrap px-3 py-3 font-bold">格式</th>
+                                                <th class="whitespace-nowrap px-3 py-3 font-bold">Base URL</th>
+                                                <th class="whitespace-nowrap px-3 py-3 font-bold">Key</th>
+                                                <th class="whitespace-nowrap px-3 py-3 font-bold" title="最大并发 / 每秒请求数 / 队列最大等待">限流</th>
+                                                <th class="whitespace-nowrap px-3 py-3 text-right font-bold">操作</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody class="divide-y divide-line">
+                                            <template x-for="(provider, name) in config.providers" :key="name">
+                                                <tr class="bg-panel/35 transition hover:bg-white/[.04]">
+                                                    <!-- 名称、Base URL 两列各 w-1/2 + max-w-0，等分剩余宽度。
+                                                         名称列若按内容定宽（w-px），一个超长 provider 名就能把列
+                                                         撑到近千像素，后面几列全被顶到容器外、操作列直接被裁掉；
+                                                         两列都写 w-full 也不行，浏览器按内容多寡分配剩余空间，
+                                                         长名字依旧独吞（实测 626px），URL 被压到只剩表头宽度。
+                                                         写死各 50% 才能两边都留出可读长度，超长的由 truncate
+                                                         截断、tooltip 看全称。 -->
+                                                    <td class="w-1/2 max-w-0 px-3 py-2.5">
+                                                        <span class="block truncate font-mono text-sm font-bold text-white" :title="name" x-text="name"></span>
+                                                    </td>
+                                                    <td class="w-px whitespace-nowrap px-2 py-2.5">
+                                                        <span class="chip px-1.5 text-[11px]" :class="provider.format === 'anthropic' ? 'border-violet/40 bg-violet/10 text-violet' : 'border-good/40 bg-good/10 text-good'" x-text="provider.format"></span>
+                                                    </td>
+                                                    <!-- 与名称列同为 w-1/2 + max-w-0：允许收缩到 0，
+                                                         窄屏时由 truncate 截断 URL，而不是把整个表撑出容器
+                                                         （实测 1440px 下原本溢出 116px，操作列被裁）。 -->
+                                                    <td class="w-1/2 max-w-0 px-3 py-2.5">
+                                                        <!-- 去掉协议前缀：11 个 provider 每行都顶着 https:// 占宽度又没信息量 -->
+                                                        <span class="block truncate font-mono text-xs text-muted" :title="provider.baseUrl"
+                                                              x-text="(provider.baseUrl || '').replace(/^https?:\/\//, '')"></span>
+                                                    </td>
+                                                    <td class="w-px whitespace-nowrap px-2 py-2.5 text-center">
+                                                        <span x-show="provider.apiKeyConfigured" class="material-symbols-outlined text-[18px] text-good" title="已配置密钥">key</span>
+                                                        <span x-show="!provider.apiKeyConfigured" class="material-symbols-outlined text-[18px] text-muted" title="未配置，从客户端请求头读取">key_off</span>
+                                                    </td>
+                                                    <td class="w-px whitespace-nowrap px-3 py-2.5 font-mono text-xs text-muted">
+                                                        <span class="text-text" x-text="(provider.maxConcurrent || 5) + ' 并发'"></span>
+                                                        <span x-text="' · ' + ((provider.maxPerSecond || 0) === 0 ? '不限速' : provider.maxPerSecond + '/s')"></span>
+                                                        <span x-text="' · 等待 ' + formatMs(provider.maxQueueWait || 30000)"></span>
+                                                    </td>
+                                                    <td class="w-px whitespace-nowrap px-3 py-2.5">
+                                                        <div class="flex justify-end gap-1.5">
+                                                            <button @click="editProvider(name)" class="btn btn-secondary px-2 py-1.5" title="编辑 Provider">
+                                                                <span class="material-symbols-outlined text-[18px]">edit</span>
+                                                            </button>
+                                                            <button @click="duplicateProvider(name)" class="btn btn-secondary px-2 py-1.5" title="复制为新 Provider">
+                                                                <span class="material-symbols-outlined text-[18px]">content_copy</span>
+                                                            </button>
+                                                            <button @click="removeProvider(name)" class="btn btn-danger px-2 py-1.5" title="删除 Provider">
+                                                                <span class="material-symbols-outlined text-[18px]">delete</span>
+                                                            </button>
+                                                        </div>
+                                                    </td>
+                                                </tr>
+                                            </template>
+                                            <tr x-show="!config.providers || Object.keys(config.providers).length === 0">
+                                                <td colspan="6" class="px-3 py-10 text-center text-sm text-muted">还没有 Provider</td>
+                                            </tr>
+                                        </tbody>
+                                    </table>
                                 </div>
                             </section>
                         </div>
 
-                        <aside class="space-y-5 xl:col-span-4 lg:min-h-0 lg:overflow-y-auto lg:pr-2">
+                        <aside class="space-y-5 xl:col-span-3 lg:min-h-0 lg:overflow-y-auto lg:pr-2">
                             <section class="glass rounded-lg lg:flex lg:max-h-[68vh] lg:min-h-[360px] lg:flex-col">
                                 <div class="flex items-center justify-between border-b border-line p-4">
                                     <div class="flex items-center gap-2 font-bold text-white">
@@ -672,8 +711,8 @@
                                 <span class="text-sm font-bold text-muted">请求速率</span>
                                 <span class="material-symbols-outlined text-cyan">speed</span>
                             </div>
-                            <div class="text-3xl font-extrabold text-white" x-text="metricValue('requestsPerMinute', '--')"></div>
-                            <div class="mt-1 text-xs text-muted">最近 1 分钟请求数</div>
+                            <div class="text-3xl font-extrabold text-white" x-text="metricValue('windowRequests', '--')"></div>
+                            <div class="mt-1 text-xs text-muted" x-text="'最近 ' + metricWindowLabel() + '请求数'"></div>
                         </article>
                         <article class="glass rounded-lg p-4">
                             <div class="mb-3 flex items-center justify-between">
@@ -735,55 +774,119 @@
                                     </button>
                                 </div>
                             </div>
-                            <div class="overflow-x-auto">
-                                <table class="w-full min-w-[960px] border-collapse text-left">
-                                    <thead class="bg-panel2 text-xs uppercase tracking-wide text-muted">
+                            <!-- 默认高度按 10 条数据算：表头 41px + 10 行 × 41px ≈ 451px。
+                                 超过 10 个 provider 时内部滚动，不再把整页顶长——这块下面还有
+                                 系统资源和路由排行，provider 一多就要滚很久才能看到它们。
+                                 表头 sticky 吸顶，滚动时列名不丢。 -->
+                            <div class="overflow-auto lg:max-h-[451px]">
+                                <!-- min-w 保持 660：后七列不可压缩部分实测合计 565px，
+                                     名称列带 max-w-0 truncate 可以继续缩，所以加了「检测」列
+                                     也不必放宽 min-w（放到 720 会在 1440 宽度下多出 9px 横向滚动）。 -->
+                                <table class="w-full min-w-[660px] border-collapse text-left">
+                                    <thead class="sticky top-0 z-10 bg-panel2 text-xs uppercase tracking-wide text-muted">
                                         <tr>
-                                            <th class="px-4 py-3 font-bold">Provider</th>
-                                            <th class="px-4 py-3 font-bold">健康</th>
-                                            <th class="px-4 py-3 font-bold">熔断</th>
-                                            <th class="px-4 py-3 font-bold">格式</th>
-                                            <th class="px-4 py-3 font-bold">运行中</th>
-                                            <th class="px-4 py-3 font-bold">排队</th>
-                                            <th class="px-4 py-3 font-bold">并发</th>
-                                            <th class="px-4 py-3 font-bold">限速</th>
-                                            <th class="px-4 py-3 font-bold">状态</th>
+                                            <!-- 用百分比分配列宽而不是让某一列吃掉全部剩余空间：
+                                                 给名称列 w-full 会把它拉得极宽、其余列全挤到右边；
+                                                 全部 w-px 又会让内容挤在左侧、右边空一大片。
+                                                 百分比让各列按需要的比例铺满面板。
+
+                                                 对齐基准按内容类型分三种，且表头必须和单元格用同一种，
+                                                 否则看起来是歪的：标识列左对齐（截断要有左锚点）、
+                                                 chip 列居中（chip 宽度不等，左对齐时右边缘散开 10~60px
+                                                 不齐）、数值列右对齐（数位对齐才好比较）。 -->
+                                            <th class="w-[22%] whitespace-nowrap px-3 py-2.5 font-bold">Provider</th>
+                                            <th class="w-[10%] whitespace-nowrap px-2 py-2.5 text-center font-bold">健康</th>
+                                            <th class="w-[10%] whitespace-nowrap px-2 py-2.5 text-center font-bold">熔断</th>
+                                            <th class="w-[8%] whitespace-nowrap px-2 py-2.5 text-center font-bold">格式</th>
+                                            <th class="w-[11%] whitespace-nowrap px-2 py-2.5 text-right font-bold" title="运行中 / 排队中">在途</th>
+                                            <th class="w-[18%] whitespace-nowrap px-2 py-2.5 text-right font-bold" title="最大并发 / 每秒请求数">限流</th>
+                                            <!-- 状态只有「直通」/「队列」两种短 chip，份额让给限流那列 -->
+                                            <th class="w-[11%] whitespace-nowrap px-2 py-2.5 text-center font-bold">状态</th>
+                                            <th class="w-[10%] whitespace-nowrap px-2 py-2.5 text-center font-bold" title="只检测这一个 Provider">检测</th>
                                         </tr>
                                     </thead>
                                     <tbody class="divide-y divide-line">
                                         <template x-for="row in providerStatusRows()" :key="row.name">
                                             <tr class="bg-panel/35">
-                                                <td class="px-4 py-4 font-mono text-sm font-bold text-white" x-text="row.name"></td>
-                                                <td class="px-4 py-4">
+                                                <td class="max-w-0 truncate px-3 py-2 font-mono text-xs font-bold text-white" :title="row.name" x-text="row.name"></td>
+                                                <td class="whitespace-nowrap px-2 py-2 text-center">
                                                     <!-- 不用 title：原生 tooltip 有约 1-2 秒延迟且无法调，
                                                          这两列的详情（剩余冷却、失败次数）是要一眼看到的。 -->
-                                                    <span class="chip" :class="row.healthClass" x-text="row.healthLabel"
+                                                    <span class="chip px-1.5 text-[11px]" :class="row.healthClass" x-text="row.healthLabel"
                                                           @mouseenter="showTip(row.healthTitle, $event)"
                                                           @mouseleave="hideTip()"
                                                           @focus="showTip(row.healthTitle, $event)"
                                                           @blur="hideTip()"
                                                           tabindex="0"></span>
                                                 </td>
-                                                <td class="px-4 py-4">
-                                                    <span class="chip" :class="row.breakerClass" x-text="row.breakerLabel"
-                                                          @mouseenter="showTip(row.breakerTitle, $event)"
-                                                          @mouseleave="hideTip()"
-                                                          @focus="showTip(row.breakerTitle, $event)"
-                                                          @blur="hideTip()"
-                                                          tabindex="0"></span>
+                                                <!-- 单行重置按钮放在熔断徽章旁边，而不是另开一列：
+                                                     重置本就属于熔断这一列的语义，且这张表在 1280px 下
+                                                     已经贴着 min-width 下限，再加一整列会加重横向滚动。
+                                                     只在「重置确实会改变状态」时出现（闭合且无失败计数
+                                                     时是空操作），所以多数行不占这份宽度。 -->
+                                                <td class="whitespace-nowrap px-2 py-2 text-center">
+                                                    <span class="inline-flex items-center gap-1">
+                                                        <span class="chip px-1.5 text-[11px]" :class="row.breakerClass" x-text="row.breakerLabel"
+                                                              @mouseenter="showTip(row.breakerTitle, $event)"
+                                                              @mouseleave="hideTip()"
+                                                              @focus="showTip(row.breakerTitle, $event)"
+                                                              @blur="hideTip()"
+                                                              tabindex="0"></span>
+                                                        <!-- 不可重置时用 invisible 而非 x-show：x-show 会把按钮
+                                                             从布局里摘掉，导致「有按钮的行」chip 被挤偏、
+                                                             「没按钮的行」chip 居中，同一列里位置不一致——
+                                                             那正是这张表当初显得歪的原因。始终占位才对齐。 -->
+                                                        <button @click="resetOneBreaker(row.name)"
+                                                                :class="row.breakerResettable ? '' : 'invisible pointer-events-none'"
+                                                                :aria-hidden="!row.breakerResettable"
+                                                                :tabindex="row.breakerResettable ? 0 : -1"
+                                                                :disabled="!row.breakerResettable || resettingBreakers || resettingBreaker === row.name"
+                                                                class="rounded p-0.5 text-muted transition hover:text-cyan disabled:opacity-60"
+                                                                :title="resettingBreaker === row.name ? '重置中…' : '闭合「' + row.name + '」的熔断器'">
+                                                            <span class="material-symbols-outlined text-[15px]"
+                                                                  :class="resettingBreaker === row.name && 'gw-spin'"
+                                                                  x-text="resettingBreaker === row.name ? 'progress_activity' : 'restart_alt'"></span>
+                                                        </button>
+                                                    </span>
                                                 </td>
-                                                <td class="px-4 py-4"><span class="chip bg-white/[.05] text-text" x-text="row.format"></span></td>
-                                                <td class="px-4 py-4 font-mono text-sm text-text" x-text="row.running"></td>
-                                                <td class="px-4 py-4 font-mono text-sm" :class="row.queued > 0 ? 'text-warn' : 'text-muted'" x-text="row.queued"></td>
-                                                <td class="px-4 py-4 font-mono text-sm text-text" x-text="row.maxConcurrent"></td>
-                                                <td class="px-4 py-4 font-mono text-sm text-text" x-text="row.maxPerSecond > 0 ? row.maxPerSecond + '/s' : '不限'"></td>
-                                                <td class="px-4 py-4">
-                                                    <span class="chip" :class="row.statusClass" x-text="row.status"></span>
+                                                <!-- 格式缩写成 ANT / OAI：取值只有两种，全称在这列纯占宽度，
+                                                     全称挂 title。 -->
+                                                <td class="whitespace-nowrap px-2 py-2 text-center">
+                                                    <span class="chip bg-white/[.05] px-1.5 text-[11px] text-text" :title="row.format"
+                                                          x-text="row.format === 'anthropic' ? 'ANT' : 'OAI'"></span>
+                                                </td>
+                                                <!-- 运行中 / 排队合成一列：两个数各占一列时表头「运行中」「排队」
+                                                     比数值本身宽得多，而它们总是一起看的。排队 > 0 才高亮。 -->
+                                                <td class="whitespace-nowrap px-2 py-2 text-right font-mono text-xs">
+                                                    <span class="text-text" x-text="row.running"></span>
+                                                    <span class="text-muted">/</span>
+                                                    <span :class="row.queued > 0 ? 'text-warn' : 'text-muted'" x-text="row.queued"></span>
+                                                </td>
+                                                <td class="whitespace-nowrap px-2 py-2 text-right font-mono text-xs text-muted">
+                                                    <span class="text-text" x-text="row.maxConcurrent"></span>
+                                                    <span x-text="' · ' + (row.maxPerSecond > 0 ? row.maxPerSecond + '/s' : '不限')"></span>
+                                                </td>
+                                                <td class="whitespace-nowrap px-2 py-2 text-center">
+                                                    <span class="chip px-1.5 text-[11px]" :class="row.statusClass" x-text="row.status"></span>
+                                                </td>
+                                                <!-- 单行检测：provider 一多时整表检测要等最慢的那个，
+                                                     而用户往往只关心刚改过的那一个。用 checkingProvider
+                                                     记住是哪一行在跑，只转那一行的图标；整表检测进行中
+                                                     也一并禁用，避免两种检测互相覆盖结果。 -->
+                                                <td class="whitespace-nowrap px-2 py-2 text-center">
+                                                    <button @click="checkOneProvider(row.name)"
+                                                            :disabled="checkingHealth || checkingProvider === row.name"
+                                                            class="btn btn-secondary px-2 py-1 disabled:opacity-60"
+                                                            :title="checkingProvider === row.name ? '检测中…' : '检测「' + row.name + '」'">
+                                                        <span class="material-symbols-outlined text-[16px]"
+                                                              :class="checkingProvider === row.name && 'gw-spin'"
+                                                              x-text="checkingProvider === row.name ? 'progress_activity' : 'health_and_safety'"></span>
+                                                    </button>
                                                 </td>
                                             </tr>
                                         </template>
                                         <tr x-show="providerStatusRows().length === 0">
-                                            <td colspan="9" class="px-4 py-10 text-center text-sm text-muted">还没有 Provider</td>
+                                            <td colspan="8" class="px-3 py-10 text-center text-sm text-muted">还没有 Provider</td>
                                         </tr>
                                     </tbody>
                                 </table>
@@ -847,7 +950,7 @@
                         <section class="glass rounded-lg xl:col-span-7">
                             <div class="border-b border-line p-4 font-bold text-white">最近错误</div>
                             <div class="divide-y divide-line">
-                                <template x-for="err in recentErrors()" :key="err.id || err.time + err.message">
+                                <template x-for="err in recentErrors()" :key="errorKey(err)">
                                     <div class="grid grid-cols-1 gap-2 px-4 py-3 md:grid-cols-[9rem_7rem_1fr] md:items-center">
                                         <span class="font-mono text-xs text-muted" x-text="err.time || '--'"></span>
                                         <span class="chip border-danger/35 bg-danger/10 text-rose-100" x-text="err.status || err.code || 'error'"></span>
@@ -858,52 +961,6 @@
                             </div>
                         </section>
                     </div>
-
-                    <section class="glass rounded-lg">
-                        <div class="flex items-center justify-between border-b border-line p-4">
-                            <div class="font-bold text-white">最近请求</div>
-                            <span class="text-xs text-muted" x-text="requestLogs.length ? '最近 ' + requestLogs.length + ' 条' : '暂无请求明细'"></span>
-                        </div>
-                        <div class="overflow-x-auto">
-                            <table class="w-full min-w-[900px] border-collapse text-left">
-                                <thead class="bg-panel2 text-xs uppercase tracking-wide text-muted">
-                                    <tr>
-                                        <th class="px-4 py-3 font-bold">时间</th>
-                                        <th class="px-4 py-3 font-bold">状态</th>
-                                        <th class="px-4 py-3 font-bold">来源</th>
-                                        <th class="px-4 py-3 font-bold">Key 来源</th>
-                                        <th class="px-4 py-3 font-bold">Key 指纹</th>
-                                        <th class="px-4 py-3 font-bold">格式</th>
-                                        <th class="px-4 py-3 font-bold">模型</th>
-                                        <th class="px-4 py-3 font-bold">Provider</th>
-                                        <th class="px-4 py-3 font-bold">转移轨迹</th>
-                                        <th class="px-4 py-3 font-bold">耗时</th>
-                                        <th class="px-4 py-3 font-bold">错误</th>
-                                    </tr>
-                                </thead>
-                                <tbody class="divide-y divide-line">
-                                    <template x-for="log in requestLogs" :key="log.id || log.time + log.model">
-                                        <tr class="bg-panel/35">
-                                            <td class="px-4 py-4 font-mono text-xs text-muted" x-text="log.time || log.startedAt || '--'"></td>
-                                            <td class="px-4 py-4"><span class="chip" :class="statusClass(log.status)" x-text="log.status || '--'"></span></td>
-                                            <td class="px-4 py-4 font-mono text-xs text-text" x-text="log.clientIp || '--'"></td>
-                                            <td class="px-4 py-4 font-mono text-xs text-text" x-text="log.keySource || '--'"></td>
-                                            <td class="px-4 py-4 font-mono text-xs text-text" x-text="log.keyFingerprint || '--'"></td>
-                                            <td class="px-4 py-4 text-sm text-text" x-text="log.format || log.clientFormat || '--'"></td>
-                                            <td class="px-4 py-4 font-mono text-sm text-cyan" x-text="log.model || '--'"></td>
-                                            <td class="px-4 py-4 font-mono text-sm text-text" x-text="log.provider || '--'"></td>
-                                            <td class="px-4 py-4 max-w-[16rem] truncate font-mono text-xs" :class="log.attemptTrail ? 'text-warn' : 'text-muted'" :title="log.attemptTrail || ''" x-text="attemptTrailText(log)"></td>
-                                            <td class="px-4 py-4 font-mono text-sm text-text" x-text="durationText(log.durationMs || log.latencyMs)"></td>
-                                            <td class="px-4 py-4 max-w-[18rem] truncate text-sm text-muted" x-text="log.error || ''"></td>
-                                        </tr>
-                                    </template>
-                                    <tr x-show="requestLogs.length === 0">
-                                        <td colspan="11" class="px-4 py-10 text-center text-sm text-muted">暂无请求明细</td>
-                                    </tr>
-                                </tbody>
-                            </table>
-                        </div>
-                    </section>
 
                 </section>
 
@@ -949,43 +1006,62 @@
                             </div>
                         </div>
                     </div>
+                    <!-- 12 列在 1900px 下也塞不满，结果每列都被压到强行折行：时间折 3 行、
+                         模型折 3 行、耗时折 2 行，行高 127px，一屏只看得到 7 条，错误列还被裁掉。
+                         这里合并同源信息（来源+Key 来源+指纹 → 客户端；格式并入模型行下方），
+                         列数 12 → 8，并给所有列加 nowrap，行高降到一行。 -->
                     <div class="overflow-x-auto lg:max-h-[calc(100%-9.75rem)]">
-                        <table class="w-full min-w-[980px] border-collapse text-left">
-                            <thead class="sticky top-0 bg-panel2 text-xs uppercase tracking-wide text-muted">
+                        <table class="w-full min-w-[860px] border-collapse text-left">
+                            <thead class="sticky top-0 z-10 bg-panel2 text-xs uppercase tracking-wide text-muted">
                                 <tr>
-                                    <th class="px-4 py-3 font-bold">时间</th>
-                                    <th class="px-4 py-3 font-bold">状态</th>
-                                    <th class="px-4 py-3 font-bold">来源</th>
-                                    <th class="px-4 py-3 font-bold">Key 来源</th>
-                                    <th class="px-4 py-3 font-bold">Key 指纹</th>
-                                    <th class="px-4 py-3 font-bold">格式</th>
-                                    <th class="px-4 py-3 font-bold">模型</th>
-                                    <th class="px-4 py-3 font-bold">Provider</th>
-                                    <th class="px-4 py-3 font-bold">转移轨迹</th>
-                                    <th class="px-4 py-3 font-bold">耗时</th>
-                                    <th class="px-4 py-3 font-bold">请求 ID</th>
-                                    <th class="px-4 py-3 font-bold">错误</th>
+                                    <th class="w-px whitespace-nowrap px-3 py-2.5 font-bold">时间</th>
+                                    <th class="w-px whitespace-nowrap px-2 py-2.5 font-bold">状态</th>
+                                    <th class="w-px whitespace-nowrap px-3 py-2.5 font-bold" title="客户端 IP · Key 来源 · Key 指纹">客户端</th>
+                                    <th class="w-px whitespace-nowrap px-3 py-2.5 font-bold">模型</th>
+                                    <th class="w-px whitespace-nowrap px-3 py-2.5 font-bold">Provider</th>
+                                    <th class="w-px whitespace-nowrap px-3 py-2.5 text-right font-bold">耗时</th>
+                                    <th class="w-px whitespace-nowrap px-3 py-2.5 font-bold">转移轨迹</th>
+                                    <th class="w-full max-w-0 whitespace-nowrap px-3 py-2.5 font-bold">错误</th>
                                 </tr>
                             </thead>
                             <tbody class="divide-y divide-line">
                                 <template x-for="log in requestLogs" :key="log.id || log.time + log.model">
                                     <tr class="bg-panel/35 transition hover:bg-white/[.04]">
-                                        <td class="px-4 py-4 font-mono text-xs text-muted" x-text="log.time || log.startedAt || '--'"></td>
-                                        <td class="px-4 py-4"><span class="chip" :class="statusClass(log.status)" x-text="log.status || '--'"></span></td>
-                                        <td class="px-4 py-4 font-mono text-xs text-text" x-text="log.clientIp || '--'"></td>
-                                        <td class="px-4 py-4 font-mono text-xs text-text" x-text="log.keySource || '--'"></td>
-                                        <td class="px-4 py-4 font-mono text-xs text-text" x-text="log.keyFingerprint || '--'"></td>
-                                        <td class="px-4 py-4 text-sm text-text" x-text="log.format || log.clientFormat || '--'"></td>
-                                        <td class="px-4 py-4 font-mono text-sm text-cyan" x-text="log.model || '--'"></td>
-                                        <td class="px-4 py-4 font-mono text-sm text-text" x-text="log.provider || '--'"></td>
-                                        <td class="px-4 py-4 max-w-[18rem] truncate font-mono text-xs" :class="log.attemptTrail ? 'text-warn' : 'text-muted'" :title="log.attemptTrail || ''" x-text="attemptTrailText(log)"></td>
-                                        <td class="px-4 py-4 font-mono text-sm text-text" x-text="durationText(log.durationMs || log.latencyMs)"></td>
-                                        <td class="px-4 py-4 font-mono text-xs text-muted" x-text="log.id || log.requestId || '--'"></td>
-                                        <td class="px-4 py-4 max-w-[22rem] truncate text-sm text-muted" x-text="log.error || ''"></td>
+                                        <!-- 只显示时分秒：整列日期都是今天，重复 100 遍还把时间折成三行。
+                                             完整时间戳和请求 ID 放 title，排查时悬停可见。 -->
+                                        <td class="w-px whitespace-nowrap px-3 py-2 font-mono text-xs text-muted"
+                                            :title="(log.time || log.startedAt || '') + '　' + (log.id || log.requestId || '')"
+                                            x-text="logClock(log)"></td>
+                                        <td class="w-px whitespace-nowrap px-2 py-2">
+                                            <span class="chip px-1.5 text-[11px]" :class="statusClass(log.status)" x-text="log.status || '--'"></span>
+                                        </td>
+                                        <!-- 来源 IP / Key 来源 / Key 指纹三列合一：三者都是「谁发来的」，
+                                             各占一列时每列都要留出中文表头宽度，信息密度却很低。 -->
+                                        <td class="w-px whitespace-nowrap px-3 py-2 font-mono text-[11px] text-muted"
+                                            :title="'IP: ' + (log.clientIp || '--') + '\nKey 来源: ' + (log.keySource || '--') + '\nKey 指纹: ' + (log.keyFingerprint || '--')">
+                                            <span class="text-text" x-text="log.clientIp || '--'"></span>
+                                            <span x-show="log.keySource" x-text="' · ' + log.keySource"></span>
+                                            <span x-show="log.keyFingerprint" class="opacity-70" x-text="' · ' + log.keyFingerprint"></span>
+                                        </td>
+                                        <!-- 格式作为副行放在模型下方：它取值只有 anthropic/openai-chat/openai-responses
+                                             三种，单独占一列不划算，但排查跨格式转换问题时需要看见。 -->
+                                        <td class="w-px whitespace-nowrap px-3 py-2">
+                                            <span class="block font-mono text-xs text-cyan" x-text="log.model || '--'"></span>
+                                            <span class="block text-[10px] text-muted" x-text="log.format || log.clientFormat || ''"></span>
+                                        </td>
+                                        <td class="w-px whitespace-nowrap px-3 py-2 font-mono text-xs text-text" x-text="log.provider || '--'"></td>
+                                        <td class="w-px whitespace-nowrap px-3 py-2 text-right font-mono text-xs"
+                                            :class="slowClass(log.durationMs || log.latencyMs)"
+                                            x-text="durationText(log.durationMs || log.latencyMs)"></td>
+                                        <td class="w-px max-w-[16rem] truncate px-3 py-2 font-mono text-[11px]"
+                                            :class="log.attemptTrail ? 'text-warn' : 'text-muted'"
+                                            :title="log.attemptTrail || ''" x-text="attemptTrailText(log)"></td>
+                                        <td class="w-full max-w-0 truncate px-3 py-2 text-xs text-muted"
+                                            :title="log.error || ''" x-text="log.error || '—'"></td>
                                     </tr>
                                 </template>
                                 <tr x-show="requestLogs.length === 0">
-                                    <td colspan="12" class="px-4 py-12 text-center text-sm text-muted">暂无请求明细</td>
+                                    <td colspan="8" class="px-3 py-12 text-center text-sm text-muted">暂无请求明细</td>
                                 </tr>
                             </tbody>
                         </table>
@@ -1010,7 +1086,11 @@
             <div class="grid grid-cols-1 gap-4 p-5 md:grid-cols-2">
                 <label class="block">
                     <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">名称</span>
-                    <input autocomplete="off" type="text" x-model="providerForm.name" :disabled="editingProvider" class="field">
+                    <!-- maxlength 按 UTF-16 码元数截，和后端的 rune 计数在 BMP 内一致；
+                         emoji 等代理对会被前端多算，最终以后端校验为准。 -->
+                    <input autocomplete="off" type="text" :maxlength="maxProviderNameLen" x-model="providerForm.name" :disabled="editingProvider" class="field">
+                    <span class="mt-1 block text-[11px] text-muted" x-show="!editingProvider" x-cloak
+                          x-text="`最多 ${maxProviderNameLen} 个字符，已用 ${[...(providerForm.name || '')].length}`"></span>
                 </label>
                 <label class="block">
                     <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">格式</span>
@@ -1079,9 +1159,14 @@
                             <div class="flex flex-col gap-1">
                                 <div class="flex items-center gap-2">
                                     <span class="w-6 shrink-0 font-mono text-xs text-muted" x-text="'#' + (ti + 1)"></span>
+                                    <!-- :selected 不能省：弹窗是 x-show、DOM 常驻，外层 x-for 为新增候选
+                                         建好 <select> 并让 x-model 写 select.value 时，内层 x-for 的 <option>
+                                         还没渲染出来，赋值落空、浏览器回落到第一项（看起来就是「每行都是同一个
+                                         provider」），options 补齐后 x-model 也不会再回写一次。让每个 option
+                                         自己认领选中态，才与 model 无条件一致。 -->
                                     <select autocomplete="off" x-model="target.provider" @change="onRouteTargetProviderChange(ti)" class="field w-1/3">
                                         <template x-for="(provider, name) in config.providers" :key="name">
-                                            <option :value="name" x-text="name"></option>
+                                            <option :value="name" :selected="name === target.provider" x-text="name"></option>
                                         </template>
                                     </select>
                                     <div class="relative flex flex-1">
@@ -1129,7 +1214,7 @@
                     <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">候选选择策略</span>
                     <select autocomplete="off" x-model="routeForm.strategy" class="field">
                         <template x-for="option in routeStrategies" :key="option.value">
-                            <option :value="option.value" x-text="option.label"></option>
+                            <option :value="option.value" :selected="option.value === routeForm.strategy" x-text="option.label"></option>
                         </template>
                     </select>
                     <p class="mt-2 text-xs text-muted">
@@ -1150,7 +1235,7 @@
                             <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">视觉 Provider</span>
                             <select autocomplete="off" x-model="routeForm.visionProvider" class="field">
                                 <template x-for="(provider, name) in config.providers" :key="name">
-                                    <option :value="name" x-text="name"></option>
+                                    <option :value="name" :selected="name === routeForm.visionProvider" x-text="name"></option>
                                 </template>
                             </select>
                         </label>
@@ -1209,7 +1294,12 @@
                 // 监控页三个动作各自一个进行中标志，不复用 loading：
                 // loading 管配置保存，共用会让检测期间顶部保存按钮一起变灰。
                 checkingHealth: false,
+                // 正在单独检测的 provider 名（null 表示没有）。存名字而不是布尔，
+                // 这样只有被点的那一行转图标，其余行照常可点。
+                checkingProvider: null,
                 resettingBreakers: false,
+                // 同理：正在单独重置熔断器的 provider 名
+                resettingBreaker: null,
                 refreshingMonitor: false,
                 // 未保存浮层的拖拽状态。dirtyToastPos 为 null 表示没拖过，用默认右下角。
                 draggingDirty: false,
@@ -1276,6 +1366,9 @@
                 },
                 yamlContent: '',
                 showProviderModal: false,
+                // 与后端 config.maxProviderNameRunes 对齐，按字符（rune）而非字节计。
+                // 前端三处用到（输入框 maxlength、保存校验、副本名截断），只留这一处来源。
+                maxProviderNameLen: 100,
                 editingProvider: null,
                 providerForm: {
                     name: '',
@@ -1302,9 +1395,14 @@
                     visionModel: ''
                 },
                 maxRouteTargets: 5,
-                // 与后端 balancer 的取值表对应；空选项表示不写 strategy 字段
+                // 与后端 balancer 的取值表对应。
+                // failover 必须写成真实枚举值、不能用空字符串当哨兵：Alpine 对
+                // :value="''" 会把 value 属性整个移除，而没有 value 属性的 <option>
+                // 按 HTML 规范取值退化成 textContent，于是 select.value 变成中文
+                // label，change 后被写进 routeForm.strategy，保存时后端 ValidStrategy
+                // 不认这个值直接报错。保存时由 saveRoute 归一化成「不写该字段」。
                 routeStrategies: [
-                    { value: '', label: 'failover（默认，按顺序）' },
+                    { value: 'failover', label: 'failover（默认，按顺序）' },
                     { value: 'round-robin', label: 'round-robin（轮转分流）' },
                     { value: 'least-queue', label: 'least-queue（按在途量）' }
                 ],
@@ -1570,6 +1668,30 @@
                     }
                 },
 
+                // checkOneProvider 只检测一个 provider。
+                // 结果按 key 合并进 health.providerHealth，不整份替换：
+                // 整份替换会把其他 provider 的既有检测结果抹成「未检测」。
+                async checkOneProvider(name) {
+                    if (this.checkingHealth || this.checkingProvider) return;
+                    this.checkingProvider = name;
+                    try {
+                        const res = await fetch(`/api/providers/health?provider=${encodeURIComponent(name)}`, { method: 'POST' });
+                        if (!res.ok) throw new Error(await this.errorText(res, '检测失败'));
+                        const data = await res.json();
+                        const status = (data.providers || {})[name];
+                        if (!status) throw new Error('响应里没有该 Provider 的结果');
+                        this.health = this.health || {};
+                        // 新建对象而不是原地改：Alpine 要靠引用变化触发这一行重渲染
+                        this.health.providerHealth = { ...(this.health.providerHealth || {}), [name]: status };
+                        const detail = status.message || status.status;
+                        this.showStatus(`「${name}」检测完成：${detail}`, status.status === 'ok' ? 'success' : 'error');
+                    } catch (err) {
+                        this.showStatus(`「${name}」检测失败: ` + err.message, 'error');
+                    } finally {
+                        this.checkingProvider = null;
+                    }
+                },
+
                 // resetBreakers 手动闭合全部熔断器。不复用 checkProviderHealth：
                 // 后端两个端点判据不同，合并会让「为什么这个上游被放行」难以解释。
                 async resetBreakers() {
@@ -1586,6 +1708,32 @@
                         this.showStatus('重置熔断器失败: ' + err.message, 'error');
                     } finally {
                         this.resettingBreakers = false;
+                    }
+                },
+
+                // resetOneBreaker 只闭合一个 provider 的熔断器。
+                // 后端 ?provider= 返回 reset 布尔（不是条数）：false 表示该 provider
+                // 在熔断器里没有状态记录，属于「无需重置」而不是失败，提示要分开说，
+                // 否则用户会以为操作出错了。
+                async resetOneBreaker(name) {
+                    if (this.resettingBreakers || this.resettingBreaker) return;
+                    this.resettingBreaker = name;
+                    try {
+                        const res = await fetch(`/api/providers/breaker/reset?provider=${encodeURIComponent(name)}`, { method: 'POST' });
+                        if (!res.ok) throw new Error(await this.errorText(res, '重置失败'));
+                        const data = await res.json();
+                        this.health = this.health || {};
+                        // 整份替换 breakers 是对的：后端每次都返回全量快照，
+                        // 且重置一个 provider 不会改动其他 provider 的状态。
+                        this.health.breakers = data.breakers || {};
+                        this.showStatus(
+                            data.reset ? `已闭合「${name}」的熔断器` : `「${name}」无需重置（熔断器里没有它的状态）`,
+                            'success'
+                        );
+                    } catch (err) {
+                        this.showStatus(`重置「${name}」熔断器失败: ` + err.message, 'error');
+                    } finally {
+                        this.resettingBreaker = null;
                     }
                 },
 
@@ -1689,6 +1837,17 @@
                         return;
                     }
                     this.showRouteModal = false;
+                },
+
+                // formatMs 把毫秒压成人读的短写法：30000 → 30s、90000 → 1.5m。
+                // 列表里 11 行都顶着「30000 ms」会白占一列宽度，而这个值的量级比精确毫秒更有用。
+                formatMs(ms) {
+                    const value = Number(ms) || 0;
+                    if (value < 1000) return value + 'ms';
+                    const seconds = value / 1000;
+                    if (seconds < 60) return (Number.isInteger(seconds) ? seconds : seconds.toFixed(1)) + 's';
+                    const minutes = seconds / 60;
+                    return (Number.isInteger(minutes) ? minutes : minutes.toFixed(1)) + 'm';
                 },
 
                 showStatus(message, type) {
@@ -1995,9 +2154,33 @@
                     return Math.round((Number(value) || 0) / 1000);
                 },
 
+                // 短写：3587 → 3.6s。原来输出「3587 ms」，中间那个空格是折行点，
+                // 窄列里会被折成两行把行高翻倍。
                 durationText(value) {
                     if (value === undefined || value === null || value === '') return '--';
-                    return `${Math.round(Number(value) || 0)} ms`;
+                    const ms = Math.round(Number(value) || 0);
+                    if (ms < 1000) return `${ms}ms`;
+                    const seconds = ms / 1000;
+                    return seconds < 10 ? `${seconds.toFixed(1)}s` : `${Math.round(seconds)}s`;
+                },
+
+                // slowClass 按耗时量级着色：一屏几十条日志里，慢请求靠扫数字很难发现。
+                // 阈值取 10s / 30s——本地网关正常响应在秒级，10s 以上值得注意，
+                // 30s 以上基本是上游卡住或超时边缘。
+                slowClass(value) {
+                    const ms = Number(value) || 0;
+                    if (ms >= 30000) return 'text-danger';
+                    if (ms >= 10000) return 'text-warn';
+                    return 'text-text';
+                },
+
+                // logClock 只取时分秒。列表里整屏都是同一天，重复 100 遍日期没有信息量，
+                // 还会把时间列折成三行。完整时间戳挂在 title 上。
+                logClock(log) {
+                    const raw = log?.time || log?.startedAt || '';
+                    if (!raw) return '--';
+                    const matched = String(raw).match(/(\d{2}:\d{2}:\d{2})/);
+                    return matched ? matched[1] : String(raw);
                 },
 
                 // attemptTrailText 只在发生过候选转移时显示轨迹，单次直达显示 '--'
@@ -2038,6 +2221,14 @@
                     return value === null ? '--' : this.durationText(value);
                 },
 
+                // 窗口标签跟随后端返回的 windowMinutes；缺省按 1 分钟兜底。
+                // 整除 60 时显示「N 小时」，否则「N 分钟」。
+                metricWindowLabel() {
+                    const m = Number(this.metricValue('windowMinutes', 1)) || 1;
+                    if (m >= 60 && m % 60 === 0) return `${m / 60} 小时`;
+                    return `${m} 分钟`;
+                },
+
                 providerStatusRows() {
                     const queues = this.health?.queues || {};
                     const health = this.health?.providerHealth || {};
@@ -2076,6 +2267,9 @@
                             breakerLabel: this.breakerLabel(b),
                             breakerClass: this.breakerClass(b),
                             breakerTitle: this.breakerTitle(b),
+                            // 判据与后端 ResetAll 的计数条件一致（state != closed || failures > 0）：
+                            // 闭合且无失败计数时重置是空操作，按钮不出现，免得点了没反应。
+                            breakerResettable: !!b && (b.state !== 'closed' || Number(b.consecutiveFailures || 0) > 0),
                             status,
                             statusClass
                         };
@@ -2121,13 +2315,29 @@
                             : '已熔断 待探测';
                     }
                     if (b.state === 'half_open') return '半开探测';
+                    // 闭合但已有失败计数时写出「几/阈值」，不只写「正常」：
+                    // 那种行旁边会出现重置按钮（判据 failures > 0），只写「正常」
+                    // 会让人以为按钮多余、甚至怀疑状态判错了。进度原本只在 title 里，
+                    // 要悬停才看得见，而这正是最该一眼看到的信息。
+                    const failures = Number(b.consecutiveFailures || 0);
+                    if (failures > 0) return `正常 ${failures}/${this.breakerThreshold()}`;
                     return '正常';
+                },
+
+                // 熔断阈值。config.breaker 经 applyBreakerDefaults 落盘后一定带实际值，
+                // 但配置尚未加载完时 this.config 可能还是空壳，所以兜一次默认 3，
+                // 避免徽章短暂写出「1/undefined」。
+                breakerThreshold() {
+                    return Number(this.config?.breaker?.consecutiveFailures) || 3;
                 },
 
                 breakerClass(b) {
                     if (!b) return 'bg-white/[.05] text-muted';
                     if (b.state === 'open') return 'border-danger/35 bg-danger/10 text-rose-100';
                     if (b.state === 'half_open') return 'border-warn/35 bg-warn/10 text-amber-100';
+                    // 闭合但有失败计数：不给纯绿。请求确实还在正常发（所以不是 danger），
+                    // 但「离打开熔断还差几次」和干净的闭合不是一回事，颜色上要分得开。
+                    if (Number(b.consecutiveFailures || 0) > 0) return 'border-warn/35 bg-warn/10 text-amber-100';
                     return 'border-good/35 bg-good/10 text-emerald-100';
                 },
 
@@ -2140,7 +2350,15 @@
                             : '冷却已过，等下一个请求充当半开探针');
                     }
                     if (b.state === 'half_open' && b.probesInFlight > 0) parts.push('探测中 ' + b.probesInFlight);
-                    if (b.consecutiveFailures > 0) parts.push('连续失败 ' + b.consecutiveFailures);
+                    if (b.consecutiveFailures > 0) {
+                        const n = Number(b.consecutiveFailures);
+                        const threshold = this.breakerThreshold();
+                        // 闭合状态下补一句「还差几次」：光看「连续失败 1」不知道离熔断多远，
+                        // 而这个距离决定了要不要现在就去处理这个上游。
+                        parts.push(b.state === 'closed' && threshold > n
+                            ? `连续失败 ${n}/${threshold}（还差 ${threshold - n} 次打开熔断）`
+                            : `连续失败 ${n}/${threshold}`);
+                    }
                     if (b.openedAt) parts.push('打开于 ' + b.openedAt);
                     if (b.totalOpens > 0) parts.push('累计打开 ' + b.totalOpens + ' 次');
                     return parts.join(' · ') || '闭合，无失败记录';
@@ -2179,10 +2397,29 @@
                         .slice(0, 6);
                 },
 
+                // errorKey 是错误条目的身份。x-for 的 :key 和 recentErrays 的去重都用它，
+                // 两处各写一份表达式必然分叉（曾经模板用 err.message、去重用 err.error）。
+                errorKey(err) {
+                    return err.id || (err.time || '') + ' ' + (err.message || err.error || '');
+                },
+
+                // recentErrors 合并两个来源：/api/metrics 的 recentErrors 和 /api/logs 里的错误行。
+                // 同一条请求会同时出现在两边，必须去重——x-for 的 :key 撞车会让 Alpine
+                // 在内部 diff 时抛 "Cannot read properties of undefined (reading 'after')"，
+                // 每次轮询刷一次错，同时列表里还会重复显示同一条错误。
                 recentErrors() {
                     const metricErrors = this.metrics?.recentErrors || this.metrics?.errors || [];
                     const logErrors = this.requestLogs.filter((log) => Number(log.status || 0) >= 400 || log.error);
-                    return [...metricErrors, ...logErrors].slice(0, 6);
+                    const seen = new Set();
+                    const out = [];
+                    for (const err of [...metricErrors, ...logErrors]) {
+                        const key = this.errorKey(err);
+                        if (seen.has(key)) continue;
+                        seen.add(key);
+                        out.push(err);
+                        if (out.length >= 6) break;
+                    }
+                    return out;
                 },
 
                 statusClass(status) {
@@ -2383,12 +2620,17 @@
 
                 // nextCopyName 生成不重名的副本名：foo → foo-copy → foo-copy-2 …
                 // 直接沿用原名会在保存时覆盖源对象，用户以为是新增、实际丢了一个。
+                // 加后缀可能顶破名称长度上限（99 字符的名字 +"-copy" 就是 104），
+                // 所以先按后缀长度把原名截短，保证成品始终合法、不用用户手工改名。
                 nextCopyName(base, taken) {
                     const used = new Set(taken || []);
-                    let candidate = `${base}-copy`;
+                    const limit = this.maxProviderNameLen;
+                    // 按码点切分，避免把 emoji 一类代理对截成半个字符
+                    const fit = (suffix) => [...base].slice(0, Math.max(0, limit - suffix.length)).join('') + suffix;
+                    let candidate = fit('-copy');
                     let n = 2;
                     while (used.has(candidate)) {
-                        candidate = `${base}-copy-${n}`;
+                        candidate = fit(`-copy-${n}`);
                         n += 1;
                     }
                     return candidate;
@@ -2397,6 +2639,13 @@
                 async saveProvider() {
                     if (!this.providerForm.name || !this.providerForm.baseUrl) {
                         this.showStatus('名称和 URL 不能为空', 'error');
+                        return;
+                    }
+                    // 用展开运算符按码点数，和后端 utf8.RuneCountInString 对齐；
+                    // 'str'.length 会把 emoji 一类代理对算成 2，比后端更严。
+                    // input 的 maxlength 挡不住粘贴以外的路径（复制 provider、导入配置），所以这里再兜一次。
+                    if ([...this.providerForm.name].length > this.maxProviderNameLen) {
+                        this.showStatus(`名称最多 ${this.maxProviderNameLen} 个字符`, 'error');
                         return;
                     }
 
@@ -2463,7 +2712,8 @@
                     this.routeForm = {
                         match: '',
                         targets: [this.newRouteTarget(providers[0] || '')],
-                        strategy: '',
+                        // 存真实枚举值而不是空字符串，保证下拉的 DOM 值总能匹配到一个 option
+                        strategy: 'failover',
                         enableVision: false,
                         visionProvider: providers[0] || '',
                         visionModel: ''
@@ -2477,7 +2727,9 @@
                     this.routeForm = {
                         match: route.match,
                         targets: this.routeTargets(route).map((t) => this.newRouteTarget(t.provider || '', t.model || '')),
-                        strategy: route.strategy || '',
+                        // 配置里没写 strategy 就是默认 failover；这里补成真实枚举值，
+                        // 留空会让下拉匹配不到 option、显示回落到第一项
+                        strategy: route.strategy || 'failover',
                         enableVision: !!route.vision,
                         visionProvider: route.vision?.provider || '',
                         visionModel: route.vision?.model || ''
@@ -2496,7 +2748,7 @@
                     this.routeForm = {
                         match: route.match || '',
                         targets: this.routeTargets(route).map((t) => this.newRouteTarget(t.provider || '', t.model || '')),
-                        strategy: route.strategy || '',
+                        strategy: route.strategy || 'failover',
                         enableVision: !!route.vision,
                         visionProvider: route.vision?.provider || '',
                         visionModel: route.vision?.model || ''
@@ -2636,8 +2888,10 @@
                         ? { match: this.routeForm.match, provider: targets[0].provider, model: targets[0].model }
                         : { match: this.routeForm.match, targets };
                     // 单候选不写 strategy：后端对单候选 + 非 failover 直接报错，
-                    // 这里删干净比让用户在保存时撞校验更好（删掉最后一个候选是常见操作）
-                    if (targets.length > 1 && this.routeForm.strategy) {
+                    // 这里删干净比让用户在保存时撞校验更好（删掉最后一个候选是常见操作）。
+                    // failover 是默认值，同样不落盘：表单里它是真实枚举值（下拉需要能匹配
+                    // 到 option），但写进配置只会给每条路由平添一个等于默认的字段。
+                    if (targets.length > 1 && this.routeForm.strategy && this.routeForm.strategy !== 'failover') {
                         route.strategy = this.routeForm.strategy;
                     }
                     if (this.routeForm.enableVision) {
