@@ -452,6 +452,10 @@ func TestStaticAssetsAndSecurityHeaders(t *testing.T) {
 		{path: "/", contentType: "text/html"},
 		{path: "/vendor/alpine.min.js", contentType: "javascript"},
 		{path: "/vendor/tailwindcss.js", contentType: "javascript"},
+		// 字体必须发出 font/woff2：Go 内置 MIME 表没有 .woff2，distroless 也没有
+		// /etc/mime.types 兜底，退化成 application/octet-stream 后叠加 nosniff 会被浏览器拒绝。
+		{path: "/vendor/material-symbols-outlined.woff2", contentType: "font/woff2"},
+		{path: "/vendor/inter-latin.woff2", contentType: "font/woff2"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.path, func(t *testing.T) {
@@ -468,6 +472,13 @@ func TestStaticAssetsAndSecurityHeaders(t *testing.T) {
 			for _, header := range []string{"Content-Security-Policy", "X-Content-Type-Options", "Referrer-Policy", "Cache-Control"} {
 				if recorder.Header().Get(header) == "" {
 					t.Errorf("missing security header %s", header)
+				}
+			}
+			// 字体本地化后 CSP 不该再为 Google 域名开口子；留着等于本地化没做干净。
+			csp := recorder.Header().Get("Content-Security-Policy")
+			for _, forbidden := range []string{"fonts.googleapis.com", "fonts.gstatic.com"} {
+				if strings.Contains(csp, forbidden) {
+					t.Errorf("CSP still allows %s: %s", forbidden, csp)
 				}
 			}
 		})
@@ -494,6 +505,14 @@ func TestEmbeddedAdminPageUsesLocalAssetsAndSafeConfigState(t *testing.T) {
 		`If-Match`,
 		`application/yaml`,
 		`configPayload()`,
+		// 字体本地化：三个字体族都走 /vendor/ 下的 woff2。
+		`url('/vendor/material-symbols-outlined.woff2')`,
+		`url('/vendor/inter-latin.woff2')`,
+		`url('/vendor/jetbrains-mono-latin.woff2')`,
+		// 图标类必须自带 font-family 与 liga：这两条原先由 Google 的 css2 样式表提供，
+		// 少任何一条，页面上的图标都会退化成 monitoring、dns 这样的字面英文单词。
+		`font-family: 'Material Symbols Outlined'`,
+		`font-feature-settings: 'liga'`,
 	} {
 		if !strings.Contains(page, required) {
 			t.Errorf("admin page missing %q", required)
@@ -503,6 +522,9 @@ func TestEmbeddedAdminPageUsesLocalAssetsAndSafeConfigState(t *testing.T) {
 		"https://cdn.tailwindcss.com",
 		"cdn.jsdelivr.net/npm/alpinejs",
 		`x-text="provider.apiKey || '(未配置)'"`,
+		// 字体外部依赖已去掉，CSP 也随之收紧，不能再漏回来。
+		"fonts.googleapis.com",
+		"fonts.gstatic.com",
 	} {
 		if strings.Contains(page, forbidden) {
 			t.Errorf("admin page still contains unsafe/stale pattern %q", forbidden)

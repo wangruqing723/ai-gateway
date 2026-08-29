@@ -157,7 +157,8 @@ func setSecurityHeaders(w http.ResponseWriter) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Referrer-Policy", "no-referrer")
-	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'")
+	// 字体已全部本地化到 web/vendor/，style-src 与 font-src 不再放行 Google 域名。
+	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'")
 }
 
 func writeMethodNotAllowed(w http.ResponseWriter, allowed ...string) {
@@ -173,8 +174,21 @@ func writeForbiddenHost(w http.ResponseWriter) {
 	writeJSONError(w, http.StatusForbidden, "forbidden_host", "拒绝非本机 Host 的请求")
 }
 
+// staticVendorTypes 补齐 Go 内置 MIME 表缺失的扩展名。
+// mime.TypeByExtension 的内置表不含 .woff2，unix 上靠 /etc/mime.types 之类的系统库补，
+// 但运行镜像是 distroless、没有这些文件，字体会以 application/octet-stream 发出；
+// 叠加 X-Content-Type-Options: nosniff 后浏览器可能直接拒绝加载。
+var staticVendorTypes = map[string]string{
+	".woff2": "font/woff2",
+	".woff":  "font/woff",
+}
+
 func staticContentType(path string) string {
-	if value := mime.TypeByExtension(filepath.Ext(path)); value != "" {
+	ext := strings.ToLower(filepath.Ext(path))
+	if value, ok := staticVendorTypes[ext]; ok {
+		return value
+	}
+	if value := mime.TypeByExtension(ext); value != "" {
 		return value
 	}
 	return "application/octet-stream"
