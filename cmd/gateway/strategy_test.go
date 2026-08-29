@@ -425,7 +425,7 @@ func TestHealthExposesStickyMappings(t *testing.T) {
 		StickyMappings int `json:"stickyMappings"`
 	}
 	recorder := httptest.NewRecorder()
-	srv.handle(recorder, httptest.NewRequest(http.MethodGet, "http://gateway.test/health", nil))
+	srv.handle(recorder, httptest.NewRequest(http.MethodGet, "http://127.0.0.1:7789/health", nil))
 	if err := json.Unmarshal(recorder.Body.Bytes(), &health); err != nil {
 		t.Fatalf("解析 /health 失败: %v, body=%s", err, recorder.Body.String())
 	}
@@ -436,7 +436,7 @@ func TestHealthExposesStickyMappings(t *testing.T) {
 	// 未装 selector 时不能 panic，取 0。
 	off := newFailoverTestServer(providers, route, a.Client(), defaultTestFailover())
 	recorder = httptest.NewRecorder()
-	off.handle(recorder, httptest.NewRequest(http.MethodGet, "http://gateway.test/health", nil))
+	off.handle(recorder, httptest.NewRequest(http.MethodGet, "http://127.0.0.1:7789/health", nil))
 	if err := json.Unmarshal(recorder.Body.Bytes(), &health); err != nil {
 		t.Fatalf("解析 /health 失败: %v", err)
 	}

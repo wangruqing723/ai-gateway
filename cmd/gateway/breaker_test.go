@@ -309,7 +309,7 @@ func TestBreakerResetEndpoint(t *testing.T) {
 
 	// 只重置 a
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "http://gateway.test/api/providers/breaker/reset?provider=a", nil)
+	request := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:7789/api/providers/breaker/reset?provider=a", nil)
 	srv.handle(recorder, request)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status/body = %d/%s, 期望 200", recorder.Code, recorder.Body.String())
@@ -334,7 +334,7 @@ func TestBreakerResetEndpoint(t *testing.T) {
 
 	// 全量重置
 	recorder = httptest.NewRecorder()
-	request = httptest.NewRequest(http.MethodPost, "http://gateway.test/api/providers/breaker/reset", nil)
+	request = httptest.NewRequest(http.MethodPost, "http://127.0.0.1:7789/api/providers/breaker/reset", nil)
 	srv.handle(recorder, request)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("全量重置 status = %d", recorder.Code)
@@ -355,13 +355,13 @@ func TestBreakerResetRejectsWrongMethodAndCrossSite(t *testing.T) {
 		defaultTestFailover(), testBreakerSettings())
 
 	recorder := httptest.NewRecorder()
-	srv.handle(recorder, httptest.NewRequest(http.MethodGet, "http://gateway.test/api/providers/breaker/reset", nil))
+	srv.handle(recorder, httptest.NewRequest(http.MethodGet, "http://127.0.0.1:7789/api/providers/breaker/reset", nil))
 	if recorder.Code != http.StatusMethodNotAllowed {
 		t.Errorf("GET status = %d, 期望 405", recorder.Code)
 	}
 
 	recorder = httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "http://gateway.test/api/providers/breaker/reset", nil)
+	request := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:7789/api/providers/breaker/reset", nil)
 	request.Header.Set("Origin", "https://evil.example.com")
 	srv.handle(recorder, request)
 	if recorder.Code != http.StatusForbidden {
@@ -376,7 +376,7 @@ func TestBreakerResetWithoutBreakerReturns503(t *testing.T) {
 	}
 	srv := newFailoverTestServer(providers, singleCandidateRoute("a", "m"), http.DefaultClient, defaultTestFailover())
 	recorder := httptest.NewRecorder()
-	srv.handle(recorder, httptest.NewRequest(http.MethodPost, "http://gateway.test/api/providers/breaker/reset", nil))
+	srv.handle(recorder, httptest.NewRequest(http.MethodPost, "http://127.0.0.1:7789/api/providers/breaker/reset", nil))
 	if recorder.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status/body = %d/%s, 期望 503", recorder.Code, recorder.Body.String())
 	}
@@ -395,7 +395,7 @@ func TestHealthExposesBreakerSnapshot(t *testing.T) {
 		srv.breaker.Report("a", breaker.OutcomeFailure)
 	}
 	recorder := httptest.NewRecorder()
-	srv.handle(recorder, httptest.NewRequest(http.MethodGet, "http://gateway.test/health", nil))
+	srv.handle(recorder, httptest.NewRequest(http.MethodGet, "http://127.0.0.1:7789/health", nil))
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d", recorder.Code)
 	}
@@ -412,7 +412,7 @@ func TestHealthExposesBreakerSnapshot(t *testing.T) {
 	// 未启用熔断：字段应为 null
 	off := newFailoverTestServer(providers, route, http.DefaultClient, defaultTestFailover())
 	recorder = httptest.NewRecorder()
-	off.handle(recorder, httptest.NewRequest(http.MethodGet, "http://gateway.test/health", nil))
+	off.handle(recorder, httptest.NewRequest(http.MethodGet, "http://127.0.0.1:7789/health", nil))
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(recorder.Body.Bytes(), &raw); err != nil {
 		t.Fatalf("解析 /health 失败: %v", err)

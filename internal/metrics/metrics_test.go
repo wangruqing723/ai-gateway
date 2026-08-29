@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"strconv"
 	"testing"
 	"time"
 )
@@ -118,6 +119,38 @@ func TestCollectorLogsFiltersAndRing(t *testing.T) {
 	}
 }
 
+func TestCollectorLogsOffsetAcrossRingStates(t *testing.T) {
+	tests := []struct {
+		name     string
+		capacity int
+		count    int
+		offset   int
+		limit    int
+		want     []string
+	}{
+		{name: "缓冲未满", capacity: 5, count: 3, offset: 1, limit: 2, want: []string{"request-1", "request-0"}},
+		{name: "缓冲刚满", capacity: 3, count: 3, offset: 1, limit: 2, want: []string{"request-1", "request-0"}},
+		{name: "缓冲已回绕", capacity: 3, count: 5, offset: 2, limit: 2, want: []string{"request-2"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := NewCollector(tt.capacity)
+			for i := 0; i < tt.count; i++ {
+				c.Add(RequestLog{ID: "request-" + strconv.Itoa(i), Status: 200, Provider: "p"})
+			}
+			logs := c.Logs(LogFilter{Offset: tt.offset, Limit: tt.limit})
+			if len(logs) != len(tt.want) {
+				t.Fatalf("logs length = %d, want %d: %#v", len(logs), len(tt.want), logs)
+			}
+			for i, want := range tt.want {
+				if logs[i].ID != want {
+					t.Errorf("logs[%d].ID = %q, want %q", i, logs[i].ID, want)
+				}
+			}
+		})
+	}
+}
+
 func TestCollectorMetrics(t *testing.T) {
 	c := NewCollector(10)
 	now := time.Date(2026, 6, 27, 10, 1, 0, 0, time.UTC)
@@ -134,6 +167,9 @@ func TestCollectorMetrics(t *testing.T) {
 	}
 	if m.Summary.P95LatencyMs != 100 {
 		t.Fatalf("expected p95 100, got %d", m.Summary.P95LatencyMs)
+	}
+	if m.Summary.LatencySamples != 3 {
+		t.Fatalf("expected 3 latency samples, got %d", m.Summary.LatencySamples)
 	}
 	if len(m.RecentErrors) != 2 || m.RecentErrors[0].ID != "c" || m.RecentErrors[1].ID != "b" {
 		t.Fatalf("expected recent errors c and b, got %#v", m.RecentErrors)
@@ -197,6 +233,9 @@ func TestCollectorMetricsAreIndependentFromLogCapacity(t *testing.T) {
 	}
 	if m.Summary.P50LatencyMs != 50 || m.Summary.P95LatencyMs != 100 || m.Summary.P99LatencyMs != 100 {
 		t.Fatalf("summary histogram must include every request: %#v", m.Summary)
+	}
+	if m.Summary.LatencySamples != 1500 {
+		t.Fatalf("summary latency samples must include every request: %d", m.Summary.LatencySamples)
 	}
 	provider := m.Providers[0]
 	if provider.P50LatencyMs != 50 || provider.P95LatencyMs != 100 || provider.P99LatencyMs != 100 {

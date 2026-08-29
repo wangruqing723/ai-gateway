@@ -230,7 +230,7 @@ docker logs -f ai-gateway
 
 本项目按个人本机使用设计，不新增强制 gateway token。默认 `docker-compose.yml` 只把端口发布到 `127.0.0.1:7789`；应用同时校验推理和配置接口的 HTTP method、浏览器 Origin、`Content-Type` 与请求体大小。
 
-不要直接把网关端口暴露到公网或不可信局域网。浏览器管理接口只接受 `localhost` 或 loopback IP 的同源请求，不支持通过远程域名反向代理后直接保存配置；跨机器使用时应通过 SSH 本地端口转发后仍以 `127.0.0.1` 访问。无 `Origin` 的非浏览器 API 客户端即使置于反向代理后，也仍需由代理提供认证、TLS、来源限制和访问日志；应用内这些本地防护不等价于公网鉴权。
+不要直接把网关端口暴露到公网或不可信局域网。浏览器管理接口只接受 `localhost` 或 loopback IP 的同源请求，不支持通过远程域名反向代理后直接保存配置；跨机器使用时应通过 SSH 本地端口转发后仍以 `127.0.0.1` 访问。所有非静态请求还会校验 `Host`：只放行 loopback、配置中的 `host`；配置为 `0.0.0.0` 或 `::` 时放行 IP 字面量，以阻断 DNS rebinding。通过反向代理访问时请保留本机 Host，或把代理使用的域名写入 `host`。无 `Origin` 的非浏览器 API 客户端即使置于反向代理后，也仍需由代理提供认证、TLS、来源限制和访问日志；应用内这些本地防护不等价于公网鉴权。
 
 配置保存带不透明 revision/ETag 冲突检测，已配置 API Key 只通过专用 sentinel 往返，不会作为展示文本写回文件。除 `host`、`port` 外，队列、direct mode、缓存策略和 Provider 健康状态会动态更新；`host` 或 `port` 变化会返回 `restartRequired`。
 

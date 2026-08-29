@@ -46,6 +46,8 @@ var webFS embed.FS
 
 var reqCounter uint64
 
+const healthStatsCacheTTL = 10 * time.Second
+
 func main() {
 	cfg, err := config.Load()
 	if err != nil {
@@ -184,6 +186,11 @@ type server struct {
 	cfg            *config.Config
 	cfgMu          sync.RWMutex // 保护 cfg 的并发读写
 	configOpMu     sync.Mutex   // 串行化保存、重载与运行时应用
+	healthStatsMu  sync.Mutex   // 串行化 /health 的缓存刷新，避免并发请求击穿 TTL
+	healthStatsAt  time.Time
+	healthCache    cache.Stats
+	healthHeapMB   uint64
+	healthSysMB    uint64
 	revision       string
 	revisionSource func() (string, error)
 	listenHost     string
@@ -221,6 +228,16 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.handleStatic(w, r, urlPath)
+		return
+	}
+
+	// 非静态请求只接受本机 loopback、配置中的 host，或 0.0.0.0/:: 监听时的 IP 字面量。
+	// 这一层独立于 Origin 校验，用来阻断 DNS rebinding 下同源页面读取网关响应。
+	s.cfgMu.RLock()
+	requestCfg := s.cfg
+	s.cfgMu.RUnlock()
+	if !allowRequestHost(r, requestCfg) {
+		writeForbiddenHost(w)
 		return
 	}
 
@@ -1041,13 +1058,7 @@ func (s *server) handleHealth(w http.ResponseWriter, head bool) {
 	for name, p := range cfg.Providers {
 		queues[name] = s.qm.StatusOf(name, p.MaxConcurrent, p.MaxPerSecond)
 	}
-	var m runtime.MemStats
-	runtime.ReadMemStats(&m)
-
-	var cs cache.Stats
-	if s.cache != nil {
-		cs = s.cache.GetStats()
-	}
+	cs, heapAllocMB, sysMB := s.healthStats(time.Now())
 	health := map[string]any{
 		"status":         "ok",
 		"timeout":        cfg.Timeout,
@@ -1064,11 +1075,11 @@ func (s *server) handleHealth(w http.ResponseWriter, head bool) {
 		// 用来判断粘性是否真的在生效（长期为 0 说明前缀太短或策略是 failover）
 		"stickyMappings": s.stickyMappings(),
 		"memory": map[string]any{
-			"heapAllocMB": m.HeapAlloc / 1024 / 1024,
-			"sysMB":       m.Sys / 1024 / 1024,
+			"heapAllocMB": heapAllocMB,
+			"sysMB":       sysMB,
 		},
 	}
-	out, err := json.MarshalIndent(health, "", "  ")
+	out, err := json.Marshal(health)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "gateway_error", "健康状态序列化失败: "+err.Error())
 		return
@@ -1079,6 +1090,30 @@ func (s *server) handleHealth(w http.ResponseWriter, head bool) {
 	if !head {
 		_, _ = w.Write(out)
 	}
+}
+
+// healthStats 返回 /health 展示的缓存与内存概览。两类数据共用 10 秒 TTL，
+// 并在独立锁下完成一次刷新，避免并发 /health 请求同时触发 SQLite 查询和 STW。
+func (s *server) healthStats(now time.Time) (cache.Stats, uint64, uint64) {
+	s.healthStatsMu.Lock()
+	defer s.healthStatsMu.Unlock()
+
+	if !s.healthStatsAt.IsZero() && now.Sub(s.healthStatsAt) < healthStatsCacheTTL {
+		return s.healthCache, s.healthHeapMB, s.healthSysMB
+	}
+
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	var cs cache.Stats
+	if s.cache != nil {
+		cs = s.cache.GetStats()
+	}
+
+	s.healthCache = cs
+	s.healthHeapMB = m.HeapAlloc / 1024 / 1024
+	s.healthSysMB = m.Sys / 1024 / 1024
+	s.healthStatsAt = now
+	return s.healthCache, s.healthHeapMB, s.healthSysMB
 }
 
 // stickyMappings 返回当前有效的 prompt cache 粘性映射数，未装 selector 时返回 0。
@@ -1115,7 +1150,7 @@ func (s *server) handleBreakerReset(w http.ResponseWriter, r *http.Request) {
 		payload["reset"] = s.breaker.ResetAll()
 	}
 	payload["breakers"] = s.breaker.Snapshot()
-	out, _ := json.MarshalIndent(payload, "", "  ")
+	out, _ := json.Marshal(payload)
 	w.Header().Set("content-type", "application/json")
 	w.Header().Set("content-length", fmt.Sprintf("%d", len(out)))
 	w.WriteHeader(http.StatusOK)
@@ -1138,9 +1173,9 @@ func (s *server) handleProviderHealthCheck(w http.ResponseWriter, r *http.Reques
 			writeJSONError(w, http.StatusNotFound, "gateway_error", fmt.Sprintf("未找到 provider: %s", name))
 			return
 		}
-		out, _ := json.MarshalIndent(map[string]any{
+		out, _ := json.Marshal(map[string]any{
 			"providers": map[string]providerhealth.Status{name: status},
-		}, "", "  ")
+		})
 		w.Header().Set("content-type", "application/json")
 		w.Header().Set("content-length", fmt.Sprintf("%d", len(out)))
 		w.WriteHeader(http.StatusOK)
@@ -1149,9 +1184,9 @@ func (s *server) handleProviderHealthCheck(w http.ResponseWriter, r *http.Reques
 	}
 
 	statuses := s.providerHealth.CheckAll(r.Context(), cfg, s.httpClient)
-	out, _ := json.MarshalIndent(map[string]any{
+	out, _ := json.Marshal(map[string]any{
 		"providers": statuses,
-	}, "", "  ")
+	})
 	w.Header().Set("content-type", "application/json")
 	w.Header().Set("content-length", fmt.Sprintf("%d", len(out)))
 	w.WriteHeader(http.StatusOK)
@@ -1186,10 +1221,10 @@ func (s *server) handleProviderModels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	out, _ := json.MarshalIndent(map[string]any{
+	out, _ := json.Marshal(map[string]any{
 		"provider": name,
 		"models":   models,
-	}, "", "  ")
+	})
 	w.Header().Set("content-type", "application/json")
 	w.Header().Set("content-length", fmt.Sprintf("%d", len(out)))
 	w.WriteHeader(http.StatusOK)
@@ -1267,7 +1302,7 @@ func modelsEndpoint(baseURL string) string {
 }
 
 func (s *server) handleMetrics(w http.ResponseWriter, r *http.Request) {
-	out, _ := json.MarshalIndent(s.metrics.Metrics(time.Now()), "", "  ")
+	out, _ := json.Marshal(s.metrics.Metrics(time.Now()))
 	w.Header().Set("content-type", "application/json")
 	w.Header().Set("content-length", fmt.Sprintf("%d", len(out)))
 	w.WriteHeader(http.StatusOK)
@@ -1296,10 +1331,10 @@ func (s *server) handleLogs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	logs := s.metrics.Logs(filter)
-	out, _ := json.MarshalIndent(map[string]any{
+	out, _ := json.Marshal(map[string]any{
 		"data":  logs,
 		"limit": filter.Limit,
-	}, "", "  ")
+	})
 	w.Header().Set("content-type", "application/json")
 	w.Header().Set("content-length", fmt.Sprintf("%d", len(out)))
 	w.WriteHeader(http.StatusOK)
@@ -1356,7 +1391,7 @@ func (s *server) handleModels(w http.ResponseWriter) {
 		"data":        models,
 		"description": "返回网关已配置的路由匹配模式（支持通配符 * 和 ?）。客户端请求时按顺序匹配，首条命中生效。",
 	}
-	out, _ := json.MarshalIndent(result, "", "  ")
+	out, _ := json.Marshal(result)
 	w.Header().Set("content-type", "application/json")
 	w.Header().Set("content-length", fmt.Sprintf("%d", len(out)))
 	w.WriteHeader(http.StatusOK)

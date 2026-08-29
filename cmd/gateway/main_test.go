@@ -63,7 +63,7 @@ func TestHandleMethodGuards(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			srv := newBoundaryTestServer()
 			recorder := httptest.NewRecorder()
-			request := httptest.NewRequest(tt.method, "http://gateway.test"+tt.path, nil)
+			request := httptest.NewRequest(tt.method, "http://127.0.0.1:7789"+tt.path, nil)
 			srv.handle(recorder, request)
 			if recorder.Code != tt.wantStatus {
 				t.Fatalf("status = %d, want %d; body=%s", recorder.Code, tt.wantStatus, recorder.Body.String())
@@ -78,9 +78,9 @@ func TestHandleMethodGuards(t *testing.T) {
 func TestHealthHeadUsesGetRepresentationHeadersWithoutBody(t *testing.T) {
 	srv := newBoundaryTestServer()
 	getRecorder := httptest.NewRecorder()
-	srv.handle(getRecorder, httptest.NewRequest(http.MethodGet, "http://gateway.test/health", nil))
+	srv.handle(getRecorder, httptest.NewRequest(http.MethodGet, "http://127.0.0.1:7789/health", nil))
 	headRecorder := httptest.NewRecorder()
-	srv.handle(headRecorder, httptest.NewRequest(http.MethodHead, "http://gateway.test/health", nil))
+	srv.handle(headRecorder, httptest.NewRequest(http.MethodHead, "http://127.0.0.1:7789/health", nil))
 
 	if headRecorder.Code != http.StatusOK {
 		t.Fatalf("HEAD status = %d, want 200", headRecorder.Code)
@@ -93,6 +93,97 @@ func TestHealthHeadUsesGetRepresentationHeadersWithoutBody(t *testing.T) {
 	}
 	if length, err := strconv.Atoi(headRecorder.Header().Get("Content-Length")); err != nil || length <= 0 {
 		t.Errorf("HEAD Content-Length = %q, want a positive representation length", headRecorder.Header().Get("Content-Length"))
+	}
+}
+
+func TestObservationEndpointsUseHostAllowlist(t *testing.T) {
+	endpoints := []string{"/health", "/api/metrics", "/api/logs"}
+	tests := []struct {
+		name        string
+		requestHost string
+		configHost  string
+		wantStatus  int
+	}{
+		{name: "ipv4 loopback", requestHost: "127.0.0.42:7789", configHost: "127.0.0.1", wantStatus: http.StatusOK},
+		{name: "localhost", requestHost: "localhost:7789", configHost: "127.0.0.1", wantStatus: http.StatusOK},
+		{name: "ipv6 loopback", requestHost: "[::1]:7789", configHost: "127.0.0.1", wantStatus: http.StatusOK},
+		{name: "configured host", requestHost: "Gateway.Example:7789", configHost: "gateway.example", wantStatus: http.StatusOK},
+		{name: "wildcard listener accepts ipv4 literal", requestHost: "192.0.2.10:7789", configHost: "0.0.0.0", wantStatus: http.StatusOK},
+		{name: "wildcard listener accepts ipv6 literal", requestHost: "[2001:db8::10]:7789", configHost: "::", wantStatus: http.StatusOK},
+		{name: "external host rejected", requestHost: "evil.example.com", configHost: "127.0.0.1", wantStatus: http.StatusForbidden},
+	}
+
+	for _, tt := range tests {
+		for _, endpoint := range endpoints {
+			t.Run(tt.name+" "+endpoint, func(t *testing.T) {
+				srv := newBoundaryTestServer()
+				srv.cfg.Host = tt.configHost
+				recorder := httptest.NewRecorder()
+				request := httptest.NewRequest(http.MethodGet, "http://"+tt.requestHost+endpoint, nil)
+				srv.handle(recorder, request)
+				if recorder.Code != tt.wantStatus {
+					t.Fatalf("status = %d, want %d; body=%s", recorder.Code, tt.wantStatus, recorder.Body.String())
+				}
+				if tt.wantStatus == http.StatusForbidden {
+					var body struct {
+						Error struct {
+							Type    string `json:"type"`
+							Message string `json:"message"`
+						} `json:"error"`
+					}
+					if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+						t.Fatalf("forbidden response is not JSON: %v", err)
+					}
+					if body.Error.Type != "forbidden_host" || body.Error.Message != "拒绝非本机 Host 的请求" {
+						t.Fatalf("forbidden response = %#v, want forbidden_host error", body.Error)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestHealthStatsAreCachedAndConcurrentRefreshCoalesces(t *testing.T) {
+	cacheSpy := &healthStatsCacheSpy{stats: cache.Stats{Total: 7, ContentSize: 128, DBSize: 256}}
+	srv := newBoundaryTestServer()
+	srv.cache = cacheSpy
+
+	const requests = 32
+	start := make(chan struct{})
+	statuses := make(chan int, requests)
+	var wg sync.WaitGroup
+	for i := 0; i < requests; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			recorder := httptest.NewRecorder()
+			srv.handle(recorder, httptest.NewRequest(http.MethodGet, "http://127.0.0.1:7789/health", nil))
+			statuses <- recorder.Code
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(statuses)
+	for status := range statuses {
+		if status != http.StatusOK {
+			t.Fatalf("concurrent /health status = %d, want 200", status)
+		}
+	}
+	if got := cacheSpy.StatsCalls(); got != 1 {
+		t.Fatalf("concurrent /health GetStats calls = %d, want 1 within TTL", got)
+	}
+
+	srv.healthStatsMu.Lock()
+	srv.healthStatsAt = time.Now().Add(-healthStatsCacheTTL)
+	srv.healthStatsMu.Unlock()
+	recorder := httptest.NewRecorder()
+	srv.handle(recorder, httptest.NewRequest(http.MethodGet, "http://127.0.0.1:7789/health", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expired /health status = %d, want 200", recorder.Code)
+	}
+	if got := cacheSpy.StatsCalls(); got != 2 {
+		t.Fatalf("expired /health GetStats calls = %d, want 2", got)
 	}
 }
 
@@ -164,7 +255,7 @@ func TestHandleAllowsSameOriginAndCLIInference(t *testing.T) {
 	}{
 		{name: "same local origin", target: "http://127.0.0.1:7789/v1/messages", origin: "http://127.0.0.1:7789"},
 		{name: "localhost origin", target: "http://localhost:7789/v1/messages", origin: "http://localhost:7789"},
-		{name: "no browser origin", target: "http://gateway.test/v1/messages"},
+		{name: "no browser origin", target: "http://127.0.0.1:7789/v1/messages"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -188,7 +279,7 @@ func TestHandleRequiresJSONForInference(t *testing.T) {
 		t.Run(contentType, func(t *testing.T) {
 			srv := newBoundaryTestServer()
 			recorder := httptest.NewRecorder()
-			request := httptest.NewRequest(http.MethodPost, "http://gateway.test/v1/messages", strings.NewReader(`{}`))
+			request := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:7789/v1/messages", strings.NewReader(`{}`))
 			if contentType != "" {
 				request.Header.Set("Content-Type", contentType)
 			}
@@ -205,7 +296,7 @@ func TestHandleBodyLimits(t *testing.T) {
 		srv := newBoundaryTestServer()
 		recorder := httptest.NewRecorder()
 		body := io.LimitReader(zeroReader{}, testMaxProxyBodyBytes+1)
-		request := httptest.NewRequest(http.MethodPost, "http://gateway.test/v1/messages", body)
+		request := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:7789/v1/messages", body)
 		request.Header.Set("Content-Type", "application/json")
 		srv.handle(recorder, request)
 		if recorder.Code != http.StatusRequestEntityTooLarge {
@@ -217,7 +308,7 @@ func TestHandleBodyLimits(t *testing.T) {
 		srv := newBoundaryTestServer()
 		recorder := httptest.NewRecorder()
 		body := io.LimitReader(zeroReader{}, testMaxConfigBodyBytes+1)
-		request := httptest.NewRequest(http.MethodPut, "http://gateway.test/api/config", body)
+		request := httptest.NewRequest(http.MethodPut, "http://127.0.0.1:7789/api/config", body)
 		request.Header.Set("Content-Type", "application/yaml")
 		srv.handle(recorder, request)
 		if recorder.Code != http.StatusRequestEntityTooLarge {
@@ -239,7 +330,7 @@ func TestHandleBodyLimits(t *testing.T) {
 		for _, tt := range tests {
 			t.Run(tt.name, func(t *testing.T) {
 				body := &countingEOFReader{}
-				request := httptest.NewRequest(tt.method, "http://gateway.test"+tt.path, body)
+				request := httptest.NewRequest(tt.method, "http://127.0.0.1:7789"+tt.path, body)
 				request.Header.Set("Content-Type", tt.contentType)
 				request.ContentLength = tt.limit + 1
 				recorder := httptest.NewRecorder()
@@ -259,7 +350,7 @@ func TestSlowConfigBodyDoesNotBlockOtherConfigOperations(t *testing.T) {
 	go func() {
 		defer close(putDone)
 		recorder := httptest.NewRecorder()
-		request := httptest.NewRequest(http.MethodPut, "http://gateway.test/api/config", body)
+		request := httptest.NewRequest(http.MethodPut, "http://127.0.0.1:7789/api/config", body)
 		request.Header.Set("Content-Type", "application/yaml")
 		srv.handle(recorder, request)
 	}()
@@ -274,7 +365,7 @@ func TestSlowConfigBodyDoesNotBlockOtherConfigOperations(t *testing.T) {
 	rawDone := make(chan *httptest.ResponseRecorder, 1)
 	go func() {
 		recorder := httptest.NewRecorder()
-		srv.handle(recorder, httptest.NewRequest(http.MethodGet, "http://gateway.test/api/config/raw", nil))
+		srv.handle(recorder, httptest.NewRequest(http.MethodGet, "http://127.0.0.1:7789/api/config/raw", nil))
 		rawDone <- recorder
 	}()
 
@@ -310,7 +401,7 @@ func TestSlowRawConfigWriterDoesNotBlockReload(t *testing.T) {
 	rawDone := make(chan struct{})
 	go func() {
 		defer close(rawDone)
-		srv.handle(writer, httptest.NewRequest(http.MethodGet, "http://gateway.test/api/config/raw", nil))
+		srv.handle(writer, httptest.NewRequest(http.MethodGet, "http://127.0.0.1:7789/api/config/raw", nil))
 	}()
 
 	select {
@@ -323,7 +414,7 @@ func TestSlowRawConfigWriterDoesNotBlockReload(t *testing.T) {
 	reloadDone := make(chan *httptest.ResponseRecorder, 1)
 	go func() {
 		recorder := httptest.NewRecorder()
-		srv.handle(recorder, httptest.NewRequest(http.MethodPost, "http://gateway.test/api/config/reload", nil))
+		srv.handle(recorder, httptest.NewRequest(http.MethodPost, "http://127.0.0.1:7789/api/config/reload", nil))
 		reloadDone <- recorder
 	}()
 
@@ -366,7 +457,7 @@ func TestStaticAssetsAndSecurityHeaders(t *testing.T) {
 		t.Run(tt.path, func(t *testing.T) {
 			srv := newBoundaryTestServer()
 			recorder := httptest.NewRecorder()
-			request := httptest.NewRequest(http.MethodGet, "http://gateway.test"+tt.path, nil)
+			request := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:7789"+tt.path, nil)
 			srv.handle(recorder, request)
 			if recorder.Code != http.StatusOK {
 				t.Fatalf("status = %d, want 200; body=%s", recorder.Code, recorder.Body.String())
@@ -451,7 +542,7 @@ func TestEmbeddedAdminPageUsesActualListenerAndKeepsRestartWarnings(t *testing.T
 func TestGetConfigUsesExactSecretSentinelAndRevision(t *testing.T) {
 	srv := newConfigTestServer(t, testConfigYAML("127.0.0.1", 7789, "https://api.example.com", "super-secret", 5))
 	recorder := httptest.NewRecorder()
-	srv.handle(recorder, httptest.NewRequest(http.MethodGet, "http://gateway.test/api/config", nil))
+	srv.handle(recorder, httptest.NewRequest(http.MethodGet, "http://127.0.0.1:7789/api/config", nil))
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d; body=%s", recorder.Code, recorder.Body.String())
 	}
@@ -476,7 +567,7 @@ func TestGetConfigUsesExactSecretSentinelAndRevision(t *testing.T) {
 func TestConfigRevisionIsOpaqueAndRotatesOnSecretChange(t *testing.T) {
 	srv := newConfigTestServer(t, testConfigYAML("127.0.0.1", 7789, "https://api.example.com", "guessable-one", 5))
 	first := httptest.NewRecorder()
-	srv.handle(first, httptest.NewRequest(http.MethodGet, "http://gateway.test/api/config", nil))
+	srv.handle(first, httptest.NewRequest(http.MethodGet, "http://127.0.0.1:7789/api/config", nil))
 	var firstBody map[string]any
 	if err := json.Unmarshal(first.Body.Bytes(), &firstBody); err != nil {
 		t.Fatal(err)
@@ -513,7 +604,7 @@ func TestSameConfigGetsDifferentRevisionAcrossServers(t *testing.T) {
 	for i := range revisions {
 		srv := newConfigTestServer(t, raw)
 		recorder := httptest.NewRecorder()
-		srv.handle(recorder, httptest.NewRequest(http.MethodGet, "http://gateway.test/api/config", nil))
+		srv.handle(recorder, httptest.NewRequest(http.MethodGet, "http://127.0.0.1:7789/api/config", nil))
 		var body map[string]any
 		if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
 			t.Fatal(err)
@@ -528,7 +619,7 @@ func TestSameConfigGetsDifferentRevisionAcrossServers(t *testing.T) {
 func TestGetConfigKeepsEmptyAPIKeySemantics(t *testing.T) {
 	srv := newConfigTestServer(t, testConfigYAML("127.0.0.1", 7789, "https://api.example.com", "", 5))
 	recorder := httptest.NewRecorder()
-	srv.handle(recorder, httptest.NewRequest(http.MethodGet, "http://gateway.test/api/config", nil))
+	srv.handle(recorder, httptest.NewRequest(http.MethodGet, "http://127.0.0.1:7789/api/config", nil))
 	var body map[string]any
 	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
@@ -560,7 +651,7 @@ func TestConfigPutMediaTypes(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			srv := newConfigTestServer(t, raw)
 			recorder := httptest.NewRecorder()
-			request := httptest.NewRequest(http.MethodPut, "http://gateway.test/api/config", strings.NewReader(tt.body))
+			request := httptest.NewRequest(http.MethodPut, "http://127.0.0.1:7789/api/config", strings.NewReader(tt.body))
 			if tt.contentType != "" {
 				request.Header.Set("Content-Type", tt.contentType)
 			}
@@ -582,7 +673,7 @@ routes:
 `
 	srv := newConfigTestServer(t, raw)
 	recorder := httptest.NewRecorder()
-	srv.handle(recorder, httptest.NewRequest(http.MethodGet, "http://gateway.test/api/config/raw", nil))
+	srv.handle(recorder, httptest.NewRequest(http.MethodGet, "http://127.0.0.1:7789/api/config/raw", nil))
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d; body=%s", recorder.Code, recorder.Body.String())
 	}
@@ -683,7 +774,7 @@ func TestPutConfigRevisionConflict(t *testing.T) {
 func TestConcurrentPutWithSameRevisionOnlyOneWins(t *testing.T) {
 	srv := newConfigTestServer(t, testConfigYAML("127.0.0.1", 7789, "https://api.example.com", "secret", 5))
 	getRecorder := httptest.NewRecorder()
-	srv.handle(getRecorder, httptest.NewRequest(http.MethodGet, "http://gateway.test/api/config", nil))
+	srv.handle(getRecorder, httptest.NewRequest(http.MethodGet, "http://127.0.0.1:7789/api/config", nil))
 	etag := getRecorder.Header().Get("ETag")
 	if etag == "" {
 		t.Fatal("GET config did not return ETag")
@@ -738,7 +829,7 @@ func TestPutConfigReportsRestartRequired(t *testing.T) {
 		t.Fatalf("restartRequired = %#v, want host and port", response.RestartRequired)
 	}
 	healthRecorder := httptest.NewRecorder()
-	srv.handle(healthRecorder, httptest.NewRequest(http.MethodGet, "http://gateway.test/health", nil))
+	srv.handle(healthRecorder, httptest.NewRequest(http.MethodGet, "http://127.0.0.1:7789/health", nil))
 	var health map[string]any
 	if err := json.Unmarshal(healthRecorder.Body.Bytes(), &health); err != nil {
 		t.Fatal(err)
@@ -757,7 +848,7 @@ func TestReloadUsesSamePathAndRollsBackInvalidConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	reload := httptest.NewRecorder()
-	srv.handle(reload, httptest.NewRequest(http.MethodPost, "http://gateway.test/api/config/reload", nil))
+	srv.handle(reload, httptest.NewRequest(http.MethodPost, "http://127.0.0.1:7789/api/config/reload", nil))
 	if reload.Code != http.StatusOK {
 		t.Fatalf("valid reload status = %d; body=%s", reload.Code, reload.Body.String())
 	}
@@ -774,7 +865,7 @@ func TestReloadUsesSamePathAndRollsBackInvalidConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	invalid := httptest.NewRecorder()
-	srv.handle(invalid, httptest.NewRequest(http.MethodPost, "http://gateway.test/api/config/reload", nil))
+	srv.handle(invalid, httptest.NewRequest(http.MethodPost, "http://127.0.0.1:7789/api/config/reload", nil))
 	if invalid.Code != http.StatusInternalServerError {
 		t.Fatalf("invalid reload status = %d, want 500; body=%s", invalid.Code, invalid.Body.String())
 	}
@@ -882,7 +973,7 @@ func TestInferenceRejectsRequestConversionError(t *testing.T) {
 	srv.cfg.Routes = []config.Route{{Match: "*", Provider: "primary", Model: "upstream"}}
 	recorder := httptest.NewRecorder()
 	body := `{"model":"client-model","messages":[],"tools":[{"type":"computer_20241022","name":"computer"}]}`
-	request := httptest.NewRequest(http.MethodPost, "http://gateway.test/v1/messages", strings.NewReader(body))
+	request := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:7789/v1/messages", strings.NewReader(body))
 	request.Header.Set("Content-Type", "application/json")
 	srv.handle(recorder, request)
 	if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), "conversion_error") {
@@ -894,7 +985,7 @@ func TestInferenceRejectsTargetSpecificToolOutput(t *testing.T) {
 	srv := newConfigTestServer(t, testConfigYAML("127.0.0.1", 7789, "http://127.0.0.1:1", "secret", 5))
 	recorder := httptest.NewRecorder()
 	body := `{"model":"client-model","input":[{"type":"function_call_output","call_id":"call_1","output":[{"type":"input_image","image_url":"https://images.example/test.png"}]}]}`
-	request := httptest.NewRequest(http.MethodPost, "http://gateway.test/v1/responses", strings.NewReader(body))
+	request := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:7789/v1/responses", strings.NewReader(body))
 	request.Header.Set("Content-Type", "application/json")
 	srv.handle(recorder, request)
 	if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), "conversion_error") {
@@ -992,7 +1083,7 @@ func TestSameFormatRequestPreservesNativeExtensions(t *testing.T) {
 				providerHealth: providerhealth.NewChecker(), translator: &runtimeVisionSpy{},
 			}
 			recorder := httptest.NewRecorder()
-			request := httptest.NewRequest(http.MethodPost, "http://gateway.test"+tt.path, strings.NewReader(tt.requestBody))
+			request := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:7789"+tt.path, strings.NewReader(tt.requestBody))
 			request.Header.Set("Content-Type", "application/json")
 			srv.handle(recorder, request)
 			if recorder.Code != http.StatusOK {
@@ -1155,7 +1246,7 @@ routes:
 `
 	srv := newConfigTestServer(t, yaml)
 	recorder := httptest.NewRecorder()
-	srv.handle(recorder, httptest.NewRequest(http.MethodGet, "http://gateway.test/v1/models", nil))
+	srv.handle(recorder, httptest.NewRequest(http.MethodGet, "http://127.0.0.1:7789/v1/models", nil))
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d; body=%s", recorder.Code, recorder.Body.String())
 	}
@@ -1221,7 +1312,7 @@ breaker:
 `
 	srv := newConfigTestServer(t, yaml)
 	recorder := httptest.NewRecorder()
-	srv.handle(recorder, httptest.NewRequest(http.MethodGet, "http://gateway.test/api/config", nil))
+	srv.handle(recorder, httptest.NewRequest(http.MethodGet, "http://127.0.0.1:7789/api/config", nil))
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d; body=%s", recorder.Code, recorder.Body.String())
 	}
@@ -1284,7 +1375,7 @@ func TestPutConfigWithoutFailoverBlockDisablesIt(t *testing.T) {
 func putConfig(t *testing.T, srv *server, body, ifMatch string) *httptest.ResponseRecorder {
 	t.Helper()
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPut, "http://gateway.test/api/config", strings.NewReader(body))
+	request := httptest.NewRequest(http.MethodPut, "http://127.0.0.1:7789/api/config", strings.NewReader(body))
 	request.Header.Set("Content-Type", "application/yaml")
 	if ifMatch != "" {
 		request.Header.Set("If-Match", ifMatch)
@@ -1351,6 +1442,29 @@ func (s *runtimeCacheSpy) Cleanup(maxAgeDays, maxRecords int) (cache.CleanupResu
 	s.calls++
 	s.maxAgeDays = maxAgeDays
 	s.maxRecords = maxRecords
+	return cache.CleanupResult{}, nil
+}
+
+type healthStatsCacheSpy struct {
+	mu    sync.Mutex
+	calls int
+	stats cache.Stats
+}
+
+func (s *healthStatsCacheSpy) GetStats() cache.Stats {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.calls++
+	return s.stats
+}
+
+func (s *healthStatsCacheSpy) StatsCalls() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.calls
+}
+
+func (s *healthStatsCacheSpy) Cleanup(int, int) (cache.CleanupResult, error) {
 	return cache.CleanupResult{}, nil
 }
 
@@ -1500,7 +1614,7 @@ func TestHandleProviderModels(t *testing.T) {
 	t.Run("missing provider parameter rejected", func(t *testing.T) {
 		srv := newConfigTestServer(t, testConfigYAML("127.0.0.1", 7789, "https://api.example.com", "secret", 5))
 		recorder := httptest.NewRecorder()
-		request := httptest.NewRequest(http.MethodGet, "http://gateway.test/api/providers/models", nil)
+		request := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:7789/api/providers/models", nil)
 		srv.handle(recorder, request)
 		if recorder.Code != http.StatusBadRequest {
 			t.Fatalf("status = %d, want 400", recorder.Code)
@@ -1519,7 +1633,7 @@ func TestHandleProviderModels(t *testing.T) {
 func callProviderModels(t *testing.T, srv *server, provider string) *httptest.ResponseRecorder {
 	t.Helper()
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodGet, "http://gateway.test/api/providers/models?provider="+provider, nil)
+	request := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:7789/api/providers/models?provider="+provider, nil)
 	srv.handle(recorder, request)
 	return recorder
 }

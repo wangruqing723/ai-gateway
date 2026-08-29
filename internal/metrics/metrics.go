@@ -85,6 +85,14 @@ type metricBucket struct {
 	providers   map[string]*providerBucket
 }
 
+// logProviderStats 是 provider 统计兜底分支所需的最小记录集合。
+// 正常情况下 provider 数据直接来自时间桶，不需要读取请求日志环形缓冲。
+type logProviderStats struct {
+	requests  int
+	errors    int
+	latencies []int64
+}
+
 func (b *metricBucket) reset(second int64) {
 	b.second = second
 	b.requests = 0
@@ -149,6 +157,8 @@ type Summary struct {
 	P50LatencyMs   int64   `json:"p50LatencyMs"`
 	P95LatencyMs   int64   `json:"p95LatencyMs"`
 	P99LatencyMs   int64   `json:"p99LatencyMs"`
+	// LatencySamples 是实际进入延迟直方图的窗口内样本数，可能少于 WindowRequests。
+	LatencySamples int `json:"latencySamples"`
 }
 
 // ProviderStats 是按 provider 聚合的指标。
@@ -316,32 +326,35 @@ func (c *Collector) addMetricLocked(record RequestLog, observedAt time.Time) {
 
 // Logs 返回按时间倒序排列的记录，支持轻量筛选。
 func (c *Collector) Logs(filter LogFilter) []RequestLog {
-	records := c.snapshot()
-	out := make([]RequestLog, 0, len(records))
-	for i := len(records) - 1; i >= 0; i-- {
-		if match(records[i], filter) {
-			out = append(out, records[i])
+	limit := filter.Limit
+	if limit <= 0 || limit > 200 {
+		limit = 100
+	}
+	offset := filter.Offset
+	if offset < 0 {
+		offset = 0
+	}
+
+	out := make([]RequestLog, 0, limit)
+	c.mu.RLock()
+	c.forEachRecordNewestLocked(func(record RequestLog) bool {
+		if !match(record, filter) {
+			return true
 		}
-	}
-	if filter.Offset > 0 {
-		if filter.Offset >= len(out) {
-			return []RequestLog{}
+		if offset > 0 {
+			offset--
+			return true
 		}
-		out = out[filter.Offset:]
-	}
-	if filter.Limit <= 0 || filter.Limit > 200 {
-		filter.Limit = 100
-	}
-	if len(out) > filter.Limit {
-		out = out[:filter.Limit]
-	}
+		out = append(out, record)
+		return len(out) < limit
+	})
+	c.mu.RUnlock()
 	return out
 }
 
 // Metrics 聚合最近窗口内的请求指标，并保留历史 provider 排行和最近错误摘要。
 func (c *Collector) Metrics(now time.Time) Response {
 	c.mu.RLock()
-	records := c.snapshotLocked()
 	resp := Response{
 		Summary: Summary{
 			TotalRequests: int(c.totalRequests),
@@ -376,6 +389,30 @@ func (c *Collector) Metrics(now time.Time) Response {
 			total.latency.merge(stats.latency)
 		}
 	}
+	resp.Summary.LatencySamples = latency.total
+
+	var fallbackProviderTotals map[string]*logProviderStats
+	if len(providerTotals) == 0 {
+		fallbackProviderTotals = make(map[string]*logProviderStats)
+		c.forEachRecordOldestLocked(func(record RequestLog) bool {
+			name := record.Provider
+			if name == "" {
+				name = "(未匹配)"
+			}
+			stats := fallbackProviderTotals[name]
+			if stats == nil {
+				stats = &logProviderStats{}
+				fallbackProviderTotals[name] = stats
+			}
+			stats.requests++
+			if !isSuccess(record) {
+				stats.errors++
+			}
+			stats.latencies = append(stats.latencies, record.DurationMs)
+			return true
+		})
+	}
+	recent := c.recentErrorsLocked(8)
 	c.mu.RUnlock()
 
 	resp.Summary.SuccessRate = ratio(successes, resp.Summary.WindowRequests)
@@ -399,23 +436,15 @@ func (c *Collector) Metrics(now time.Time) Response {
 		})
 	}
 	if len(resp.Providers) == 0 {
-		providerMap := make(map[string][]RequestLog)
-		for _, record := range records {
-			name := record.Provider
-			if name == "" {
-				name = "(未匹配)"
-			}
-			providerMap[name] = append(providerMap[name], record)
-		}
-		for name, rows := range providerMap {
-			resp.Providers = append(resp.Providers, providerStats(name, rows))
+		for name, stats := range fallbackProviderTotals {
+			resp.Providers = append(resp.Providers, providerStatsFromLogStats(name, stats))
 		}
 	}
 	sort.Slice(resp.Providers, func(i, j int) bool {
 		return resp.Providers[i].P95LatencyMs > resp.Providers[j].P95LatencyMs
 	})
 
-	resp.RecentErrors = recentErrors(records, 8)
+	resp.RecentErrors = recent
 	return resp
 }
 
@@ -431,23 +460,50 @@ type LogFilter struct {
 	Since    time.Time
 }
 
-func (c *Collector) snapshot() []RequestLog {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.snapshotLocked()
+// forEachRecordOldestLocked 按日志原有的从旧到新逻辑顺序遍历记录。
+// 调用方必须持有 c.mu 的读锁或写锁；回调返回 false 时提前停止。
+func (c *Collector) forEachRecordOldestLocked(fn func(RequestLog) bool) {
+	count := len(c.records)
+	for i := 0; i < count; i++ {
+		index := i
+		if c.full {
+			index = (c.next + i) % count
+		}
+		if !fn(c.records[index]) {
+			return
+		}
+	}
 }
 
-func (c *Collector) snapshotLocked() []RequestLog {
-	if len(c.records) == 0 {
-		return []RequestLog{}
+// forEachRecordNewestLocked 按时间倒序遍历记录。环形缓冲未满、刚满和回绕后
+// 都通过 next 计算物理下标，避免先复制整份缓冲再反向扫描。
+func (c *Collector) forEachRecordNewestLocked(fn func(RequestLog) bool) {
+	count := len(c.records)
+	for offset := 0; offset < count; offset++ {
+		index := count - 1 - offset
+		if c.full {
+			index = (c.next - 1 - offset) % count
+			if index < 0 {
+				index += count
+			}
+		}
+		if !fn(c.records[index]) {
+			return
+		}
 	}
-	out := make([]RequestLog, 0, len(c.records))
-	if c.full {
-		out = append(out, c.records[c.next:]...)
-		out = append(out, c.records[:c.next]...)
+}
+
+func (c *Collector) recentErrorsLocked(limit int) []RequestLog {
+	out := make([]RequestLog, 0, limit)
+	if limit <= 0 {
 		return out
 	}
-	out = append(out, c.records...)
+	c.forEachRecordNewestLocked(func(record RequestLog) bool {
+		if !isSuccess(record) {
+			out = append(out, record)
+		}
+		return len(out) < limit
+	})
 	return out
 }
 
@@ -524,6 +580,18 @@ func providerStats(name string, rows []RequestLog) ProviderStats {
 		P50LatencyMs: percentile(latencies, 50),
 		P95LatencyMs: percentile(latencies, 95),
 		P99LatencyMs: percentile(latencies, 99),
+	}
+}
+
+func providerStatsFromLogStats(name string, stats *logProviderStats) ProviderStats {
+	return ProviderStats{
+		Name:         name,
+		Requests:     stats.requests,
+		Errors:       stats.errors,
+		SuccessRate:  ratio(stats.requests-stats.errors, stats.requests),
+		P50LatencyMs: percentile(stats.latencies, 50),
+		P95LatencyMs: percentile(stats.latencies, 95),
+		P99LatencyMs: percentile(stats.latencies, 99),
 	}
 }
 

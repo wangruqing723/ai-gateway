@@ -117,6 +117,42 @@ func isLoopbackHostname(host string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
+// allowRequestHost 校验请求 Host 是否属于网关允许的本地访问范围。
+// 只比较 hostname，不把任意可解析域名当作本机地址，避免 DNS rebinding 绕过校验。
+func allowRequestHost(r *http.Request, cfg *config.Config) bool {
+	if r == nil || cfg == nil {
+		return false
+	}
+	hostname := requestHostname(r.Host)
+	if hostname == "" {
+		return false
+	}
+	if isLoopbackHostname(hostname) {
+		return true
+	}
+
+	configHost := strings.TrimSpace(cfg.Host)
+	if strings.EqualFold(hostname, configHost) {
+		return true
+	}
+	if (strings.EqualFold(configHost, "0.0.0.0") || strings.EqualFold(configHost, "::")) && net.ParseIP(hostname) != nil {
+		return true
+	}
+	return false
+}
+
+// requestHostname 从 Host 头中提取 hostname。Host 可能带端口，也可能是裸 IPv6 字面量。
+func requestHostname(hostport string) string {
+	hostport = strings.TrimSpace(hostport)
+	if host, _, err := net.SplitHostPort(hostport); err == nil {
+		return host
+	}
+	if strings.HasPrefix(hostport, "[") && strings.HasSuffix(hostport, "]") {
+		return hostport[1 : len(hostport)-1]
+	}
+	return hostport
+}
+
 func setSecurityHeaders(w http.ResponseWriter) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -131,6 +167,10 @@ func writeMethodNotAllowed(w http.ResponseWriter, allowed ...string) {
 
 func writeForbiddenOrigin(w http.ResponseWriter) {
 	writeJSONError(w, http.StatusForbidden, "forbidden_origin", "拒绝跨站请求")
+}
+
+func writeForbiddenHost(w http.ResponseWriter) {
+	writeJSONError(w, http.StatusForbidden, "forbidden_host", "拒绝非本机 Host 的请求")
 }
 
 func staticContentType(path string) string {

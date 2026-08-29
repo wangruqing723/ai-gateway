@@ -51,7 +51,7 @@ func defaultTestFailover() config.Failover {
 
 func postInference(srv *server, path, body string) *httptest.ResponseRecorder {
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "http://gateway.test"+path, strings.NewReader(body))
+	request := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:7789"+path, strings.NewReader(body))
 	request.Header.Set("Content-Type", "application/json")
 	srv.handle(recorder, request)
 	return recorder

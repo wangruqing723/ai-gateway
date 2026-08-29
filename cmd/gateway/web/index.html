@@ -728,7 +728,7 @@
                                 <span class="material-symbols-outlined text-warn">timer</span>
                             </div>
                             <div class="text-3xl font-extrabold text-white" x-text="metricDuration('p95LatencyMs')"></div>
-                            <div class="mt-1 text-xs text-muted">端到端转发耗时</div>
+                            <div class="mt-1 text-xs text-muted">端到端转发耗时；按桶上界近似；样本不足时显示样本数</div>
                         </article>
                         <article class="glass rounded-lg p-4">
                             <div class="mb-3 flex items-center justify-between">
@@ -1313,6 +1313,8 @@
                 // 用户是否真的动过表单。浏览器的表单恢复不会产生 isTrusted 的
                 // pointerdown/keydown，靠这个把「恢复污染」和「真实编辑」分开。
                 _userEdited: false,
+                _monitorPollTimer: null,
+                _monitorVisibilityHandler: null,
                 statusMessage: '',
                 statusType: 'success',
                 configPath: '',
@@ -1409,8 +1411,17 @@
 
                 async init() {
                     await this.loadConfig();
-                    await this.refreshMonitor();
-                    window.setInterval(() => this.refreshMonitor(false), 5000);
+                    if (this.monitorPollingAllowed()) await this.refreshMonitor();
+                    this._monitorPollTimer = window.setInterval(() => {
+                        if (this.monitorPollingAllowed()) this.refreshMonitor(false);
+                    }, 5000);
+                    this._monitorVisibilityHandler = () => {
+                        if (this.monitorPollingAllowed()) this.refreshMonitor(false);
+                    };
+                    document.addEventListener('visibilitychange', this._monitorVisibilityHandler);
+                    this.$watch('activeTab', (tab, oldTab) => {
+                        if (tab !== oldTab && this.monitorPollingAllowed()) this.refreshMonitor(false);
+                    });
                     // 直接编辑的字段仍需手动保存，关页面前拦一下，免得改了半天丢掉
                     window.addEventListener('beforeunload', (e) => {
                         if (this.canSave()) e.preventDefault();
@@ -1441,6 +1452,13 @@
                             this.dirtyToastPos = this.clampDirtyToast(this.dirtyToastPos.x, this.dirtyToastPos.y);
                         }
                     });
+                },
+
+                destroy() {
+                    if (this._monitorPollTimer !== null) window.clearInterval(this._monitorPollTimer);
+                    if (this._monitorVisibilityHandler) {
+                        document.removeEventListener('visibilitychange', this._monitorVisibilityHandler);
+                    }
                 },
 
                 normalizeConfig(data) {
@@ -1613,6 +1631,11 @@
 
                 // showErrors 兼作「是否手动触发」：每 5 秒的轮询传 false，
                 // 只有手动点刷新才转圈，否则按钮会跟着轮询一直闪。
+                monitorPollingAllowed() {
+                    return document.visibilityState === 'visible' &&
+                        (this.activeTab === 'monitor' || this.activeTab === 'logs');
+                },
+
                 async refreshMonitor(showErrors = true) {
                     if (showErrors) this.refreshingMonitor = true;
                     try {
@@ -2217,6 +2240,14 @@
                 },
 
                 metricDuration(key) {
+                    if (key === 'p95LatencyMs') {
+                        // rank 算法在小样本下会让 P95 退化为最大值，20 是避免把
+                        // 这种低可信度的桶上界近似误当成稳定延迟的展示阈值。
+                        const rawSamples = this.metricValue('latencySamples', null);
+                        const samples = Number(rawSamples === null ? this.metricValue('windowRequests', 0) : rawSamples);
+                        const count = Number.isFinite(samples) ? Math.max(0, Math.floor(samples)) : 0;
+                        if (count < 20) return count === 0 ? '--' : `${count} 个样本`;
+                    }
                     const value = this.metricValue(key, null);
                     return value === null ? '--' : this.durationText(value);
                 },
