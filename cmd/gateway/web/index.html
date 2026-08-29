@@ -138,37 +138,23 @@
                 </div>
             </div>
 
-            <nav class="flex-1 px-3 py-5">
-                <button @click="activeTab = 'monitor'"
-                        :class="activeTab === 'monitor' ? 'bg-cyan2/12 text-cyan border-l-cyan' : 'text-muted border-l-transparent hover:bg-white/[.04] hover:text-text'"
-                        class="flex w-full items-center gap-3 border-l-4 px-4 py-3 text-sm font-bold transition">
-                    <span class="material-symbols-outlined">monitoring</span>
-                    监控仪表盘
-                </button>
-                <button @click="activeTab = 'providers'; editMode = 'visual'"
-                        :class="activeTab === 'providers' ? 'bg-cyan2/12 text-cyan border-l-cyan' : 'text-muted border-l-transparent hover:bg-white/[.04] hover:text-text'"
-                        class="mt-1 flex w-full items-center gap-3 border-l-4 px-4 py-3 text-sm font-bold transition">
-                    <span class="material-symbols-outlined" :class="activeTab === 'providers' ? 'icon-fill' : ''">dns</span>
-                    提供商
-                </button>
-                <button @click="activeTab = 'routes'; editMode = 'visual'"
-                        :class="activeTab === 'routes' ? 'bg-cyan2/12 text-cyan border-l-cyan' : 'text-muted border-l-transparent hover:bg-white/[.04] hover:text-text'"
-                        class="mt-1 flex w-full items-center gap-3 border-l-4 px-4 py-3 text-sm font-bold transition">
-                    <span class="material-symbols-outlined" :class="activeTab === 'routes' ? 'icon-fill' : ''">alt_route</span>
-                    路由
-                </button>
-                <button @click="activeTab = 'logs'"
-                        :class="activeTab === 'logs' ? 'bg-cyan2/12 text-cyan border-l-cyan' : 'text-muted border-l-transparent hover:bg-white/[.04] hover:text-text'"
-                        class="mt-1 flex w-full items-center gap-3 border-l-4 px-4 py-3 text-sm font-bold transition">
-                    <span class="material-symbols-outlined">receipt_long</span>
-                    请求日志
-                </button>
-                <button @click="activeTab = 'settings'"
-                        :class="activeTab === 'settings' ? 'bg-cyan2/12 text-cyan border-l-cyan' : 'text-muted border-l-transparent hover:bg-white/[.04] hover:text-text'"
-                        class="mt-1 flex w-full items-center gap-3 border-l-4 px-4 py-3 text-sm font-bold transition">
-                    <span class="material-symbols-outlined" :class="activeTab === 'settings' ? 'icon-fill' : ''">tune</span>
-                    全局设置
-                </button>
+            <nav class="flex-1 px-3 py-5" role="tablist">
+                <template x-for="(item, index) in navItems" :key="item.id">
+                    <button @click="selectNav(item.id)"
+                            :class="{
+                                'mt-1': index > 0,
+                                'bg-cyan2/12 text-cyan border-l-cyan': activeTab === item.id,
+                                'text-muted border-l-transparent hover:bg-white/[.04] hover:text-text': activeTab !== item.id
+                            }"
+                            :aria-selected="activeTab === item.id"
+                            role="tab"
+                            class="flex w-full items-center gap-3 border-l-4 px-4 py-3 text-sm font-bold transition">
+                        <span class="material-symbols-outlined"
+                              :class="item.fillIcon && activeTab === item.id ? 'icon-fill' : ''"
+                              x-text="item.icon"></span>
+                        <span x-text="item.label"></span>
+                    </button>
+                </template>
             </nav>
 
             <div class="border-t border-line p-4">
@@ -256,22 +242,15 @@
                         <span class="material-symbols-outlined">close</span>
                     </button>
                 </div>
-                <div class="space-y-2">
-                    <button @click="activeTab = 'monitor'; mobileNavOpen = false" class="btn btn-secondary w-full justify-start">
-                        <span class="material-symbols-outlined">monitoring</span> 监控仪表盘
-                    </button>
-                    <button @click="activeTab = 'providers'; editMode = 'visual'; mobileNavOpen = false" class="btn btn-secondary w-full justify-start">
-                        <span class="material-symbols-outlined">dns</span> 提供商
-                    </button>
-                    <button @click="activeTab = 'routes'; editMode = 'visual'; mobileNavOpen = false" class="btn btn-secondary w-full justify-start">
-                        <span class="material-symbols-outlined">alt_route</span> 路由
-                    </button>
-                    <button @click="activeTab = 'logs'; mobileNavOpen = false" class="btn btn-secondary w-full justify-start">
-                        <span class="material-symbols-outlined">receipt_long</span> 请求日志
-                    </button>
-                    <button @click="activeTab = 'settings'; mobileNavOpen = false" class="btn btn-secondary w-full justify-start">
-                        <span class="material-symbols-outlined">tune</span> 全局设置
-                    </button>
+                <div class="space-y-2" role="tablist">
+                    <template x-for="item in navItems" :key="item.id">
+                        <button @click="selectNav(item.id, true)" class="btn btn-secondary w-full justify-start"
+                                :aria-selected="activeTab === item.id"
+                                role="tab">
+                            <span class="material-symbols-outlined" x-text="item.icon"></span>
+                            <span x-text="item.label"></span>
+                        </button>
+                    </template>
                 </div>
             </div>
 
@@ -355,11 +334,11 @@
                                     <table class="w-full min-w-[560px] border-collapse text-left">
                                         <thead class="bg-panel2 text-xs uppercase tracking-wide text-muted">
                                             <tr>
-                                                <th class="whitespace-nowrap px-3 py-3 font-bold">#</th>
-                                                <th class="whitespace-nowrap px-3 py-3 font-bold">匹配模式</th>
-                                                <th class="whitespace-nowrap px-3 py-3 font-bold">候选（按尝试顺序）</th>
-                                                <th class="whitespace-nowrap px-3 py-3 font-bold">视觉</th>
-                                                <th class="whitespace-nowrap px-3 py-3 text-right font-bold">操作</th>
+                                                <th scope="col" class="whitespace-nowrap px-3 py-3 font-bold">#</th>
+                                                <th scope="col" class="whitespace-nowrap px-3 py-3 font-bold">匹配模式</th>
+                                                <th scope="col" class="whitespace-nowrap px-3 py-3 font-bold">候选（按尝试顺序）</th>
+                                                <th scope="col" class="whitespace-nowrap px-3 py-3 font-bold">视觉</th>
+                                                <th scope="col" class="whitespace-nowrap px-3 py-3 text-right font-bold">操作</th>
                                             </tr>
                                         </thead>
                                         <tbody class="divide-y divide-line">
@@ -400,7 +379,7 @@
                                                               @mouseenter="showTip('视觉伴随: ' + route.vision?.provider + ' / ' + route.vision?.model, $event)"
                                                               @mouseleave="hideTip()"
                                                               @focus="showTip('视觉伴随: ' + route.vision?.provider + ' / ' + route.vision?.model, $event)"
-                                                              @blur="hideTip()" tabindex="0">
+                                                              @blur="hideTip()" tabindex="0" aria-describedby="immediate-tooltip">
                                                             <span class="material-symbols-outlined text-[16px]">visibility</span>
                                                             <span class="font-mono text-[11px]" x-text="route.vision?.model"></span>
                                                         </span>
@@ -416,19 +395,19 @@
                                                          预览抽屉化后主表已有完整宽度，仍按按钮内容取宽以避免操作列抢走候选区。 -->
                                                     <td class="w-px whitespace-nowrap px-3 py-2.5 align-top">
                                                         <div class="flex justify-end gap-1.5">
-                                                            <button @click="moveRoute(index, -1)" :disabled="index === 0" class="btn btn-secondary px-2 py-1.5" title="上移">
+                                                            <button @click="moveRoute(index, -1)" :disabled="index === 0" class="btn btn-secondary px-2 py-1.5" title="上移" aria-label="上移">
                                                                 <span class="material-symbols-outlined text-[18px]">keyboard_arrow_up</span>
                                                             </button>
-                                                            <button @click="moveRoute(index, 1)" :disabled="index === config.routes.length - 1" class="btn btn-secondary px-2 py-1.5" title="下移">
+                                                            <button @click="moveRoute(index, 1)" :disabled="index === config.routes.length - 1" class="btn btn-secondary px-2 py-1.5" title="下移" aria-label="下移">
                                                                 <span class="material-symbols-outlined text-[18px]">keyboard_arrow_down</span>
                                                             </button>
-                                                            <button @click="editRoute(index)" class="btn btn-secondary px-2 py-1.5" title="编辑">
+                                                            <button @click="editRoute(index)" class="btn btn-secondary px-2 py-1.5" title="编辑" aria-label="编辑">
                                                                 <span class="material-symbols-outlined text-[18px]">edit</span>
                                                             </button>
-                                                            <button @click="duplicateRoute(index)" class="btn btn-secondary px-2 py-1.5" title="复制为新路由">
+                                                            <button @click="duplicateRoute(index)" class="btn btn-secondary px-2 py-1.5" title="复制为新路由" aria-label="复制为新路由">
                                                                 <span class="material-symbols-outlined text-[18px]">content_copy</span>
                                                             </button>
-                                                            <button @click="removeRoute(index)" class="btn btn-danger px-2 py-1.5" title="删除">
+                                                            <button @click="removeRoute(index)" class="btn btn-danger px-2 py-1.5" title="删除" aria-label="删除">
                                                                 <span class="material-symbols-outlined text-[18px]">delete</span>
                                                             </button>
                                                         </div>
@@ -616,14 +595,14 @@
                                     <table class="w-full border-collapse text-left">
                                         <thead class="bg-panel2 text-xs uppercase tracking-wide text-muted">
                                             <tr>
-                                                <th class="whitespace-nowrap px-3 py-3 font-bold">名称</th>
-                                                <th class="whitespace-nowrap px-3 py-3 font-bold">格式</th>
-                                                <th class="whitespace-nowrap px-3 py-3 font-bold">Base URL</th>
-                                                <th class="whitespace-nowrap px-3 py-3 font-bold">Key</th>
-                                                <th class="whitespace-nowrap px-3 py-3 text-right font-bold">并发</th>
-                                                <th class="whitespace-nowrap px-3 py-3 text-right font-bold">速率</th>
-                                                <th class="whitespace-nowrap px-3 py-3 text-right font-bold">队列等待</th>
-                                                <th class="whitespace-nowrap px-3 py-3 text-right font-bold">操作</th>
+                                                <th scope="col" class="whitespace-nowrap px-3 py-3 font-bold">名称</th>
+                                                <th scope="col" class="whitespace-nowrap px-3 py-3 font-bold">格式</th>
+                                                <th scope="col" class="whitespace-nowrap px-3 py-3 font-bold">Base URL</th>
+                                                <th scope="col" class="whitespace-nowrap px-3 py-3 font-bold">Key</th>
+                                                <th scope="col" class="whitespace-nowrap px-3 py-3 text-right font-bold">并发</th>
+                                                <th scope="col" class="whitespace-nowrap px-3 py-3 text-right font-bold">速率</th>
+                                                <th scope="col" class="whitespace-nowrap px-3 py-3 text-right font-bold">队列等待</th>
+                                                <th scope="col" class="whitespace-nowrap px-3 py-3 text-right font-bold">操作</th>
                                             </tr>
                                         </thead>
                                         <tbody class="divide-y divide-line">
@@ -795,7 +774,8 @@
                                          这段时间里按钮毫无变化，点了像没反应。 -->
                                     <button @click="checkProviderHealth()" :disabled="checkingHealth"
                                             class="btn btn-secondary px-2 py-2 disabled:opacity-60"
-                                            :title="checkingHealth ? '检测中…' : '检测 Provider'">
+                                            :title="checkingHealth ? '检测中…' : '检测 Provider'"
+                                            :aria-label="checkingHealth ? '检测中…' : '检测 Provider'">
                                         <span class="material-symbols-outlined text-[18px]"
                                               :class="checkingHealth && 'gw-spin'"
                                               x-text="checkingHealth ? 'progress_activity' : 'health_and_safety'"></span>
@@ -803,14 +783,16 @@
                                     <!-- 熔断未启用时后端返回 breakers: null，此时隐藏重置按钮 -->
                                     <button x-show="health?.breakers" @click="resetBreakers()" :disabled="resettingBreakers"
                                             class="btn btn-secondary px-2 py-2 disabled:opacity-60"
-                                            :title="resettingBreakers ? '重置中…' : '重置全部熔断器'">
+                                            :title="resettingBreakers ? '重置中…' : '重置全部熔断器'"
+                                            :aria-label="resettingBreakers ? '重置中…' : '重置全部熔断器'">
                                         <span class="material-symbols-outlined text-[18px]"
                                               :class="resettingBreakers && 'gw-spin'"
                                               x-text="resettingBreakers ? 'progress_activity' : 'restart_alt'"></span>
                                     </button>
                                     <button @click="refreshMonitor()" :disabled="refreshingMonitor"
                                             class="btn btn-secondary px-2 py-2 disabled:opacity-60"
-                                            :title="refreshingMonitor ? '刷新中…' : '刷新仪表盘'">
+                                            :title="refreshingMonitor ? '刷新中…' : '刷新仪表盘'"
+                                            :aria-label="refreshingMonitor ? '刷新中…' : '刷新仪表盘'">
                                         <span class="material-symbols-outlined text-[18px]"
                                               :class="refreshingMonitor && 'gw-spin'">refresh</span>
                                     </button>
@@ -838,15 +820,15 @@
                                                  否则看起来是歪的：标识列左对齐（截断要有左锚点）、
                                                  chip 列居中（chip 宽度不等，左对齐时右边缘散开 10~60px
                                                  不齐）、数值列右对齐（数位对齐才好比较）。 -->
-                                            <th class="w-[22%] whitespace-nowrap px-3 py-2.5 font-bold">Provider</th>
-                                            <th class="w-[10%] whitespace-nowrap px-2 py-2.5 text-center font-bold">健康</th>
-                                            <th class="w-[10%] whitespace-nowrap px-2 py-2.5 text-center font-bold">熔断</th>
-                                            <th class="w-[8%] whitespace-nowrap px-2 py-2.5 text-center font-bold">格式</th>
-                                            <th class="w-[11%] whitespace-nowrap px-2 py-2.5 text-right font-bold" title="运行中 / 排队中">在途</th>
-                                            <th class="w-[18%] whitespace-nowrap px-2 py-2.5 text-right font-bold" title="最大并发 / 每秒请求数">限流</th>
+                                            <th scope="col" class="w-[22%] whitespace-nowrap px-3 py-2.5 font-bold">Provider</th>
+                                            <th scope="col" class="w-[10%] whitespace-nowrap px-2 py-2.5 text-center font-bold">健康</th>
+                                            <th scope="col" class="w-[10%] whitespace-nowrap px-2 py-2.5 text-center font-bold">熔断</th>
+                                            <th scope="col" class="w-[8%] whitespace-nowrap px-2 py-2.5 text-center font-bold">格式</th>
+                                            <th scope="col" class="w-[11%] whitespace-nowrap px-2 py-2.5 text-right font-bold" title="运行中 / 排队中">在途</th>
+                                            <th scope="col" class="w-[18%] whitespace-nowrap px-2 py-2.5 text-right font-bold" title="最大并发 / 每秒请求数">限流</th>
                                             <!-- 状态只有「直通」/「队列」两种短 chip，份额让给限流那列 -->
-                                            <th class="w-[11%] whitespace-nowrap px-2 py-2.5 text-center font-bold">状态</th>
-                                            <th class="w-[10%] whitespace-nowrap px-2 py-2.5 text-center font-bold" title="只检测这一个 Provider">检测</th>
+                                            <th scope="col" class="w-[11%] whitespace-nowrap px-2 py-2.5 text-center font-bold">状态</th>
+                                            <th scope="col" class="w-[10%] whitespace-nowrap px-2 py-2.5 text-center font-bold" title="只检测这一个 Provider">检测</th>
                                         </tr>
                                     </thead>
                                     <tbody class="divide-y divide-line">
@@ -865,7 +847,7 @@
                                                           @mouseleave="hideTip()"
                                                           @focus="showTip(row.healthTitle, $event)"
                                                           @blur="hideTip()"
-                                                          tabindex="0"></span>
+                                                          tabindex="0" aria-describedby="immediate-tooltip"></span>
                                                 </td>
                                                 <!-- 单行重置按钮放在熔断徽章旁边，而不是另开一列：
                                                      重置本就属于熔断这一列的语义，且这张表在 1280px 下
@@ -880,7 +862,7 @@
                                                               @mouseleave="hideTip()"
                                                               @focus="showTip(row.breakerTitle, $event)"
                                                               @blur="hideTip()"
-                                                              tabindex="0"></span>
+                                                              tabindex="0" aria-describedby="immediate-tooltip"></span>
                                                         <!-- 不可重置时用 invisible 而非 x-show：x-show 会把按钮
                                                              从布局里摘掉，导致「有按钮的行」chip 被挤偏、
                                                              「没按钮的行」chip 居中，同一列里位置不一致——
@@ -891,7 +873,8 @@
                                                                 :tabindex="row.breakerResettable ? 0 : -1"
                                                                 :disabled="!row.breakerResettable || resettingBreakers || resettingBreaker === row.name"
                                                                 class="rounded p-0.5 text-muted transition hover:text-cyan disabled:opacity-60"
-                                                                :title="resettingBreaker === row.name ? '重置中…' : '闭合「' + row.name + '」的熔断器'">
+                                                                :title="resettingBreaker === row.name ? '重置中…' : '闭合「' + row.name + '」的熔断器'"
+                                                                :aria-label="resettingBreaker === row.name ? '重置中…' : '闭合「' + row.name + '」的熔断器'">
                                                             <span class="material-symbols-outlined text-[15px]"
                                                                   :class="resettingBreaker === row.name && 'gw-spin'"
                                                                   x-text="resettingBreaker === row.name ? 'progress_activity' : 'restart_alt'"></span>
@@ -905,7 +888,7 @@
                                                           @mouseenter="showTip(row.format, $event)"
                                                           @mouseleave="hideTip()"
                                                           @focus="showTip(row.format, $event)"
-                                                          @blur="hideTip()" tabindex="0"
+                                                          @blur="hideTip()" tabindex="0" aria-describedby="immediate-tooltip"
                                                           x-text="row.format === 'anthropic' ? 'ANT' : 'OAI'"></span>
                                                 </td>
                                                 <!-- 运行中 / 排队合成一列：两个数各占一列时表头「运行中」「排队」
@@ -930,7 +913,8 @@
                                                     <button @click="checkOneProvider(row.name)"
                                                             :disabled="checkingHealth || checkingProvider === row.name"
                                                             class="btn btn-secondary px-2 py-1 disabled:opacity-60"
-                                                            :title="checkingProvider === row.name ? '检测中…' : '检测「' + row.name + '」'">
+                                                            :title="checkingProvider === row.name ? '检测中…' : '检测「' + row.name + '」'"
+                                                            :aria-label="checkingProvider === row.name ? '检测中…' : '检测「' + row.name + '」'">
                                                         <span class="material-symbols-outlined text-[16px]"
                                                               :class="checkingProvider === row.name && 'gw-spin'"
                                                               x-text="checkingProvider === row.name ? 'progress_activity' : 'health_and_safety'"></span>
@@ -1067,14 +1051,14 @@
                         <table class="w-full min-w-[860px] border-collapse text-left">
                             <thead class="sticky top-0 z-10 bg-panel2 text-xs uppercase tracking-wide text-muted">
                                 <tr>
-                                    <th class="w-px whitespace-nowrap px-3 py-2.5 font-bold">时间</th>
-                                    <th class="w-px whitespace-nowrap px-2 py-2.5 font-bold">状态</th>
-                                    <th class="w-px whitespace-nowrap px-3 py-2.5 font-bold" title="客户端 IP · Key 来源 · Key 指纹">客户端</th>
-                                    <th class="w-px whitespace-nowrap px-3 py-2.5 font-bold">模型</th>
-                                    <th class="w-px whitespace-nowrap px-3 py-2.5 font-bold">Provider</th>
-                                    <th class="w-px whitespace-nowrap px-3 py-2.5 text-right font-bold">耗时</th>
-                                    <th class="w-px whitespace-nowrap px-3 py-2.5 font-bold">转移轨迹</th>
-                                    <th class="w-full max-w-0 whitespace-nowrap px-3 py-2.5 font-bold">错误</th>
+                                    <th scope="col" class="w-px whitespace-nowrap px-3 py-2.5 font-bold">时间</th>
+                                    <th scope="col" class="w-px whitespace-nowrap px-2 py-2.5 font-bold">状态</th>
+                                    <th scope="col" class="w-px whitespace-nowrap px-3 py-2.5 font-bold" title="客户端 IP · Key 来源 · Key 指纹">客户端</th>
+                                    <th scope="col" class="w-px whitespace-nowrap px-3 py-2.5 font-bold">模型</th>
+                                    <th scope="col" class="w-px whitespace-nowrap px-3 py-2.5 font-bold">Provider</th>
+                                    <th scope="col" class="w-px whitespace-nowrap px-3 py-2.5 text-right font-bold">耗时</th>
+                                    <th scope="col" class="w-px whitespace-nowrap px-3 py-2.5 font-bold">转移轨迹</th>
+                                    <th scope="col" class="w-full max-w-0 whitespace-nowrap px-3 py-2.5 font-bold">错误</th>
                                 </tr>
                             </thead>
                             <template x-for="log in requestLogs" :key="logKey(log)">
@@ -1435,7 +1419,7 @@
 
     <!-- 自定义 tooltip：fixed 定位而不是 CSS ::after，因为徽章所在表格外层是
          overflow-x-auto，绝对定位的气泡会被滚动容器裁掉。z-[70] 在错误提示之上。 -->
-    <div x-show="tip.show" x-cloak role="tooltip"
+    <div id="immediate-tooltip" x-show="tip.show" x-cloak role="tooltip"
          :style="`left: ${tip.x}px; top: ${tip.y}px;`"
          class="pointer-events-none fixed z-[70] max-w-xs -translate-x-1/2 -translate-y-full whitespace-pre-line rounded-lg border border-line bg-panel3 px-3 py-2 text-xs font-semibold leading-relaxed text-text shadow-glow">
         <span x-text="tip.text"></span>
@@ -1468,6 +1452,13 @@
         function gatewayApp() {
             return {
                 activeTab: 'monitor',
+                navItems: [
+                    { id: 'monitor', label: '监控仪表盘', icon: 'monitoring', fillIcon: false },
+                    { id: 'providers', label: '提供商', icon: 'dns', fillIcon: true },
+                    { id: 'routes', label: '路由', icon: 'alt_route', fillIcon: true },
+                    { id: 'logs', label: '请求日志', icon: 'receipt_long', fillIcon: false },
+                    { id: 'settings', label: '全局设置', icon: 'tune', fillIcon: true }
+                ],
                 editMode: 'visual',
                 mobileNavOpen: false,
                 // 预览抽屉默认收起；这是界面状态，不写入配置内容。
@@ -2119,6 +2110,12 @@
                         }
                     }
                     return `${fallback}（HTTP ${res.status} ${res.statusText || ''}`.trim() + '）';
+                },
+
+                selectNav(tab, closeMobile = false) {
+                    this.activeTab = tab;
+                    if (tab === 'providers' || tab === 'routes') this.editMode = 'visual';
+                    if (closeMobile) this.mobileNavOpen = false;
                 },
 
                 pageTitle() {
