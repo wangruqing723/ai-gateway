@@ -203,6 +203,16 @@
                             <span>监听 <span class="font-mono text-text" x-text="health?.listenAddress || '--'"></span></span>
                             <span x-show="restartRequired.length" x-cloak class="text-warn">需重启</span>
                         </div>
+                        <!-- 预览只在可视化配置页出现；抽屉状态跨刷新保留，切换 providers/routes/settings 时内容跟随当前页。 -->
+                        <button x-show="isConfigTab() && editMode === 'visual'" x-cloak
+                                @click="togglePreviewDrawer()"
+                                :aria-expanded="previewDrawerOpen"
+                                aria-controls="config-preview-drawer"
+                                :aria-label="previewDrawerOpen ? '收起配置预览' : '展开配置预览'"
+                                class="btn btn-secondary px-3">
+                            <span class="material-symbols-outlined text-[18px]">description</span>
+                            <span class="hidden sm:inline" x-text="previewDrawerOpen ? '收起预览' : '配置预览'"></span>
+                        </button>
                         <button x-show="isConfigTab()" x-cloak @click="reloadConfig()" :disabled="loading" class="btn btn-secondary">
                             <span class="material-symbols-outlined">sync</span>
                             <span class="hidden sm:inline">重载</span>
@@ -217,7 +227,7 @@
 
             <!-- 未保存提示：可拖拽浮层，默认右下角。
                  不做成 inline 横幅是因为那会把整页内容往下推，每改一个字段页面就跳一次；
-                 也不放顶部，顶部浮层会盖住统计卡片（statusMessage 就是这个毛病）。
+                 也不放顶部，顶部浮层会盖住统计卡片。
                  弹窗开着时隐掉：弹窗保存自己落盘，这时提示未保存只是噪音。
                  只针对全局设置、故障转移与熔断这些直接编辑的字段。
                  顶部的保存按钮保持不变，这里只是提醒 + 快捷入口。 -->
@@ -265,58 +275,30 @@
                 </div>
             </div>
 
-			<div x-show="statusMessage" x-transition x-cloak role="status" aria-live="polite"
-				 :class="statusType === 'success' ? 'border-good/40 bg-good/10 text-emerald-100' : 'border-danger/40 bg-danger/10 text-rose-100'"
-				 style="top: 5rem"
-				 class="fixed left-4 right-4 z-[60] flex items-start justify-between gap-4 rounded-lg border px-4 py-3 shadow-glow lg:left-80 lg:right-8">
-                <div class="flex min-w-0 items-center gap-3">
-                    <span class="material-symbols-outlined shrink-0" x-text="statusType === 'success' ? 'check_circle' : 'error'"></span>
-                    <span class="min-w-0 break-words text-sm font-semibold" x-text="statusMessage"></span>
-                </div>
-                <button @click="statusMessage = ''" class="shrink-0 text-current opacity-70 hover:opacity-100" title="关闭通知">
-                    <span class="material-symbols-outlined">close</span>
-                </button>
+			<!-- 状态提示统一为右下角 toast 栈，单条 toast 各自计时，连续提示不会互相覆盖。 -->
+			<div x-ref="statusToastStack" x-show="statusToasts.length" x-transition x-cloak
+				 :style="statusToastStackStyle()"
+				 class="pointer-events-none fixed bottom-5 left-4 right-4 z-[60] flex max-h-[calc(100vh-6rem)] flex-col items-end gap-2 overflow-y-auto lg:left-80 lg:right-8">
+                <template x-for="toast in statusToasts" :key="toast.id">
+                    <div role="status" aria-live="polite"
+                         :class="toast.type === 'success' ? 'border-good/40 bg-good/10 text-emerald-100' : 'border-danger/40 bg-danger/10 text-rose-100'"
+                         class="pointer-events-auto flex w-full max-w-xl items-start justify-between gap-4 rounded-lg border px-4 py-3 shadow-glow backdrop-blur-xl">
+                        <div class="flex min-w-0 items-center gap-3">
+                            <span class="material-symbols-outlined shrink-0" x-text="toast.type === 'success' ? 'check_circle' : 'error'"></span>
+                            <span class="min-w-0 break-words text-sm font-semibold" x-text="toast.message"></span>
+                        </div>
+                        <button @click="dismissStatus(toast.id)" class="shrink-0 text-current opacity-70 hover:opacity-100" aria-label="关闭通知">
+                            <span class="material-symbols-outlined">close</span>
+                        </button>
+                    </div>
+                </template>
             </div>
 
             <main class="flex-1 overflow-y-auto px-4 py-5 sm:px-6 lg:h-[calc(100vh-4rem)] lg:overflow-hidden lg:px-8">
                 <section x-show="isConfigTab()" x-transition class="lg:flex lg:h-full lg:min-h-0 lg:flex-col">
-                    <div class="mb-5 grid shrink-0 grid-cols-1 gap-4 xl:grid-cols-4">
-                        <div class="glass rounded-lg p-4">
-                            <div class="mb-3 flex items-center justify-between">
-                                <span class="text-sm font-bold text-muted">Providers</span>
-                                <span class="material-symbols-outlined text-cyan">dns</span>
-                            </div>
-                            <div class="text-3xl font-extrabold text-white" x-text="providerCount()"></div>
-                            <div class="mt-1 text-xs text-muted">上游服务配置</div>
-                        </div>
-                        <div class="glass rounded-lg p-4">
-                            <div class="mb-3 flex items-center justify-between">
-                                <span class="text-sm font-bold text-muted">Routes</span>
-                                <span class="material-symbols-outlined text-violet">alt_route</span>
-                            </div>
-                            <div class="text-3xl font-extrabold text-white" x-text="routeCount()"></div>
-                            <div class="mt-1 text-xs text-muted">按列表顺序匹配</div>
-                        </div>
-                        <div class="glass rounded-lg p-4">
-                            <div class="mb-3 flex items-center justify-between">
-                                <span class="text-sm font-bold text-muted">Mode</span>
-                                <span class="material-symbols-outlined text-good">bolt</span>
-                            </div>
-                            <div class="truncate text-2xl font-extrabold text-white" x-text="config.directMode ? '直通' : '队列'"></div>
-                            <div class="mt-1 text-xs text-muted" x-text="config.directMode ? '跳过并发与限速队列' : '启用并发、限速、排队'"></div>
-                        </div>
-                        <div class="glass rounded-lg p-4">
-                            <div class="mb-3 flex items-center justify-between">
-                                <span class="text-sm font-bold text-muted">Timeout</span>
-                                <span class="material-symbols-outlined text-warn">timer</span>
-                            </div>
-                            <div class="text-3xl font-extrabold text-white"><span x-text="seconds(config.timeout)"></span>s</div>
-                            <div class="mt-1 text-xs text-muted">常规请求超时</div>
-                        </div>
-                    </div>
-
-                    <div x-show="activeTab === 'settings'" x-transition class="mb-5 flex shrink-0 flex-col justify-between gap-3 rounded-lg border border-line bg-panel/70 p-2 sm:flex-row sm:items-center">
-                        <div class="grid grid-cols-2 gap-2 sm:w-auto">
+                    <!-- 四张统计卡片改成轻量 chip，仍保留四个数值；sm 以下隐藏标签、保留图标和数值。 -->
+                    <div class="mb-5 flex shrink-0 flex-col justify-between gap-3 rounded-lg border border-line bg-panel/70 p-2 sm:flex-row sm:items-center">
+                        <div x-show="activeTab === 'settings'" x-cloak class="grid grid-cols-2 gap-2 sm:w-auto">
                             <button @click="editMode = 'visual'"
                                     :class="editMode === 'visual' ? 'bg-cyan2 text-ink' : 'text-muted hover:bg-white/[.06] hover:text-text'"
                                     class="rounded-lg px-4 py-2 text-sm font-extrabold transition">
@@ -328,16 +310,36 @@
                                 YAML 编辑器
                             </button>
                         </div>
-                        <div class="flex flex-wrap items-center gap-2 px-2 text-xs text-muted">
+                        <div class="flex flex-wrap items-center gap-1.5 px-1 text-xs text-muted sm:flex-1 sm:justify-end">
+                            <span class="chip bg-ink" aria-label="Provider 数量">
+                                <span class="material-symbols-outlined text-[16px] text-cyan">dns</span>
+                                <span class="hidden sm:inline">Providers</span>
+                                <span class="font-mono text-text" x-text="providerCount()"></span>
+                            </span>
+                            <span class="chip bg-ink" aria-label="路由数量">
+                                <span class="material-symbols-outlined text-[16px] text-violet">alt_route</span>
+                                <span class="hidden sm:inline">Routes</span>
+                                <span class="font-mono text-text" x-text="routeCount()"></span>
+                            </span>
+                            <span class="chip bg-ink" aria-label="运行模式">
+                                <span class="material-symbols-outlined text-[16px] text-good">bolt</span>
+                                <span class="hidden sm:inline">Mode</span>
+                                <span class="font-mono text-text" x-text="config.directMode ? '直通' : '队列'"></span>
+                            </span>
+                            <span class="chip bg-ink" aria-label="常规请求超时">
+                                <span class="material-symbols-outlined text-[16px] text-warn">timer</span>
+                                <span class="hidden sm:inline">Timeout</span>
+                                <span class="font-mono text-text"><span x-text="seconds(config.timeout)"></span>s</span>
+                            </span>
                             <span class="chip bg-ink"><span class="material-symbols-outlined text-[16px]">lan</span><span x-text="config.host || '127.0.0.1'"></span></span>
                             <span class="chip bg-ink"><span class="material-symbols-outlined text-[16px]">schedule</span><span x-text="seconds(config.streamActivityTimeout) + 's stream'"></span></span>
                         </div>
                     </div>
 
-                    <!-- 9/3 而不是 8/4：provider 和路由都是宽表格，右侧配置预览是只读概览、
-                         窄一点照样能读，但表格少一列宽度就要横向滚动、操作列被裁掉。 -->
-                    <div x-show="editMode === 'visual'" x-transition class="grid grid-cols-1 gap-5 xl:grid-cols-12 lg:min-h-0 lg:flex-1 lg:overflow-hidden">
-                        <div class="space-y-5 xl:col-span-9 lg:min-h-0 lg:overflow-y-auto lg:pr-2">
+                    <!-- 历史布局曾用 9/3（更早是 8/4）给右侧预览让位，provider 和路由表因此容易横向滚动、操作列被裁掉。
+                         预览现在是默认折叠的浮动抽屉，不再参与分栏，配置表格占满可用宽度。 -->
+                    <div x-show="editMode === 'visual'" x-transition class="lg:min-h-0 lg:flex-1 lg:overflow-hidden">
+                        <div class="space-y-5 lg:min-h-0 lg:overflow-y-auto lg:pr-2">
                             <section x-show="activeTab === 'routes'" x-transition class="glass rounded-lg">
                                 <div class="flex flex-col gap-3 border-b border-line p-4 sm:flex-row sm:items-center sm:justify-between">
                                     <div>
@@ -375,11 +377,12 @@
                                                          原来拆两列各自纵向排列，两列条目对不齐、看不出配对关系；
                                                          改成一候选一项后若强制每项独占一行，5 个候选会把行撑到 250px 高、
                                                          右侧大片留白浪费。这里用 flex-wrap，宽度够就并排、不够才换行。 -->
-                                                    <!-- w-full + max-w-0 让这一列吃掉剩余宽度并允许收缩到 0：
+                                                    <!-- 历史布局使用 w-full + max-w-0 让这一列吃掉剩余宽度并允许收缩到 0：
                                                          不加的话候选内容会把 table 撑出容器、横向滚动条回来、操作列被裁。
                                                          内层再套一个 min-w-0 的容器——td 的 max-w-0 不会自动传导给
                                                          flex 子项，缺了它 flex-wrap 在某些宽度（实测 1600px）算出的
-                                                         可用宽度仍是内容宽度，于是排成一行把表撑到 1039px。 -->
+                                                         可用宽度仍是内容宽度，于是排成一行把表撑到 1039px。
+                                                         预览抽屉不再占用主栏宽度，但多个长 Provider / 模型仍需要保留这层收缩保护。 -->
                                                     <td class="w-full max-w-0 px-3 py-2.5 align-top">
                                                         <div class="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1.5">
                                                             <template x-for="(target, ti) in routeTargets(route)" :key="ti">
@@ -394,15 +397,23 @@
                                                     </td>
                                                     <td class="w-px px-3 py-2.5 align-top">
                                                         <span x-show="route.vision" class="chip whitespace-nowrap border-cyan2/35 bg-cyan2/10 text-cyan"
-                                                              :title="'视觉伴随: ' + route.vision?.provider + ' / ' + route.vision?.model">
+                                                              @mouseenter="showTip('视觉伴随: ' + route.vision?.provider + ' / ' + route.vision?.model, $event)"
+                                                              @mouseleave="hideTip()"
+                                                              @focus="showTip('视觉伴随: ' + route.vision?.provider + ' / ' + route.vision?.model, $event)"
+                                                              @blur="hideTip()" tabindex="0">
                                                             <span class="material-symbols-outlined text-[16px]">visibility</span>
                                                             <span class="font-mono text-[11px]" x-text="route.vision?.model"></span>
                                                         </span>
                                                         <!-- 未启用用短横线：11 行里重复 11 遍「未启用」是纯噪声，一眼扫下来只需要知道「这里没配」 -->
-                                                        <span x-show="!route.vision" class="text-sm text-muted" title="未启用视觉伴随">—</span>
+                                                        <span x-show="!route.vision" class="text-sm text-muted"
+                                                              @mouseenter="showTip('未启用视觉伴随', $event)"
+                                                              @mouseleave="hideTip()"
+                                                              @focus="showTip('未启用视觉伴随', $event)"
+                                                              @blur="hideTip()" tabindex="0">—</span>
                                                     </td>
-                                                    <!-- w-px 让这列收缩到内容宽度：不限制的话它会连同 w-full 一起
-                                                         抢剩余空间（实测吃到 726px），把候选列挤到 92px 反而溢出。 -->
+                                                    <!-- 历史布局中 w-px 让这列收缩到内容宽度：不限制的话它会连同 w-full 一起
+                                                         抢剩余空间（实测吃到 726px），把候选列挤到 92px 反而溢出。
+                                                         预览抽屉化后主表已有完整宽度，仍按按钮内容取宽以避免操作列抢走候选区。 -->
                                                     <td class="w-px whitespace-nowrap px-3 py-2.5 align-top">
                                                         <div class="flex justify-end gap-1.5">
                                                             <button @click="moveRoute(index, -1)" :disabled="index === 0" class="btn btn-secondary px-2 py-1.5" title="上移">
@@ -598,54 +609,74 @@
                                      包成一个小方块后纵向占地是表格的几倍，数量一多就要来回滚动比对。
                                      表格同列对齐，扫一眼就能横向比较各上游的并发和限速。 -->
                                 <div class="overflow-x-auto">
-                                    <!-- 列宽预算很紧：这块在 xl:col-span-8 里，右侧还有配置预览栏。
-                                         并发/限速/队列等待三个数值合并成一列「限流」，否则每列都要留出
-                                         表头「队列等待」的宽度，表格会宽到必须横向滚动、操作列被裁掉。
-                                         表头和数值都 nowrap，避免「API KEY」「队列等待」被折成两行把行高撑高。 -->
-                                    <table class="w-full min-w-[600px] border-collapse text-left">
+                                    <!-- 历史布局备注：这块曾在 xl:col-span-8 里，右侧还有配置预览栏，
+                                         因而把并发/限速/队列等待三个数值合并成一列「限流」，否则表格会宽到
+                                         必须横向滚动、操作列被裁掉；当时表头和数值都 nowrap 以避免行高撑高。
+                                         预览抽屉化后恢复三个独立列，窄屏仍由外层横向滚动容器承接。 -->
+                                    <table class="w-full border-collapse text-left">
                                         <thead class="bg-panel2 text-xs uppercase tracking-wide text-muted">
                                             <tr>
                                                 <th class="whitespace-nowrap px-3 py-3 font-bold">名称</th>
                                                 <th class="whitespace-nowrap px-3 py-3 font-bold">格式</th>
                                                 <th class="whitespace-nowrap px-3 py-3 font-bold">Base URL</th>
                                                 <th class="whitespace-nowrap px-3 py-3 font-bold">Key</th>
-                                                <th class="whitespace-nowrap px-3 py-3 font-bold" title="最大并发 / 每秒请求数 / 队列最大等待">限流</th>
+                                                <th class="whitespace-nowrap px-3 py-3 text-right font-bold">并发</th>
+                                                <th class="whitespace-nowrap px-3 py-3 text-right font-bold">速率</th>
+                                                <th class="whitespace-nowrap px-3 py-3 text-right font-bold">队列等待</th>
                                                 <th class="whitespace-nowrap px-3 py-3 text-right font-bold">操作</th>
                                             </tr>
                                         </thead>
                                         <tbody class="divide-y divide-line">
                                             <template x-for="(provider, name) in config.providers" :key="name">
                                                 <tr class="bg-panel/35 transition hover:bg-white/[.04]">
-                                                    <!-- 名称、Base URL 两列各 w-1/2 + max-w-0，等分剩余宽度。
-                                                         名称列若按内容定宽（w-px），一个超长 provider 名就能把列
-                                                         撑到近千像素，后面几列全被顶到容器外、操作列直接被裁掉；
-                                                         两列都写 w-full 也不行，浏览器按内容多寡分配剩余空间，
-                                                         长名字依旧独吞（实测 626px），URL 被压到只剩表头宽度。
-                                                         写死各 50% 才能两边都留出可读长度，超长的由 truncate
-                                                         截断、tooltip 看全称。 -->
-                                                    <td class="w-1/2 max-w-0 px-3 py-2.5">
-                                                        <span class="block truncate font-mono text-sm font-bold text-white" :title="name" x-text="name"></span>
+                                                    <!-- 历史布局曾让名称、Base URL 两列各 w-1/2 + max-w-0：
+                                                         名称列按内容定宽会被超长名称撑到近千像素，后面几列被顶出容器；
+                                                         两列都写 w-full 时长名字仍独吞空间（实测 626px）。
+                                                         现在主表已拿回全宽，去掉固定 50% 预算；max-w-0 + truncate
+                                                         仍保留，超长内容交给即时 tooltip 展示全文。 -->
+                                                    <td class="max-w-0 px-3 py-2.5">
+                                                        <span class="block truncate font-mono text-sm font-bold text-white"
+                                                              @mouseenter="showTip(name, $event)"
+                                                              @mouseleave="hideTip()"
+                                                              @focus="showTip(name, $event)"
+                                                              @blur="hideTip()"
+                                                              tabindex="0" x-text="name"></span>
                                                     </td>
                                                     <td class="w-px whitespace-nowrap px-2 py-2.5">
                                                         <span class="chip px-1.5 text-[11px]" :class="provider.format === 'anthropic' ? 'border-violet/40 bg-violet/10 text-violet' : 'border-good/40 bg-good/10 text-good'" x-text="provider.format"></span>
                                                     </td>
-                                                    <!-- 与名称列同为 w-1/2 + max-w-0：允许收缩到 0，
-                                                         窄屏时由 truncate 截断 URL，而不是把整个表撑出容器
-                                                         （实测 1440px 下原本溢出 116px，操作列被裁）。 -->
-                                                    <td class="w-1/2 max-w-0 px-3 py-2.5">
-                                                        <!-- 去掉协议前缀：11 个 provider 每行都顶着 https:// 占宽度又没信息量 -->
-                                                        <span class="block truncate font-mono text-xs text-muted" :title="provider.baseUrl"
-                                                              x-text="(provider.baseUrl || '').replace(/^https?:\/\//, '')"></span>
+                                                    <!-- 历史上 URL 列与名称列同为 w-1/2 + max-w-0，实测 1440px 下曾溢出 116px；
+                                                         主表恢复全宽后不再固定半列，但保留 max-w-0 + truncate 保护窄屏。 -->
+                                                    <td class="max-w-0 px-3 py-2.5">
+                                                        <!-- 历史上为省宽度去掉 https://；现在恢复完整地址，截断处用即时 tooltip 看全文。 -->
+                                                        <span class="block truncate font-mono text-xs text-muted"
+                                                              @mouseenter="showTip(provider.baseUrl, $event)"
+                                                              @mouseleave="hideTip()"
+                                                              @focus="showTip(provider.baseUrl, $event)"
+                                                              @blur="hideTip()"
+                                                              tabindex="0" x-text="provider.baseUrl || ''"></span>
                                                     </td>
                                                     <td class="w-px whitespace-nowrap px-2 py-2.5 text-center">
-                                                        <span x-show="provider.apiKeyConfigured" class="material-symbols-outlined text-[18px] text-good" title="已配置密钥">key</span>
-                                                        <span x-show="!provider.apiKeyConfigured" class="material-symbols-outlined text-[18px] text-muted" title="未配置，从客户端请求头读取">key_off</span>
+                                                        <span x-show="provider.apiKeyConfigured"
+                                                              class="material-symbols-outlined text-[18px] text-good"
+                                                              @mouseenter="showTip('已配置密钥', $event)"
+                                                              @mouseleave="hideTip()"
+                                                              @focus="showTip('已配置密钥', $event)"
+                                                              @blur="hideTip()"
+                                                              tabindex="0">key</span>
+                                                        <span x-show="!provider.apiKeyConfigured"
+                                                              class="material-symbols-outlined text-[18px] text-muted"
+                                                              @mouseenter="showTip('未配置，从客户端请求头读取', $event)"
+                                                              @mouseleave="hideTip()"
+                                                              @focus="showTip('未配置，从客户端请求头读取', $event)"
+                                                              @blur="hideTip()"
+                                                              tabindex="0">key_off</span>
                                                     </td>
-                                                    <td class="w-px whitespace-nowrap px-3 py-2.5 font-mono text-xs text-muted">
-                                                        <span class="text-text" x-text="(provider.maxConcurrent || 5) + ' 并发'"></span>
-                                                        <span x-text="' · ' + ((provider.maxPerSecond || 0) === 0 ? '不限速' : provider.maxPerSecond + '/s')"></span>
-                                                        <span x-text="' · 等待 ' + formatMs(provider.maxQueueWait || 30000)"></span>
-                                                    </td>
+                                                    <td class="w-px whitespace-nowrap px-3 py-2.5 text-right font-mono text-xs text-text" x-text="provider.maxConcurrent || 5"></td>
+                                                    <td class="w-px whitespace-nowrap px-3 py-2.5 text-right font-mono text-xs text-muted"
+                                                        x-text="(provider.maxPerSecond || 0) === 0 ? '不限速' : provider.maxPerSecond + '/s'"></td>
+                                                    <td class="w-px whitespace-nowrap px-3 py-2.5 text-right font-mono text-xs text-muted"
+                                                        x-text="formatMs(provider.maxQueueWait || 30000)"></td>
                                                     <td class="w-px whitespace-nowrap px-3 py-2.5">
                                                         <div class="flex justify-end gap-1.5">
                                                             <button @click="editProvider(name)" class="btn btn-secondary px-2 py-1.5" title="编辑 Provider">
@@ -662,7 +693,7 @@
                                                 </tr>
                                             </template>
                                             <tr x-show="!config.providers || Object.keys(config.providers).length === 0">
-                                                <td colspan="6" class="px-3 py-10 text-center text-sm text-muted">还没有 Provider</td>
+                                                <td colspan="8" class="px-3 py-10 text-center text-sm text-muted">还没有 Provider</td>
                                             </tr>
                                         </tbody>
                                     </table>
@@ -670,22 +701,33 @@
                             </section>
                         </div>
 
-                        <aside class="space-y-5 xl:col-span-3 lg:min-h-0 lg:overflow-y-auto lg:pr-2">
-                            <section class="glass rounded-lg lg:flex lg:max-h-[68vh] lg:min-h-[360px] lg:flex-col">
-                                <div class="flex items-center justify-between border-b border-line p-4">
-                                    <div class="flex items-center gap-2 font-bold text-white">
-                                        <span class="material-symbols-outlined text-cyan">description</span>
-                                        配置预览
-                                    </div>
-                                    <button @click="copyPreview()" class="btn btn-secondary px-2 py-2" title="复制预览">
+                    </div>
+
+                    <div x-show="isConfigTab() && editMode === 'visual' && previewDrawerOpen" x-transition.opacity x-cloak
+                         @click="closePreviewDrawer()"
+                         class="fixed bottom-0 left-0 right-0 top-16 z-[35] bg-black/50"></div>
+                    <aside id="config-preview-drawer"
+                           x-show="isConfigTab() && editMode === 'visual' && previewDrawerOpen" x-transition
+                           x-cloak @keydown.escape.window="previewDrawerOpen && closePreviewDrawer()"
+                           class="fixed bottom-0 right-0 top-16 z-50 flex w-full max-w-[calc(100vw-1rem)] flex-col border-l border-line bg-panel shadow-glow sm:w-[32rem]">
+                        <section class="flex min-h-0 flex-1 flex-col">
+                            <div class="flex shrink-0 items-center justify-between border-b border-line p-4">
+                                <div class="flex items-center gap-2 font-bold text-white">
+                                    <span class="material-symbols-outlined text-cyan">description</span>
+                                    配置预览
+                                </div>
+                                <div class="flex items-center gap-2">
+                                    <button @click="copyPreview()" class="btn btn-secondary px-2 py-2" title="复制预览" aria-label="复制预览">
                                         <span class="material-symbols-outlined text-[18px]">content_copy</span>
                                     </button>
+                                    <button @click="closePreviewDrawer()" class="btn btn-secondary px-2 py-2" title="收起预览" aria-label="收起预览">
+                                        <span class="material-symbols-outlined text-[18px]">close</span>
+                                    </button>
                                 </div>
-                                <pre class="max-h-[560px] overflow-auto bg-ink p-4 font-mono text-xs leading-5 text-slate-300 lg:min-h-0 lg:flex-1" x-text="configPreview()"></pre>
-                            </section>
-
-                        </aside>
-                    </div>
+                            </div>
+                            <pre class="min-h-0 flex-1 overflow-auto bg-ink p-4 font-mono text-xs leading-5 text-slate-300" x-text="configPreview()"></pre>
+                        </section>
+                    </aside>
 
                     <div x-show="editMode === 'yaml'" x-transition x-cloak class="glass rounded-lg lg:flex lg:min-h-0 lg:flex-1 lg:flex-col">
                         <div class="flex flex-col gap-3 border-b border-line p-4 sm:flex-row sm:items-center sm:justify-between">
@@ -741,7 +783,7 @@
                     </div>
 
                     <div class="grid grid-cols-1 gap-5 xl:grid-cols-12">
-                        <section class="glass rounded-lg xl:col-span-8">
+                        <section class="glass rounded-lg xl:col-span-9">
                             <div class="flex items-center justify-between border-b border-line p-4">
                                 <div class="flex items-center gap-2 font-bold text-white">
                                     <span class="material-symbols-outlined text-cyan">dns</span>
@@ -779,10 +821,12 @@
                                  系统资源和路由排行，provider 一多就要滚很久才能看到它们。
                                  表头 sticky 吸顶，滚动时列名不丢。 -->
                             <div class="overflow-auto lg:max-h-[451px]">
-                                <!-- min-w 保持 660：后七列不可压缩部分实测合计 565px，
+                                <!-- 历史布局用 min-w 保持 660：后七列不可压缩部分实测合计 565px，
                                      名称列带 max-w-0 truncate 可以继续缩，所以加了「检测」列
-                                     也不必放宽 min-w（放到 720 会在 1440 宽度下多出 9px 横向滚动）。 -->
-                                <table class="w-full min-w-[660px] border-collapse text-left">
+                                     也不必放宽 min-w（放到 720 会在 1440 宽度下多出 9px 横向滚动）。
+                                     现在监控表在 xl 使用 9/3 分栏，桌面端解除这个最小宽度；xl 以下仍保留 660，
+                                     让窄屏通过横向滚动完整查看操作列。 -->
+                                <table class="w-full min-w-[660px] border-collapse text-left xl:min-w-0">
                                     <thead class="sticky top-0 z-10 bg-panel2 text-xs uppercase tracking-wide text-muted">
                                         <tr>
                                             <!-- 用百分比分配列宽而不是让某一列吃掉全部剩余空间：
@@ -808,7 +852,11 @@
                                     <tbody class="divide-y divide-line">
                                         <template x-for="row in providerStatusRows()" :key="row.name">
                                             <tr class="bg-panel/35">
-                                                <td class="max-w-0 truncate px-3 py-2 font-mono text-xs font-bold text-white" :title="row.name" x-text="row.name"></td>
+                                                <td class="max-w-0 truncate px-3 py-2 font-mono text-xs font-bold text-white"
+                                                    @mouseenter="showTip(row.name, $event)"
+                                                    @mouseleave="hideTip()"
+                                                    @focus="showTip(row.name, $event)"
+                                                    @blur="hideTip()" tabindex="0" x-text="row.name"></td>
                                                 <td class="whitespace-nowrap px-2 py-2 text-center">
                                                     <!-- 不用 title：原生 tooltip 有约 1-2 秒延迟且无法调，
                                                          这两列的详情（剩余冷却、失败次数）是要一眼看到的。 -->
@@ -821,7 +869,8 @@
                                                 </td>
                                                 <!-- 单行重置按钮放在熔断徽章旁边，而不是另开一列：
                                                      重置本就属于熔断这一列的语义，且这张表在 1280px 下
-                                                     已经贴着 min-width 下限，再加一整列会加重横向滚动。
+                                                     列数较多，再加一整列会加重横向滚动；桌面端现在虽已解除
+                                                     历史 min-width 限制，仍需避免为一个动作单独占列。
                                                      只在「重置确实会改变状态」时出现（闭合且无失败计数
                                                      时是空操作），所以多数行不占这份宽度。 -->
                                                 <td class="whitespace-nowrap px-2 py-2 text-center">
@@ -850,9 +899,13 @@
                                                     </span>
                                                 </td>
                                                 <!-- 格式缩写成 ANT / OAI：取值只有两种，全称在这列纯占宽度，
-                                                     全称挂 title。 -->
+                                                     全称由即时 tooltip 展示。 -->
                                                 <td class="whitespace-nowrap px-2 py-2 text-center">
-                                                    <span class="chip bg-white/[.05] px-1.5 text-[11px] text-text" :title="row.format"
+                                                    <span class="chip bg-white/[.05] px-1.5 text-[11px] text-text"
+                                                          @mouseenter="showTip(row.format, $event)"
+                                                          @mouseleave="hideTip()"
+                                                          @focus="showTip(row.format, $event)"
+                                                          @blur="hideTip()" tabindex="0"
                                                           x-text="row.format === 'anthropic' ? 'ANT' : 'OAI'"></span>
                                                 </td>
                                                 <!-- 运行中 / 排队合成一列：两个数各占一列时表头「运行中」「排队」
@@ -893,7 +946,7 @@
                             </div>
                         </section>
 
-                        <aside class="space-y-5 xl:col-span-4">
+                        <aside class="space-y-5 xl:col-span-3">
                             <section class="glass rounded-lg p-4">
                                 <h2 class="mb-4 text-base font-extrabold text-white">系统资源</h2>
                                 <div class="grid grid-cols-2 gap-3 text-xs">
@@ -1024,21 +1077,38 @@
                                     <th class="w-full max-w-0 whitespace-nowrap px-3 py-2.5 font-bold">错误</th>
                                 </tr>
                             </thead>
-                            <tbody class="divide-y divide-line">
-                                <template x-for="log in requestLogs" :key="log.id || log.time + log.model">
-                                    <tr class="bg-panel/35 transition hover:bg-white/[.04]">
+                            <template x-for="log in requestLogs" :key="logKey(log)">
+                                <!-- x-for 必须只有一个根节点；用每条日志独立的 tbody 包住主行和详情行，
+                                     才能让详情紧跟对应日志，同时保持合法的 table 结构。
+                                     divide-y 只作用于同一个 tbody 内的相邻子元素；跨 tbody 的日志行
+                                     由除第一个日志 tbody 外的每个 tbody 自身绘制顶边。 -->
+                                <tbody class="divide-y divide-line [&:not(:first-of-type)]:border-t border-line">
+                                    <tr @click="toggleLog(log)"
+                                        @keydown.enter.prevent="toggleLog(log)"
+                                        @keydown.space.prevent="toggleLog(log)"
+                                        :aria-expanded="isLogExpanded(log)"
+                                        :aria-label="(isLogExpanded(log) ? '收起' : '展开') + '请求日志详情'"
+                                        :class="isLogExpanded(log) ? 'bg-cyan2/[.08]' : 'bg-panel/35'"
+                                        class="cursor-pointer transition hover:bg-white/[.04] focus:outline-none focus:ring-2 focus:ring-inset focus:ring-cyan2"
+                                        role="button" tabindex="0">
                                         <!-- 只显示时分秒：整列日期都是今天，重复 100 遍还把时间折成三行。
-                                             完整时间戳和请求 ID 放 title，排查时悬停可见。 -->
+                                             完整时间戳和请求 ID 改由即时 tooltip 显示，展开面板也会列出完整值。 -->
                                         <td class="w-px whitespace-nowrap px-3 py-2 font-mono text-xs text-muted"
-                                            :title="(log.time || log.startedAt || '') + '　' + (log.id || log.requestId || '')"
-                                            x-text="logClock(log)"></td>
+                                            @mouseenter="showTip((log.time || log.startedAt || '') + '　' + (log.id || log.requestId || ''), $event)"
+                                            @mouseleave="hideTip()"
+                                            @focus="showTip((log.time || log.startedAt || '') + '　' + (log.id || log.requestId || ''), $event)"
+                                            @blur="hideTip()"
+                                            tabindex="0" x-text="logClock(log)"></td>
                                         <td class="w-px whitespace-nowrap px-2 py-2">
                                             <span class="chip px-1.5 text-[11px]" :class="statusClass(log.status)" x-text="log.status || '--'"></span>
                                         </td>
                                         <!-- 来源 IP / Key 来源 / Key 指纹三列合一：三者都是「谁发来的」，
                                              各占一列时每列都要留出中文表头宽度，信息密度却很低。 -->
                                         <td class="w-px whitespace-nowrap px-3 py-2 font-mono text-[11px] text-muted"
-                                            :title="'IP: ' + (log.clientIp || '--') + '\nKey 来源: ' + (log.keySource || '--') + '\nKey 指纹: ' + (log.keyFingerprint || '--')">
+                                            @mouseenter="showTip('IP: ' + (log.clientIp || '--') + '\nKey 来源: ' + (log.keySource || '--') + '\nKey 指纹: ' + (log.keyFingerprint || '--'), $event)"
+                                            @mouseleave="hideTip()"
+                                            @focus="showTip('IP: ' + (log.clientIp || '--') + '\nKey 来源: ' + (log.keySource || '--') + '\nKey 指纹: ' + (log.keyFingerprint || '--'), $event)"
+                                            @blur="hideTip()" tabindex="0">
                                             <span class="text-text" x-text="log.clientIp || '--'"></span>
                                             <span x-show="log.keySource" x-text="' · ' + log.keySource"></span>
                                             <span x-show="log.keyFingerprint" class="opacity-70" x-text="' · ' + log.keyFingerprint"></span>
@@ -1055,11 +1125,121 @@
                                             x-text="durationText(log.durationMs || log.latencyMs)"></td>
                                         <td class="w-px max-w-[16rem] truncate px-3 py-2 font-mono text-[11px]"
                                             :class="log.attemptTrail ? 'text-warn' : 'text-muted'"
-                                            :title="log.attemptTrail || ''" x-text="attemptTrailText(log)"></td>
+                                            @mouseenter="showTip(log.attemptTrail || '', $event)"
+                                            @mouseleave="hideTip()"
+                                            @focus="showTip(log.attemptTrail || '', $event)"
+                                            @blur="hideTip()" tabindex="0" x-text="attemptTrailText(log)"></td>
                                         <td class="w-full max-w-0 truncate px-3 py-2 text-xs text-muted"
-                                            :title="log.error || ''" x-text="log.error || '—'"></td>
+                                            @mouseenter="showTip(log.error || '', $event)"
+                                            @mouseleave="hideTip()"
+                                            @focus="showTip(log.error || '', $event)"
+                                            @blur="hideTip()" tabindex="0" x-text="log.error || '—'"></td>
                                     </tr>
-                                </template>
+                                    <tr x-show="isLogExpanded(log)" x-transition x-cloak class="bg-ink/70">
+                                        <td colspan="8" class="px-3 py-4 sm:px-4">
+                                            <div class="mb-3 flex items-center justify-between gap-3">
+                                                <span class="text-sm font-bold text-cyan">请求详情</span>
+                                                <span class="text-xs text-muted">再次点击日志行收起</span>
+                                            </div>
+                                            <dl class="grid grid-cols-1 gap-x-4 gap-y-3 text-xs sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+                                                <div>
+                                                    <dt class="text-muted">HTTP 方法</dt>
+                                                    <dd class="mt-1 font-mono text-text" x-text="log.method || '--'"></dd>
+                                                </div>
+                                                <div>
+                                                    <dt class="text-muted">请求路径</dt>
+                                                    <dd class="mt-1 break-words font-mono text-text" x-text="log.path || '--'"></dd>
+                                                </div>
+                                                <div>
+                                                    <dt class="text-muted">请求 ID</dt>
+                                                    <dd class="mt-1 break-all font-mono text-text" x-text="log.id || log.requestId || '--'"></dd>
+                                                </div>
+                                                <div>
+                                                    <dt class="text-muted">完整时间</dt>
+                                                    <dd class="mt-1 break-words font-mono text-text" x-text="log.time || log.startedAt || '--'"></dd>
+                                                </div>
+                                                <div>
+                                                    <dt class="text-muted">状态</dt>
+                                                    <dd class="mt-1 font-mono text-text" x-text="log.status || '--'"></dd>
+                                                </div>
+                                                <div>
+                                                    <dt class="text-muted">客户端模型</dt>
+                                                    <dd class="mt-1 break-words font-mono text-text" x-text="log.model || '--'"></dd>
+                                                </div>
+                                                <div>
+                                                    <dt class="text-muted">Provider</dt>
+                                                    <dd class="mt-1 break-words font-mono text-text" x-text="log.provider || '--'"></dd>
+                                                </div>
+                                                <div>
+                                                    <dt class="text-muted">流式</dt>
+                                                    <dd class="mt-1 text-text" x-text="log.stream ? '是' : '否'"></dd>
+                                                </div>
+                                                <div x-show="hasLogValue(log.route)">
+                                                    <dt class="text-muted">命中路由</dt>
+                                                    <dd class="mt-1 break-words font-mono text-text" x-text="log.route"></dd>
+                                                </div>
+                                                <div x-show="hasLogValue(log.targetModel)">
+                                                    <dt class="text-muted">上游目标模型</dt>
+                                                    <dd class="mt-1 break-words font-mono text-cyan" x-text="log.targetModel"></dd>
+                                                </div>
+                                                <div>
+                                                    <dt class="text-muted">客户端格式</dt>
+                                                    <dd class="mt-1 break-words font-mono text-text" x-text="log.clientFormat || '--'"></dd>
+                                                </div>
+                                                <div>
+                                                    <dt class="text-muted">上游格式</dt>
+                                                    <dd class="mt-1 break-words font-mono text-text" x-text="log.format || '--'"></dd>
+                                                </div>
+                                                <div>
+                                                    <dt class="text-muted">总耗时</dt>
+                                                    <dd class="mt-1 font-mono text-text" x-text="durationText(log.durationMs ?? log.latencyMs)"></dd>
+                                                </div>
+                                                <div x-show="hasLogValue(log.queueWaitMs)">
+                                                    <dt class="text-muted">队列等待</dt>
+                                                    <dd class="mt-1 font-mono text-warn" x-text="formatMs(log.queueWaitMs)"></dd>
+                                                </div>
+                                                <div x-show="hasLogValue(log.upstreamStatus)">
+                                                    <dt class="text-muted">上游状态码</dt>
+                                                    <dd class="mt-1 font-mono text-text" x-text="log.upstreamStatus"></dd>
+                                                </div>
+                                                <div x-show="hasLogValue(log.responseBytes)">
+                                                    <dt class="text-muted">响应大小</dt>
+                                                    <dd class="mt-1 font-mono text-text" x-text="formatBytes(log.responseBytes)"></dd>
+                                                </div>
+                                                <div x-show="log.vision === true">
+                                                    <dt class="text-muted">视觉翻译</dt>
+                                                    <dd class="mt-1 text-cyan" x-text="'已启用'"></dd>
+                                                </div>
+                                                <div x-show="hasLogValue(log.clientIp)">
+                                                    <dt class="text-muted">客户端 IP</dt>
+                                                    <dd class="mt-1 break-words font-mono text-text" x-text="log.clientIp"></dd>
+                                                </div>
+                                                <div x-show="hasLogValue(log.keySource)">
+                                                    <dt class="text-muted">Key 来源</dt>
+                                                    <dd class="mt-1 break-words font-mono text-text" x-text="log.keySource"></dd>
+                                                </div>
+                                                <div x-show="hasLogValue(log.keyFingerprint)">
+                                                    <dt class="text-muted">Key 指纹</dt>
+                                                    <dd class="mt-1 break-all font-mono text-text" x-text="log.keyFingerprint"></dd>
+                                                </div>
+                                                <div x-show="hasLogValue(log.attempts)">
+                                                    <dt class="text-muted">尝试次数</dt>
+                                                    <dd class="mt-1 font-mono text-text" x-text="log.attempts"></dd>
+                                                </div>
+                                            </dl>
+                                            <div x-show="hasLogValue(log.attemptTrail)" class="mt-4 rounded-lg border border-warn/25 bg-warn/5 px-3 py-2">
+                                                <div class="text-xs text-muted">转移轨迹</div>
+                                                <div class="mt-1 break-words font-mono text-xs text-warn" x-text="log.attemptTrail"></div>
+                                            </div>
+                                            <div x-show="hasLogValue(log.error)" class="mt-3 rounded-lg border border-danger/25 bg-danger/5 px-3 py-2">
+                                                <div class="text-xs text-muted">错误全文</div>
+                                                <div class="mt-1 whitespace-pre-wrap break-words text-xs text-rose-100" x-text="log.error"></div>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                </tbody>
+                            </template>
+                            <tbody class="divide-y divide-line">
                                 <tr x-show="requestLogs.length === 0">
                                     <td colspan="8" class="px-3 py-12 text-center text-sm text-muted">暂无请求明细</td>
                                 </tr>
@@ -1257,7 +1437,7 @@
          overflow-x-auto，绝对定位的气泡会被滚动容器裁掉。z-[70] 在错误提示之上。 -->
     <div x-show="tip.show" x-cloak role="tooltip"
          :style="`left: ${tip.x}px; top: ${tip.y}px;`"
-         class="pointer-events-none fixed z-[70] max-w-xs -translate-x-1/2 -translate-y-full rounded-lg border border-line bg-panel3 px-3 py-2 text-xs font-semibold leading-relaxed text-text shadow-glow">
+         class="pointer-events-none fixed z-[70] max-w-xs -translate-x-1/2 -translate-y-full whitespace-pre-line rounded-lg border border-line bg-panel3 px-3 py-2 text-xs font-semibold leading-relaxed text-text shadow-glow">
         <span x-text="tip.text"></span>
     </div>
 
@@ -1290,6 +1470,8 @@
                 activeTab: 'monitor',
                 editMode: 'visual',
                 mobileNavOpen: false,
+                // 预览抽屉默认收起；这是界面状态，不写入配置内容。
+                previewDrawerOpen: false,
                 loading: false,
                 // 监控页三个动作各自一个进行中标志，不复用 loading：
                 // loading 管配置保存，共用会让检测期间顶部保存按钮一起变灰。
@@ -1315,8 +1497,8 @@
                 _userEdited: false,
                 _monitorPollTimer: null,
                 _monitorVisibilityHandler: null,
-                statusMessage: '',
-                statusType: 'success',
+                statusToasts: [],
+                _statusToastSeq: 0,
                 configPath: '',
                 revision: '',
                 restartRequired: [],
@@ -1359,6 +1541,7 @@
                 health: null,
                 metrics: null,
                 requestLogs: [],
+                expandedLogId: null,
                 logFilters: {
                     status: '',
                     provider: '',
@@ -1446,6 +1629,7 @@
                     window.addEventListener('keydown', markEdited, { capture: true });
                     this.scheduleRestoreGuard();
                     this.loadDirtyToastPos();
+                    this.loadPreviewDrawerState();
                     // 窗口变小后旧坐标可能落到视窗外，重新收进来
                     window.addEventListener('resize', () => {
                         if (this.dirtyToastPos) {
@@ -1766,7 +1950,29 @@
                         if (value !== '') params.set(key, value);
                     });
                     const data = await this.loadOptionalJSON('/api/logs?' + params.toString());
-                    this.requestLogs = Array.isArray(data?.data) ? data.data : [];
+                    const logs = Array.isArray(data?.data) ? data.data : [];
+                    this.requestLogs = logs;
+                    // 轮询刷新时同一请求 ID 保持展开；筛选后该行消失则收起，避免状态指向不可见日志。
+                    if (this.expandedLogId && !logs.some((log) => this.logKey(log) === this.expandedLogId)) {
+                        this.expandedLogId = null;
+                    }
+                },
+
+                logKey(log) {
+                    return log?.id || (log?.time || '') + (log?.model || '');
+                },
+
+                isLogExpanded(log) {
+                    return this.expandedLogId === this.logKey(log);
+                },
+
+                toggleLog(log) {
+                    const key = this.logKey(log);
+                    this.expandedLogId = this.expandedLogId === key ? null : key;
+                },
+
+                hasLogValue(value) {
+                    return value !== undefined && value !== null && value !== '';
                 },
 
                 resetLogFilters() {
@@ -1874,13 +2080,16 @@
                 },
 
                 showStatus(message, type) {
-                    this.statusMessage = message;
-                    this.statusType = type;
-                    window.clearTimeout(this._statusTimer);
                     // 错误信息通常是后端校验原文，比成功提示长得多，5 秒读不完。
-                    // 面板本身有关闭按钮，停留久一点不挡操作。
+                    // 每条 toast 单独计时：连续触发时旧提示继续可读，不被新提示顶掉。
                     const holdMs = type === 'error' ? 20000 : 5000;
-                    this._statusTimer = window.setTimeout(() => { this.statusMessage = ''; }, holdMs);
+                    const id = ++this._statusToastSeq;
+                    this.statusToasts = [...this.statusToasts, { id, message, type }];
+                    window.setTimeout(() => this.dismissStatus(id), holdMs);
+                },
+
+                dismissStatus(id) {
+                    this.statusToasts = this.statusToasts.filter((toast) => toast.id !== id);
                 },
 
                 // errorText 从失败响应里榨出可读原因。
@@ -2013,6 +2222,63 @@
                 // 按钮灰着、浮层却在喊有改动。统一到一个函数上，不可能再不一致。
                 canSave() {
                     return this.isConfigTab() && this.isDirty();
+                },
+
+                loadPreviewDrawerState() {
+                    try {
+                        this.previewDrawerOpen = window.localStorage.getItem('gw.configPreviewOpen') === 'true';
+                    } catch (err) {
+                        // localStorage 被禁用时保持默认收起，不影响预览抽屉使用
+                    }
+                },
+
+                savePreviewDrawerState() {
+                    try {
+                        window.localStorage.setItem('gw.configPreviewOpen', String(!!this.previewDrawerOpen));
+                    } catch (err) {
+                        // 存不了不影响当前抽屉状态，跳过持久化
+                    }
+                },
+
+                togglePreviewDrawer() {
+                    this.previewDrawerOpen = !this.previewDrawerOpen;
+                    this.savePreviewDrawerState();
+                },
+
+                closePreviewDrawer() {
+                    if (!this.previewDrawerOpen) return;
+                    this.previewDrawerOpen = false;
+                    this.savePreviewDrawerState();
+                },
+
+                // toast 栈默认避开右下角的未保存浮层；浮层被拖到右侧时，动态把 toast 放到它上方或下方。
+                // 只计算 toast 自身的位置，不改 dirtyToast 的定位与拖拽逻辑。
+                statusToastStackStyle() {
+                    const fallback = { top: '', bottom: '1.25rem' };
+                    const dirty = this.$refs.dirtyToast;
+                    if (!dirty || !this.canSave() || this.showProviderModal || this.showRouteModal) return fallback;
+                    const dirtyRect = dirty.getBoundingClientRect();
+                    if (!dirtyRect.width || !dirtyRect.height) return fallback;
+
+                    const stack = this.$refs.statusToastStack;
+                    const stackRect = stack?.getBoundingClientRect();
+                    const right = window.innerWidth >= 1024 ? 32 : 16;
+                    const left = window.innerWidth >= 1024 ? 320 : 16;
+                    const stackWidth = stackRect?.width || Math.max(0, window.innerWidth - left - right);
+                    const stackLeft = window.innerWidth - right - stackWidth;
+                    if (dirtyRect.left >= window.innerWidth - right || dirtyRect.right <= stackLeft) return fallback;
+
+                    const gap = 12;
+                    const stackHeight = stack?.offsetHeight || 72;
+                    const aboveBottom = window.innerHeight - dirtyRect.top + gap;
+                    if (dirtyRect.top - gap - stackHeight >= 16) {
+                        return { top: '', bottom: `${aboveBottom}px` };
+                    }
+                    const belowTop = dirtyRect.bottom + gap;
+                    if (belowTop + stackHeight <= window.innerHeight - 16) {
+                        return { top: `${belowTop}px`, bottom: '' };
+                    }
+                    return { top: '', bottom: `${aboveBottom}px` };
                 },
 
                 // ── 即时 tooltip ────────────────────────────────────
@@ -2366,9 +2632,9 @@
                     if (!b) return 'bg-white/[.05] text-muted';
                     if (b.state === 'open') return 'border-danger/35 bg-danger/10 text-rose-100';
                     if (b.state === 'half_open') return 'border-warn/35 bg-warn/10 text-amber-100';
-                    // 闭合但有失败计数：不给纯绿。请求确实还在正常发（所以不是 danger），
-                    // 但「离打开熔断还差几次」和干净的闭合不是一回事，颜色上要分得开。
-                    if (Number(b.consecutiveFailures || 0) > 0) return 'border-warn/35 bg-warn/10 text-amber-100';
+                    // 闭合但有失败计数：徽章文本已经写出「正常 n/阈值」，
+                    // 改用中性底色与健康列的 warn 区分，仍不和干净闭合混为一谈。
+                    if (Number(b.consecutiveFailures || 0) > 0) return 'border-line bg-white/[.05] text-muted';
                     return 'border-good/35 bg-good/10 text-emerald-100';
                 },
 
