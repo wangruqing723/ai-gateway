@@ -80,12 +80,18 @@
                 metrics: null,
                 requestLogs: [],
                 expandedLogId: null,
+                // 高级诊断筛选默认折叠：正常排查优先看请求最终结果；仅在定位
+                // failover / 上游失败时再展开 attempt 维度，避免和最终 Provider、状态混在一起。
+                logAdvancedFiltersOpen: false,
                 logFilters: {
                     status: '',
                     provider: '',
                     stream: '',
                     model: '',
-                    q: ''
+                    q: '',
+                    attemptProvider: '',
+                    attemptStatus: '',
+                    attemptOutcome: ''
                 },
                 yamlContent: '',
                 showProviderModal: false,
@@ -129,4 +135,3 @@
                     { value: 'round-robin', label: 'round-robin（轮转分流）' },
                     { value: 'least-queue', label: 'least-queue（按在途量）' }
                 ],
-

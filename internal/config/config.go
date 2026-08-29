@@ -72,7 +72,7 @@ type Provider struct {
 	Name          string `yaml:"-" json:"name,omitempty"`                    // 运行时填充（map 的 key）
 	BaseURL       string `yaml:"baseUrl" json:"baseUrl"`                     // 上游地址
 	APIKey        string `yaml:"apiKey" json:"apiKey"`                       // 密钥，留空则从客户端请求头提取
-	Format        string `yaml:"format" json:"format"`                       // anthropic | openai
+	Format        string `yaml:"format" json:"format"`                       // anthropic | openai | openai-responses
 	MaxConcurrent int    `yaml:"maxConcurrent" json:"maxConcurrent"`         // 最大并发
 	MaxPerSecond  int    `yaml:"maxPerSecond" json:"maxPerSecond"`           // 每秒最多请求数，0 表示不限
 	MaxQueueWait  int    `yaml:"maxQueueWait" json:"maxQueueWait,omitempty"` // 队列最大等待（毫秒）
@@ -802,8 +802,8 @@ func validate(c *Config) error {
 		if err != nil || parsedURL.Host == "" || parsedURL.Scheme != "http" && parsedURL.Scheme != "https" {
 			return fmt.Errorf("providers.%s.baseUrl 须为有效的 http/https URL", name)
 		}
-		if p.Format != "anthropic" && p.Format != "openai" {
-			return fmt.Errorf("providers.%s.format 须为 anthropic 或 openai", name)
+		if p.Format != "anthropic" && p.Format != "openai" && p.Format != "openai-responses" {
+			return fmt.Errorf("providers.%s.format 须为 anthropic、openai 或 openai-responses", name)
 		}
 		if p.MaxConcurrent < 1 || p.MaxConcurrent > 100 {
 			return fmt.Errorf("providers.%s.maxConcurrent 应在 1-100 之间", name)

@@ -44,7 +44,8 @@ func DetectClientFormat(path string) string {
 // 供 proxy 和 stream 模块共用，消除判定逻辑分歧。
 func IsPassthrough(providerFormat, clientFormat string) bool {
 	return providerFormat == clientFormat ||
-		(providerFormat == "openai" && clientFormat == "openai-chat")
+		(providerFormat == "openai" && clientFormat == "openai-chat") ||
+		(providerFormat == "openai-responses" && clientFormat == "openai-responses")
 }
 
 // ── 客户端请求 → 内部格式 ──────────────────────
@@ -158,6 +159,7 @@ func FromOpenAIResponses(body map[string]any) *Internal {
 			}})
 		default:
 			if item["type"] != "message" && item["role"] == nil {
+				conversionErr = errors.Join(conversionErr, fmt.Errorf("unsupported responses input item %q", getString(item, "type")))
 				continue
 			}
 			messages = append(messages, map[string]any{
@@ -201,6 +203,19 @@ func ToAnthropicBody(in *Internal, targetModel string) map[string]any {
 			body[k] = v
 		}
 	}
+	if toolChoice, exists := in.Extra["tool_choice"]; exists && toolChoice != nil {
+		if mapped, err := toolChoiceToAnthropic(toolChoice); err == nil && mapped != nil {
+			body["tool_choice"] = mapped
+		}
+	}
+	if parallel, exists := in.Extra["parallel_tool_calls"]; exists && parallel == false {
+		toolChoice, _ := body["tool_choice"].(map[string]any)
+		if toolChoice == nil {
+			toolChoice = map[string]any{"type": "auto"}
+			body["tool_choice"] = toolChoice
+		}
+		toolChoice["disable_parallel_tool_use"] = true
+	}
 	return body
 }
 
@@ -213,6 +228,9 @@ func ToAnthropicBodyChecked(in *Internal, targetModel string) (map[string]any, e
 		return nil, fmt.Errorf("request normalization failed: %w", in.Err)
 	}
 	if err := validateAnthropicTargetMessages(in.Messages); err != nil {
+		return nil, err
+	}
+	if err := validateAnthropicTargetExtras(in.Extra); err != nil {
 		return nil, err
 	}
 	return ToAnthropicBody(in, targetModel), nil
@@ -246,6 +264,17 @@ func ToOpenAIChatBody(in *Internal, targetModel string) map[string]any {
 			body[k] = v
 		}
 	}
+	if stopSequences, ok := in.Extra["stop_sequences"]; ok {
+		body["stop"] = stopSequences
+	}
+	if format, err := responsesTextFormatToChat(in.Extra["text"]); err == nil && format != nil {
+		body["response_format"] = format
+	}
+	if effort, ok := responsesReasoningEffort(in.Extra["reasoning"]); ok {
+		body["reasoning_effort"] = effort
+	} else if effort, ok := in.Extra["reasoning_effort"]; ok {
+		body["reasoning_effort"] = effort
+	}
 	return body
 }
 
@@ -260,7 +289,54 @@ func ToOpenAIChatBodyChecked(in *Internal, targetModel string) (map[string]any, 
 	if err := validateOpenAIChatTargetMessages(in.Messages); err != nil {
 		return nil, err
 	}
+	if err := validateOpenAIChatTargetExtras(in.Extra); err != nil {
+		return nil, err
+	}
 	return ToOpenAIChatBody(in, targetModel), nil
+}
+
+// ToOpenAIResponsesBody 内部格式 → OpenAI Responses 请求体。
+// 这里只生成 Responses 原生的 input/items 结构，不把 Chat 的 function 工具
+// 直接塞进 tools；两种协议的工具定义和工具调用项虽然语义相近，JSON 结构并不相同。
+func ToOpenAIResponsesBody(in *Internal, targetModel string) map[string]any {
+	body := map[string]any{
+		"model":             targetModel,
+		"input":             responsesInputFromMessages(in.Messages),
+		"max_output_tokens": in.MaxTokens,
+		"stream":            in.Stream,
+	}
+	if system := systemTextFromContent(in.System); system != "" {
+		body["instructions"] = system
+	}
+	if in.Tools != nil {
+		body["tools"] = canonicalToolsToOpenAIResponses(in.Tools)
+	}
+	copyResponsesCompatibleExtras(body, in.Extra)
+	if toolChoice, exists := in.Extra["tool_choice"]; exists && toolChoice != nil {
+		if mapped, err := toolChoiceToResponses(toolChoice); err == nil && mapped != nil {
+			body["tool_choice"] = mapped
+		}
+	}
+	return body
+}
+
+// ToOpenAIResponsesBodyChecked 在生成 Responses 请求体前检查规范化结果和
+// Responses 专属字段的兼容边界。跨协议转换宁可返回 conversion_error，也不静默丢掉
+// 会改变会话状态或工具语义的字段。
+func ToOpenAIResponsesBodyChecked(in *Internal, targetModel string) (map[string]any, error) {
+	if in == nil {
+		return nil, fmt.Errorf("internal request is nil")
+	}
+	if in.Err != nil {
+		return nil, fmt.Errorf("request normalization failed: %w", in.Err)
+	}
+	if err := validateResponsesTargetMessages(in.Messages); err != nil {
+		return nil, err
+	}
+	if err := validateResponsesTargetExtras(in.Extra); err != nil {
+		return nil, err
+	}
+	return ToOpenAIResponsesBody(in, targetModel), nil
 }
 
 func normalizeSystem(system any) any {
@@ -392,6 +468,158 @@ func canonicalToolsToOpenAIChat(tools any) any {
 		out = append(out, map[string]any{"type": "function", "function": function})
 	}
 	return out
+}
+
+// canonicalToolsToOpenAIResponses 将内部统一的 function 工具定义还原为
+// Responses API 的扁平结构。Chat Completions 的 function 位于 function 字段内，
+// 不能复用其 JSON 结构。
+func canonicalToolsToOpenAIResponses(tools any) any {
+	arr, ok := tools.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]any, 0, len(arr))
+	for _, value := range arr {
+		tool, ok := value.(map[string]any)
+		if !ok {
+			continue
+		}
+		function := map[string]any{"type": "function", "name": tool["name"]}
+		if description, exists := tool["description"]; exists {
+			function["description"] = description
+		}
+		if schema, exists := tool["input_schema"]; exists {
+			function["parameters"] = schema
+		}
+		if strict, exists := tool["strict"]; exists {
+			function["strict"] = strict
+		}
+		out = append(out, function)
+	}
+	return out
+}
+
+// responsesInputFromMessages 将内部消息按 Responses input 的 item 语义展开。
+// tool_use 和 tool_result 都是独立 item，不能混入 message.content。
+func responsesInputFromMessages(messages []any) []any {
+	out := make([]any, 0, len(messages))
+	for _, value := range messages {
+		message, ok := value.(map[string]any)
+		if !ok {
+			continue
+		}
+		role := getString(message, "role")
+		blocks, ok := message["content"].([]any)
+		if !ok {
+			out = append(out, map[string]any{
+				"type": "message", "role": role,
+				"content": responsesContentFromCanonical(message["content"], role),
+			})
+			continue
+		}
+
+		var ordinary []any
+		flushOrdinary := func() {
+			if len(ordinary) == 0 {
+				return
+			}
+			out = append(out, map[string]any{
+				"type": "message", "role": role,
+				"content": responsesContentFromCanonical(ordinary, role),
+			})
+			ordinary = nil
+		}
+		for _, blockValue := range blocks {
+			block, ok := blockValue.(map[string]any)
+			if !ok {
+				ordinary = append(ordinary, blockValue)
+				continue
+			}
+			switch getString(block, "type") {
+			case "tool_use":
+				flushOrdinary()
+				out = append(out, map[string]any{
+					"type":      "function_call",
+					"call_id":   getString(block, "id"),
+					"name":      getString(block, "name"),
+					"arguments": marshalFunctionArguments(block["input"]),
+				})
+			case "tool_result":
+				flushOrdinary()
+				out = append(out, map[string]any{
+					"type":    "function_call_output",
+					"call_id": getString(block, "tool_use_id"),
+					"output":  responsesToolOutputFromCanonical(block["content"]),
+				})
+			default:
+				ordinary = append(ordinary, block)
+			}
+		}
+		flushOrdinary()
+	}
+	return out
+}
+
+func responsesContentFromCanonical(content any, role string) []any {
+	if text, ok := content.(string); ok {
+		return []any{responsesTextPart(text, role)}
+	}
+	blocks, ok := content.([]any)
+	if !ok {
+		return []any{}
+	}
+	out := make([]any, 0, len(blocks))
+	for _, value := range blocks {
+		block, ok := value.(map[string]any)
+		if !ok {
+			continue
+		}
+		switch getString(block, "type") {
+		case "text":
+			out = append(out, responsesTextPart(getString(block, "text"), role))
+		case "image":
+			if image := canonicalImageToResponses(block); image != nil {
+				out = append(out, image)
+			}
+		}
+	}
+	return out
+}
+
+func responsesTextPart(text, role string) map[string]any {
+	partType := "input_text"
+	if role == "assistant" {
+		partType = "output_text"
+	}
+	return map[string]any{"type": partType, "text": text}
+}
+
+func canonicalImageToResponses(block map[string]any) map[string]any {
+	source, _ := block["source"].(map[string]any)
+	if source == nil {
+		return nil
+	}
+	imageURL := getString(source, "url")
+	if getString(source, "type") == "base64" {
+		imageURL = "data:" + getString(source, "media_type") + ";base64," + getString(source, "data")
+	}
+	if imageURL == "" {
+		return nil
+	}
+	return map[string]any{"type": "input_image", "image_url": imageURL}
+}
+
+func responsesToolOutputFromCanonical(content any) any {
+	if text, ok := content.(string); ok {
+		return text
+	}
+	parts := responsesContentFromCanonical(content, "user")
+	if len(parts) == 1 {
+		if part, ok := parts[0].(map[string]any); ok && getString(part, "type") == "input_text" {
+			return getString(part, "text")
+		}
+	}
+	return parts
 }
 
 func chatToolUses(toolCalls any) ([]any, error) {
@@ -565,17 +793,384 @@ func validateOpenAIChatTargetMessages(messages []any) error {
 		for blockIndex, blockValue := range blocks {
 			block, ok := blockValue.(map[string]any)
 			if !ok {
-				continue
+				return fmt.Errorf("openai chat message %d content block %d must be an object", messageIndex, blockIndex)
 			}
-			if getString(block, "type") != "tool_result" {
-				continue
-			}
-			if err := validateOpenAIChatToolResultContent(block["content"]); err != nil {
-				return fmt.Errorf("openai chat message %d tool_result block %d: %w", messageIndex, blockIndex, err)
+			switch getString(block, "type") {
+			case "text":
+			case "image":
+				source, _ := block["source"].(map[string]any)
+				if source == nil || (getString(source, "url") == "" && getString(source, "data") == "") {
+					return fmt.Errorf("openai chat message %d image block %d requires URL or base64 source", messageIndex, blockIndex)
+				}
+			case "tool_use":
+				if _, ok := block["input"].(map[string]any); !ok {
+					return fmt.Errorf("openai chat message %d tool_use arguments must be a JSON object", messageIndex)
+				}
+			case "tool_result":
+				if err := validateOpenAIChatToolResultContent(block["content"]); err != nil {
+					return fmt.Errorf("openai chat message %d tool_result block %d: %w", messageIndex, blockIndex, err)
+				}
+			default:
+				return fmt.Errorf("unsupported openai chat target content block %q", getString(block, "type"))
 			}
 		}
 	}
 	return nil
+}
+
+func validateResponsesTargetMessages(messages []any) error {
+	for messageIndex, value := range messages {
+		message, ok := value.(map[string]any)
+		if !ok {
+			return fmt.Errorf("openai responses message %d must be an object", messageIndex)
+		}
+		role := getString(message, "role")
+		if role != "user" && role != "assistant" && role != "developer" {
+			return fmt.Errorf("unsupported openai responses message role %q", role)
+		}
+		blocks, ok := message["content"].([]any)
+		if !ok {
+			if _, ok := message["content"].(string); ok || message["content"] == nil {
+				continue
+			}
+			return fmt.Errorf("openai responses message %d content must be text or an array", messageIndex)
+		}
+		for blockIndex, blockValue := range blocks {
+			block, ok := blockValue.(map[string]any)
+			if !ok {
+				return fmt.Errorf("openai responses message %d content block %d must be an object", messageIndex, blockIndex)
+			}
+			switch getString(block, "type") {
+			case "text":
+			case "image":
+				source, _ := block["source"].(map[string]any)
+				if source == nil || (getString(source, "url") == "" && getString(source, "data") == "") {
+					return fmt.Errorf("openai responses message %d image block %d requires URL or base64 source", messageIndex, blockIndex)
+				}
+			case "tool_use":
+				if _, ok := block["input"].(map[string]any); !ok {
+					return fmt.Errorf("openai responses message %d tool_use arguments must be a JSON object", messageIndex)
+				}
+			case "tool_result":
+				if err := validateResponsesToolResultContent(block["content"]); err != nil {
+					return fmt.Errorf("openai responses message %d tool_result block %d: %w", messageIndex, blockIndex, err)
+				}
+			default:
+				return fmt.Errorf("unsupported openai responses target content block %q", getString(block, "type"))
+			}
+		}
+	}
+	return nil
+}
+
+func validateResponsesToolResultContent(content any) error {
+	if content == nil {
+		return nil
+	}
+	if _, ok := content.(string); ok {
+		return nil
+	}
+	blocks, ok := content.([]any)
+	if !ok {
+		return fmt.Errorf("content must be text or a supported content array, got %T", content)
+	}
+	for _, value := range blocks {
+		block, ok := value.(map[string]any)
+		if !ok {
+			return fmt.Errorf("content block must be an object, got %T", value)
+		}
+		switch getString(block, "type") {
+		case "text":
+		case "image":
+			source, _ := block["source"].(map[string]any)
+			if source == nil || (getString(source, "url") == "" && getString(source, "data") == "") {
+				return fmt.Errorf("image content requires URL or base64 source")
+			}
+		default:
+			return fmt.Errorf("tool_result %s content is unsupported", getString(block, "type"))
+		}
+	}
+	return nil
+}
+
+// isMeaningfulExtra 判断额外字段是否真的改变了请求语义。
+func isMeaningfulExtra(key string, value any) bool {
+	if value == nil {
+		return false
+	}
+	switch key {
+	case "store":
+		v, ok := value.(bool)
+		return !ok || v
+	case "n":
+		switch v := value.(type) {
+		case int:
+			return v != 1
+		case float64:
+			return v != 1
+		default:
+			return true
+		}
+	case "parallel_tool_calls":
+		v, ok := value.(bool)
+		return !ok || !v
+	case "stream_options":
+		options, ok := value.(map[string]any)
+		return !ok || len(options) != 1 || options["include_usage"] != true
+	default:
+		return true
+	}
+}
+
+// validateOpenAIChatTargetExtras 拒绝会被 Chat Completions 静默丢失的
+// Responses 会话状态和原生扩展。已经明确可转换的 text.format、reasoning.effort
+// 会在 ToOpenAIChatBody 中映射为 Chat 字段。
+func validateOpenAIChatTargetExtras(extra map[string]any) error {
+	if extra == nil {
+		return nil
+	}
+	for _, key := range []string{
+		"previous_response_id", "store", "conversation", "background", "approval_request_id",
+		"logit_bias", "prediction", "modalities", "audio", "n", "seed", "logprobs", "top_logprobs",
+	} {
+		if value, exists := extra[key]; exists && isMeaningfulExtra(key, value) {
+			return fmt.Errorf("无法将 Responses 字段 %q 转换为 OpenAI Chat Completions，避免丢失语义", key)
+		}
+	}
+	if reasoning, exists := extra["reasoning"]; exists && reasoning != nil {
+		if err := validateReasoningExtra(reasoning, "OpenAI Chat Completions"); err != nil {
+			return err
+		}
+	}
+	if text, exists := extra["text"]; exists && text != nil {
+		if _, err := responsesTextFormatToChat(text); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateAnthropicTargetExtras 防止将 OpenAI Chat/Responses 的会话状态、结构化
+// 输出或推理配置静默丢弃。Anthropic 的 temperature/top_p/top_k/stop_sequences/
+// metadata 在 ToAnthropicBody 中有明确映射，因此不在拒绝名单中。
+func validateAnthropicTargetExtras(extra map[string]any) error {
+	if extra == nil {
+		return nil
+	}
+	for _, key := range []string{
+		"previous_response_id", "store", "conversation", "background", "approval_request_id",
+		"logit_bias", "prediction", "modalities", "audio", "n", "seed", "logprobs", "top_logprobs",
+	} {
+		if value, exists := extra[key]; exists && isMeaningfulExtra(key, value) {
+			return fmt.Errorf("无法将 OpenAI 字段 %q 转换为 Anthropic Messages，避免丢失语义", key)
+		}
+	}
+	if reasoning, exists := extra["reasoning"]; exists && reasoning != nil {
+		if err := validateReasoningExtra(reasoning, "Anthropic Messages"); err != nil {
+			return err
+		}
+	}
+	if toolChoice, exists := extra["tool_choice"]; exists && toolChoice != nil {
+		if _, err := toolChoiceToAnthropic(toolChoice); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateResponsesTargetExtras 校验 Anthropic/Chat 规范化后无法表达的字段。
+// Responses 原生状态允许保留，因为直通请求在视觉翻译后仍可能需要重建请求体。
+func validateResponsesTargetExtras(extra map[string]any) error {
+	if extra == nil {
+		return nil
+	}
+	for _, key := range []string{"logprobs", "top_logprobs", "n", "seed", "logit_bias", "prediction", "modalities", "audio", "stop_sequences"} {
+		if value, exists := extra[key]; exists && isMeaningfulExtra(key, value) {
+			fieldSource := "OpenAI Chat"
+			if key == "stop_sequences" {
+				fieldSource = "Anthropic"
+			}
+			return fmt.Errorf("无法将 %s 字段 %q 转换为 OpenAI Responses，避免丢失语义", fieldSource, key)
+		}
+	}
+	if responseFormat, exists := extra["response_format"]; exists && responseFormat != nil {
+		if _, err := chatResponseFormatToResponses(responseFormat); err != nil {
+			return err
+		}
+	}
+	if toolChoice, exists := extra["tool_choice"]; exists && toolChoice != nil {
+		if _, err := toolChoiceToResponses(toolChoice); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateReasoningExtra(reasoning any, target string) error {
+	r, ok := reasoning.(map[string]any)
+	if !ok {
+		return fmt.Errorf("Responses reasoning 必须是对象")
+	}
+	if value, exists := r["encrypted_content"]; exists && isMeaningfulExtra("reasoning.encrypted_content", value) {
+		return fmt.Errorf("无法将 Responses reasoning.encrypted_content 转换为 %s，避免丢失语义", target)
+	}
+	return nil
+}
+
+func copyResponsesCompatibleExtras(body, extra map[string]any) {
+	if extra == nil {
+		return
+	}
+	for _, key := range []string{
+		"temperature", "top_p", "metadata", "parallel_tool_calls",
+		"store", "previous_response_id", "conversation", "truncation", "background",
+		"include", "prompt", "reasoning", "service_tier", "safety_identifier",
+	} {
+		if value, exists := extra[key]; exists && value != nil {
+			body[key] = value
+		}
+	}
+	if responseFormat, exists := extra["response_format"]; exists && responseFormat != nil {
+		if format, err := chatResponseFormatToResponses(responseFormat); err == nil && format != nil {
+			body["text"] = map[string]any{"format": format}
+		}
+	}
+	if effort, exists := extra["reasoning_effort"]; exists && effort != nil {
+		if reasoning, _ := body["reasoning"].(map[string]any); reasoning != nil {
+			if _, exists := reasoning["effort"]; !exists {
+				reasoning["effort"] = effort
+			}
+		} else {
+			body["reasoning"] = map[string]any{"effort": effort}
+		}
+	}
+}
+
+func toolChoiceToAnthropic(value any) (map[string]any, error) {
+	switch choice := value.(type) {
+	case string:
+		switch choice {
+		case "auto":
+			return map[string]any{"type": "auto"}, nil
+		case "required", "any":
+			return map[string]any{"type": "any"}, nil
+		}
+	case map[string]any:
+		switch getString(choice, "type") {
+		case "auto":
+			return map[string]any{"type": "auto"}, nil
+		case "any", "required":
+			return map[string]any{"type": "any"}, nil
+		case "tool":
+			if name := getString(choice, "name"); name != "" {
+				return map[string]any{"type": "tool", "name": name}, nil
+			}
+		case "function":
+			if function, ok := choice["function"].(map[string]any); ok {
+				if name := getString(function, "name"); name != "" {
+					return map[string]any{"type": "tool", "name": name}, nil
+				}
+			}
+		}
+	}
+	return nil, fmt.Errorf("不支持转换为 Anthropic 的 tool_choice：%#v", value)
+}
+
+func toolChoiceToResponses(value any) (any, error) {
+	switch choice := value.(type) {
+	case string:
+		switch choice {
+		case "auto", "required", "any":
+			return choice, nil
+		}
+	case map[string]any:
+		switch getString(choice, "type") {
+		case "auto", "required", "any":
+			return getString(choice, "type"), nil
+		case "tool":
+			if name := getString(choice, "name"); name != "" {
+				return map[string]any{"type": "function", "name": name}, nil
+			}
+		case "function":
+			if function, ok := choice["function"].(map[string]any); ok {
+				if name := getString(function, "name"); name != "" {
+					return map[string]any{"type": "function", "name": name}, nil
+				}
+			}
+		}
+	}
+	return nil, fmt.Errorf("不支持转换为 Responses 的 tool_choice：%#v", value)
+}
+
+func responsesTextFormatToChat(text any) (any, error) {
+	if text == nil {
+		return nil, nil
+	}
+	container, ok := text.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("responses text must be an object")
+	}
+	format, exists := container["format"]
+	if !exists || format == nil {
+		return nil, nil
+	}
+	f, ok := format.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("responses text.format must be an object")
+	}
+	switch getString(f, "type") {
+	case "text", "":
+		return nil, nil
+	case "json_object":
+		return map[string]any{"type": "json_object"}, nil
+	case "json_schema":
+		name := getString(f, "name")
+		schema, exists := f["schema"]
+		if name == "" || !exists {
+			return nil, fmt.Errorf("responses text.format json_schema requires name and schema")
+		}
+		jsonSchema := map[string]any{"name": name, "schema": schema}
+		if strict, exists := f["strict"]; exists {
+			jsonSchema["strict"] = strict
+		}
+		return map[string]any{"type": "json_schema", "json_schema": jsonSchema}, nil
+	default:
+		return nil, fmt.Errorf("cannot convert Responses text.format type %q to OpenAI Chat Completions", getString(f, "type"))
+	}
+}
+
+func chatResponseFormatToResponses(responseFormat any) (any, error) {
+	f, ok := responseFormat.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("openai chat response_format must be an object")
+	}
+	switch getString(f, "type") {
+	case "text", "":
+		return map[string]any{"type": "text"}, nil
+	case "json_object":
+		return map[string]any{"type": "json_object"}, nil
+	case "json_schema":
+		jsonSchema, ok := f["json_schema"].(map[string]any)
+		if !ok || getString(jsonSchema, "name") == "" || jsonSchema["schema"] == nil {
+			return nil, fmt.Errorf("openai chat json_schema response_format requires json_schema.name and json_schema.schema")
+		}
+		out := map[string]any{"type": "json_schema", "name": jsonSchema["name"], "schema": jsonSchema["schema"]}
+		if strict, exists := jsonSchema["strict"]; exists {
+			out["strict"] = strict
+		}
+		return out, nil
+	default:
+		return nil, fmt.Errorf("cannot convert OpenAI Chat response_format type %q to Responses", getString(f, "type"))
+	}
+}
+
+func responsesReasoningEffort(reasoning any) (any, bool) {
+	r, ok := reasoning.(map[string]any)
+	if !ok {
+		return nil, false
+	}
+	effort, ok := r["effort"]
+	return effort, ok
 }
 
 func validateOpenAIChatToolResultContent(content any) error {

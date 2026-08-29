@@ -116,6 +116,172 @@ func TestAnthropicInputJSONDeltaMapsToOpenAIChatToolCalls(t *testing.T) {
 	}
 }
 
+func TestResponsesStreamMapsToChatAndAnthropic(t *testing.T) {
+	lines := []string{
+		`event: response.created`,
+		`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-upstream","status":"in_progress","output":[]}}`,
+		`event: response.output_item.added`,
+		`data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_1","role":"assistant","status":"in_progress","content":[]}}`,
+		`event: response.output_text.delta`,
+		`data: {"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":"Hello"}`,
+		`event: response.completed`,
+		`data: {"type":"response.completed","response":{"id":"resp_1","model":"gpt-upstream","status":"completed","output":[]}}`,
+	}
+
+	chatOut := transformAll(t, NewStreamTransformer("openai-responses", "openai-chat"), lines...)
+	chatChunks := captureChatChunks(t, chatOut)
+	if len(chatChunks) < 3 {
+		t.Fatalf("chat chunks = %#v", chatChunks)
+	}
+	var sawText, sawStop bool
+	for _, chunk := range chatChunks {
+		delta, finish, _ := firstChoiceDelta(chunk)
+		if delta["content"] == "Hello" {
+			sawText = true
+		}
+		if finish == "stop" {
+			sawStop = true
+		}
+	}
+	if !sawText || !sawStop {
+		t.Fatalf("responses → chat text/stop = %v/%v; %#v", sawText, sawStop, chatChunks)
+	}
+
+	anthropicOut := transformAll(t, NewStreamTransformer("openai-responses", "anthropic"), lines...)
+	events := captureEvents(t, anthropicOut)
+	if findEvent(t, events, "message_start") == nil || findEvent(t, events, "message_delta") == nil || findEvent(t, events, "message_stop") == nil {
+		t.Fatalf("responses → anthropic events = %#v", events)
+	}
+	foundText := false
+	for _, event := range events {
+		if event.event != "content_block_delta" {
+			continue
+		}
+		delta, _ := event.data["delta"].(map[string]any)
+		if delta["text"] == "Hello" {
+			foundText = true
+		}
+	}
+	if !foundText {
+		t.Fatalf("responses → anthropic missing text delta: %#v", events)
+	}
+}
+
+func TestResponsesOutputItemDoneStartsToolBeforeArguments(t *testing.T) {
+	line := `data: {"type":"response.output_item.done","output_index":3,"item":{"type":"function_call","call_id":"call_lookup","name":"lookup","arguments":"{\"city\":\"Paris\"}"}}`
+
+	t.Run("Anthropic", func(t *testing.T) {
+		events := captureEvents(t, transformAll(t, NewStreamTransformer("openai-responses", "anthropic"), line))
+		startAt, deltaAt := -1, -1
+		var startIndex, deltaIndex any
+		for i, event := range events {
+			switch event.event {
+			case "content_block_start":
+				block, _ := event.data["content_block"].(map[string]any)
+				if block["type"] == "tool_use" {
+					startAt, startIndex = i, event.data["index"]
+				}
+			case "content_block_delta":
+				delta, _ := event.data["delta"].(map[string]any)
+				if delta["type"] == "input_json_delta" {
+					deltaAt, deltaIndex = i, event.data["index"]
+				}
+			}
+		}
+		if startAt < 0 || deltaAt < 0 || startAt >= deltaAt || startIndex != deltaIndex {
+			t.Fatalf("工具 start/delta 顺序或索引错误：%#v", events)
+		}
+	})
+
+	t.Run("Chat", func(t *testing.T) {
+		chunks := captureChatChunks(t, transformAll(t, NewStreamTransformer("openai-responses", "openai-chat"), line))
+		startAt, argumentsAt := -1, -1
+		for i, chunk := range chunks {
+			delta, _, _ := firstChoiceDelta(chunk)
+			calls, _ := delta["tool_calls"].([]any)
+			for _, value := range calls {
+				call, _ := value.(map[string]any)
+				function, _ := call["function"].(map[string]any)
+				if call["id"] == "call_lookup" && function["name"] == "lookup" {
+					startAt = i
+				}
+				if getString(function, "arguments") != "" {
+					argumentsAt = i
+				}
+			}
+		}
+		if startAt < 0 || argumentsAt < 0 || startAt >= argumentsAt {
+			t.Fatalf("Chat 工具首块/参数顺序错误：%#v", chunks)
+		}
+	})
+}
+
+// 此测试应配合 go test -count=20 运行，避免 map 迭代的偶发顺序掩盖问题。
+func TestResponsesStreamTextBlocksStopInCreationOrder(t *testing.T) {
+	out := transformAll(t, NewStreamTransformer("openai-responses", "anthropic"),
+		`data: {"type":"response.output_text.delta","output_index":0,"delta":"第一段"}`,
+		`data: {"type":"response.output_text.delta","output_index":1,"delta":"第二段"}`,
+		`data: {"type":"response.completed"}`,
+	)
+	events := captureEvents(t, out)
+	var stops []int
+	for _, event := range events {
+		if event.event != "content_block_stop" {
+			continue
+		}
+		index, ok := event.data["index"].(float64)
+		if !ok {
+			t.Fatalf("content_block_stop 索引 = %#v", event.data["index"])
+		}
+		stops = append(stops, int(index))
+	}
+	if len(stops) != 2 || stops[0] != 0 || stops[1] != 1 {
+		t.Fatalf("content_block_stop 顺序 = %v，期望 [0 1]", stops)
+	}
+}
+
+func TestResponsesFunctionArgumentsDoneWithoutOutputItemFails(t *testing.T) {
+	line := `data: {"type":"response.function_call_arguments.done","output_index":4,"arguments":"{\"city\":\"Paris\"}"}`
+	for _, target := range []string{"anthropic", "openai-chat"} {
+		t.Run(target, func(t *testing.T) {
+			transformer := NewStreamTransformer("openai-responses", target)
+			if out := transformer.Transform(line); len(out) != 0 {
+				t.Fatalf("错误事件不能产生正常输出：%#v", out)
+			}
+			if err := StreamError(transformer); err == nil {
+				t.Fatal("缺少流式转换错误")
+			}
+			failure := strings.Join(StreamFailure(transformer), "")
+			if failure == "" {
+				t.Fatal("缺少目标协议失败终态")
+			}
+			if target == "anthropic" && !strings.Contains(failure, "event: error") {
+				t.Fatalf("Anthropic 失败终态 = %q", failure)
+			}
+			if target == "openai-chat" && (!strings.Contains(failure, `"error"`) || !strings.Contains(failure, "data: [DONE]")) {
+				t.Fatalf("Chat 失败终态 = %q", failure)
+			}
+		})
+	}
+}
+
+func TestResponsesStreamRejectsUnsupportedSemanticEvents(t *testing.T) {
+	for _, target := range []string{"openai-chat", "anthropic"} {
+		t.Run(target, func(t *testing.T) {
+			transformer := NewStreamTransformer("openai-responses", target)
+			transformer.Transform(`data: {"type":"response.created","response":{"model":"gpt-upstream","status":"in_progress","output":[]}}`)
+			transformer.Transform(`data: {"type":"response.reasoning_summary_text.delta","output_index":0,"delta":"hidden"}`)
+			if err := StreamError(transformer); err == nil || !strings.Contains(err.Error(), "unsupported") {
+				t.Fatalf("StreamError() = %v", err)
+			}
+			failure := StreamFailure(transformer)
+			if len(failure) == 0 {
+				t.Fatal("unsupported Responses event must generate target failure terminal")
+			}
+		})
+	}
+}
+
 func TestOpenAIToolCallDeltasMapToAnthropicInputJSONDelta(t *testing.T) {
 	out := transformAll(t, NewStreamTransformer("openai", "anthropic"),
 		`data: {"model":"gpt-upstream","choices":[{"delta":{"role":"assistant"},"finish_reason":null}]}`,

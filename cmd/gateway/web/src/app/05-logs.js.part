@@ -15,8 +15,16 @@
                     return value !== undefined && value !== null && value !== '';
                 },
 
-                resetLogFilters() {
-                    this.logFilters = { status: '', provider: '', stream: '', model: '', q: '' };
-                    this.loadRequestLogs();
+                advancedLogFilterCount() {
+                    return ['attemptProvider', 'attemptStatus', 'attemptOutcome']
+                        .filter((key) => this.logFilters[key] !== '').length;
                 },
 
+                resetLogFilters() {
+                    this.logFilters = {
+                        status: '', provider: '', stream: '', model: '', q: '',
+                        attemptProvider: '', attemptStatus: '', attemptOutcome: ''
+                    };
+                    this.logAdvancedFiltersOpen = false;
+                    this.loadRequestLogs();
+                },

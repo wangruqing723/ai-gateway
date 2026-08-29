@@ -7,7 +7,7 @@ import (
 	"ai-gateway/internal/config"
 )
 
-// buildUpstreamURL 对齐 Node 版：去掉末尾 /v1，按 format 拼接 /v1/messages 或 /v1/chat/completions。
+// buildUpstreamURL 去掉末尾 /v1，再按 provider format 选择对应的上游 API 端点。
 func buildUpstreamURL(p *config.Provider) (base, path string) {
 	base = p.BaseURL
 	if !strings.HasPrefix(base, "http") {
@@ -15,10 +15,14 @@ func buildUpstreamURL(p *config.Provider) (base, path string) {
 	}
 	base = strings.TrimRight(base, "/")
 	base = strings.TrimSuffix(base, "/v1")
-	if p.Format == "anthropic" {
+	switch p.Format {
+	case "anthropic":
 		return base, "/v1/messages"
+	case "openai-responses":
+		return base, "/v1/responses"
+	default: // 配置校验已保证其余合法值只能是 openai。
+		return base, "/v1/chat/completions"
 	}
-	return base, "/v1/chat/completions"
 }
 
 // setUpstreamHeaders 按 provider 格式设置鉴权头。

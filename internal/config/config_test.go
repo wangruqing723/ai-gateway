@@ -220,6 +220,17 @@ func TestDecodeAndValidateProviderAndRouteFields(t *testing.T) {
 	}
 }
 
+func TestDecodeAndValidateAcceptsOpenAIResponsesProvider(t *testing.T) {
+	raw := strings.Replace(validConfigYAML(), "format: openai", "format: openai-responses", 1)
+	cfg, err := DecodeAndValidate([]byte(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Providers["primary"].Format; got != "openai-responses" {
+		t.Fatalf("provider format = %q", got)
+	}
+}
+
 // provider 名称长度按 rune 计：中文名按字节算会只剩三分之一额度。
 // 边界两侧都要测，否则把 > 写成 >= 也能过。
 func TestDecodeAndValidateProviderNameLength(t *testing.T) {

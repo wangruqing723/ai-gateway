@@ -45,6 +45,194 @@ func TestResponsesStrictFunctionPreservedWhenConvertingToChat(t *testing.T) {
 	}
 }
 
+func TestAnthropicRequestToResponsesMapsMessagesToolsAndImages(t *testing.T) {
+	in := FromAnthropic(map[string]any{
+		"model":  "claude-client",
+		"system": "Be concise.",
+		"messages": []any{
+			map[string]any{"role": "user", "content": []any{
+				map[string]any{"type": "text", "text": "Look at this."},
+				map[string]any{"type": "image", "source": map[string]any{"type": "base64", "media_type": "image/png", "data": "YWJj"}},
+			}},
+			map[string]any{"role": "assistant", "content": []any{
+				map[string]any{"type": "tool_use", "id": "call_weather", "name": "weather", "input": map[string]any{"city": "Paris"}},
+			}},
+			map[string]any{"role": "user", "content": []any{
+				map[string]any{"type": "tool_result", "tool_use_id": "call_weather", "content": "sunny"},
+			}},
+		},
+		"tools": []any{map[string]any{"name": "weather", "input_schema": map[string]any{"type": "object"}}},
+	})
+	body, err := ToOpenAIResponsesBodyChecked(in, "gpt-upstream")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body["instructions"] != "Be concise." {
+		t.Fatalf("instructions = %#v", body["instructions"])
+	}
+	input, _ := body["input"].([]any)
+	if len(input) != 3 {
+		t.Fatalf("input = %#v", body["input"])
+	}
+	message, _ := input[0].(map[string]any)
+	content, _ := message["content"].([]any)
+	image, _ := content[1].(map[string]any)
+	if image["image_url"] != "data:image/png;base64,YWJj" {
+		t.Fatalf("image = %#v", image)
+	}
+	call, _ := input[1].(map[string]any)
+	if call["type"] != "function_call" || call["call_id"] != "call_weather" || call["arguments"] != `{"city":"Paris"}` {
+		t.Fatalf("function call = %#v", call)
+	}
+	result, _ := input[2].(map[string]any)
+	if result["type"] != "function_call_output" || result["output"] != "sunny" {
+		t.Fatalf("function output = %#v", result)
+	}
+	tools, _ := body["tools"].([]any)
+	tool, _ := tools[0].(map[string]any)
+	if tool["type"] != "function" || tool["parameters"] == nil {
+		t.Fatalf("responses tool = %#v", tool)
+	}
+}
+
+func TestResponsesRequestMapsChatResponseFormatAndReasoningEffort(t *testing.T) {
+	in := FromOpenAIChat(map[string]any{
+		"messages": []any{map[string]any{"role": "user", "content": "json please"}},
+		"response_format": map[string]any{"type": "json_schema", "json_schema": map[string]any{
+			"name": "answer", "schema": map[string]any{"type": "object"}, "strict": true,
+		}},
+		"reasoning_effort": "high",
+	})
+	body, err := ToOpenAIResponsesBodyChecked(in, "gpt-upstream")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text, _ := body["text"].(map[string]any)
+	format, _ := text["format"].(map[string]any)
+	if format["type"] != "json_schema" || format["name"] != "answer" {
+		t.Fatalf("responses text format = %#v", text)
+	}
+	reasoning, _ := body["reasoning"].(map[string]any)
+	if reasoning["effort"] != "high" {
+		t.Fatalf("responses reasoning = %#v", reasoning)
+	}
+}
+
+func TestCheckedBodiesApplyExtraFieldPolicy(t *testing.T) {
+	t.Run("Anthropic 到 Chat 映射 stop_sequences", func(t *testing.T) {
+		in := FromAnthropic(map[string]any{
+			"messages":       []any{map[string]any{"role": "user", "content": "你好"}},
+			"stop_sequences": []any{"结束"},
+			"top_k":          3,
+			"metadata":       map[string]any{"user_id": "u_1"},
+		})
+		body, err := ToOpenAIChatBodyChecked(in, "gpt-upstream")
+		if err != nil {
+			t.Fatalf("转换失败：%v", err)
+		}
+		requireJSONEqual(t, []any{"结束"}, body["stop"])
+	})
+
+	t.Run("Responses 默认字段和可丢弃字段到 Chat", func(t *testing.T) {
+		in := FromOpenAIResponses(map[string]any{
+			"input":     []any{map[string]any{"role": "user", "content": "你好"}},
+			"store":     false,
+			"include":   []any{"reasoning.encrypted_content"},
+			"reasoning": map[string]any{"summary": "auto"},
+		})
+		if _, err := ToOpenAIChatBodyChecked(in, "gpt-upstream"); err != nil {
+			t.Fatalf("转换失败：%v", err)
+		}
+	})
+
+	t.Run("Chat 到 Anthropic 映射工具选择和并行开关", func(t *testing.T) {
+		in := FromOpenAIChat(map[string]any{
+			"messages": []any{map[string]any{"role": "user", "content": "你好"}},
+			"tool_choice": map[string]any{
+				"type":     "function",
+				"function": map[string]any{"name": "lookup"},
+			},
+			"parallel_tool_calls": false,
+		})
+		body, err := ToAnthropicBodyChecked(in, "claude-upstream")
+		if err != nil {
+			t.Fatalf("转换失败：%v", err)
+		}
+		requireJSONEqual(t, map[string]any{
+			"type":                      "tool",
+			"name":                      "lookup",
+			"disable_parallel_tool_use": true,
+		}, body["tool_choice"])
+	})
+
+	for _, tt := range []struct {
+		name  string
+		key   string
+		value any
+	}{
+		{name: "previous_response_id", key: "previous_response_id", value: "resp_123"},
+		{name: "conversation", key: "conversation", value: "conv_123"},
+		{name: "background", key: "background", value: true},
+		{name: "store true", key: "store", value: true},
+		{name: "n 大于一", key: "n", value: 2},
+	} {
+		t.Run("拒绝 "+tt.name, func(t *testing.T) {
+			in := FromOpenAIResponses(map[string]any{
+				"input": []any{map[string]any{"role": "user", "content": "你好"}},
+				tt.key:  tt.value,
+			})
+			if _, err := ToOpenAIChatBodyChecked(in, "gpt-upstream"); err == nil {
+				t.Fatalf("字段 %q 应被拒绝", tt.key)
+			}
+		})
+	}
+}
+
+func TestToolChoiceToResponses(t *testing.T) {
+	tests := []struct {
+		name string
+		in   *Internal
+		want any
+	}{
+		{
+			name: "Anthropic 指定工具",
+			in: FromAnthropic(map[string]any{
+				"messages":    []any{map[string]any{"role": "user", "content": "你好"}},
+				"tool_choice": map[string]any{"type": "tool", "name": "lookup"},
+			}),
+			want: map[string]any{"type": "function", "name": "lookup"},
+		},
+		{
+			name: "Chat 指定函数",
+			in: FromOpenAIChat(map[string]any{
+				"messages": []any{map[string]any{"role": "user", "content": "你好"}},
+				"tool_choice": map[string]any{
+					"type":     "function",
+					"function": map[string]any{"name": "lookup"},
+				},
+			}),
+			want: map[string]any{"type": "function", "name": "lookup"},
+		},
+		{
+			name: "auto 保持字符串",
+			in: FromOpenAIChat(map[string]any{
+				"messages":    []any{map[string]any{"role": "user", "content": "你好"}},
+				"tool_choice": "auto",
+			}),
+			want: "auto",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body, err := ToOpenAIResponsesBodyChecked(tt.in, "gpt-upstream")
+			if err != nil {
+				t.Fatalf("转换失败：%v", err)
+			}
+			requireJSONEqual(t, tt.want, body["tool_choice"])
+		})
+	}
+}
+
 func TestAnthropicRequestToOpenAIChatMapsToolsCallsResultsAndSystem(t *testing.T) {
 	schema := map[string]any{
 		"type":       "object",
@@ -373,6 +561,25 @@ func TestUnsupportedResponsesFunctionOutputBlockReturnsError(t *testing.T) {
 		}},
 	}})
 	requireInternalError(t, in, "unsupported", "input_file")
+}
+
+func TestUnsupportedResponsesStatefulInputReturnsConversionErrorForCrossProtocol(t *testing.T) {
+	in := FromOpenAIResponses(map[string]any{"input": []any{
+		map[string]any{"type": "reasoning", "id": "rs_123", "summary": []any{}},
+	}})
+	requireInternalError(t, in, "unsupported", "reasoning")
+	if _, err := ToOpenAIChatBodyChecked(in, "gpt-upstream"); err == nil {
+		t.Fatal("Responses reasoning input must not silently convert to Chat")
+	}
+}
+
+func TestResponsesInputFileIsRejectedForOpenAIChatTarget(t *testing.T) {
+	in := FromOpenAIResponses(map[string]any{"input": []any{map[string]any{
+		"type": "message", "role": "user", "content": []any{map[string]any{"type": "input_file", "file_id": "file_123"}},
+	}}})
+	if _, err := ToOpenAIChatBodyChecked(in, "gpt-upstream"); err == nil || !strings.Contains(err.Error(), "input_file") {
+		t.Fatalf("checked body error = %v, want unsupported input_file", err)
+	}
 }
 
 func TestResponsesFunctionOutputFileIDImageReturnsError(t *testing.T) {

@@ -138,11 +138,37 @@ type RequestLog struct {
 	Vision         bool   `json:"vision,omitempty"`
 	ResponseBytes  int64  `json:"responseBytes,omitempty"`
 	UpstreamStatus int    `json:"upstreamStatus,omitempty"`
-	// Attempts 本次请求实际发起的上游尝试次数，1 表示首个候选即成功。
+	// Attempts 保留既有的故障转移额度计数语义；超长 Retry-After 的 free attempt
+	// 不计入其中。严格的实际 HTTP 尝试编号见 AttemptDetails.AttemptNumber。
 	Attempts int `json:"attempts,omitempty"`
 	// AttemptTrail 故障转移轨迹，例如 "mimo:429/ratelimit → deepseek:200"。
-	AttemptTrail string    `json:"attemptTrail,omitempty"`
-	Started      time.Time `json:"-"`
+	AttemptTrail string `json:"attemptTrail,omitempty"`
+	// AttemptDetails 保留每一个候选的请求、跳过和转移明细；仍只生成一条顶层请求日志。
+	AttemptDetails []AttemptDetail `json:"attemptDetails,omitempty"`
+	Started        time.Time       `json:"-"`
+}
+
+// AttemptDetail 是一次候选决策的结构化可观测性记录。Kind/Outcome/Reason 使用稳定
+// 枚举，避免前端或外部诊断脚本依赖自由格式的 AttemptTrail 文本。
+type AttemptDetail struct {
+	Sequence           int    `json:"sequence"`
+	AttemptNumber      int    `json:"attemptNumber,omitempty"`
+	Kind               string `json:"kind"`
+	Provider           string `json:"provider"`
+	TargetModel        string `json:"targetModel,omitempty"`
+	ProviderFormat     string `json:"providerFormat"`
+	StartedAt          string `json:"startedAt"`
+	DurationMs         int64  `json:"durationMs"`
+	UpstreamStatus     int    `json:"upstreamStatus,omitempty"`
+	Outcome            string `json:"outcome"`
+	Reason             string `json:"reason,omitempty"`
+	Error              string `json:"error,omitempty"`
+	ErrorBody          string `json:"errorBody,omitempty"`
+	ErrorBodyTruncated bool   `json:"errorBodyTruncated,omitempty"`
+	UpstreamRequestID  string `json:"upstreamRequestId,omitempty"`
+	RetryAfterMs       int64  `json:"retryAfterMs,omitempty"`
+	FreeAttempt        bool   `json:"freeAttempt,omitempty"`
+	ResponseStarted    bool   `json:"responseStarted,omitempty"`
 }
 
 // Summary 是仪表盘顶部指标。
@@ -457,7 +483,11 @@ type LogFilter struct {
 	Status   string
 	Stream   string
 	Query    string
-	Since    time.Time
+	// Attempt* 过滤器按任意一条 attempt detail 匹配；顶层 status/provider 语义不变。
+	AttemptProvider string
+	AttemptStatus   string
+	AttemptOutcome  string
+	Since           time.Time
 }
 
 // forEachRecordOldestLocked 按日志原有的从旧到新逻辑顺序遍历记录。
@@ -553,14 +583,71 @@ func match(r RequestLog, f LogFilter) bool {
 			}
 		}
 	}
+	if f.AttemptProvider != "" && !matchesAttemptProvider(r.AttemptDetails, f.AttemptProvider) {
+		return false
+	}
+	if f.AttemptStatus != "" && !matchesAttemptStatus(r.AttemptDetails, f.AttemptStatus) {
+		return false
+	}
+	if f.AttemptOutcome != "" && !matchesAttemptOutcome(r.AttemptDetails, f.AttemptOutcome) {
+		return false
+	}
 	if f.Query != "" {
 		q := strings.ToLower(f.Query)
 		haystack := strings.ToLower(strings.Join([]string{r.ID, r.Path, r.Model, r.Provider, r.TargetModel, r.Error}, " "))
+		for _, detail := range r.AttemptDetails {
+			haystack += " " + strings.ToLower(strings.Join([]string{
+				detail.Provider, detail.TargetModel, detail.ProviderFormat, detail.Reason, detail.Error, detail.UpstreamRequestID,
+			}, " "))
+		}
 		if !strings.Contains(haystack, q) {
 			return false
 		}
 	}
 	return true
+}
+
+func matchesAttemptProvider(details []AttemptDetail, provider string) bool {
+	for _, detail := range details {
+		if detail.Provider == provider {
+			return true
+		}
+	}
+	return false
+}
+
+func matchesAttemptOutcome(details []AttemptDetail, outcome string) bool {
+	for _, detail := range details {
+		if detail.Outcome == outcome {
+			return true
+		}
+	}
+	return false
+}
+
+func matchesAttemptStatus(details []AttemptDetail, status string) bool {
+	for _, detail := range details {
+		switch status {
+		case "error":
+			if detail.Kind == "request" && detail.UpstreamStatus == 0 && detail.Error != "" {
+				return true
+			}
+		case "4xx":
+			if detail.UpstreamStatus >= 400 && detail.UpstreamStatus < 500 {
+				return true
+			}
+		case "5xx":
+			if detail.UpstreamStatus >= 500 {
+				return true
+			}
+		default:
+			code, err := strconv.Atoi(status)
+			if err == nil && detail.UpstreamStatus == code {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func providerStats(name string, rows []RequestLog) ProviderStats {

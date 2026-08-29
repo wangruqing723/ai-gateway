@@ -507,8 +507,10 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		lastAbandoned bool
 		breakerSkips  int
 		// freeSkips 因上游自报限流而放弃、且未消耗额度的次数
-		freeSkips    int
-		soonestRetry time.Duration
+		freeSkips          int
+		soonestRetry       time.Duration
+		nextHTTPAttemptNo  int
+		nextDetailSequence int
 	)
 	// 按 order 遍历全部候选，但真实尝试次数受 attemptLimit 约束：
 	// 被熔断跳过的候选不消耗尝试额度，否则熔断反而会削弱可用性。
@@ -522,6 +524,17 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 			if !allowed {
 				breakerSkips++
 				trail = append(trail, name+":breaker_open")
+				nextDetailSequence++
+				reqLog.AttemptDetails = append(reqLog.AttemptDetails, metrics.AttemptDetail{
+					Sequence:       nextDetailSequence,
+					Kind:           "breaker_skip",
+					Provider:       name,
+					TargetModel:    candidate.TargetModel,
+					ProviderFormat: candidate.Provider.Format,
+					StartedAt:      time.Now().In(beijingLoc).Format(time.RFC3339Nano),
+					Outcome:        "skipped",
+					Reason:         "breaker_open",
+				})
 				if retryAfter > 0 && (soonestRetry == 0 || retryAfter < soonestRetry) {
 					soonestRetry = retryAfter
 				}
@@ -532,6 +545,15 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 
 		// 是否还有后续候选可试：额度未用尽且 order 里后面还有候选
 		hasNext := attempts+1 < attemptLimit && pos+1 < len(order)
+		nextDetailSequence++
+		attemptStarted := time.Now()
+		detail := metrics.AttemptDetail{
+			Sequence:       nextDetailSequence,
+			Provider:       name,
+			TargetModel:    candidate.TargetModel,
+			ProviderFormat: candidate.Provider.Format,
+			StartedAt:      attemptStarted.In(beijingLoc).Format(time.RFC3339Nano),
+		}
 
 		outcome := s.forwardAttempt(w, r, forwardAttemptInput{
 			cfg:           cfg,
@@ -545,8 +567,15 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 			candidate:     candidate,
 			allowRetry:    hasNext,
 			attemptNo:     attempts + 1,
+			httpAttemptNo: nextHTTPAttemptNo + 1,
 			reqLog:        &reqLog,
+			detail:        &detail,
 		})
+		detail.DurationMs = time.Since(attemptStarted).Milliseconds()
+		reqLog.AttemptDetails = append(reqLog.AttemptDetails, detail)
+		if outcome.requestStarted {
+			nextHTTPAttemptNo++
+		}
 
 		if outcome.buildErr != "" {
 			// 该候选构建不出上游请求（协议不兼容等）：跳过，换下一个。
@@ -687,8 +716,11 @@ type forwardAttemptInput struct {
 	needVision    bool
 	candidate     router.Candidate
 	attemptNo     int // 从 1 开始，用于 x-ai-gateway-attempts
+	// httpAttemptNo 只对实际调用 proxy 的请求递增；与保留兼容语义的 attemptNo 分开。
+	httpAttemptNo int
 	allowRetry    bool
 	reqLog        *metrics.RequestLog
+	detail        *metrics.AttemptDetail
 }
 
 // forwardAttemptOutcome 单次尝试结果。
@@ -697,7 +729,9 @@ type forwardAttemptInput struct {
 type forwardAttemptOutcome struct {
 	buildErr  string
 	abandoned bool
-	trail     string // "provider:429/ratelimit"
+	// requestStarted 表示已实际调用上游 HTTP；构建/队列跳过不计入此编号。
+	requestStarted bool
+	trail          string // "provider:429/ratelimit"
 	// breakerOutcome 本次尝试对熔断计数的影响，由调用方汇报给 breaker。
 	breakerOutcome breaker.Outcome
 	// freeAttempt 本次放弃不消耗 maxAttempts 额度，见 failoverDecision.freeAttempt。
@@ -719,6 +753,7 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 	// 这里只兜住「部分候选是透传、部分不是」的情况：全部候选都不透传时 handle()
 	// 已在 vision 之前返回了。buildErr 不自带前缀，终态由调用方统一加。
 	if in.internal.Err != nil && !isPassthrough {
+		setAttemptBuildError(in.detail, in.internal.Err)
 		return forwardAttemptOutcome{buildErr: in.internal.Err.Error()}
 	}
 
@@ -736,29 +771,42 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 		}
 		upstreamMap["model"] = targetModel
 		if in.needVision {
-			// 图片翻译只覆盖 messages，system/tools 等 provider 原生扩展仍保留原值。
+			// 图片翻译只覆盖消息输入，system/tools 等 provider 原生扩展仍保留原值。
 			var translated map[string]any
 			if p.Format == "anthropic" {
 				translated = converter.ToAnthropicBody(in.internal, targetModel)
-			} else {
+				upstreamMap["messages"] = mergeTranslatedMessageContent(in.rawBody["messages"], translated["messages"])
+			} else if p.Format == "openai" {
 				translated = converter.ToOpenAIChatBody(in.internal, targetModel)
+				upstreamMap["messages"] = mergeTranslatedMessageContent(in.rawBody["messages"], translated["messages"])
+			} else {
+				translated = converter.ToOpenAIResponsesBody(in.internal, targetModel)
+				upstreamMap["input"] = mergeTranslatedResponsesInput(in.rawBody["input"], translated["input"])
 			}
-			upstreamMap["messages"] = mergeTranslatedMessageContent(in.rawBody["messages"], translated["messages"])
 		}
 	} else if p.Format == "anthropic" {
 		upstreamMap, err = converter.ToAnthropicBodyChecked(in.internal, targetModel)
-	} else {
+	} else if p.Format == "openai" {
 		upstreamMap, err = converter.ToOpenAIChatBodyChecked(in.internal, targetModel)
+	} else {
+		upstreamMap, err = converter.ToOpenAIResponsesBodyChecked(in.internal, targetModel)
 	}
 	if err != nil {
+		setAttemptBuildError(in.detail, err)
 		return forwardAttemptOutcome{buildErr: err.Error()}
 	}
 	upstreamBody, err := json.Marshal(upstreamMap)
 	if err != nil {
-		in.reqLog.Error = "上游请求体序列化失败: " + err.Error()
-		writeJSONError(w, http.StatusInternalServerError, "gateway_error", in.reqLog.Error)
-		// 网关侧序列化失败，与上游健康无关
-		return forwardAttemptOutcome{trail: p.Name + ":serialize_error", breakerOutcome: breaker.OutcomeIgnored}
+		buildErr := "上游请求体序列化失败: " + err.Error()
+		if in.detail != nil {
+			in.detail.Kind = "build_skip"
+			in.detail.Outcome = "build_error"
+			in.detail.Reason = "conversion_error"
+			in.detail.Error = buildErr
+		}
+		// 这是构建阶段错误，尚未向客户端写入字节；允许后续候选继续尝试，
+		// 并由外层在全部候选均不可构建时生成统一终态。
+		return forwardAttemptOutcome{buildErr: buildErr}
 	}
 
 	// 本次尝试真正会用到该候选，更新日志归属
@@ -773,22 +821,41 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 		release, waitMs, err := s.qm.Acquire(r.Context(), p.Name, p.MaxConcurrent, p.MaxPerSecond, p.MaxQueueWait)
 		in.reqLog.QueueWaitMs += waitMs
 		if err != nil {
+			if in.detail != nil {
+				in.detail.Kind = "queue_skip"
+				in.detail.Error = err.Error()
+			}
 			logf(reqID, "  队列处理异常: %s", err.Error())
-			if err == queue.ErrQueueTimeout {
+			if errors.Is(err, queue.ErrQueueTimeout) {
+				if in.detail != nil {
+					in.detail.Reason = "queue_timeout"
+					in.detail.Outcome = "skipped"
+				}
 				// 排队超时且允许转移：换下一个候选，别把客户端 503 掉
 				// 走访问器而不是直接 BoolOr：默认值只应写在 TransferOnXxx 一处，
 				// 否则改默认值时这里会静默不同步
 				if in.allowRetry && cfg.Failover.TransferOnQueueTimeout() && cfg.Failover.Enabled {
+					if in.detail != nil {
+						in.detail.Outcome = "transferred"
+					}
 					// 本地队列背压，不是上游故障
 					return forwardAttemptOutcome{abandoned: true, trail: p.Name + ":queue_timeout", breakerOutcome: breaker.OutcomeIgnored}
 				}
 				in.reqLog.Error = err.Error()
 				writeJSONError(w, http.StatusServiceUnavailable, "queue_timeout", err.Error())
 			} else if r.Context().Err() != nil {
+				if in.detail != nil {
+					in.detail.Reason = "client_disconnected"
+					in.detail.Outcome = "skipped"
+				}
 				// 客户端已断开，net/http 会忽略写入，无需也不应写响应
 				in.reqLog.Error = err.Error()
 				logf(reqID, "  客户端已断开，跳过响应")
 			} else {
+				if in.detail != nil {
+					in.detail.Reason = "queue_error"
+					in.detail.Outcome = "skipped"
+				}
 				in.reqLog.Error = err.Error()
 				writeJSONError(w, http.StatusBadGateway, "gateway_error", "队列错误: "+err.Error())
 			}
@@ -812,6 +879,10 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 	h := w.Header()
 	h.Set("x-ai-gateway-provider", p.Name)
 	h.Set("x-ai-gateway-attempts", strconv.Itoa(in.attemptNo))
+	if in.detail != nil {
+		in.detail.Kind = "request"
+		in.detail.AttemptNumber = in.httpAttemptNo
+	}
 
 	var (
 		// abandonReason / abandonBreaker / abandonFree 由 ShouldRetry 回调写、
@@ -848,6 +919,25 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 			attemptStatus = code
 			in.reqLog.UpstreamStatus = code
 		},
+		OnUpstreamHeaders: func(code int, requestID string, retryAfter time.Duration) {
+			if in.detail == nil {
+				return
+			}
+			in.detail.UpstreamStatus = code
+			in.detail.UpstreamRequestID = requestID
+			in.detail.RetryAfterMs = retryAfter.Milliseconds()
+		},
+		OnErrorBody: func(body string, truncated bool) {
+			if in.detail != nil {
+				in.detail.ErrorBody = body
+				in.detail.ErrorBodyTruncated = truncated
+			}
+		},
+		OnResponseStarted: func() {
+			if in.detail != nil {
+				in.detail.ResponseStarted = true
+			}
+		},
 	}
 	if in.allowRetry {
 		opts.ShouldRetry = func(upstreamCode int, retryAfter time.Duration, err error) bool {
@@ -870,8 +960,14 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 		if reason == "" {
 			reason = "abandoned"
 		}
+		if in.detail != nil {
+			in.detail.Outcome = "transferred"
+			in.detail.Reason = reason
+			in.detail.FreeAttempt = abandonFree
+		}
 		return forwardAttemptOutcome{
 			abandoned:      true,
+			requestStarted: true,
 			trail:          p.Name + ":" + reason,
 			breakerOutcome: abandonBreaker,
 			freeAttempt:    abandonFree,
@@ -881,6 +977,9 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 	upstreamStatus := attemptStatus
 	if forwardErr != nil {
 		in.reqLog.Error = forwardErr.Error()
+		if in.detail != nil {
+			in.detail.Error = forwardErr.Error()
+		}
 		// 区分客户端断开、超时、其他错误，避免把正常断开误报为异常
 		if errors.Is(forwardErr, context.Canceled) {
 			logf(reqID, "  客户端断开连接")
@@ -900,9 +999,54 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 	//
 	// 这里必须显式赋值：OutcomeSuccess 是零值，漏赋会让最后一个候选（allowRetry=false，
 	// 不触发放弃）的 5xx 被当成成功上报，既开不了路还会清零此前累积的失败streak。
+	breakerOutcome := breakerOutcomeFor(upstreamStatus, forwardErr)
+	if in.detail != nil {
+		if breakerOutcome == breaker.OutcomeSuccess {
+			in.detail.Outcome = "success"
+		} else {
+			in.detail.Outcome = "final_error"
+			in.detail.Reason = attemptFailureReason(upstreamStatus, forwardErr)
+		}
+	}
 	return forwardAttemptOutcome{
 		trail:          fmt.Sprintf("%s:%d", p.Name, status),
-		breakerOutcome: breakerOutcomeFor(upstreamStatus, forwardErr),
+		requestStarted: true,
+		breakerOutcome: breakerOutcome,
+	}
+}
+
+func setAttemptBuildError(detail *metrics.AttemptDetail, err error) {
+	if detail == nil {
+		return
+	}
+	detail.Kind = "build_skip"
+	detail.Outcome = "build_error"
+	detail.Reason = "conversion_error"
+	detail.Error = err.Error()
+}
+
+func attemptFailureReason(status int, err error) string {
+	if errors.Is(err, proxy.ErrConversion) {
+		return "conversion_error"
+	}
+	if status == http.StatusTooManyRequests {
+		return "429/ratelimit"
+	}
+	if status >= 500 {
+		return fmt.Sprintf("%d/server", status)
+	}
+	if status > 0 {
+		return fmt.Sprintf("%d/error", status)
+	}
+	switch {
+	case errors.Is(err, proxy.ErrStreamHeaderTimeout):
+		return "header_timeout"
+	case errors.Is(err, proxy.ErrRequestTimeout), errors.Is(err, context.DeadlineExceeded):
+		return "timeout"
+	case err != nil:
+		return "transport_error"
+	default:
+		return ""
 	}
 }
 
@@ -1038,6 +1182,51 @@ func mergeTranslatedMessageContent(original, translated any) any {
 			message["content"] = content
 		}
 		merged[i] = message
+	}
+	return merged
+}
+
+// mergeTranslatedResponsesInput 是 Responses 直通模式的视觉翻译合并。
+// Responses input 不是 Chat 的 messages 数组：function_call / function_call_output
+// 与 message 同级。只替换 message.content，其他原生 item 完整保留，避免把
+// Responses 的 item id、状态或扩展字段在“直通 + vision”时意外丢掉。
+func mergeTranslatedResponsesInput(original, translated any) any {
+	originalItems, originalOK := original.([]any)
+	translatedItems, translatedOK := translated.([]any)
+	if !originalOK || !translatedOK || len(originalItems) != len(translatedItems) {
+		return translated
+	}
+	merged := make([]any, len(originalItems))
+	for i := range originalItems {
+		originalItem, originalOK := originalItems[i].(map[string]any)
+		translatedItem, translatedOK := translatedItems[i].(map[string]any)
+		if !originalOK || !translatedOK {
+			return translated
+		}
+		originalType := originalItem["type"]
+		if originalType == nil {
+			originalType = "message"
+		}
+		translatedType := translatedItem["type"]
+		if translatedType == nil {
+			translatedType = "message"
+		}
+		if originalType != translatedType {
+			return translated
+		}
+		if originalType != "message" {
+			merged[i] = originalItem
+			continue
+		}
+		if originalItem["role"] != translatedItem["role"] {
+			return translated
+		}
+		item := make(map[string]any, len(originalItem))
+		for key, value := range originalItem {
+			item[key] = value
+		}
+		item["content"] = translatedItem["content"]
+		merged[i] = item
 	}
 	return merged
 }
@@ -1313,11 +1502,14 @@ func (s *server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 func (s *server) handleLogs(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	filter := metrics.LogFilter{
-		Provider: q.Get("provider"),
-		Model:    q.Get("model"),
-		Status:   q.Get("status"),
-		Stream:   q.Get("stream"),
-		Query:    q.Get("q"),
+		Provider:        q.Get("provider"),
+		Model:           q.Get("model"),
+		Status:          q.Get("status"),
+		Stream:          q.Get("stream"),
+		Query:           q.Get("q"),
+		AttemptProvider: q.Get("attemptProvider"),
+		AttemptStatus:   q.Get("attemptStatus"),
+		AttemptOutcome:  q.Get("attemptOutcome"),
 	}
 	if limit, err := strconv.Atoi(q.Get("limit")); err == nil {
 		filter.Limit = limit

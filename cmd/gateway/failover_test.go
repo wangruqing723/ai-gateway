@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"unicode/utf8"
 
 	"ai-gateway/internal/config"
 	"ai-gateway/internal/metrics"
@@ -18,6 +19,7 @@ import (
 const (
 	anthropicOKBody = `{"id":"msg_test","type":"message","role":"assistant","model":"upstream","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`
 	openaiOKBody    = `{"id":"chatcmpl-test","model":"upstream","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`
+	responsesOKBody = `{"id":"resp_test","object":"response","status":"completed","model":"upstream","output":[{"type":"message","id":"msg_test","role":"assistant","status":"completed","content":[{"type":"output_text","text":"ok"}]}],"usage":{"input_tokens":1,"output_tokens":1}}`
 )
 
 // newFailoverTestServer 组装一台开启 failover 的直通模式网关，候选顺序即 targets 顺序。
@@ -114,6 +116,122 @@ func TestFailoverTransfersToSecondCandidateOn502(t *testing.T) {
 	}
 	if entry.Provider != "good" {
 		t.Errorf("Provider = %q, 期望记最终成功的 good", entry.Provider)
+	}
+	if len(entry.AttemptDetails) != 2 {
+		t.Fatalf("AttemptDetails = %#v, 期望两条", entry.AttemptDetails)
+	}
+	failed, succeeded := entry.AttemptDetails[0], entry.AttemptDetails[1]
+	if failed.AttemptNumber != 1 || failed.Kind != "request" || failed.Outcome != "transferred" || failed.Reason != "502/server" || failed.UpstreamStatus != 502 {
+		t.Errorf("失败 detail = %#v", failed)
+	}
+	if succeeded.AttemptNumber != 2 || succeeded.Outcome != "success" || succeeded.UpstreamStatus != 200 || succeeded.Provider != "good" {
+		t.Errorf("成功 detail = %#v", succeeded)
+	}
+}
+
+func TestFailoverAttemptDetailCapturesErrorBodyAndRequestID(t *testing.T) {
+	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("x-request-id", "upstream-500")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = io.WriteString(w, `{"error":{"message":"bad","api_key":"must-not-leak"}}`)
+	}))
+	defer first.Close()
+	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, anthropicOKBody)
+	}))
+	defer second.Close()
+	providers := map[string]*config.Provider{
+		"bad":  {Name: "bad", BaseURL: first.URL, Format: "anthropic", MaxConcurrent: 1, MaxQueueWait: 1000},
+		"good": {Name: "good", BaseURL: second.URL, Format: "anthropic", MaxConcurrent: 1, MaxQueueWait: 1000},
+	}
+	srv := newFailoverTestServer(providers, config.Route{Match: "*", Targets: []config.Target{{Provider: "bad", Model: "m"}, {Provider: "good", Model: "m"}}}, first.Client(), defaultTestFailover())
+	recorder := postInference(srv, "/v1/messages", `{"model":"client-model","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status/body = %d/%s", recorder.Code, recorder.Body.String())
+	}
+	entry := srv.metrics.Logs(metrics.LogFilter{Limit: 1})[0]
+	detail := entry.AttemptDetails[0]
+	if detail.UpstreamRequestID != "upstream-500" || detail.ErrorBody == "" || !strings.Contains(detail.ErrorBody, "[REDACTED]") || strings.Contains(detail.ErrorBody, "must-not-leak") {
+		t.Fatalf("error observability detail = %#v", detail)
+	}
+}
+
+func TestFailoverAttemptDetailErrorBodyKeepsUTF8Boundary(t *testing.T) {
+	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		// 第 8192 字节落在“你”的中间，覆盖观测片段按字节截断的边界。
+		_, _ = io.WriteString(w, strings.Repeat("x", 8191)+"你后续错误正文")
+	}))
+	defer first.Close()
+	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, anthropicOKBody)
+	}))
+	defer second.Close()
+
+	providers := map[string]*config.Provider{
+		"bad":  {Name: "bad", BaseURL: first.URL, Format: "anthropic", MaxConcurrent: 1, MaxQueueWait: 1000},
+		"good": {Name: "good", BaseURL: second.URL, Format: "anthropic", MaxConcurrent: 1, MaxQueueWait: 1000},
+	}
+	srv := newFailoverTestServer(providers, config.Route{Match: "*", Targets: []config.Target{{Provider: "bad", Model: "m"}, {Provider: "good", Model: "m"}}}, first.Client(), defaultTestFailover())
+	if recorder := postInference(srv, "/v1/messages", `{"model":"client-model","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`); recorder.Code != http.StatusOK {
+		t.Fatalf("status/body = %d/%s", recorder.Code, recorder.Body.String())
+	}
+	detail := srv.metrics.Logs(metrics.LogFilter{Limit: 1})[0].AttemptDetails[0]
+	if !utf8.ValidString(detail.ErrorBody) {
+		t.Fatalf("错误正文不是合法 UTF-8：%q", detail.ErrorBody)
+	}
+}
+
+func TestFailoverCanTransferBetweenChatAndResponsesProviders(t *testing.T) {
+	var chatPath, responsesPath string
+	chat := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		chatPath = r.URL.Path
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = io.WriteString(w, `{"error":"chat unavailable"}`)
+	}))
+	defer chat.Close()
+	responses := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		responsesPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, responsesOKBody)
+	}))
+	defer responses.Close()
+	providers := map[string]*config.Provider{
+		"chat":      {Name: "chat", BaseURL: chat.URL, Format: "openai", MaxConcurrent: 1, MaxQueueWait: 1000},
+		"responses": {Name: "responses", BaseURL: responses.URL, Format: "openai-responses", MaxConcurrent: 1, MaxQueueWait: 1000},
+	}
+	srv := newFailoverTestServer(providers, config.Route{Match: "*", Targets: []config.Target{{Provider: "chat", Model: "gpt-chat"}, {Provider: "responses", Model: "gpt-responses"}}}, chat.Client(), defaultTestFailover())
+	recorder := postInference(srv, "/v1/responses", `{"model":"client-model","input":"hi"}`)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status/body = %d/%s", recorder.Code, recorder.Body.String())
+	}
+	if chatPath != "/v1/chat/completions" || responsesPath != "/v1/responses" {
+		t.Fatalf("upstream paths chat/responses = %q/%q", chatPath, responsesPath)
+	}
+	entry := srv.metrics.Logs(metrics.LogFilter{Limit: 1})[0]
+	if len(entry.AttemptDetails) != 2 || entry.AttemptDetails[0].ProviderFormat != "openai" || entry.AttemptDetails[1].ProviderFormat != "openai-responses" {
+		t.Fatalf("attempt details = %#v", entry.AttemptDetails)
+	}
+}
+
+func TestRequestLogFormatKeepsClientFormat(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, openaiOKBody)
+	}))
+	defer upstream.Close()
+	providers := map[string]*config.Provider{
+		"openai": {Name: "openai", BaseURL: upstream.URL, Format: "openai", MaxConcurrent: 1, MaxQueueWait: 1000},
+	}
+	srv := newFailoverTestServer(providers, config.Route{Match: "*", Provider: "openai", Model: "gpt-upstream"}, upstream.Client(), defaultTestFailover())
+	if recorder := postInference(srv, "/v1/messages", `{"model":"client-model","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`); recorder.Code != http.StatusOK {
+		t.Fatalf("status/body = %d/%s", recorder.Code, recorder.Body.String())
+	}
+	entry := srv.metrics.Logs(metrics.LogFilter{Limit: 1})[0]
+	if entry.Format != "anthropic" || entry.ClientFormat != "anthropic" {
+		t.Fatalf("日志格式 = %q/%q，期望客户端格式 anthropic", entry.Format, entry.ClientFormat)
 	}
 }
 

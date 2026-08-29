@@ -18,9 +18,11 @@ import (
 
 	"ai-gateway/internal/cache"
 	"ai-gateway/internal/config"
+	"ai-gateway/internal/converter"
 	"ai-gateway/internal/metrics"
 	"ai-gateway/internal/providerhealth"
 	"ai-gateway/internal/queue"
+	"ai-gateway/internal/router"
 	"ai-gateway/internal/vision"
 	"ai-gateway/internal/webbuild"
 )
@@ -42,6 +44,39 @@ func newBoundaryTestServer() *server {
 		httpClient:     http.DefaultClient,
 		metrics:        metrics.NewCollector(10),
 		providerHealth: providerhealth.NewChecker(),
+	}
+}
+
+func TestForwardAttemptCanceledQueueUsesClientDisconnectedReason(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	request := httptest.NewRequest(http.MethodPost, "http://client.test/v1/messages", nil).WithContext(ctx)
+	provider := &config.Provider{
+		Name: "primary", BaseURL: "http://127.0.0.1:1", Format: "anthropic", MaxConcurrent: 1, MaxQueueWait: 1000,
+	}
+	detail := metrics.AttemptDetail{}
+	reqLog := metrics.RequestLog{}
+	srv := &server{qm: queue.NewManager(), httpClient: http.DefaultClient}
+	outcome := srv.forwardAttempt(httptest.NewRecorder(), request, forwardAttemptInput{
+		cfg:          &config.Config{DirectMode: false},
+		start:        time.Now(),
+		clientFormat: "anthropic",
+		internal: converter.FromAnthropic(map[string]any{
+			"model": "client-model", "messages": []any{map[string]any{"role": "user", "content": "你好"}},
+		}),
+		rawBody:   map[string]any{"model": "client-model", "messages": []any{}},
+		candidate: router.Candidate{Provider: provider, TargetModel: "upstream-model"},
+		reqLog:    &reqLog,
+		detail:    &detail,
+	})
+	if detail.Reason == "queue_timeout" || detail.Reason != "client_disconnected" {
+		t.Fatalf("队列取消原因 = %q，期望 client_disconnected", detail.Reason)
+	}
+	if detail.Outcome != "skipped" {
+		t.Fatalf("队列取消结果 = %q，期望 skipped", detail.Outcome)
+	}
+	if outcome.abandoned || outcome.requestStarted {
+		t.Fatalf("取消的队列结果 = %#v", outcome)
 	}
 }
 
@@ -1241,6 +1276,27 @@ func TestSameFormatRequestPreservesNativeExtensions(t *testing.T) {
 				user, _ := messages[1].(map[string]any)
 				if user["name"] != "alice" {
 					t.Fatalf("native OpenAI message fields were dropped: %#v", body)
+				}
+			},
+		},
+		{
+			name: "openai responses native fields", path: "/v1/responses", providerFormat: "openai-responses",
+			requestBody:  `{"model":"client-model","input":[{"type":"message","role":"user","name":"alice","content":[{"type":"input_text","text":"hi"},{"type":"input_image","image_url":"https://images.example/test.png"}]}],"store":true,"tools":[{"type":"function","name":"lookup","strict":true,"parameters":{"type":"object"}}]}`,
+			responseBody: `{"id":"resp-test","object":"response","status":"completed","model":"upstream","output":[{"type":"message","id":"msg-test","role":"assistant","status":"completed","content":[{"type":"output_text","text":"ok"}]}],"usage":{"input_tokens":1,"output_tokens":1}}`,
+			withVision:   true,
+			assert: func(t *testing.T, body map[string]any) {
+				if body["store"] != true {
+					t.Fatalf("native Responses store was dropped: %#v", body)
+				}
+				tools, _ := body["tools"].([]any)
+				tool, _ := tools[0].(map[string]any)
+				if tool["strict"] != true || tool["name"] != "lookup" {
+					t.Fatalf("native Responses tool was dropped: %#v", body)
+				}
+				input, _ := body["input"].([]any)
+				message, _ := input[0].(map[string]any)
+				if message["name"] != "alice" {
+					t.Fatalf("native Responses message fields were dropped: %#v", body)
 				}
 			},
 		},

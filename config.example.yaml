@@ -88,7 +88,7 @@ metrics:
   windowMinutes: 15    # 统计窗口分钟数（默认 15，范围 1-60）
 
 # ── Provider 定义 ────────────────────────────────────────
-# format: anthropic | openai
+# format: anthropic | openai（Chat Completions）| openai-responses（Responses API）
 # apiKey 可选：留空则从客户端请求头中自动提取
 providers:
   mimo:

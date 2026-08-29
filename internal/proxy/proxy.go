@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -28,7 +29,13 @@ type LogFunc func(format string, args ...any)
 const (
 	maxResponseBodyBytes = 32 << 20
 	maxErrorBodyBytes    = 1 << 20
-	maxSSEEventBytes     = 8 << 20
+	// maxObservedErrorBodyBytes 限制写入请求日志的上游错误正文。实际回传仍沿用
+	// maxErrorBodyBytes 的既有保护上限，观测能力不能扩大内存或泄露风险。
+	maxObservedErrorBodyBytes = 8 << 10
+	// observedErrorBodyTimeout 限制即将放弃的候选采集错误正文和 drain 的时间，
+	// 不能让诊断信息读取占用下一次故障转移的时间预算。
+	observedErrorBodyTimeout = 100 * time.Millisecond
+	maxSSEEventBytes         = 8 << 20
 	// maxDrainBytes 放弃尝试时最多 drain 的响应体字节数，用于保住连接复用。
 	maxDrainBytes = 64 << 10
 )
@@ -37,6 +44,8 @@ var (
 	errResponseBodyTooLarge  = errors.New("上游响应体超过大小限制")
 	errSSEEventTooLarge      = errors.New("上游 SSE 事件超过大小限制")
 	errStreamActivityTimeout = errors.New("流式传输活跃超时")
+	// ErrConversion 表示上游已响应，但无法安全转换为客户端协议。
+	ErrConversion = errors.New("上游响应协议转换失败")
 
 	// ErrAttemptAbandoned 表示 ShouldRetry 判定放弃本次尝试，未向客户端写入任何字节。
 	// 调用方应据此换下一个候选重试，或在候选耗尽后自行写终态响应。
@@ -63,6 +72,16 @@ type ShouldRetryFunc func(upstreamCode int, retryAfter time.Duration, err error)
 // 让调用方能用「未上报」区分「上游没给状态码」和「上游给了 5xx」。
 type UpstreamStatusFunc func(upstreamCode int)
 
+// UpstreamHeadersFunc 在收到上游响应头后报告可观测性字段。request ID 与
+// Retry-After 都来自响应头，传输失败时不会调用。
+type UpstreamHeadersFunc func(upstreamCode int, requestID string, retryAfter time.Duration)
+
+// ErrorBodyFunc 报告已限量且脱敏的上游错误正文。正文只在状态码 >= 400 时采集。
+type ErrorBodyFunc func(body string, truncated bool)
+
+// ResponseStartedFunc 表示网关已经开始向客户端写入响应；此后不能再安全 failover。
+type ResponseStartedFunc func()
+
 // Options 转发选项
 type Options struct {
 	ClientReq             *http.Request
@@ -85,6 +104,12 @@ type Options struct {
 	// 与 ShouldRetry 分开：后者只在「可放弃」的时机询问，拿不到最后一个候选
 	// （不允许转移）的状态码，而熔断判据恰恰需要它。
 	OnUpstreamStatus UpstreamStatusFunc
+	// OnUpstreamHeaders 提供状态码以外的上游诊断元数据，可与旧回调并存。
+	OnUpstreamHeaders UpstreamHeadersFunc
+	// OnErrorBody 提供脱敏、最多 8 KiB 的上游错误正文。
+	OnErrorBody ErrorBodyFunc
+	// OnResponseStarted 在向客户端写响应头或正文前调用。
+	OnResponseStarted ResponseStartedFunc
 }
 
 // recordUpstreamStatus 上报上游状态码，供调用方做熔断判据与请求日志。
@@ -92,6 +117,37 @@ func recordUpstreamStatus(opts *Options, code int) {
 	if opts.OnUpstreamStatus != nil {
 		opts.OnUpstreamStatus(code)
 	}
+}
+
+func recordUpstreamHeaders(opts *Options, resp *http.Response) {
+	if resp == nil {
+		return
+	}
+	recordUpstreamStatus(opts, resp.StatusCode)
+	if opts.OnUpstreamHeaders != nil {
+		opts.OnUpstreamHeaders(resp.StatusCode, upstreamRequestID(resp.Header), parseRetryAfter(resp.Header, time.Now()))
+	}
+}
+
+func recordErrorBody(opts *Options, body string, truncated bool) {
+	if opts.OnErrorBody != nil {
+		opts.OnErrorBody(body, truncated)
+	}
+}
+
+func markResponseStarted(opts *Options) {
+	if opts.OnResponseStarted != nil {
+		opts.OnResponseStarted()
+	}
+}
+
+func upstreamRequestID(h http.Header) string {
+	for _, key := range []string{"x-request-id", "request-id", "x-openai-request-id"} {
+		if value := strings.TrimSpace(h.Get(key)); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 // abandonAttempt 在尚未写入客户端时询问是否放弃本次尝试。
@@ -108,6 +164,127 @@ func drainBody(resp *http.Response) {
 		return
 	}
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxDrainBytes))
+}
+
+var sensitiveErrorField = regexp.MustCompile(`(?i)(["']?(?:api[_-]?key|token|authorization|cookie|secret|password)["']?\s*[:=]\s*["']?)([^\s,"'}]+)`)
+
+// readErrorBody 一次性消费最多 limit 字节的上游错误正文，同时产出用于日志的
+// 8 KiB 脱敏片段。回传分支用 maxErrorBodyBytes，放弃分支只用观测上限。
+func readErrorBody(r io.Reader, limit int) (raw []byte, observed string, truncated bool, err error) {
+	if limit <= 0 {
+		return nil, "", false, fmt.Errorf("错误正文读取上限必须大于零")
+	}
+	raw, readErr := io.ReadAll(io.LimitReader(r, int64(limit)+1))
+	if len(raw) > maxObservedErrorBodyBytes {
+		truncated = true
+	}
+	observedRaw := raw
+	if len(observedRaw) > maxObservedErrorBodyBytes {
+		observedRaw = []byte(truncateUTF8(string(observedRaw), maxObservedErrorBodyBytes))
+	}
+	observed = sanitizeErrorBody(observedRaw)
+	if len(observed) > maxObservedErrorBodyBytes {
+		// 对无效 JSON 做正则脱敏时，替换后的字节数理论上可能略有变化；日志契约
+		// 仍必须严格保持 8 KiB 上限。
+		observed = truncateUTF8(observed, maxObservedErrorBodyBytes)
+		truncated = true
+	}
+	if readErr != nil {
+		return raw, observed, truncated, readErr
+	}
+	if len(raw) > limit {
+		return raw, observed, true, fmt.Errorf("%w (%d bytes)", errResponseBodyTooLarge, limit)
+	}
+	return raw, observed, truncated, nil
+}
+
+// truncateUTF8 按字节上限截断字符串，并移除截断处不完整的 UTF-8 序列。
+func truncateUTF8(value string, limit int) string {
+	if len(value) <= limit {
+		return value
+	}
+	return strings.ToValidUTF8(value[:limit], "")
+}
+
+// readObservedErrorBody 读取即将放弃的候选的短错误正文，并在同一短计时器内 drain。
+// 计时器取消请求上下文以打断卡住的读取；正常完成时仍会 drain 以保持连接复用。
+func readObservedErrorBody(cancel context.CancelFunc, resp *http.Response) (string, bool) {
+	timerDone := make(chan struct{})
+	timer := time.AfterFunc(observedErrorBodyTimeout, func() {
+		cancel()
+		close(timerDone)
+	})
+	_, observed, truncated, _ := readErrorBody(resp.Body, maxObservedErrorBodyBytes)
+	drainBody(resp)
+	if !timer.Stop() {
+		<-timerDone
+	}
+	return observed, truncated
+}
+
+// readStreamErrorBody 为“已拿到流响应头、且必须回传错误正文”的阶段保留活跃超时。
+// 流式请求已在拿到响应头后取消 header timer，错误正文本身仍可能卡住。
+func readStreamErrorBody(ctx context.Context, cancel context.CancelFunc, r io.Reader, opts *Options, limit int) ([]byte, string, bool, error) {
+	timeoutMs := opts.StreamActivityTimeout
+	if timeoutMs <= 0 {
+		timeoutMs = opts.TimeoutMs
+	}
+	var timedOut atomic.Bool
+	timerDone := make(chan struct{})
+	timer := time.AfterFunc(time.Duration(timeoutMs)*time.Millisecond, func() {
+		timedOut.Store(true)
+		cancel()
+		close(timerDone)
+	})
+	raw, observed, truncated, err := readErrorBody(r, limit)
+	if !timer.Stop() {
+		<-timerDone
+	}
+	if timedOut.Load() {
+		return raw, observed, truncated, fmt.Errorf("%w: 上游错误响应体超时", context.DeadlineExceeded)
+	}
+	if err != nil && errors.Is(ctx.Err(), context.Canceled) {
+		return raw, observed, truncated, ctx.Err()
+	}
+	return raw, observed, truncated, err
+}
+
+func sanitizeErrorBody(raw []byte) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	// JSON 错误体按字段名递归脱敏，避免正则跨引号导致结构损坏。
+	var value any
+	if json.Unmarshal(raw, &value) == nil {
+		redactSensitiveJSON(value)
+		if encoded, err := json.Marshal(value); err == nil {
+			return string(encoded)
+		}
+	}
+	return sensitiveErrorField.ReplaceAllString(string(raw), "${1}[REDACTED]")
+}
+
+func redactSensitiveJSON(value any) {
+	switch current := value.(type) {
+	case map[string]any:
+		for key, child := range current {
+			if isSensitiveErrorField(key) {
+				current[key] = "[REDACTED]"
+				continue
+			}
+			redactSensitiveJSON(child)
+		}
+	case []any:
+		for _, child := range current {
+			redactSensitiveJSON(child)
+		}
+	}
+}
+
+func isSensitiveErrorField(key string) bool {
+	normalized := strings.ToLower(strings.NewReplacer("-", "", "_", "", " ", "").Replace(key))
+	return normalized == "apikey" || normalized == "authorization" || normalized == "cookie" ||
+		strings.Contains(normalized, "token") || strings.Contains(normalized, "secret") || strings.Contains(normalized, "password")
 }
 
 // parseRetryAfter 解析 Retry-After：整数秒或 HTTP-date。缺失或无法解析返回 0。
@@ -151,6 +328,7 @@ func Forward(opts *Options) error {
 		headerTimeout := time.Duration(headerTimeoutMs) * time.Millisecond
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, upstreamURL+upstreamPath, bytes.NewReader(opts.UpstreamBody))
 		if err != nil {
+			markResponseStarted(opts)
 			writeJSONError(opts.ClientRes, http.StatusBadGateway, "proxy_error", err.Error())
 			return err
 		}
@@ -189,24 +367,29 @@ func Forward(opts *Options) error {
 				return ErrAttemptAbandoned
 			}
 			if isHeaderTimeout {
+				markResponseStarted(opts)
 				writeJSONError(opts.ClientRes, http.StatusGatewayTimeout, "timeout_error", fmt.Sprintf("上游响应头超时 (%d秒)", headerTimeoutMs/1000))
 				return err
 			}
+			markResponseStarted(opts)
 			writeJSONError(opts.ClientRes, http.StatusBadGateway, "proxy_error", err.Error())
 			return err
 		}
 		defer resp.Body.Close()
 
 		elapsed := time.Since(opts.StartTime).Milliseconds()
-		recordUpstreamStatus(opts, resp.StatusCode)
+		recordUpstreamHeaders(opts, resp)
 		if resp.StatusCode >= 400 {
 			opts.Log("← HTTP %d [%dms]", resp.StatusCode, elapsed)
-			// 错误响应体还没读、客户端还没写，可放弃本次尝试。
 			if abandonAttempt(opts, resp.StatusCode, parseRetryAfter(resp.Header, time.Now()), nil) {
-				drainBody(resp)
+				observed, truncated := readObservedErrorBody(cancel, resp)
+				recordErrorBody(opts, observed, truncated)
 				return ErrAttemptAbandoned
 			}
-			return handleStreamError(ctx, cancel, resp, opts)
+			raw, observed, truncated, readErr := readStreamErrorBody(ctx, cancel, resp.Body, opts, maxErrorBodyBytes)
+			recordErrorBody(opts, observed, truncated)
+			drainBody(resp)
+			return handleStreamErrorPayload(ctx, resp.StatusCode, raw, readErr, opts)
 		}
 		opts.Log("← %d [%dms]", resp.StatusCode, elapsed)
 		return handleStream(ctx, cancel, resp, opts)
@@ -218,6 +401,7 @@ func Forward(opts *Options) error {
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, upstreamURL+upstreamPath, bytes.NewReader(opts.UpstreamBody))
 	if err != nil {
+		markResponseStarted(opts)
 		writeJSONError(opts.ClientRes, http.StatusBadGateway, "proxy_error", err.Error())
 		return err
 	}
@@ -239,23 +423,29 @@ func Forward(opts *Options) error {
 			return ErrAttemptAbandoned
 		}
 		if isTimeout {
+			markResponseStarted(opts)
 			writeJSONError(opts.ClientRes, http.StatusGatewayTimeout, "timeout_error", fmt.Sprintf("上游请求超时 (%d秒)", opts.TimeoutMs/1000))
 			return err
 		}
+		markResponseStarted(opts)
 		writeJSONError(opts.ClientRes, http.StatusBadGateway, "proxy_error", err.Error())
 		return err
 	}
 	defer resp.Body.Close()
 
 	elapsed := time.Since(opts.StartTime).Milliseconds()
-	recordUpstreamStatus(opts, resp.StatusCode)
+	recordUpstreamHeaders(opts, resp)
 	if resp.StatusCode >= 400 {
 		opts.Log("← HTTP %d [%dms]", resp.StatusCode, elapsed)
 		if abandonAttempt(opts, resp.StatusCode, parseRetryAfter(resp.Header, time.Now()), nil) {
-			drainBody(resp)
+			observed, truncated := readObservedErrorBody(cancel2, resp)
+			recordErrorBody(opts, observed, truncated)
 			return ErrAttemptAbandoned
 		}
-		return handleError(ctx, resp, opts.ClientRes, opts.Log)
+		raw, observed, truncated, readErr := readErrorBody(resp.Body, maxErrorBodyBytes)
+		recordErrorBody(opts, observed, truncated)
+		drainBody(resp)
+		return handleErrorPayload(ctx, resp.StatusCode, raw, readErr, opts)
 	}
 	opts.Log("← %d [%dms]", resp.StatusCode, elapsed)
 	return handleResponse(ctx, resp, opts)
@@ -268,15 +458,18 @@ func handleResponse(ctx context.Context, resp *http.Response, opts *Options) err
 		opts.Log("上游响应流错误: %s", err.Error())
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			msg := fmt.Sprintf("上游响应体超时 (%d秒)", opts.TimeoutMs/1000)
+			markResponseStarted(opts)
 			writeJSONError(opts.ClientRes, http.StatusGatewayTimeout, "timeout_error", msg)
 			return fmt.Errorf("%w: %s", context.DeadlineExceeded, msg)
 		}
+		markResponseStarted(opts)
 		writeJSONError(opts.ClientRes, http.StatusBadGateway, "upstream_error", err.Error())
 		return err
 	}
 
 	var data map[string]any
 	if err := json.Unmarshal(raw, &data); err != nil {
+		markResponseStarted(opts)
 		writeJSONError(opts.ClientRes, http.StatusBadGateway, "parse_error", "上游响应解析失败: "+err.Error())
 		return err
 	}
@@ -285,16 +478,20 @@ func handleResponse(ctx context.Context, resp *http.Response, opts *Options) err
 	var conversionErr error
 	if opts.Provider.Format == "anthropic" {
 		result, conversionErr = converter.ConvertAnthropicResponseChecked(data, opts.ClientFormat, opts.OriginalModel)
-	} else {
+	} else if opts.Provider.Format == "openai" {
 		result, conversionErr = converter.ConvertOpenAIChatResponseChecked(data, opts.ClientFormat, opts.OriginalModel)
+	} else {
+		result, conversionErr = converter.ConvertOpenAIResponsesResponseChecked(data, opts.ClientFormat, opts.OriginalModel)
 	}
 	if conversionErr != nil {
 		opts.Log("上游响应转换失败: %s", conversionErr.Error())
+		markResponseStarted(opts)
 		writeJSONError(opts.ClientRes, http.StatusBadGateway, "conversion_error", "上游响应转换失败: "+conversionErr.Error())
-		return conversionErr
+		return fmt.Errorf("%w: %v", ErrConversion, conversionErr)
 	}
 
 	out, _ := json.Marshal(result)
+	markResponseStarted(opts)
 	return writeResponseWithDeadline(ctx, opts.ClientRes, http.StatusOK, out)
 }
 
@@ -313,6 +510,7 @@ func handleStream(ctx context.Context, cancel context.CancelFunc, resp *http.Res
 	if opts.ClientFormat == "anthropic" {
 		h.Set("anthropic-version", "2023-06-01")
 	}
+	markResponseStarted(opts)
 	opts.ClientRes.WriteHeader(http.StatusOK)
 
 	activityTimeout := time.Duration(opts.StreamActivityTimeout) * time.Millisecond
@@ -486,12 +684,12 @@ func writeTransformedLine(transform converter.StreamTransformer, line string, ca
 			if writeErr := writeStreamFailure(opts.ClientRes, flusher, writeTimeout, opts.ClientFormat, "conversion_error", "上游流式响应转换失败: "+err.Error()); writeErr != nil {
 				return true, finishStreamWrite(writeErr, cancel, opts)
 			}
-			return true, err
+			return true, fmt.Errorf("%w: %v", ErrConversion, err)
 		}
 		if writeErr := writeAndFlushStream(opts.ClientRes, flusher, []byte(strings.Join(failure, "")), writeTimeout); writeErr != nil {
 			return true, finishStreamWrite(writeErr, cancel, opts)
 		}
-		return true, err
+		return true, fmt.Errorf("%w: %v", ErrConversion, err)
 	}
 	for _, event := range out {
 		if event == "" {
@@ -609,61 +807,65 @@ func responsesStreamFailure(errType, message string) []byte {
 	return []byte(fmt.Sprintf("event: response.failed\ndata: %s\n\n", payload))
 }
 
-func handleStreamError(ctx context.Context, cancel context.CancelFunc, resp *http.Response, opts *Options) error {
+// handleStreamErrorPayload 将已经读取过一次的上游错误正文回写给客户端。
+func handleStreamErrorPayload(ctx context.Context, statusCode int, raw []byte, readErr error, opts *Options) error {
 	timeoutMs := opts.StreamActivityTimeout
 	if timeoutMs <= 0 {
 		timeoutMs = opts.TimeoutMs
-	}
-	var timedOut atomic.Bool
-	timerDone := make(chan struct{})
-	timer := time.AfterFunc(time.Duration(timeoutMs)*time.Millisecond, func() {
-		timedOut.Store(true)
-		cancel()
-		close(timerDone)
-	})
-	raw, err := readAllLimited(resp.Body, maxErrorBodyBytes)
-	if !timer.Stop() {
-		<-timerDone
 	}
 	if clientRequestCanceled(opts) {
 		opts.Log("客户端断开连接")
 		return nil
 	}
-	if timedOut.Load() {
-		msg := fmt.Sprintf("上游错误响应体超时 (%d秒)", timeoutMs/1000)
-		opts.Log("%s", msg)
-		if writeErr := writeJSONErrorWithTimeout(opts.ClientRes, http.StatusGatewayTimeout, "timeout_error", msg, time.Duration(timeoutMs)*time.Millisecond); writeErr != nil {
-			return writeErr
+	if readErr != nil {
+		if errors.Is(readErr, errResponseBodyTooLarge) {
+			msg := readErr.Error()
+			opts.Log("   错误响应读取失败: %s", msg)
+			markResponseStarted(opts)
+			if writeErr := writeJSONErrorWithTimeout(opts.ClientRes, http.StatusBadGateway, "upstream_error", msg, time.Duration(timeoutMs)*time.Millisecond); writeErr != nil {
+				return writeErr
+			}
+			return readErr
 		}
-		return fmt.Errorf("%w: %s", context.DeadlineExceeded, msg)
-	}
-	if err != nil {
+		if errors.Is(readErr, context.DeadlineExceeded) {
+			msg := fmt.Sprintf("上游错误响应体超时 (%d秒)", timeoutMs/1000)
+			opts.Log("%s", msg)
+			markResponseStarted(opts)
+			if writeErr := writeJSONErrorWithTimeout(opts.ClientRes, http.StatusGatewayTimeout, "timeout_error", msg, time.Duration(timeoutMs)*time.Millisecond); writeErr != nil {
+				return writeErr
+			}
+			return readErr
+		}
 		if errors.Is(ctx.Err(), context.Canceled) {
 			return ctx.Err()
 		}
-		opts.Log("   错误响应读取失败: %s", err.Error())
-		if writeErr := writeJSONErrorWithTimeout(opts.ClientRes, http.StatusBadGateway, "upstream_error", err.Error(), time.Duration(timeoutMs)*time.Millisecond); writeErr != nil {
+		opts.Log("   错误响应读取失败: %s", readErr.Error())
+		markResponseStarted(opts)
+		if writeErr := writeJSONErrorWithTimeout(opts.ClientRes, http.StatusBadGateway, "upstream_error", readErr.Error(), time.Duration(timeoutMs)*time.Millisecond); writeErr != nil {
 			return writeErr
 		}
-		return err
+		return readErr
 	}
-	return writeErrorResponseWithTimeout(resp.StatusCode, raw, opts.ClientRes, opts.Log, time.Duration(timeoutMs)*time.Millisecond)
+	markResponseStarted(opts)
+	return writeErrorResponseWithTimeout(statusCode, raw, opts.ClientRes, opts.Log, time.Duration(timeoutMs)*time.Millisecond)
 }
 
-// handleError 上游错误响应：原样回传状态码与响应体。
-func handleError(ctx context.Context, resp *http.Response, w http.ResponseWriter, log LogFunc) error {
-	raw, err := readAllLimited(resp.Body, maxErrorBodyBytes)
-	if err != nil {
-		log("   错误响应读取失败: %s", err.Error())
+// handleErrorPayload 回写已经读取过的错误正文，确保最终失败时能原样回传。
+func handleErrorPayload(ctx context.Context, statusCode int, raw []byte, readErr error, opts *Options) error {
+	if readErr != nil {
+		opts.Log("   错误响应读取失败: %s", readErr.Error())
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			msg := "上游错误响应体超时"
-			writeJSONError(w, http.StatusGatewayTimeout, "timeout_error", msg)
+			markResponseStarted(opts)
+			writeJSONError(opts.ClientRes, http.StatusGatewayTimeout, "timeout_error", msg)
 			return fmt.Errorf("%w: %s", context.DeadlineExceeded, msg)
 		}
-		writeJSONError(w, http.StatusBadGateway, "upstream_error", err.Error())
-		return err
+		markResponseStarted(opts)
+		writeJSONError(opts.ClientRes, http.StatusBadGateway, "upstream_error", readErr.Error())
+		return readErr
 	}
-	return writeErrorResponse(ctx, resp.StatusCode, raw, w, log)
+	markResponseStarted(opts)
+	return writeErrorResponse(ctx, statusCode, raw, opts.ClientRes, opts.Log)
 }
 
 func writeErrorResponse(ctx context.Context, statusCode int, raw []byte, w http.ResponseWriter, log LogFunc) error {

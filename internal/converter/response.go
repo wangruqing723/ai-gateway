@@ -56,6 +56,20 @@ func ConvertOpenAIChatResponseChecked(data map[string]any, clientFormat, origina
 	return data, nil
 }
 
+// ConvertOpenAIResponsesResponseChecked 转换 Responses 非流式响应。Responses 的 output
+// 是带类型的 item 序列，不能只读取 output_text 便利字段，否则会丢失 function_call。
+func ConvertOpenAIResponsesResponseChecked(data map[string]any, clientFormat, originalModel string) (map[string]any, error) {
+	switch clientFormat {
+	case "openai-responses":
+		return data, nil
+	case "openai-chat":
+		return responsesToOpenAIChatResponse(data, originalModel)
+	case "anthropic":
+		return responsesToAnthropicResponse(data, originalModel)
+	}
+	return data, nil
+}
+
 func anthropicToOpenAIChatResponse(data map[string]any, model string) (map[string]any, error) {
 	usage, _ := data["usage"].(map[string]any)
 	in := getIntDefault(usage, "input_tokens", 0)
@@ -146,6 +160,185 @@ func openAIChatToAnthropicResponse(data map[string]any, model string) (map[strin
 		},
 	}
 	return result, nil
+}
+
+func responsesToOpenAIChatResponse(data map[string]any, model string) (map[string]any, error) {
+	parsed, err := parseResponsesOutput(data)
+	if err != nil {
+		return nil, err
+	}
+	message := map[string]any{"role": "assistant", "content": parsed.text}
+	if parsed.refusal != "" {
+		message["content"] = nil
+		message["refusal"] = parsed.refusal
+	}
+	if parsed.text == "" && parsed.refusal == "" && len(parsed.toolCalls) > 0 {
+		message["content"] = nil
+	}
+	if len(parsed.toolCalls) > 0 {
+		message["tool_calls"] = parsed.toolCalls
+	}
+	finish := "stop"
+	if parsed.incomplete {
+		finish = "length"
+	} else if len(parsed.toolCalls) > 0 {
+		finish = "tool_calls"
+	} else if parsed.refusal != "" {
+		finish = "content_filter"
+	}
+	usage := responsesUsageToChat(data["usage"])
+	return map[string]any{
+		"id":      responseIDForChat(data),
+		"object":  "chat.completion",
+		"created": responseCreatedAt(data),
+		"model":   model,
+		"choices": []any{map[string]any{"index": 0, "message": message, "finish_reason": finish}},
+		"usage":   usage,
+	}, nil
+}
+
+func responsesToAnthropicResponse(data map[string]any, model string) (map[string]any, error) {
+	parsed, err := parseResponsesOutput(data)
+	if err != nil {
+		return nil, err
+	}
+	content := make([]any, 0, 1+len(parsed.toolCalls))
+	if parsed.refusal != "" {
+		content = append(content, map[string]any{"type": "text", "text": parsed.refusal})
+	} else if parsed.text != "" || len(parsed.toolCalls) == 0 {
+		content = append(content, map[string]any{"type": "text", "text": parsed.text})
+	}
+	for _, value := range parsed.toolCalls {
+		call, _ := value.(map[string]any)
+		function, _ := call["function"].(map[string]any)
+		input, err := parseFunctionArguments(function["arguments"])
+		if err != nil {
+			return nil, fmt.Errorf("responses function call %q arguments: %w", getString(call, "id"), err)
+		}
+		content = append(content, map[string]any{
+			"type": "tool_use", "id": getString(call, "id"), "name": getString(function, "name"), "input": input,
+		})
+	}
+	stop := "end_turn"
+	if parsed.incomplete {
+		stop = "max_tokens"
+	} else if len(parsed.toolCalls) > 0 {
+		stop = "tool_use"
+	} else if parsed.refusal != "" {
+		stop = "refusal"
+	}
+	usage, _ := data["usage"].(map[string]any)
+	return map[string]any{
+		"id":          responseIDForAnthropic(data),
+		"type":        "message",
+		"role":        "assistant",
+		"model":       model,
+		"content":     content,
+		"stop_reason": stop,
+		"usage": map[string]any{
+			"input_tokens": getIntDefault(usage, "input_tokens", 0), "output_tokens": getIntDefault(usage, "output_tokens", 0),
+		},
+	}, nil
+}
+
+type parsedResponsesOutput struct {
+	text       string
+	refusal    string
+	toolCalls  []any
+	incomplete bool
+}
+
+func parseResponsesOutput(data map[string]any) (parsedResponsesOutput, error) {
+	if getString(data, "status") == "failed" || data["error"] != nil {
+		message := "Responses 上游返回失败响应"
+		if e, ok := data["error"].(map[string]any); ok && getString(e, "message") != "" {
+			message += ": " + getString(e, "message")
+		}
+		return parsedResponsesOutput{}, fmt.Errorf("%s", message)
+	}
+	output, ok := data["output"].([]any)
+	if !ok {
+		return parsedResponsesOutput{}, fmt.Errorf("responses response output must be an array, got %T", data["output"])
+	}
+	parsed := parsedResponsesOutput{incomplete: getString(data, "status") == "incomplete"}
+	for itemIndex, value := range output {
+		item, ok := value.(map[string]any)
+		if !ok {
+			return parsedResponsesOutput{}, fmt.Errorf("responses output item %d must be an object", itemIndex)
+		}
+		switch getString(item, "type") {
+		case "message":
+			content, ok := item["content"].([]any)
+			if !ok {
+				return parsedResponsesOutput{}, fmt.Errorf("responses message output item %d content must be an array", itemIndex)
+			}
+			for contentIndex, partValue := range content {
+				part, ok := partValue.(map[string]any)
+				if !ok {
+					return parsedResponsesOutput{}, fmt.Errorf("responses message content %d must be an object", contentIndex)
+				}
+				switch getString(part, "type") {
+				case "output_text":
+					parsed.text += getString(part, "text")
+				case "refusal":
+					parsed.refusal += getString(part, "refusal")
+				default:
+					return parsedResponsesOutput{}, fmt.Errorf("unsupported responses output message content %q", getString(part, "type"))
+				}
+			}
+		case "function_call":
+			arguments, err := functionArgumentString(item["arguments"])
+			if err != nil {
+				return parsedResponsesOutput{}, fmt.Errorf("responses function call %q arguments: %w", getString(item, "call_id"), err)
+			}
+			callID := getString(item, "call_id")
+			if callID == "" {
+				return parsedResponsesOutput{}, fmt.Errorf("responses function call is missing call_id")
+			}
+			parsed.toolCalls = append(parsed.toolCalls, map[string]any{
+				"id": callID, "type": "function",
+				"function": map[string]any{"name": getString(item, "name"), "arguments": arguments},
+			})
+		case "reasoning":
+			// 第一阶段不向其他协议伪装推理内容，保留可转换的文本和工具调用。
+		default:
+			return parsedResponsesOutput{}, fmt.Errorf("unsupported responses output item %q", getString(item, "type"))
+		}
+	}
+	return parsed, nil
+}
+
+func responsesUsageToChat(value any) map[string]any {
+	usage, _ := value.(map[string]any)
+	in := getIntDefault(usage, "input_tokens", 0)
+	out := getIntDefault(usage, "output_tokens", 0)
+	return map[string]any{"prompt_tokens": in, "completion_tokens": out, "total_tokens": in + out}
+}
+
+func responseCreatedAt(data map[string]any) int64 {
+	switch v := data["created_at"].(type) {
+	case float64:
+		return int64(v)
+	case int64:
+		return v
+	case int:
+		return int64(v)
+	}
+	return nowUnix()
+}
+
+func responseIDForChat(data map[string]any) string {
+	if id := getString(data, "id"); id != "" {
+		return id
+	}
+	return "chatcmpl-" + shortID()
+}
+
+func responseIDForAnthropic(data map[string]any) string {
+	if id := getString(data, "id"); id != "" {
+		return id
+	}
+	return "msg_" + shortID()
 }
 
 func markResponseIncomplete(response map[string]any) {

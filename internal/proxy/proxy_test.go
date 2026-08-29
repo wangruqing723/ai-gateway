@@ -109,6 +109,34 @@ func TestForwardStreamErrorBodyTimeout(t *testing.T) {
 	}
 }
 
+func TestForwardAbandonsStalledErrorBodyAfterShortObservation(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	}))
+	defer upstream.Close()
+
+	var observed string
+	recorder := httptest.NewRecorder()
+	opts := forwardTestOptions(upstream, recorder, "openai", "openai-chat", true, 500, 2_000)
+	opts.ShouldRetry = func(status int, _ time.Duration, err error) bool {
+		return status == http.StatusTooManyRequests && err == nil
+	}
+	opts.OnErrorBody = func(body string, _ bool) { observed = body }
+	started := time.Now()
+	err := Forward(opts)
+	if !errors.Is(err, ErrAttemptAbandoned) {
+		t.Fatalf("Forward() error = %v，期望 ErrAttemptAbandoned", err)
+	}
+	if elapsed := time.Since(started); elapsed >= 500*time.Millisecond {
+		t.Fatalf("Forward() 耗时 = %s，不能等待 %s 的活跃超时", elapsed, 2*time.Second)
+	}
+	if len(observed) > maxObservedErrorBodyBytes {
+		t.Fatalf("观测错误正文长度 = %d，超过 %d", len(observed), maxObservedErrorBodyBytes)
+	}
+}
+
 func TestForwardStreamWriteDeadlineReleasesBlockedClient(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("content-type", "text/event-stream")
@@ -339,6 +367,31 @@ func TestForwardRejectsOversizedResponse(t *testing.T) {
 			t.Fatalf("status = %d, want %d", recorder.Code, http.StatusBadGateway)
 		}
 	})
+}
+
+func TestForwardCapturesLimitedSanitizedErrorBody(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("x-openai-request-id", "resp-request-id")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = io.WriteString(w, `{"error":{"message":"bad","token":"secret-token"},"padding":"`+strings.Repeat("x", maxObservedErrorBodyBytes)+`"}`)
+	}))
+	defer upstream.Close()
+
+	var observed string
+	var truncated bool
+	var requestID string
+	opts := forwardTestOptions(upstream, httptest.NewRecorder(), "openai", "openai-chat", false, 0, 0)
+	opts.OnErrorBody = func(body string, wasTruncated bool) { observed, truncated = body, wasTruncated }
+	opts.OnUpstreamHeaders = func(_ int, id string, _ time.Duration) { requestID = id }
+	if err := Forward(opts); err != nil {
+		t.Fatalf("Forward() error = %v", err)
+	}
+	if !truncated || len(observed) > maxObservedErrorBodyBytes || !strings.Contains(observed, "[REDACTED]") || strings.Contains(observed, "secret-token") {
+		t.Fatalf("observed body/truncated = %q/%v", observed, truncated)
+	}
+	if requestID != "resp-request-id" {
+		t.Fatalf("request ID = %q", requestID)
+	}
 }
 
 func TestForwardRejectsOversizedSSEEvent(t *testing.T) {

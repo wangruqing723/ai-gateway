@@ -119,6 +119,31 @@ func TestCollectorLogsFiltersAndRing(t *testing.T) {
 	}
 }
 
+func TestCollectorLogsFiltersByAttemptDetails(t *testing.T) {
+	c := NewCollector(10)
+	c.Add(RequestLog{
+		ID: "recovered", Status: 200, Provider: "good", Model: "m", Started: time.Now(),
+		AttemptDetails: []AttemptDetail{
+			{Sequence: 1, Kind: "request", Provider: "bad", TargetModel: "bad-model", ProviderFormat: "openai", UpstreamStatus: 500, Outcome: "transferred", Reason: "500/server", Error: "upstream failed", UpstreamRequestID: "req_bad"},
+			{Sequence: 2, Kind: "request", Provider: "good", ProviderFormat: "openai-responses", UpstreamStatus: 200, Outcome: "success"},
+		},
+	})
+	c.Add(RequestLog{ID: "plain", Status: 200, Provider: "good", Model: "m", Started: time.Now()})
+
+	for _, filter := range []LogFilter{
+		{AttemptProvider: "bad", Limit: 10},
+		{AttemptStatus: "500", Limit: 10},
+		{AttemptStatus: "5xx", Limit: 10},
+		{AttemptOutcome: "transferred", Limit: 10},
+		{Query: "req_bad", Limit: 10},
+	} {
+		logs := c.Logs(filter)
+		if len(logs) != 1 || logs[0].ID != "recovered" {
+			t.Fatalf("filter %#v returned %#v", filter, logs)
+		}
+	}
+}
+
 func TestCollectorLogsOffsetAcrossRingStates(t *testing.T) {
 	tests := []struct {
 		name     string

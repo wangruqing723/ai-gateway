@@ -37,6 +37,10 @@ func NewStreamTransformer(providerFormat, clientFormat string) StreamTransformer
 		return &openAIToAnthropic{s: st, tools: make(map[int]*streamTool)}
 	case providerFormat == "openai" && clientFormat == "openai-responses":
 		return &openAIToResponses{s: st}
+	case providerFormat == "openai-responses" && clientFormat == "openai-chat":
+		return &responsesToChat{s: st, tools: make(map[int]*streamTool), toolIndexes: make(map[int]int)}
+	case providerFormat == "openai-responses" && clientFormat == "anthropic":
+		return &responsesToAnthropic{s: st, tools: make(map[int]*streamTool), blocks: make(map[int]int), textStarted: make(map[int]bool), textStopped: make(map[int]bool)}
 	}
 	return passthrough{}
 }
@@ -992,4 +996,453 @@ func (t *openAIToResponses) Transform(line string) []string {
 		out = append(out, finishAllResponseItems(t.s)...)
 	}
 	return out
+}
+
+// ── OpenAI Responses → OpenAI Chat ──────────
+
+// responsesToChat 将 Responses 的 typed SSE events 映射为 Chat Completions chunks。
+// 它刻意不把 Responses event JSON 原样转发：两种 API 的流式载荷结构不同。
+type responsesToChat struct {
+	s           *streamState
+	tools       map[int]*streamTool
+	toolIndexes map[int]int
+	nextTool    int
+	roleSent    bool
+	doneSent    bool
+	refused     bool
+}
+
+func (t *responsesToChat) Err() error        { return t.s.err }
+func (t *responsesToChat) Failure() []string { return chatStreamFailure(t.s) }
+func (t *responsesToChat) Completed() bool   { return t.s.completed }
+func (t *responsesToChat) Abort(kind, message string) []string {
+	t.s.abort(kind, message)
+	return t.Failure()
+}
+
+func (t *responsesToChat) start(model string) []string {
+	if model != "" {
+		t.s.model = model
+	}
+	if t.roleSent {
+		return nil
+	}
+	t.roleSent = true
+	return []string{chatDelta(t.s.msgID, t.s.model, map[string]any{"role": "assistant"}, nil)}
+}
+
+func (t *responsesToChat) ensureTool(outputIndex int, item map[string]any) (*streamTool, []string) {
+	if tool := t.tools[outputIndex]; tool != nil {
+		if callID := getString(item, "call_id"); callID != "" {
+			tool.callID = callID
+		}
+		if name := getString(item, "name"); name != "" {
+			tool.name = name
+		}
+		return tool, nil
+	}
+	callID := getString(item, "call_id")
+	if callID == "" {
+		callID = "call_" + shortID()
+	}
+	tool := &streamTool{sourceIndex: outputIndex, callID: callID, name: getString(item, "name")}
+	t.tools[outputIndex] = tool
+	t.toolIndexes[outputIndex] = t.nextTool
+	t.nextTool++
+	return tool, []string{chatDelta(t.s.msgID, t.s.model, map[string]any{"tool_calls": []any{map[string]any{
+		"index": t.toolIndexes[outputIndex], "id": tool.callID, "type": "function",
+		"function": map[string]any{"name": tool.name, "arguments": ""},
+	}}}, nil)}
+}
+
+func (t *responsesToChat) appendToolArguments(outputIndex int, value string) []string {
+	tool := t.tools[outputIndex]
+	if tool == nil {
+		t.s.addError(fmt.Errorf("responses function arguments delta arrived before output item %d", outputIndex))
+		return nil
+	}
+	if !t.s.appendAggregate(&tool.arguments, value) {
+		return nil
+	}
+	if value == "" {
+		return nil
+	}
+	return []string{chatDelta(t.s.msgID, t.s.model, map[string]any{"tool_calls": []any{map[string]any{
+		"index": t.toolIndexes[outputIndex], "function": map[string]any{"arguments": value},
+	}}}, nil)}
+}
+
+func (t *responsesToChat) finish(finish string) []string {
+	if t.doneSent || t.s.completed {
+		return nil
+	}
+	for _, tool := range t.tools {
+		if _, err := normalizeStreamToolArguments(t.s, tool); err != nil {
+			t.s.addError(fmt.Errorf("responses function call %q arguments: %w", tool.callID, err))
+			return nil
+		}
+	}
+	if finish == "" {
+		finish = "stop"
+		if len(t.tools) > 0 {
+			finish = "tool_calls"
+		}
+		if t.refused {
+			finish = "content_filter"
+		}
+	}
+	t.doneSent = true
+	t.s.completed = true
+	return []string{chatDelta(t.s.msgID, t.s.model, map[string]any{}, finish), "data: [DONE]\n\n"}
+}
+
+func (t *responsesToChat) Transform(line string) []string {
+	if t.s.err != nil || t.s.failureSent || t.s.completed {
+		return nil
+	}
+	p := parseSseLine(line)
+	if !p.ok || p.done || p.data == nil {
+		return nil
+	}
+	data := p.data
+	if response, ok := data["response"].(map[string]any); ok {
+		if model := getString(response, "model"); model != "" {
+			t.s.model = model
+		}
+	}
+	switch getString(data, "type") {
+	case "response.created", "response.in_progress":
+		return t.start(t.s.model)
+	case "response.output_item.added":
+		out := t.start(t.s.model)
+		item, _ := data["item"].(map[string]any)
+		outputIndex := valueIndex(data["output_index"])
+		switch getString(item, "type") {
+		case "message":
+			return out
+		case "function_call":
+			tool, added := t.ensureTool(outputIndex, item)
+			out = append(out, added...)
+			if arguments := getString(item, "arguments"); arguments != "" {
+				out = append(out, t.appendToolArguments(outputIndex, arguments)...)
+			}
+			_ = tool
+			return out
+		default:
+			t.s.addError(fmt.Errorf("unsupported responses stream output item %q", getString(item, "type")))
+			return nil
+		}
+	case "response.output_text.delta":
+		out := t.start(t.s.model)
+		return append(out, chatDelta(t.s.msgID, t.s.model, map[string]any{"content": getString(data, "delta")}, nil))
+	case "response.content_part.added", "response.content_part.done", "response.output_text.done", "response.refusal.done":
+		part, _ := data["part"].(map[string]any)
+		if part != nil {
+			switch getString(part, "type") {
+			case "output_text", "refusal":
+			default:
+				t.s.addError(fmt.Errorf("unsupported responses stream content part %q", getString(part, "type")))
+			}
+		}
+		return nil
+	case "response.refusal.delta":
+		t.refused = true
+		out := t.start(t.s.model)
+		return append(out, chatDelta(t.s.msgID, t.s.model, map[string]any{"refusal": getString(data, "delta")}, nil))
+	case "response.function_call_arguments.delta":
+		out := t.start(t.s.model)
+		return append(out, t.appendToolArguments(valueIndex(data["output_index"]), getString(data, "delta"))...)
+	case "response.function_call_arguments.done":
+		outputIndex := valueIndex(data["output_index"])
+		if tool := t.tools[outputIndex]; tool == nil {
+			t.s.addError(fmt.Errorf("Responses 函数参数完成事件早于输出项 %d 到达", outputIndex))
+			return nil
+		} else if tool.arguments.Len() == 0 {
+			return t.appendToolArguments(outputIndex, getString(data, "arguments"))
+		}
+	case "response.output_item.done":
+		item, _ := data["item"].(map[string]any)
+		switch getString(item, "type") {
+		case "message":
+		case "function_call":
+			outputIndex := valueIndex(data["output_index"])
+			tool, added := t.ensureTool(outputIndex, item)
+			if tool.arguments.Len() == 0 && getString(item, "arguments") != "" {
+				return append(added, t.appendToolArguments(outputIndex, getString(item, "arguments"))...)
+			}
+			return added
+		default:
+			t.s.addError(fmt.Errorf("unsupported responses stream output item %q", getString(item, "type")))
+			return nil
+		}
+	case "response.completed":
+		return t.finish("")
+	case "response.incomplete":
+		return t.finish("length")
+	case "response.failed", "error":
+		t.s.failureType = "upstream_error"
+		message := getString(data, "message")
+		if response, ok := data["response"].(map[string]any); ok {
+			if e, ok := response["error"].(map[string]any); ok && getString(e, "message") != "" {
+				message = getString(e, "message")
+			}
+		}
+		if message == "" {
+			message = "Responses 上游流式响应失败"
+		}
+		t.s.addError(errors.New(message))
+	default:
+		if strings.HasPrefix(getString(data, "type"), "response.") {
+			t.s.addError(fmt.Errorf("unsupported responses stream event %q", getString(data, "type")))
+		}
+	}
+	return nil
+}
+
+// ── OpenAI Responses → Anthropic ────────────
+
+type responsesToAnthropic struct {
+	s           *streamState
+	tools       map[int]*streamTool
+	blocks      map[int]int
+	toolOrder   []int
+	textOrder   []int
+	nextBlock   int
+	textStarted map[int]bool
+	textStopped map[int]bool
+	started     bool
+	completed   bool
+	refused     bool
+}
+
+func (t *responsesToAnthropic) Err() error        { return t.s.err }
+func (t *responsesToAnthropic) Failure() []string { return anthropicStreamFailure(t.s) }
+func (t *responsesToAnthropic) Completed() bool   { return t.s.completed }
+func (t *responsesToAnthropic) Abort(kind, message string) []string {
+	t.s.abort(kind, message)
+	return t.Failure()
+}
+
+func (t *responsesToAnthropic) start(model string) []string {
+	if model != "" {
+		t.s.model = model
+	}
+	if t.started {
+		return nil
+	}
+	t.started = true
+	t.s.started = true
+	return []string{sseEvent("message_start", map[string]any{
+		"type": "message_start",
+		"message": map[string]any{
+			"id": "msg_" + shortID(), "type": "message", "role": "assistant", "model": t.s.model,
+			"content": []any{}, "stop_reason": nil, "usage": map[string]any{"input_tokens": 0, "output_tokens": 0},
+		},
+	})}
+}
+
+func (t *responsesToAnthropic) ensureText(outputIndex int) []string {
+	if t.textStarted[outputIndex] {
+		return nil
+	}
+	blockIndex := t.nextBlock
+	t.nextBlock++
+	t.blocks[outputIndex] = blockIndex
+	t.textStarted[outputIndex] = true
+	t.textOrder = append(t.textOrder, outputIndex)
+	return []string{sseEvent("content_block_start", map[string]any{
+		"type": "content_block_start", "index": blockIndex,
+		"content_block": map[string]any{"type": "text", "text": ""},
+	})}
+}
+
+func (t *responsesToAnthropic) ensureTool(outputIndex int, item map[string]any) (*streamTool, []string) {
+	if tool := t.tools[outputIndex]; tool != nil {
+		if callID := getString(item, "call_id"); callID != "" {
+			tool.callID = callID
+		}
+		if name := getString(item, "name"); name != "" {
+			tool.name = name
+		}
+		return tool, nil
+	}
+	callID := getString(item, "call_id")
+	if callID == "" {
+		callID = "call_" + shortID()
+	}
+	tool := &streamTool{sourceIndex: outputIndex, blockIndex: t.nextBlock, callID: callID, name: getString(item, "name")}
+	t.nextBlock++
+	t.tools[outputIndex] = tool
+	t.toolOrder = append(t.toolOrder, outputIndex)
+	return tool, []string{sseEvent("content_block_start", map[string]any{
+		"type": "content_block_start", "index": tool.blockIndex,
+		"content_block": map[string]any{"type": "tool_use", "id": tool.callID, "name": tool.name, "input": map[string]any{}},
+	})}
+}
+
+func (t *responsesToAnthropic) appendToolArguments(outputIndex int, value string) []string {
+	tool := t.tools[outputIndex]
+	if tool == nil {
+		t.s.addError(fmt.Errorf("responses function arguments delta arrived before output item %d", outputIndex))
+		return nil
+	}
+	if !t.s.appendAggregate(&tool.arguments, value) {
+		return nil
+	}
+	if value == "" {
+		return nil
+	}
+	return []string{sseEvent("content_block_delta", map[string]any{
+		"type": "content_block_delta", "index": tool.blockIndex,
+		"delta": map[string]any{"type": "input_json_delta", "partial_json": value},
+	})}
+}
+
+func (t *responsesToAnthropic) finish(incomplete bool) []string {
+	if t.completed || t.s.completed {
+		return nil
+	}
+	var out []string
+	for _, outputIndex := range t.textOrder {
+		if !t.textStopped[outputIndex] {
+			out = append(out, sseEvent("content_block_stop", map[string]any{"type": "content_block_stop", "index": t.blocks[outputIndex]}))
+			t.textStopped[outputIndex] = true
+		}
+	}
+	for _, outputIndex := range t.toolOrder {
+		tool := t.tools[outputIndex]
+		if _, err := normalizeStreamToolArguments(t.s, tool); err != nil {
+			t.s.addError(fmt.Errorf("responses function call %q arguments: %w", tool.callID, err))
+			return nil
+		}
+		if !tool.done {
+			out = append(out, sseEvent("content_block_stop", map[string]any{"type": "content_block_stop", "index": tool.blockIndex}))
+			tool.done = true
+		}
+	}
+	stop := "end_turn"
+	if incomplete {
+		stop = "max_tokens"
+	} else if len(t.tools) > 0 {
+		stop = "tool_use"
+	} else if t.refused {
+		stop = "refusal"
+	}
+	out = append(out,
+		sseEvent("message_delta", map[string]any{"type": "message_delta", "delta": map[string]any{"stop_reason": stop, "stop_sequence": nil}, "usage": map[string]any{"output_tokens": 0}}),
+		"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+	)
+	t.completed = true
+	t.s.completed = true
+	return out
+}
+
+func (t *responsesToAnthropic) Transform(line string) []string {
+	if t.s.err != nil || t.s.failureSent || t.s.completed {
+		return nil
+	}
+	p := parseSseLine(line)
+	if !p.ok || p.done || p.data == nil {
+		return nil
+	}
+	data := p.data
+	if response, ok := data["response"].(map[string]any); ok {
+		if model := getString(response, "model"); model != "" {
+			t.s.model = model
+		}
+	}
+	switch getString(data, "type") {
+	case "response.created", "response.in_progress":
+		return t.start(t.s.model)
+	case "response.output_item.added":
+		out := t.start(t.s.model)
+		item, _ := data["item"].(map[string]any)
+		outputIndex := valueIndex(data["output_index"])
+		switch getString(item, "type") {
+		case "message":
+			return out
+		case "function_call":
+			_, added := t.ensureTool(outputIndex, item)
+			out = append(out, added...)
+			if arguments := getString(item, "arguments"); arguments != "" {
+				out = append(out, t.appendToolArguments(outputIndex, arguments)...)
+			}
+			return out
+		default:
+			t.s.addError(fmt.Errorf("unsupported responses stream output item %q", getString(item, "type")))
+			return nil
+		}
+	case "response.output_text.delta", "response.refusal.delta":
+		outputIndex := valueIndex(data["output_index"])
+		out := t.start(t.s.model)
+		out = append(out, t.ensureText(outputIndex)...)
+		if getString(data, "type") == "response.refusal.delta" {
+			t.refused = true
+		}
+		if delta := getString(data, "delta"); delta != "" {
+			out = append(out, sseEvent("content_block_delta", map[string]any{
+				"type": "content_block_delta", "index": t.blocks[outputIndex],
+				"delta": map[string]any{"type": "text_delta", "text": delta},
+			}))
+		}
+		return out
+	case "response.content_part.added", "response.content_part.done", "response.output_text.done", "response.refusal.done":
+		part, _ := data["part"].(map[string]any)
+		if part != nil {
+			switch getString(part, "type") {
+			case "output_text", "refusal":
+				out := t.start(t.s.model)
+				return append(out, t.ensureText(valueIndex(data["output_index"]))...)
+			default:
+				t.s.addError(fmt.Errorf("unsupported responses stream content part %q", getString(part, "type")))
+			}
+		}
+	case "response.function_call_arguments.delta":
+		out := t.start(t.s.model)
+		return append(out, t.appendToolArguments(valueIndex(data["output_index"]), getString(data, "delta"))...)
+	case "response.function_call_arguments.done":
+		outputIndex := valueIndex(data["output_index"])
+		if tool := t.tools[outputIndex]; tool == nil {
+			t.s.addError(fmt.Errorf("Responses 函数参数完成事件早于输出项 %d 到达", outputIndex))
+			return nil
+		} else if tool.arguments.Len() == 0 {
+			return t.appendToolArguments(outputIndex, getString(data, "arguments"))
+		}
+	case "response.output_item.done":
+		item, _ := data["item"].(map[string]any)
+		switch getString(item, "type") {
+		case "message":
+		case "function_call":
+			outputIndex := valueIndex(data["output_index"])
+			tool, added := t.ensureTool(outputIndex, item)
+			if tool.arguments.Len() == 0 && getString(item, "arguments") != "" {
+				return append(added, t.appendToolArguments(outputIndex, getString(item, "arguments"))...)
+			}
+			return added
+		default:
+			t.s.addError(fmt.Errorf("unsupported responses stream output item %q", getString(item, "type")))
+			return nil
+		}
+	case "response.completed":
+		return t.finish(false)
+	case "response.incomplete":
+		return t.finish(true)
+	case "response.failed", "error":
+		t.s.failureType = "upstream_error"
+		message := getString(data, "message")
+		if response, ok := data["response"].(map[string]any); ok {
+			if e, ok := response["error"].(map[string]any); ok && getString(e, "message") != "" {
+				message = getString(e, "message")
+			}
+		}
+		if message == "" {
+			message = "Responses 上游流式响应失败"
+		}
+		t.s.addError(errors.New(message))
+	default:
+		if strings.HasPrefix(getString(data, "type"), "response.") {
+			t.s.addError(fmt.Errorf("unsupported responses stream event %q", getString(data, "type")))
+		}
+	}
+	return nil
 }
