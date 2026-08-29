@@ -1,0 +1,135 @@
+                normalizeConfig(data) {
+                    const pick = (obj, lower, upper) => obj?.[lower] ?? obj?.[upper];
+                    const rawProviders = pick(data, 'providers', 'Providers') || {};
+                    const providers = {};
+                    Object.entries(rawProviders).forEach(([name, p]) => {
+                        providers[name] = {
+                            name: pick(p, 'name', 'Name') || name,
+                            baseUrl: pick(p, 'baseUrl', 'BaseURL') || '',
+                            apiKey: pick(p, 'apiKey', 'APIKey') || '',
+                            apiKeyConfigured: !!pick(p, 'apiKeyConfigured', 'APIKeyConfigured'),
+                            format: pick(p, 'format', 'Format') || 'anthropic',
+                            maxConcurrent: pick(p, 'maxConcurrent', 'MaxConcurrent') || 5,
+                            maxPerSecond: pick(p, 'maxPerSecond', 'MaxPerSecond') || 0,
+                            maxQueueWait: pick(p, 'maxQueueWait', 'MaxQueueWait') || 30000
+                        };
+                    });
+
+                    const routes = (pick(data, 'routes', 'Routes') || []).map((r) => {
+                        const vision = pick(r, 'vision', 'Vision');
+                        const rawTargets = pick(r, 'targets', 'Targets');
+                        const strategy = pick(r, 'strategy', 'Strategy') || '';
+                        const route = {
+                            match: pick(r, 'match', 'Match') || '',
+                            provider: pick(r, 'provider', 'Provider') || '',
+                            model: pick(r, 'model', 'Model') || ''
+                        };
+                        // strategy 必须读出来：漏读会让手写的策略在下次保存时被静默抹掉
+                        if (strategy) route.strategy = strategy;
+                        // 多目标写法：保留 targets 原样，后端两种写法互斥，不能同时下发
+                        if (Array.isArray(rawTargets) && rawTargets.length) {
+                            route.targets = rawTargets.map((t) => ({
+                                provider: pick(t, 'provider', 'Provider') || '',
+                                model: pick(t, 'model', 'Model') || ''
+                            }));
+                            route.provider = '';
+                            route.model = '';
+                        }
+                        if (vision) {
+                            route.vision = {
+                                provider: pick(vision, 'provider', 'Provider') || '',
+                                model: pick(vision, 'model', 'Model') || ''
+                            };
+                        }
+                        return route;
+                    });
+
+                    const cache = pick(data, 'cache', 'Cache') || {};
+                    return {
+                        port: pick(data, 'port', 'Port') || 7789,
+                        host: pick(data, 'host', 'Host') || '127.0.0.1',
+                        timeout: pick(data, 'timeout', 'Timeout') || 120000,
+                        streamActivityTimeout: pick(data, 'streamActivityTimeout', 'StreamActivityTimeout') || 60000,
+                        cache: {
+                            maxAgeDays: pick(cache, 'maxAgeDays', 'MaxAgeDays') || 7,
+                            maxRecords: pick(cache, 'maxRecords', 'MaxRecords') || 1000
+                        },
+                        providers,
+                        routes,
+                        path: pick(data, 'path', 'Path') || '',
+                        directMode: !!pick(data, 'directMode', 'DirectMode'),
+                        directTimeoutNoStream: pick(data, 'directTimeoutNoStream', 'DirectTimeoutNoStream') || 60000,
+                        directTimeoutStreamHeader: pick(data, 'directTimeoutStreamHeader', 'DirectTimeoutStreamHeader') || 60000,
+                        directTimeoutStreamActive: pick(data, 'directTimeoutStreamActive', 'DirectTimeoutStreamActive') || 120000,
+                        // failover / breaker 必须读出来再回传：PUT /api/config 是全量替换、
+                        // 不与旧配置合并，漏读会让任何一次表单保存把这两个块抹成零值。
+                        // 后端这两个字段是值类型且无 omitempty，GET 恒返回完整块（已填默认值），
+                        // 所以这里总能拿到可绑定的形状。
+                        failover: this.normalizeFailover(pick(data, 'failover', 'Failover')),
+                        breaker: this.normalizeBreaker(pick(data, 'breaker', 'Breaker'))
+                    };
+                },
+
+                // normalizeFailover 把 failover 块规范成表单可绑定的形状。
+                // 数值项保留 null：null 表示「不写该字段、用后端默认值」，
+                // 与后端 *int 的语义一一对应；显式 0 必须原样保留（maxRetryAfterMs: 0 = 不设上限）。
+                normalizeFailover(raw) {
+                    const f = raw || {};
+                    const num = (v) => (v === 0 ? 0 : (typeof v === 'number' ? v : null));
+                    const bool = (v, def) => (typeof v === 'boolean' ? v : def);
+                    return {
+                        enabled: !!f.enabled,
+                        maxAttempts: num(f.maxAttempts),
+                        maxRetryAfterMs: num(f.maxRetryAfterMs),
+                        onTransportError: bool(f.onTransportError, true),
+                        onServerError: bool(f.onServerError, true),
+                        onRateLimit: bool(f.onRateLimit, true),
+                        onQueueTimeout: bool(f.onQueueTimeout, true),
+                        onStreamHeaderTimeout: bool(f.onStreamHeaderTimeout, true),
+                        // 默认 false：非流式整体超时转移会让总耗时接近翻倍
+                        onRequestTimeout: bool(f.onRequestTimeout, false),
+                        // 默认 false：401/403 通常是配置问题，转移只会连锁失败并掩盖原因
+                        onAuthError: bool(f.onAuthError, false)
+                    };
+                },
+
+                normalizeBreaker(raw) {
+                    const b = raw || {};
+                    const num = (v) => (v === 0 ? 0 : (typeof v === 'number' ? v : null));
+                    return {
+                        enabled: !!b.enabled,
+                        consecutiveFailures: num(b.consecutiveFailures),
+                        openMs: num(b.openMs),
+                        halfOpenProbes: num(b.halfOpenProbes)
+                    };
+                },
+
+                ensureConfigShape() {
+                    this.config.cache = this.config.cache || { maxAgeDays: 7, maxRecords: 1000 };
+                    this.config.providers = this.config.providers || {};
+                    this.config.routes = this.config.routes || [];
+                    // 兜底成可绑定形状：加载失败或旧响应缺块时，x-model 不能落在 undefined 上
+                    this.config.failover = this.config.failover || this.normalizeFailover(null);
+                    this.config.breaker = this.config.breaker || this.normalizeBreaker(null);
+                    this.config.directTimeoutNoStream = this.config.directTimeoutNoStream || 60000;
+                    this.config.directTimeoutStreamHeader = this.config.directTimeoutStreamHeader || 60000;
+                    this.config.directTimeoutStreamActive = this.config.directTimeoutStreamActive || 120000;
+                },
+
+                // scheduleRestoreGuard 在页面彻底落定后重放一次服务端配置，
+                // 抹掉浏览器表单恢复对 config 的污染。
+                // 无条件排程：readyState 已是 complete 时也要跑，否则快加载路径没人兜。
+                scheduleRestoreGuard() {
+                    const replay = () => {
+                        // 让出两帧：恢复可能排在 load 之后，rAF 嵌套比 setTimeout(0) 更贴渲染时序
+                        requestAnimationFrame(() => requestAnimationFrame(() => {
+                            if (this._userEdited) return; // 真有人动过表单就别覆盖
+                            this.applyServerConfig();
+                        }));
+                    };
+                    if (document.readyState === 'complete') replay();
+                    else window.addEventListener('load', replay, { once: true });
+                },
+
+                // applyServerConfig 把最近一次 /api/config 响应铺进表单并重设脏基线。
+                // 抽出来是为了页面落定后能重放一次，抹掉浏览器的表单恢复，不必再发请求。

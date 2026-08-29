@@ -1,0 +1,230 @@
+                routeTargets(route) {
+                    if (Array.isArray(route?.targets) && route.targets.length) return route.targets;
+                    return [{ provider: route?.provider || '', model: route?.model || '' }];
+                },
+
+                addRoute() {
+                    this.editingRouteIndex = -1;
+                    const providers = Object.keys(this.config.providers || {});
+                    this.routeForm = {
+                        match: '',
+                        targets: [this.newRouteTarget(providers[0] || '')],
+                        // 存真实枚举值而不是空字符串，保证下拉的 DOM 值总能匹配到一个 option
+                        strategy: 'failover',
+                        enableVision: false,
+                        visionProvider: providers[0] || '',
+                        visionModel: ''
+                    };
+                    this.showRouteModal = true;
+                },
+
+                editRoute(index) {
+                    this.editingRouteIndex = index;
+                    const route = this.config.routes[index];
+                    this.routeForm = {
+                        match: route.match,
+                        targets: this.routeTargets(route).map((t) => this.newRouteTarget(t.provider || '', t.model || '')),
+                        // 配置里没写 strategy 就是默认 failover；这里补成真实枚举值，
+                        // 留空会让下拉匹配不到 option、显示回落到第一项
+                        strategy: route.strategy || 'failover',
+                        enableVision: !!route.vision,
+                        visionProvider: route.vision?.provider || '',
+                        visionModel: route.vision?.model || ''
+                    };
+                    this.showRouteModal = true;
+                },
+
+                // duplicateRoute 以现有路由为模板新建一条，全部字段可改。
+                // editingRouteIndex = -1 让 saveRoute 走 push 而不是替换原条目。
+                // match 保持原样：路由按顺序匹配、首条命中，复制出的同 match 条目永远
+                // 匹配不到，所以提示用户改掉，但不擅自替用户改 match 值——那是路由的语义核心。
+                duplicateRoute(index) {
+                    const route = this.config.routes?.[index];
+                    if (!route) return;
+                    this.editingRouteIndex = -1;
+                    this.routeForm = {
+                        match: route.match || '',
+                        targets: this.routeTargets(route).map((t) => this.newRouteTarget(t.provider || '', t.model || '')),
+                        strategy: route.strategy || 'failover',
+                        enableVision: !!route.vision,
+                        visionProvider: route.vision?.provider || '',
+                        visionModel: route.vision?.model || ''
+                    };
+                    this.showRouteModal = true;
+                    this.showStatus(`已按「${route.match || '(空)'}」预填，记得改匹配模式`, 'success');
+                },
+
+                // 候选 target 的运行时形状：provider/model 是落盘字段，
+                // models/modelsLoading 是查询远程模型列表的瞬态状态，saveRoute 不读它们。
+                newRouteTarget(provider, model = '') {
+                    return { provider, model, models: [], modelsLoading: false };
+                },
+
+                // 切换候选的 provider 后清掉已拉的模型列表：列表是上一个上游的，
+                // 留着只会让人选错模型。已填的 model 不清——那是用户意图。
+                onRouteTargetProviderChange(ti) {
+                    this.routeForm.targets[ti].models = [];
+                },
+
+                addRouteTarget() {
+                    if (this.routeForm.targets.length >= this.maxRouteTargets) return;
+                    const providers = Object.keys(this.config.providers || {});
+                    this.routeForm.targets.push(this.newRouteTarget(providers[0] || ''));
+                },
+
+                removeRouteTarget(index) {
+                    if (this.routeForm.targets.length <= 1) return;
+                    this.routeForm.targets.splice(index, 1);
+                },
+
+                // 用已落盘 provider 配置里的 apiKey 拉上游 /v1/models。
+                // 结果按 provider 的 baseUrl+format 做指纹缓存到 localStorage，TTL 1 天：
+                // 同一上游反复查不重复打上游；改了 baseUrl/format 自动换 key 失效。
+                async fetchProviderModels(ti) {
+                    const target = this.routeForm.targets[ti];
+                    if (!target || !target.provider) return;
+                    const provider = this.config.providers?.[target.provider];
+                    if (!provider) return;
+
+                    const cacheKey = 'gw.models|' + [target.provider, provider.baseUrl, provider.format].join('|');
+                    const cached = this.readModelCache(cacheKey);
+                    if (cached) {
+                        target.models = cached;
+                        return;
+                    }
+
+                    target.modelsLoading = true;
+                    target.models = [];
+                    try {
+                        const res = await fetch(`/api/providers/models?provider=${encodeURIComponent(target.provider)}`);
+                        if (!res.ok) throw new Error(await this.errorText(res, '上游查询失败'));
+                        const data = await res.json();
+                        const models = Array.isArray(data.models) ? data.models : [];
+                        this.writeModelCache(cacheKey, models);
+                        target.models = models;
+                        if (!models.length) {
+                            this.showStatus('上游返回了空的模型列表', 'error');
+                        }
+                    } catch (err) {
+                        this.showStatus('查询模型列表失败: ' + err.message, 'error');
+                    } finally {
+                        target.modelsLoading = false;
+                    }
+                },
+
+                // 模型列表缓存读写：1 天 TTL，结构 {at: 时间戳, models: [...]}。
+                // localStorage 可能被禁用，try/catch 兜底为 no-op，不影响查询功能本身。
+                readModelCache(key) {
+                    try {
+                        const raw = window.localStorage.getItem(key);
+                        if (!raw) return null;
+                        const entry = JSON.parse(raw);
+                        if (!entry || typeof entry.at !== 'number') return null;
+                        if (Date.now() - entry.at > 24 * 60 * 60 * 1000) return null;
+                        return Array.isArray(entry.models) ? entry.models : null;
+                    } catch {
+                        return null;
+                    }
+                },
+
+                writeModelCache(key, models) {
+                    try {
+                        window.localStorage.setItem(key, JSON.stringify({ at: Date.now(), models }));
+                    } catch {
+                        // 禁用或超配额：忽略，下次查询会重新打上游。
+                    }
+                },
+
+                moveRouteTarget(index, direction) {
+                    const newIndex = index + direction;
+                    if (newIndex < 0 || newIndex >= this.routeForm.targets.length) return;
+                    const temp = this.routeForm.targets[index];
+                    this.routeForm.targets[index] = this.routeForm.targets[newIndex];
+                    this.routeForm.targets[newIndex] = temp;
+                },
+
+                async saveRoute() {
+                    if (!this.routeForm.match) {
+                        this.showStatus('匹配模式不能为空', 'error');
+                        return;
+                    }
+                    // 路由按顺序匹配、首条命中，match 撞车的后一条永远匹配不到。
+                    // 复制路由后忘记改 match 是最容易踩的，这里直接挡住而不是静默存一条死规则。
+                    const duplicate = (this.config.routes || []).some((r, i) =>
+                        i !== this.editingRouteIndex && r.match === this.routeForm.match);
+                    if (duplicate) {
+                        this.showStatus(`匹配模式「${this.routeForm.match}」已被其他路由占用，改一个再保存`, 'error');
+                        return;
+                    }
+                    const targets = (this.routeForm.targets || []).map((t) => ({
+                        provider: (t.provider || '').trim(),
+                        model: (t.model || '').trim()
+                    }));
+                    if (!targets.length || targets.some((t) => !t.provider || !t.model)) {
+                        this.showStatus('每个候选的 Provider 和模型都不能为空', 'error');
+                        return;
+                    }
+                    // 后端拒绝完全重复的 (provider, model) 对，这里先挡一层
+                    const seen = new Set();
+                    for (const t of targets) {
+                        const key = t.provider + '\u0000' + t.model;
+                        if (seen.has(key)) {
+                            this.showStatus(`候选重复: ${t.provider} / ${t.model}`, 'error');
+                            return;
+                        }
+                        seen.add(key);
+                    }
+
+                    if (this.routeForm.enableVision && (!this.routeForm.visionProvider || !this.routeForm.visionModel)) {
+                        this.showStatus('启用视觉时，视觉 Provider 和模型不能为空', 'error');
+                        return;
+                    }
+
+                    // 单候选沿用 provider/model 写法，避免把用户配置擅自改成 targets 形态
+                    const route = targets.length === 1
+                        ? { match: this.routeForm.match, provider: targets[0].provider, model: targets[0].model }
+                        : { match: this.routeForm.match, targets };
+                    // 单候选不写 strategy：后端对单候选 + 非 failover 直接报错，
+                    // 这里删干净比让用户在保存时撞校验更好（删掉最后一个候选是常见操作）。
+                    // failover 是默认值，同样不落盘：表单里它是真实枚举值（下拉需要能匹配
+                    // 到 option），但写进配置只会给每条路由平添一个等于默认的字段。
+                    if (targets.length > 1 && this.routeForm.strategy && this.routeForm.strategy !== 'failover') {
+                        route.strategy = this.routeForm.strategy;
+                    }
+                    if (this.routeForm.enableVision) {
+                        route.vision = {
+                            provider: this.routeForm.visionProvider,
+                            model: this.routeForm.visionModel
+                        };
+                    }
+
+                    const snapshot = this.snapshotConfig();
+                    if (this.editingRouteIndex >= 0) {
+                        this.config.routes[this.editingRouteIndex] = route;
+                    } else {
+                        this.config.routes.push(route);
+                    }
+                    // 与 saveProvider 同一套语义：落盘成功才关弹窗，失败回滚并留窗
+                    if (await this.persistConfig()) {
+                        this.showRouteModal = false;
+                    } else {
+                        this.restoreConfig(snapshot);
+                    }
+                },
+
+                async removeRoute(index) {
+                    const route = this.config.routes[index];
+                    const label = route?.match ? `「${route.match}」` : '这条';
+                    if (await this.askConfirm(`删除 ${label} 路由规则后，命中它的请求会落到后面的规则上。`,
+                        { title: '删除路由', confirmText: '删除' })) {
+                        this.config.routes.splice(index, 1);
+                    }
+                },
+
+                moveRoute(index, direction) {
+                    const newIndex = index + direction;
+                    if (newIndex < 0 || newIndex >= this.config.routes.length) return;
+                    const temp = this.config.routes[index];
+                    this.config.routes[index] = this.config.routes[newIndex];
+                    this.config.routes[newIndex] = temp;
+                }

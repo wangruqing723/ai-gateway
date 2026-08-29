@@ -1,0 +1,128 @@
+                configPreview() {
+                    if (this.activeTab === 'providers') return this.providersPreview();
+                    if (this.activeTab === 'routes') return this.routesPreview();
+                    return this.fullConfigPreview();
+                },
+
+                providersPreview() {
+                    return [
+                        'providers:',
+                        this.providersYaml() || '  {}'
+                    ].join('\n');
+                },
+
+                routesPreview() {
+                    return [
+                        'routes:',
+                        this.routesYaml() || '  []'
+                    ].join('\n');
+                },
+
+                fullConfigPreview() {
+                    return [
+                        `host: "${this.config.host || '127.0.0.1'}"`,
+                        `port: ${this.config.port || 7789}`,
+                        `timeout: ${this.config.timeout || 120000}`,
+                        `streamActivityTimeout: ${this.config.streamActivityTimeout || 60000}`,
+                        'cache:',
+                        `  maxAgeDays: ${this.config.cache?.maxAgeDays || 7}`,
+                        `  maxRecords: ${this.config.cache?.maxRecords || 1000}`,
+                        `directMode: ${!!this.config.directMode}`,
+                        `directTimeoutNoStream: ${this.config.directTimeoutNoStream || 60000}`,
+                        `directTimeoutStreamHeader: ${this.config.directTimeoutStreamHeader || 60000}`,
+                        `directTimeoutStreamActive: ${this.config.directTimeoutStreamActive || 120000}`,
+                        this.failoverYaml(),
+                        this.breakerYaml(),
+                        'providers:',
+                        this.providersYaml() || '  {}',
+                        'routes:',
+                        this.routesYaml() || '  []'
+                    ].join('\n');
+                },
+
+                // failoverYaml / breakerYaml 渲染实际会保存的内容。
+                // 数值为 null 时不写该行（等同「用后端默认值」），与 failoverPayload 保持一致，
+                // 否则预览会显示一份和落盘结果不同的配置。
+                failoverYaml() {
+                    const f = this.config.failover || {};
+                    const lines = ['failover:', `  enabled: ${!!f.enabled}`];
+                    const num = this.numOrNull(f.maxAttempts);
+                    if (num !== null) lines.push(`  maxAttempts: ${num}`);
+                    const cap = this.numOrNull(f.maxRetryAfterMs);
+                    if (cap !== null) lines.push(`  maxRetryAfterMs: ${cap}`);
+                    [
+                        ['onTransportError', f.onTransportError],
+                        ['onServerError', f.onServerError],
+                        ['onRateLimit', f.onRateLimit],
+                        ['onQueueTimeout', f.onQueueTimeout],
+                        ['onStreamHeaderTimeout', f.onStreamHeaderTimeout],
+                        ['onRequestTimeout', f.onRequestTimeout],
+                        ['onAuthError', f.onAuthError]
+                    ].forEach(([key, value]) => lines.push(`  ${key}: ${!!value}`));
+                    return lines.join('\n');
+                },
+
+                breakerYaml() {
+                    const b = this.config.breaker || {};
+                    const lines = ['breaker:', `  enabled: ${!!b.enabled}`];
+                    [
+                        ['consecutiveFailures', b.consecutiveFailures],
+                        ['openMs', b.openMs],
+                        ['halfOpenProbes', b.halfOpenProbes]
+                    ].forEach(([key, value]) => {
+                        const n = this.numOrNull(value);
+                        if (n !== null) lines.push(`  ${key}: ${n}`);
+                    });
+                    return lines.join('\n');
+                },
+
+                providersYaml() {
+                    return Object.entries(this.config.providers || {}).map(([name, p]) => {
+                        return [
+                            `  ${name}:`,
+                            `    baseUrl: "${p.baseUrl || ''}"`,
+                            `    apiKey: "${p.apiKey || ''}"`,
+                            `    format: ${p.format || 'anthropic'}`,
+                            `    maxConcurrent: ${p.maxConcurrent || 5}`,
+                            `    maxPerSecond: ${p.maxPerSecond || 0}`,
+                            `    maxQueueWait: ${p.maxQueueWait || 30000}`
+                        ].join('\n');
+                    }).join('\n');
+                },
+
+                routesYaml() {
+                    return (this.config.routes || []).map((r) => {
+                        const base = [`  - match: "${r.match || ''}"`];
+                        if (Array.isArray(r.targets) && r.targets.length) {
+                            base.push('    targets:');
+                            r.targets.forEach((t) => {
+                                base.push(`      - provider: ${t.provider || ''}`);
+                                base.push(`        model: "${t.model || ''}"`);
+                            });
+                        } else {
+                            base.push(`    provider: ${r.provider || ''}`);
+                            base.push(`    model: "${r.model || ''}"`);
+                        }
+                        // strategy 要渲染出来，否则预览和实际保存的内容不一致，
+                        // 用户会以为策略没被记录
+                        if (r.strategy) {
+                            base.push(`    strategy: ${r.strategy}`);
+                        }
+                        if (r.vision) {
+                            base.push('    vision:');
+                            base.push(`      provider: ${r.vision.provider || ''}`);
+                            base.push(`      model: "${r.vision.model || ''}"`);
+                        }
+                        return base.join('\n');
+                    }).join('\n');
+                },
+
+                async copyPreview() {
+                    try {
+                        await navigator.clipboard.writeText(this.configPreview());
+                        this.showStatus('配置预览已复制', 'success');
+                    } catch (err) {
+                        this.showStatus('复制失败: ' + err.message, 'error');
+                    }
+                },
+

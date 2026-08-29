@@ -1,0 +1,35 @@
+                applyServerConfig() {
+                    if (!this._serverConfigData) return;
+                    this.config = this.normalizeConfig(this._serverConfigData);
+                    this.configPath = this.config.path || '未知';
+                    this.ensureConfigShape();
+                    this.originalConfig = JSON.stringify(this.configPayload());
+                },
+
+                async loadConfig() {
+                    try {
+                        const res = await fetch('/api/config');
+                        if (!res.ok) throw new Error(await this.errorText(res, '加载配置失败'));
+                        const data = await res.json();
+                        this.revision = data.revision || (res.headers.get('ETag') || '').replace(/^W\//, '').replaceAll('"', '');
+                        this.restartRequired = data.restartRequired || [];
+                        this._serverConfigData = data;
+                        this.applyServerConfig();
+                    } catch (err) {
+                        this.showStatus('加载配置失败: ' + err.message, 'error');
+                    }
+                },
+
+                async loadYamlConfig() {
+                    try {
+                        const res = await fetch('/api/config/raw');
+                        if (!res.ok) throw new Error(await this.errorText(res, '加载 YAML 失败'));
+                        this.yamlContent = await res.text();
+                        this.originalYaml = this.yamlContent;
+                    } catch (err) {
+                        this.showStatus('加载 YAML 失败: ' + err.message, 'error');
+                    }
+                },
+
+                // showErrors 兼作「是否手动触发」：每 5 秒的轮询传 false，
+                // 只有手动点刷新才转圈，否则按钮会跟着轮询一直闪。

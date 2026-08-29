@@ -1,0 +1,143 @@
+                monitorPollingAllowed() {
+                    return document.visibilityState === 'visible' &&
+                        (this.activeTab === 'monitor' || this.activeTab === 'logs');
+                },
+
+                async refreshMonitor(showErrors = true) {
+                    if (showErrors) this.refreshingMonitor = true;
+                    try {
+                        if (this.activeTab === 'logs') {
+                            await this.loadRequestLogs();
+                        } else {
+                            await Promise.all([
+                                this.loadHealth(showErrors),
+                                this.loadMetrics(),
+                                this.loadRequestLogs()
+                            ]);
+                        }
+                    } finally {
+                        if (showErrors) this.refreshingMonitor = false;
+                    }
+                },
+
+                async loadHealth(showErrors = true) {
+                    try {
+                        const res = await fetch('/health');
+                        if (!res.ok) throw new Error(await this.errorText(res, '健康检查失败'));
+                        this.health = await res.json();
+                    } catch (err) {
+                        this.health = null;
+                        if (showErrors) this.showStatus('健康检查失败: ' + err.message, 'error');
+                    }
+                },
+
+                async loadMetrics() {
+                    const data = await this.loadOptionalJSON('/api/metrics');
+                    this.metrics = data || null;
+                },
+
+                async checkProviderHealth() {
+                    if (this.checkingHealth) return;
+                    this.checkingHealth = true;
+                    // 逐个探上游、每个 5 秒超时，先给个即时提示，别让用户干等
+                    this.showStatus('正在检测 Provider…', 'success');
+                    try {
+                        const res = await fetch('/api/providers/health', { method: 'POST' });
+                        if (!res.ok) throw new Error(await this.errorText(res, 'Provider 健康检测失败'));
+                        const data = await res.json();
+                        const providers = data.providers || {};
+                        this.health = this.health || {};
+                        this.health.providerHealth = providers;
+                        const total = Object.keys(providers).length;
+                        const ok = Object.values(providers).filter((p) => p.status === 'ok').length;
+                        this.showStatus(`Provider 检测完成：${ok}/${total} 可用`, ok === total ? 'success' : 'error');
+                    } catch (err) {
+                        this.showStatus('Provider 健康检测失败: ' + err.message, 'error');
+                    } finally {
+                        this.checkingHealth = false;
+                    }
+                },
+
+                // checkOneProvider 只检测一个 provider。
+                // 结果按 key 合并进 health.providerHealth，不整份替换：
+                // 整份替换会把其他 provider 的既有检测结果抹成「未检测」。
+                async checkOneProvider(name) {
+                    if (this.checkingHealth || this.checkingProvider) return;
+                    this.checkingProvider = name;
+                    try {
+                        const res = await fetch(`/api/providers/health?provider=${encodeURIComponent(name)}`, { method: 'POST' });
+                        if (!res.ok) throw new Error(await this.errorText(res, '检测失败'));
+                        const data = await res.json();
+                        const status = (data.providers || {})[name];
+                        if (!status) throw new Error('响应里没有该 Provider 的结果');
+                        this.health = this.health || {};
+                        // 新建对象而不是原地改：Alpine 要靠引用变化触发这一行重渲染
+                        this.health.providerHealth = { ...(this.health.providerHealth || {}), [name]: status };
+                        const detail = status.message || status.status;
+                        this.showStatus(`「${name}」检测完成：${detail}`, status.status === 'ok' ? 'success' : 'error');
+                    } catch (err) {
+                        this.showStatus(`「${name}」检测失败: ` + err.message, 'error');
+                    } finally {
+                        this.checkingProvider = null;
+                    }
+                },
+
+                // resetBreakers 手动闭合全部熔断器。不复用 checkProviderHealth：
+                // 后端两个端点判据不同，合并会让「为什么这个上游被放行」难以解释。
+                async resetBreakers() {
+                    if (this.resettingBreakers) return;
+                    this.resettingBreakers = true;
+                    try {
+                        const res = await fetch('/api/providers/breaker/reset', { method: 'POST' });
+                        if (!res.ok) throw new Error(await this.errorText(res, '重置熔断器失败'));
+                        const data = await res.json();
+                        this.health = this.health || {};
+                        this.health.breakers = data.breakers || {};
+                        this.showStatus(`已重置 ${Number(data.reset) || 0} 个熔断器`, 'success');
+                    } catch (err) {
+                        this.showStatus('重置熔断器失败: ' + err.message, 'error');
+                    } finally {
+                        this.resettingBreakers = false;
+                    }
+                },
+
+                // resetOneBreaker 只闭合一个 provider 的熔断器。
+                // 后端 ?provider= 返回 reset 布尔（不是条数）：false 表示该 provider
+                // 在熔断器里没有状态记录，属于「无需重置」而不是失败，提示要分开说，
+                // 否则用户会以为操作出错了。
+                async resetOneBreaker(name) {
+                    if (this.resettingBreakers || this.resettingBreaker) return;
+                    this.resettingBreaker = name;
+                    try {
+                        const res = await fetch(`/api/providers/breaker/reset?provider=${encodeURIComponent(name)}`, { method: 'POST' });
+                        if (!res.ok) throw new Error(await this.errorText(res, '重置失败'));
+                        const data = await res.json();
+                        this.health = this.health || {};
+                        // 整份替换 breakers 是对的：后端每次都返回全量快照，
+                        // 且重置一个 provider 不会改动其他 provider 的状态。
+                        this.health.breakers = data.breakers || {};
+                        this.showStatus(
+                            data.reset ? `已闭合「${name}」的熔断器` : `「${name}」无需重置（熔断器里没有它的状态）`,
+                            'success'
+                        );
+                    } catch (err) {
+                        this.showStatus(`重置「${name}」熔断器失败: ` + err.message, 'error');
+                    } finally {
+                        this.resettingBreaker = null;
+                    }
+                },
+
+                async loadRequestLogs() {
+                    const params = new URLSearchParams({ limit: '100' });
+                    Object.entries(this.logFilters).forEach(([key, value]) => {
+                        if (value !== '') params.set(key, value);
+                    });
+                    const data = await this.loadOptionalJSON('/api/logs?' + params.toString());
+                    const logs = Array.isArray(data?.data) ? data.data : [];
+                    this.requestLogs = logs;
+                    // 轮询刷新时同一请求 ID 保持展开；筛选后该行消失则收起，避免状态指向不可见日志。
+                    if (this.expandedLogId && !logs.some((log) => this.logKey(log) === this.expandedLogId)) {
+                        this.expandedLogId = null;
+                    }
+                },
+

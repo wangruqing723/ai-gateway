@@ -1,0 +1,109 @@
+                selectNav(tab, closeMobile = false) {
+                    this.activeTab = tab;
+                    if (tab === 'providers' || tab === 'routes') this.editMode = 'visual';
+                    if (closeMobile) this.mobileNavOpen = false;
+                },
+
+                pageTitle() {
+                    if (this.activeTab === 'providers') return '提供商';
+                    if (this.activeTab === 'routes') return '路由';
+                    if (this.activeTab === 'settings') return '全局设置';
+                    if (this.activeTab === 'monitor') return '监控仪表盘';
+                    if (this.activeTab === 'logs') return '请求日志';
+                    return '配置管理';
+                },
+
+                pageSubtitle() {
+                    if (this.activeTab === 'providers') return '配置上游地址、协议格式、并发和限速';
+                    if (this.activeTab === 'routes') return '按顺序匹配路由，命中后转发到指定 Provider 和目标模型';
+                    if (this.activeTab === 'settings') return '管理监听、超时、缓存、直通模式和 YAML 原文';
+                    if (this.activeTab === 'monitor') return '查看运行状态和 Provider 指标';
+                    if (this.activeTab === 'logs') return '查看最近请求记录和转发结果';
+                    return '';
+                },
+
+                isConfigTab() {
+                    return ['providers', 'routes', 'settings'].includes(this.activeTab);
+                },
+
+                configPayload() {
+                    const providers = {};
+                    Object.entries(this.config.providers || {}).forEach(([name, provider]) => {
+                        providers[name] = {
+                            baseUrl: provider.baseUrl || '',
+                            apiKey: provider.apiKey || '',
+                            format: provider.format || 'anthropic',
+                            maxConcurrent: provider.maxConcurrent || 5,
+                            maxPerSecond: provider.maxPerSecond || 0,
+                            maxQueueWait: provider.maxQueueWait || 30000
+                        };
+                    });
+                    return {
+                        host: this.config.host || '127.0.0.1',
+                        port: this.config.port || 7789,
+                        timeout: this.config.timeout || 120000,
+                        streamActivityTimeout: this.config.streamActivityTimeout || 60000,
+                        cache: {
+                            maxAgeDays: this.config.cache?.maxAgeDays || 7,
+                            maxRecords: this.config.cache?.maxRecords || 1000
+                        },
+                        directMode: !!this.config.directMode,
+                        directTimeoutNoStream: this.config.directTimeoutNoStream || 60000,
+                        directTimeoutStreamHeader: this.config.directTimeoutStreamHeader || 60000,
+                        directTimeoutStreamActive: this.config.directTimeoutStreamActive || 120000,
+                        providers,
+                        routes: JSON.parse(JSON.stringify(this.config.routes || [])),
+                        // failover / breaker 必须带上：PUT 是全量替换，漏掉就等于把它们关掉
+                        failover: this.failoverPayload(),
+                        breaker: this.breakerPayload()
+                    };
+                },
+
+                // numOrNull 空输入发 null 而不是 0。
+                // 后端数值项是 *int：null 解成 nil，由 applyDefaults 填默认值，等同「没写这行」；
+                // 发 0 则是「显式写 0」，maxAttempts / breaker 三项会因此报校验错误。
+                numOrNull(v) {
+                    if (v === 0) return 0;
+                    if (v === '' || v === null || v === undefined) return null;
+                    const n = Number(v);
+                    return Number.isFinite(n) ? n : null;
+                },
+
+                failoverPayload() {
+                    const f = this.config.failover || {};
+                    return {
+                        enabled: !!f.enabled,
+                        maxAttempts: this.numOrNull(f.maxAttempts),
+                        maxRetryAfterMs: this.numOrNull(f.maxRetryAfterMs),
+                        onTransportError: !!f.onTransportError,
+                        onServerError: !!f.onServerError,
+                        onRateLimit: !!f.onRateLimit,
+                        onQueueTimeout: !!f.onQueueTimeout,
+                        onStreamHeaderTimeout: !!f.onStreamHeaderTimeout,
+                        onRequestTimeout: !!f.onRequestTimeout,
+                        onAuthError: !!f.onAuthError
+                    };
+                },
+
+                breakerPayload() {
+                    const b = this.config.breaker || {};
+                    return {
+                        enabled: !!b.enabled,
+                        consecutiveFailures: this.numOrNull(b.consecutiveFailures),
+                        openMs: this.numOrNull(b.openMs),
+                        halfOpenProbes: this.numOrNull(b.halfOpenProbes)
+                    };
+                },
+
+                isDirty() {
+                    if (this.editMode === 'yaml') return this.yamlContent !== this.originalYaml;
+                    return JSON.stringify(this.configPayload()) !== this.originalConfig;
+                },
+
+                // canSave 是「有东西可保存」的唯一判据，右上角保存按钮与未保存浮层共用。
+                // 分成两个表达式写过一次，结果就是两边可能各说各话：
+                // 按钮灰着、浮层却在喊有改动。统一到一个函数上，不可能再不一致。
+                canSave() {
+                    return this.isConfigTab() && this.isDirty();
+                },
+

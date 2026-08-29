@@ -1,0 +1,187 @@
+                loadPreviewDrawerState() {
+                    try {
+                        this.previewDrawerOpen = window.localStorage.getItem('gw.configPreviewOpen') === 'true';
+                    } catch (err) {
+                        // localStorage 被禁用时保持默认收起，不影响预览抽屉使用
+                    }
+                },
+
+                savePreviewDrawerState() {
+                    try {
+                        window.localStorage.setItem('gw.configPreviewOpen', String(!!this.previewDrawerOpen));
+                    } catch (err) {
+                        // 存不了不影响当前抽屉状态，跳过持久化
+                    }
+                },
+
+                togglePreviewDrawer() {
+                    this.previewDrawerOpen = !this.previewDrawerOpen;
+                    this.savePreviewDrawerState();
+                },
+
+                closePreviewDrawer() {
+                    if (!this.previewDrawerOpen) return;
+                    this.previewDrawerOpen = false;
+                    this.savePreviewDrawerState();
+                },
+
+                // toast 栈默认避开右下角的未保存浮层；浮层被拖到右侧时，动态把 toast 放到它上方或下方。
+                // 只计算 toast 自身的位置，不改 dirtyToast 的定位与拖拽逻辑。
+                statusToastStackStyle() {
+                    const fallback = { top: '', bottom: '1.25rem' };
+                    const dirty = this.$refs.dirtyToast;
+                    if (!dirty || !this.canSave() || this.showProviderModal || this.showRouteModal) return fallback;
+                    const dirtyRect = dirty.getBoundingClientRect();
+                    if (!dirtyRect.width || !dirtyRect.height) return fallback;
+
+                    const stack = this.$refs.statusToastStack;
+                    const stackRect = stack?.getBoundingClientRect();
+                    const right = window.innerWidth >= 1024 ? 32 : 16;
+                    const left = window.innerWidth >= 1024 ? 320 : 16;
+                    const stackWidth = stackRect?.width || Math.max(0, window.innerWidth - left - right);
+                    const stackLeft = window.innerWidth - right - stackWidth;
+                    if (dirtyRect.left >= window.innerWidth - right || dirtyRect.right <= stackLeft) return fallback;
+
+                    const gap = 12;
+                    const stackHeight = stack?.offsetHeight || 72;
+                    const aboveBottom = window.innerHeight - dirtyRect.top + gap;
+                    if (dirtyRect.top - gap - stackHeight >= 16) {
+                        return { top: '', bottom: `${aboveBottom}px` };
+                    }
+                    const belowTop = dirtyRect.bottom + gap;
+                    if (belowTop + stackHeight <= window.innerHeight - 16) {
+                        return { top: `${belowTop}px`, bottom: '' };
+                    }
+                    return { top: '', bottom: `${aboveBottom}px` };
+                },
+
+                // ── 即时 tooltip ────────────────────────────────────
+                // 原生 title 有 1-2 秒延迟且不可配置，这里 mouseenter 即显示。
+
+                showTip(text, event) {
+                    if (!text) return;
+                    const rect = event.currentTarget.getBoundingClientRect();
+                    this.tip = {
+                        show: true,
+                        text,
+                        // 锚在徽章上边缘中点，气泡自身用 -translate 往上让开 8px
+                        x: rect.left + rect.width / 2,
+                        y: rect.top - 8
+                    };
+                },
+
+                hideTip() {
+                    this.tip.show = false;
+                },
+
+                // ── 自定义确认弹窗 ──────────────────────────────────
+                // 返回 Promise<boolean>，调用方 await 即可，语义和 confirm 一致。
+
+                askConfirm(message, { title = '确认操作', confirmText = '删除' } = {}) {
+                    // 上一个还没结、又开一个：先把旧的判成取消，避免 resolve 丢失导致
+                    // 调用方的 await 永远挂着
+                    if (this._confirmResolve) this._confirmResolve(false);
+                    this.confirmDialog = { open: true, title, message, confirmText };
+                    // 打开后把焦点移到确认按钮，键盘用户可直接回车/Esc
+                    this.$nextTick(() => this.$refs.confirmOk?.focus());
+                    return new Promise((resolve) => { this._confirmResolve = resolve; });
+                },
+
+                resolveConfirm(ok) {
+                    if (!this.confirmDialog.open) return;
+                    this.confirmDialog.open = false;
+                    const resolve = this._confirmResolve;
+                    this._confirmResolve = null;
+                    if (resolve) resolve(ok);
+                },
+
+                // ── 未保存浮层的拖拽 ────────────────────────────────
+                // 位置记在 localStorage：拖过一次说明默认位置挡着东西了，
+                // 每次刷新都要重拖比不能拖更烦。
+
+                // 必须返回对象，不能返回字符串。
+                // Alpine 对 :style 字符串走 setAttribute("style", ...)，整个属性覆写；
+                // 对象则逐条 style.setProperty()。而 x-show 隐藏元素靠的正是
+                // setProperty("display","none") —— 字符串写法每次重算都会把它一起抹掉，
+                // 于是 canSave() 已经是 false、浮层却还挂在屏幕上。
+                //
+                // 这个 bug 只在拖过一次之后出现：没拖过时 dirtyToastPos 为 null，
+                // 返回值恒定不变、Alpine 不重设属性；一旦 localStorage 里存了
+                // gw.dirtyToastPos，坐标参与求值，覆写就开始发生。
+                dirtyToastStyle() {
+                    const pos = this.dirtyToastPos;
+                    // 没拖过就用默认右下角；对象里显式给出四个方位，
+                    // 避免拖动前后残留上一次的定位属性
+                    if (!pos) return { right: '1.25rem', bottom: '1.25rem', left: '', top: '' };
+                    return { left: `${pos.x}px`, top: `${pos.y}px`, right: '', bottom: '' };
+                },
+
+                loadDirtyToastPos() {
+                    try {
+                        const raw = window.localStorage.getItem('gw.dirtyToastPos');
+                        if (!raw) return;
+                        const pos = JSON.parse(raw);
+                        if (Number.isFinite(pos?.x) && Number.isFinite(pos?.y)) {
+                            this.dirtyToastPos = this.clampDirtyToast(pos.x, pos.y);
+                        }
+                    } catch (err) {
+                        // localStorage 被禁用或内容损坏：忽略，回落到默认位置
+                    }
+                },
+
+                saveDirtyToastPos() {
+                    try {
+                        if (this.dirtyToastPos) {
+                            window.localStorage.setItem('gw.dirtyToastPos', JSON.stringify(this.dirtyToastPos));
+                        }
+                    } catch (err) {
+                        // 存不了不影响本次拖动结果，跳过
+                    }
+                },
+
+                // clampDirtyToast 把坐标限制在视窗内。
+                // 「拖到哪都行」不包括拖出屏幕：位置是持久化的，一旦拖丢，
+                // 下次打开它还在屏幕外，只能清 localStorage 才能找回来。
+                clampDirtyToast(x, y) {
+                    const el = this.$refs.dirtyToast;
+                    const w = el?.offsetWidth || 240;
+                    const h = el?.offsetHeight || 44;
+                    const margin = 4;
+                    const maxX = Math.max(margin, window.innerWidth - w - margin);
+                    const maxY = Math.max(margin, window.innerHeight - h - margin);
+                    return {
+                        x: Math.min(Math.max(x, margin), maxX),
+                        y: Math.min(Math.max(y, margin), maxY)
+                    };
+                },
+
+                startDragDirty(event) {
+                    // 只响应主键/单指，避免右键菜单和多指手势误触发拖动
+                    if (event.button !== undefined && event.button !== 0) return;
+                    const el = this.$refs.dirtyToast;
+                    if (!el) return;
+                    const rect = el.getBoundingClientRect();
+                    const offsetX = event.clientX - rect.left;
+                    const offsetY = event.clientY - rect.top;
+                    this.draggingDirty = true;
+                    // 从默认的 right/bottom 定位切到 left/top，交接时保持视觉位置不跳
+                    this.dirtyToastPos = this.clampDirtyToast(rect.left, rect.top);
+
+                    const onMove = (e) => {
+                        this.dirtyToastPos = this.clampDirtyToast(e.clientX - offsetX, e.clientY - offsetY);
+                    };
+                    const onUp = () => {
+                        this.draggingDirty = false;
+                        this.saveDirtyToastPos();
+                        window.removeEventListener('pointermove', onMove);
+                        window.removeEventListener('pointerup', onUp);
+                        window.removeEventListener('pointercancel', onUp);
+                    };
+                    window.addEventListener('pointermove', onMove);
+                    window.addEventListener('pointerup', onUp);
+                    // 指针被系统取消（切窗口、手势中断）也要收尾，否则监听器泄漏
+                    window.addEventListener('pointercancel', onUp);
+                },
+
+                // snapshotConfig / restoreConfig 只用于弹窗落盘失败时的回滚。
+                // 深拷贝走 JSON 往返：配置全是纯数据，量级也就几十个字段。

@@ -39,6 +39,7 @@ import (
 	"ai-gateway/internal/queue"
 	"ai-gateway/internal/router"
 	"ai-gateway/internal/vision"
+	"ai-gateway/internal/webbuild"
 )
 
 //go:embed web/index.html web/vendor/*
@@ -1404,11 +1405,20 @@ func nextReqID() string {
 }
 
 // handleIndex 返回前端页面。默认使用嵌入资源；开发模式下从 AI_GATEWAY_WEB_DIR 实时读取。
+//
+// 开发模式优先实时拼装 src/ 下的模板与片段，而不是读产物 index.html：
+// 页面已拆成 src/app/*.js.part，只读产物的话，改片段必须先跑一遍 `make web-html`
+// 才能在浏览器里看到效果，热加载就等于半废。src/ 不存在时（比如挂载的是产物快照）
+// 退回直接读 index.html，保持旧行为。
 func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	var data []byte
 	var err error
 	if s.webDevDir != "" {
-		data, err = os.ReadFile(filepath.Join(s.webDevDir, "index.html"))
+		if webbuild.HasSources(s.webDevDir) {
+			data, err = webbuild.Assemble(s.webDevDir)
+		} else {
+			data, err = os.ReadFile(filepath.Join(s.webDevDir, "index.html"))
+		}
 		if err == nil {
 			data = injectDevReload(data)
 		}
@@ -1477,8 +1487,7 @@ func (s *server) handleDevReload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "当前响应不支持流式刷新", http.StatusInternalServerError)
 		return
 	}
-	indexPath := filepath.Join(s.webDevDir, "index.html")
-	lastMod := fileModTime(indexPath)
+	lastMod := s.webSourcesModTime()
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Connection", "keep-alive")
@@ -1492,7 +1501,7 @@ func (s *server) handleDevReload(w http.ResponseWriter, r *http.Request) {
 		case <-r.Context().Done():
 			return
 		case <-ticker.C:
-			current := fileModTime(indexPath)
+			current := s.webSourcesModTime()
 			if !current.IsZero() && current.After(lastMod) {
 				lastMod = current
 				fmt.Fprint(w, "data: reload\n\n")
@@ -1508,6 +1517,27 @@ func fileModTime(path string) time.Time {
 		return time.Time{}
 	}
 	return info.ModTime()
+}
+
+// webSourcesModTime 取开发目录下参与页面构建的全部文件里最新的 mtime。
+//
+// 页面拆分后不能只盯 index.html：那是构建产物，改片段时它根本不变，
+// 只盯它会让 SSE 永不触发、浏览器不刷新——热加载看着还在，实际已经废了。
+// src/ 不存在时退回只看 index.html，与拆分前行为一致。
+func (s *server) webSourcesModTime() time.Time {
+	paths := []string{filepath.Join(s.webDevDir, "index.html")}
+	if webbuild.HasSources(s.webDevDir) {
+		if sources, err := webbuild.SourcePaths(s.webDevDir); err == nil {
+			paths = sources
+		}
+	}
+	var latest time.Time
+	for _, path := range paths {
+		if mod := fileModTime(path); mod.After(latest) {
+			latest = mod
+		}
+	}
+	return latest
 }
 
 // handleConfigAPI 处理配置管理相关的 API 请求

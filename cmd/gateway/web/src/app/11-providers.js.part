@@ -1,0 +1,143 @@
+                addProvider() {
+                    this.editingProvider = null;
+                    this.providerForm = {
+                        name: '',
+                        baseUrl: '',
+                        apiKey: '',
+                        format: 'anthropic',
+                        maxConcurrent: 5,
+                        maxPerSecond: 0,
+                        maxQueueWait: 30000,
+                        apiKeyConfigured: false,
+                        clearApiKey: false
+                    };
+                    this.showProviderModal = true;
+                },
+
+                editProvider(name) {
+                    this.editingProvider = name;
+                    const p = this.config.providers[name];
+                    this.providerForm = {
+                        name,
+                        baseUrl: p.baseUrl,
+                        apiKey: '',
+                        format: p.format,
+                        maxConcurrent: p.maxConcurrent,
+                        maxPerSecond: p.maxPerSecond,
+                        maxQueueWait: p.maxQueueWait,
+                        apiKeyConfigured: !!p.apiKeyConfigured,
+                        clearApiKey: false
+                    };
+                    this.showProviderModal = true;
+                },
+
+                // duplicateProvider 以现有 provider 为模板新建一个。
+                // editingProvider 必须留空，否则保存时会覆盖源 provider 而不是新增。
+                // apiKey 不继承：前端拿到的是脱敏值，而新名字在磁盘上没有已存密钥，
+                // 带 sentinel 保存会被后端拒（那是「凭空保留」）。所以清空让用户重填，
+                // 并把 apiKeyConfigured 一并置 false，避免输入框显示「已配置，留空保持不变」
+                // 这种在复制场景下不成立的提示。
+                duplicateProvider(name) {
+                    const p = this.config.providers?.[name];
+                    if (!p) return;
+                    this.editingProvider = null;
+                    this.providerForm = {
+                        name: this.nextCopyName(name, Object.keys(this.config.providers || {})),
+                        baseUrl: p.baseUrl,
+                        apiKey: '',
+                        format: p.format,
+                        maxConcurrent: p.maxConcurrent,
+                        maxPerSecond: p.maxPerSecond,
+                        maxQueueWait: p.maxQueueWait,
+                        apiKeyConfigured: false,
+                        clearApiKey: false
+                    };
+                    this.showProviderModal = true;
+                    if (p.apiKeyConfigured) {
+                        this.showStatus(`已按「${name}」预填，API Key 需重新填写`, 'success');
+                    }
+                },
+
+                // nextCopyName 生成不重名的副本名：foo → foo-copy → foo-copy-2 …
+                // 直接沿用原名会在保存时覆盖源对象，用户以为是新增、实际丢了一个。
+                // 加后缀可能顶破名称长度上限（99 字符的名字 +"-copy" 就是 104），
+                // 所以先按后缀长度把原名截短，保证成品始终合法、不用用户手工改名。
+                nextCopyName(base, taken) {
+                    const used = new Set(taken || []);
+                    const limit = this.maxProviderNameLen;
+                    // 按码点切分，避免把 emoji 一类代理对截成半个字符
+                    const fit = (suffix) => [...base].slice(0, Math.max(0, limit - suffix.length)).join('') + suffix;
+                    let candidate = fit('-copy');
+                    let n = 2;
+                    while (used.has(candidate)) {
+                        candidate = fit(`-copy-${n}`);
+                        n += 1;
+                    }
+                    return candidate;
+                },
+
+                async saveProvider() {
+                    if (!this.providerForm.name || !this.providerForm.baseUrl) {
+                        this.showStatus('名称和 URL 不能为空', 'error');
+                        return;
+                    }
+                    // 用展开运算符按码点数，和后端 utf8.RuneCountInString 对齐；
+                    // 'str'.length 会把 emoji 一类代理对算成 2，比后端更严。
+                    // input 的 maxlength 挡不住粘贴以外的路径（复制 provider、导入配置），所以这里再兜一次。
+                    if ([...this.providerForm.name].length > this.maxProviderNameLen) {
+                        this.showStatus(`名称最多 ${this.maxProviderNameLen} 个字符`, 'error');
+                        return;
+                    }
+
+                    const existing = this.editingProvider ? this.config.providers[this.editingProvider] : null;
+                    let apiKey = this.providerForm.apiKey;
+                    if (!apiKey && this.providerForm.apiKeyConfigured && !this.providerForm.clearApiKey) {
+                        apiKey = existing?.apiKey || '';
+                    }
+                    if (this.providerForm.clearApiKey) apiKey = '';
+                    const snapshot = this.snapshotConfig();
+                    this.config.providers[this.providerForm.name] = {
+                        baseUrl: this.providerForm.baseUrl,
+                        apiKey,
+                        apiKeyConfigured: apiKey !== '',
+                        format: this.providerForm.format,
+                        maxConcurrent: this.providerForm.maxConcurrent || 5,
+                        maxPerSecond: this.providerForm.maxPerSecond || 0,
+                        maxQueueWait: this.providerForm.maxQueueWait || 30000
+                    };
+                    // 弹窗保存直接落盘：点这个按钮已经是一次明确确认，再要求点顶部保存
+                    // 等于同一件事确认两遍，实际结果是用户忘记第二步。
+                    // 失败时回滚内存并留着弹窗，避免界面显示的和磁盘上的不一致。
+                    if (await this.persistConfig()) {
+                        this.showProviderModal = false;
+                    } else {
+                        this.restoreConfig(snapshot);
+                    }
+                },
+
+                async removeProvider(name) {
+                    if (await this.askConfirm(`删除 Provider「${name}」后，引用它的路由候选会一并清理。`,
+                        { title: '删除 Provider', confirmText: '删除' })) {
+                        delete this.config.providers[name];
+                        // 多候选路由只删掉引用该 provider 的候选；候选清空或视觉引用命中才整条删除
+                        this.config.routes = this.config.routes.reduce((kept, r) => {
+                            if (r.vision?.provider === name) return kept;
+                            if (Array.isArray(r.targets) && r.targets.length) {
+                                const targets = r.targets.filter((t) => t.provider !== name);
+                                if (!targets.length) return kept;
+                                // 收缩成单候选时必须一并删掉 strategy：后端对「单候选 + 非
+                                // failover」直接报错，而策略下拉框只在候选数 > 1 时显示，
+                                // 带着它保存会撞校验且用户没有入口清掉
+                                kept.push(targets.length === 1
+                                    ? { ...r, targets: undefined, strategy: undefined, provider: targets[0].provider, model: targets[0].model }
+                                    : { ...r, targets });
+                                return kept;
+                            }
+                            if (r.provider === name) return kept;
+                            kept.push(r);
+                            return kept;
+                        }, []);
+                    }
+                },
+
+                // routeTargets 统一读取路由的候选列表：写了 targets 用 targets，否则退化成单目标

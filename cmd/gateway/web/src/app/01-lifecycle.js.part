@@ -1,0 +1,53 @@
+                async init() {
+                    await this.loadConfig();
+                    if (this.monitorPollingAllowed()) await this.refreshMonitor();
+                    this._monitorPollTimer = window.setInterval(() => {
+                        if (this.monitorPollingAllowed()) this.refreshMonitor(false);
+                    }, 5000);
+                    this._monitorVisibilityHandler = () => {
+                        if (this.monitorPollingAllowed()) this.refreshMonitor(false);
+                    };
+                    document.addEventListener('visibilitychange', this._monitorVisibilityHandler);
+                    this.$watch('activeTab', (tab, oldTab) => {
+                        if (tab !== oldTab && this.monitorPollingAllowed()) this.refreshMonitor(false);
+                    });
+                    // 直接编辑的字段仍需手动保存，关页面前拦一下，免得改了半天丢掉
+                    window.addEventListener('beforeunload', (e) => {
+                        if (this.canSave()) e.preventDefault();
+                    });
+                    // 软刷新（F5）时浏览器会把刷新前的表单值恢复进 DOM，x-model 的
+                    // input/change 监听再把它们写回 config。若这一步落在 loadConfig()
+                    // 之后，config 就和 originalConfig 对不上，未保存浮层会在刚打开页面时
+                    // 凭空出现 —— 而磁盘上其实什么都没改。
+                    //
+                    // autocomplete="off" 已加在所有表单控件上，但各浏览器对
+                    // session-history 恢复的处理并不一致，所以这里再兜一层重放。
+                    //
+                    // 两个坑：
+                    // 1. 不能用 readyState 当守卫。fetch 够快时 init() 跑完 load 已经触发过，
+                    //    监听器压根不会注册，重放永远不发生 —— 这正是「取消勾选再勾回来、
+                    //    刷新后浮层又出现」的直接原因。
+                    // 2. 不能就在 load 那一刻重放。部分浏览器的恢复发生在 load 之后，
+                    //    得再让出一帧等它落定。
+                    // 也不能用 isDirty() 当守卫：恢复污染时它正好是 true，一判就跳过修复。
+                    const markEdited = (e) => { if (e.isTrusted) this._userEdited = true; };
+                    window.addEventListener('pointerdown', markEdited, { capture: true });
+                    window.addEventListener('keydown', markEdited, { capture: true });
+                    this.scheduleRestoreGuard();
+                    this.loadDirtyToastPos();
+                    this.loadPreviewDrawerState();
+                    // 窗口变小后旧坐标可能落到视窗外，重新收进来
+                    window.addEventListener('resize', () => {
+                        if (this.dirtyToastPos) {
+                            this.dirtyToastPos = this.clampDirtyToast(this.dirtyToastPos.x, this.dirtyToastPos.y);
+                        }
+                    });
+                },
+
+                destroy() {
+                    if (this._monitorPollTimer !== null) window.clearInterval(this._monitorPollTimer);
+                    if (this._monitorVisibilityHandler) {
+                        document.removeEventListener('visibilitychange', this._monitorVisibilityHandler);
+                    }
+                },
+

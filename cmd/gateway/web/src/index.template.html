@@ -1,0 +1,1347 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Gateway 配置管理</title>
+    <link rel="icon" href="data:,">
+    <!-- 样式是构建期产物，源文件在 web/src/tailwind.css + web/tailwind.config.js，
+         用 `make web-css` 重新生成。此前这里挂的是 Tailwind Play CDN 那个 407KB 运行时编译器，
+         在浏览器里现场扫 DOM 生成 CSS；现在换成 25KB 静态表，省掉运行时编译，
+         首屏也不再有无样式闪烁。
+         改动页面上的 class 之后必须重跑 `make web-css`，否则新类名没有对应样式。 -->
+    <link rel="stylesheet" href="/vendor/tailwind.css">
+    <script defer src="/vendor/alpine.min.js"></script>
+</head>
+<body class="h-screen overflow-hidden font-sans antialiased" x-data="gatewayApp()" x-init="init()">
+    <div class="flex h-screen overflow-hidden">
+        <aside class="hidden h-screen w-72 shrink-0 border-r border-line bg-panel/85 backdrop-blur-xl lg:flex lg:flex-col">
+            <div class="h-16 border-b border-line px-6 flex items-center gap-3">
+                <div class="grid h-9 w-9 place-items-center rounded-lg bg-cyan2 text-ink">
+                    <span class="material-symbols-outlined icon-fill">hub</span>
+                </div>
+                <div>
+                    <div class="text-base font-extrabold tracking-tight text-white">AI Gateway</div>
+                    <div class="text-xs text-muted">本地统一 API 网关</div>
+                </div>
+            </div>
+
+            <nav class="flex-1 px-3 py-5" role="tablist">
+                <template x-for="(item, index) in navItems" :key="item.id">
+                    <button @click="selectNav(item.id)"
+                            :class="{
+                                'mt-1': index > 0,
+                                'bg-cyan2/12 text-cyan border-l-cyan': activeTab === item.id,
+                                'text-muted border-l-transparent hover:bg-white/[.04] hover:text-text': activeTab !== item.id
+                            }"
+                            :aria-selected="activeTab === item.id"
+                            role="tab"
+                            class="flex w-full items-center gap-3 border-l-4 px-4 py-3 text-sm font-bold transition">
+                        <span class="material-symbols-outlined"
+                              :class="item.fillIcon && activeTab === item.id ? 'icon-fill' : ''"
+                              x-text="item.icon"></span>
+                        <span x-text="item.label"></span>
+                    </button>
+                </template>
+            </nav>
+
+            <div class="border-t border-line p-4">
+                <div class="rounded-lg border border-line bg-ink p-4">
+                    <div class="mb-2 flex items-center justify-between">
+                        <span class="text-xs font-bold uppercase tracking-wide text-muted">配置文件</span>
+                        <span class="h-2 w-2 rounded-full bg-good"></span>
+                    </div>
+                    <p class="break-all font-mono text-xs leading-5 text-muted" x-text="configPath || '加载中...'"></p>
+                </div>
+            </div>
+        </aside>
+
+        <div class="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+            <header class="sticky top-0 z-30 h-16 border-b border-line bg-ink/78 backdrop-blur-xl">
+                <div class="flex h-full items-center justify-between gap-4 px-4 sm:px-6 lg:px-8">
+                    <div class="flex min-w-0 items-center gap-3">
+                        <button @click="mobileNavOpen = !mobileNavOpen" class="btn btn-secondary px-3 lg:hidden" title="打开导航">
+                            <span class="material-symbols-outlined">menu</span>
+                        </button>
+                        <div class="min-w-0">
+                            <h1 class="truncate text-lg font-extrabold tracking-tight text-white sm:text-xl" x-text="pageTitle()"></h1>
+                            <p class="hidden text-xs text-muted sm:block" x-text="pageSubtitle()"></p>
+                        </div>
+                    </div>
+
+                    <div class="flex items-center gap-2 sm:gap-3">
+                        <div class="hidden items-center gap-2 rounded-full border border-line bg-panel px-3 py-1.5 text-xs font-bold text-muted md:flex">
+                            <span class="h-2 w-2 rounded-full bg-good shadow-[0_0_12px_rgba(52,211,153,.8)]"></span>
+                            在线
+                            <span class="text-line">|</span>
+                            <span>监听 <span class="font-mono text-text" x-text="health?.listenAddress || '--'"></span></span>
+                            <span x-show="restartRequired.length" x-cloak class="text-warn">需重启</span>
+                        </div>
+                        <!-- 预览只在可视化配置页出现；抽屉状态跨刷新保留，切换 providers/routes/settings 时内容跟随当前页。 -->
+                        <button x-show="isConfigTab() && editMode === 'visual'" x-cloak
+                                @click="togglePreviewDrawer()"
+                                :aria-expanded="previewDrawerOpen"
+                                aria-controls="config-preview-drawer"
+                                :aria-label="previewDrawerOpen ? '收起配置预览' : '展开配置预览'"
+                                class="btn btn-secondary px-3">
+                            <span class="material-symbols-outlined text-[18px]">description</span>
+                            <span class="hidden sm:inline" x-text="previewDrawerOpen ? '收起预览' : '配置预览'"></span>
+                        </button>
+                        <button x-show="isConfigTab()" x-cloak @click="reloadConfig()" :disabled="loading" class="btn btn-secondary">
+                            <span class="material-symbols-outlined">sync</span>
+                            <span class="hidden sm:inline">重载</span>
+                        </button>
+                        <button x-show="isConfigTab()" x-cloak @click="saveConfig()" :disabled="loading || !canSave()" class="btn btn-primary">
+                            <span class="material-symbols-outlined">save</span>
+                            <span class="hidden sm:inline">保存</span>
+                        </button>
+                    </div>
+                </div>
+            </header>
+
+            <!-- 未保存提示：可拖拽浮层，默认右下角。
+                 不做成 inline 横幅是因为那会把整页内容往下推，每改一个字段页面就跳一次；
+                 也不放顶部，顶部浮层会盖住统计卡片。
+                 弹窗开着时隐掉：弹窗保存自己落盘，这时提示未保存只是噪音。
+                 只针对全局设置、故障转移与熔断这些直接编辑的字段。
+                 顶部的保存按钮保持不变，这里只是提醒 + 快捷入口。 -->
+            <div x-ref="dirtyToast"
+                 x-show="canSave() && !showProviderModal && !showRouteModal" x-transition x-cloak
+                 role="status" aria-live="polite"
+                 @pointerdown="startDragDirty($event)"
+                 :style="dirtyToastStyle()"
+                 :class="draggingDirty ? 'gw-grabbing' : 'gw-grab'"
+                 class="fixed z-40 flex max-w-[calc(100vw-2.5rem)] items-center gap-3 rounded-full border border-warn/40 bg-warn/15 px-4 py-2.5 shadow-glow backdrop-blur-xl">
+                <span class="material-symbols-outlined shrink-0 text-base text-amber-200/70" title="按住可拖动">drag_indicator</span>
+                <span class="min-w-0 truncate text-sm font-semibold text-amber-100">有改动尚未写入磁盘</span>
+                <!-- 按钮上 stop 掉 pointerdown：否则按下按钮就开始拖，点击会被判成拖拽 -->
+                <button @click="saveConfig()" @pointerdown.stop :disabled="loading"
+                        class="btn btn-primary shrink-0 cursor-pointer rounded-full px-3 py-1.5 text-xs">
+                    <span class="material-symbols-outlined text-base">save</span>
+                    <span class="hidden sm:inline">立即保存</span>
+                </button>
+            </div>
+
+            <div x-show="mobileNavOpen" x-transition.opacity x-cloak class="fixed inset-0 z-40 bg-black/60 lg:hidden" @click="mobileNavOpen = false"></div>
+            <div x-show="mobileNavOpen" x-transition x-cloak class="fixed left-0 top-0 z-50 h-full w-72 border-r border-line bg-panel p-4 lg:hidden">
+                <div class="mb-5 flex items-center justify-between">
+                    <div class="font-extrabold text-white">AI Gateway</div>
+                    <button @click="mobileNavOpen = false" class="btn btn-secondary px-3">
+                        <span class="material-symbols-outlined">close</span>
+                    </button>
+                </div>
+                <div class="space-y-2" role="tablist">
+                    <template x-for="item in navItems" :key="item.id">
+                        <button @click="selectNav(item.id, true)" class="btn btn-secondary w-full justify-start"
+                                :aria-selected="activeTab === item.id"
+                                role="tab">
+                            <span class="material-symbols-outlined" x-text="item.icon"></span>
+                            <span x-text="item.label"></span>
+                        </button>
+                    </template>
+                </div>
+            </div>
+
+			<!-- 状态提示统一为右下角 toast 栈，单条 toast 各自计时，连续提示不会互相覆盖。 -->
+			<div x-ref="statusToastStack" x-show="statusToasts.length" x-transition x-cloak
+				 :style="statusToastStackStyle()"
+				 class="pointer-events-none fixed bottom-5 left-4 right-4 z-[60] flex max-h-[calc(100vh-6rem)] flex-col items-end gap-2 overflow-y-auto lg:left-80 lg:right-8">
+                <template x-for="toast in statusToasts" :key="toast.id">
+                    <div role="status" aria-live="polite"
+                         :class="toast.type === 'success' ? 'border-good/40 bg-good/10 text-emerald-100' : 'border-danger/40 bg-danger/10 text-rose-100'"
+                         class="pointer-events-auto flex w-full max-w-xl items-start justify-between gap-4 rounded-lg border px-4 py-3 shadow-glow backdrop-blur-xl">
+                        <div class="flex min-w-0 items-center gap-3">
+                            <span class="material-symbols-outlined shrink-0" x-text="toast.type === 'success' ? 'check_circle' : 'error'"></span>
+                            <span class="min-w-0 break-words text-sm font-semibold" x-text="toast.message"></span>
+                        </div>
+                        <button @click="dismissStatus(toast.id)" class="shrink-0 text-current opacity-70 hover:opacity-100" aria-label="关闭通知">
+                            <span class="material-symbols-outlined">close</span>
+                        </button>
+                    </div>
+                </template>
+            </div>
+
+            <main class="flex-1 overflow-y-auto px-4 py-5 sm:px-6 lg:h-[calc(100vh-4rem)] lg:overflow-hidden lg:px-8">
+                <section x-show="isConfigTab()" x-transition class="lg:flex lg:h-full lg:min-h-0 lg:flex-col">
+                    <!-- 四张统计卡片改成轻量 chip，仍保留四个数值；sm 以下隐藏标签、保留图标和数值。 -->
+                    <div class="mb-5 flex shrink-0 flex-col justify-between gap-3 rounded-lg border border-line bg-panel/70 p-2 sm:flex-row sm:items-center">
+                        <div x-show="activeTab === 'settings'" x-cloak class="grid grid-cols-2 gap-2 sm:w-auto">
+                            <button @click="editMode = 'visual'"
+                                    :class="editMode === 'visual' ? 'bg-cyan2 text-ink' : 'text-muted hover:bg-white/[.06] hover:text-text'"
+                                    class="rounded-lg px-4 py-2 text-sm font-extrabold transition">
+                                可视化配置
+                            </button>
+                            <button @click="editMode = 'yaml'; loadYamlConfig()"
+                                    :class="editMode === 'yaml' ? 'bg-cyan2 text-ink' : 'text-muted hover:bg-white/[.06] hover:text-text'"
+                                    class="rounded-lg px-4 py-2 text-sm font-extrabold transition">
+                                YAML 编辑器
+                            </button>
+                        </div>
+                        <div class="flex flex-wrap items-center gap-1.5 px-1 text-xs text-muted sm:flex-1 sm:justify-end">
+                            <span class="chip bg-ink" aria-label="Provider 数量">
+                                <span class="material-symbols-outlined text-[16px] text-cyan">dns</span>
+                                <span class="hidden sm:inline">Providers</span>
+                                <span class="font-mono text-text" x-text="providerCount()"></span>
+                            </span>
+                            <span class="chip bg-ink" aria-label="路由数量">
+                                <span class="material-symbols-outlined text-[16px] text-violet">alt_route</span>
+                                <span class="hidden sm:inline">Routes</span>
+                                <span class="font-mono text-text" x-text="routeCount()"></span>
+                            </span>
+                            <span class="chip bg-ink" aria-label="运行模式">
+                                <span class="material-symbols-outlined text-[16px] text-good">bolt</span>
+                                <span class="hidden sm:inline">Mode</span>
+                                <span class="font-mono text-text" x-text="config.directMode ? '直通' : '队列'"></span>
+                            </span>
+                            <span class="chip bg-ink" aria-label="常规请求超时">
+                                <span class="material-symbols-outlined text-[16px] text-warn">timer</span>
+                                <span class="hidden sm:inline">Timeout</span>
+                                <span class="font-mono text-text"><span x-text="seconds(config.timeout)"></span>s</span>
+                            </span>
+                            <span class="chip bg-ink"><span class="material-symbols-outlined text-[16px]">lan</span><span x-text="config.host || '127.0.0.1'"></span></span>
+                            <span class="chip bg-ink"><span class="material-symbols-outlined text-[16px]">schedule</span><span x-text="seconds(config.streamActivityTimeout) + 's stream'"></span></span>
+                        </div>
+                    </div>
+
+                    <!-- 历史布局曾用 9/3（更早是 8/4）给右侧预览让位，provider 和路由表因此容易横向滚动、操作列被裁掉。
+                         预览现在是默认折叠的浮动抽屉，不再参与分栏，配置表格占满可用宽度。 -->
+                    <div x-show="editMode === 'visual'" x-transition class="lg:min-h-0 lg:flex-1 lg:overflow-hidden">
+                        <div class="space-y-5 lg:min-h-0 lg:overflow-y-auto lg:pr-2">
+                            <section x-show="activeTab === 'routes'" x-transition class="glass rounded-lg">
+                                <div class="flex flex-col gap-3 border-b border-line p-4 sm:flex-row sm:items-center sm:justify-between">
+                                    <div>
+                                        <h2 class="text-base font-extrabold text-cyan">路由规则</h2>
+                                        <p class="mt-1 text-xs text-muted">越靠前优先级越高，支持通配符 * 和 ?</p>
+                                    </div>
+                                    <button @click="addRoute()" class="btn btn-secondary">
+                                        <span class="material-symbols-outlined">add</span>
+                                        添加路由
+                                    </button>
+                                </div>
+                                <div class="overflow-x-auto">
+                                    <table class="w-full min-w-[560px] border-collapse text-left">
+                                        <thead class="bg-panel2 text-xs uppercase tracking-wide text-muted">
+                                            <tr>
+                                                <th scope="col" class="whitespace-nowrap px-3 py-3 font-bold">#</th>
+                                                <th scope="col" class="whitespace-nowrap px-3 py-3 font-bold">匹配模式</th>
+                                                <th scope="col" class="whitespace-nowrap px-3 py-3 font-bold">候选（按尝试顺序）</th>
+                                                <th scope="col" class="whitespace-nowrap px-3 py-3 font-bold">视觉</th>
+                                                <th scope="col" class="whitespace-nowrap px-3 py-3 text-right font-bold">操作</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody class="divide-y divide-line">
+                                            <template x-for="(route, index) in config.routes" :key="index">
+                                                <tr class="group bg-panel/35 transition hover:bg-white/[.04]">
+                                                    <td class="w-px whitespace-nowrap px-3 py-2.5 align-top font-mono text-xs text-muted" x-text="index + 1"></td>
+                                                    <td class="w-px px-3 py-2.5 align-top">
+                                                        <span class="whitespace-nowrap font-mono text-sm font-bold text-cyan" x-text="route.match"></span>
+                                                        <!-- 策略只在多候选时有意义，单候选写非 failover 后端会直接报错 -->
+                                                        <span x-show="routeTargets(route).length > 1" x-cloak
+                                                              class="mt-0.5 block whitespace-nowrap text-[11px] text-muted"
+                                                              x-text="(route.strategy || 'failover') + ' · ' + routeTargets(route).length + ' 个候选'"></span>
+                                                    </td>
+                                                    <!-- Provider 和目标模型合成一列、且流式换行：
+                                                         原来拆两列各自纵向排列，两列条目对不齐、看不出配对关系；
+                                                         改成一候选一项后若强制每项独占一行，5 个候选会把行撑到 250px 高、
+                                                         右侧大片留白浪费。这里用 flex-wrap，宽度够就并排、不够才换行。 -->
+                                                    <!-- 历史布局使用 w-full + max-w-0 让这一列吃掉剩余宽度并允许收缩到 0：
+                                                         不加的话候选内容会把 table 撑出容器、横向滚动条回来、操作列被裁。
+                                                         内层再套一个 min-w-0 的容器——td 的 max-w-0 不会自动传导给
+                                                         flex 子项，缺了它 flex-wrap 在某些宽度（实测 1600px）算出的
+                                                         可用宽度仍是内容宽度，于是排成一行把表撑到 1039px。
+                                                         预览抽屉不再占用主栏宽度，但多个长 Provider / 模型仍需要保留这层收缩保护。 -->
+                                                    <td class="w-full max-w-0 px-3 py-2.5 align-top">
+                                                        <div class="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1.5">
+                                                            <template x-for="(target, ti) in routeTargets(route)" :key="ti">
+                                                                <div class="flex items-center gap-1.5 whitespace-nowrap">
+                                                                    <span class="font-mono text-[11px] text-muted" x-text="(ti + 1) + '.'"></span>
+                                                                    <span class="chip bg-white/[.05] text-text" x-text="target.provider"></span>
+                                                                    <span class="text-[11px] text-muted">→</span>
+                                                                    <span class="font-mono text-xs text-emerald-200" x-text="target.model || '(沿用请求模型)'"></span>
+                                                                </div>
+                                                            </template>
+                                                        </div>
+                                                    </td>
+                                                    <td class="w-px px-3 py-2.5 align-top">
+                                                        <span x-show="route.vision" class="chip whitespace-nowrap border-cyan2/35 bg-cyan2/10 text-cyan"
+                                                              @mouseenter="showTip('视觉伴随: ' + route.vision?.provider + ' / ' + route.vision?.model, $event)"
+                                                              @mouseleave="hideTip()"
+                                                              @focus="showTip('视觉伴随: ' + route.vision?.provider + ' / ' + route.vision?.model, $event)"
+                                                              @blur="hideTip()" tabindex="0" aria-describedby="immediate-tooltip">
+                                                            <span class="material-symbols-outlined text-[16px]">visibility</span>
+                                                            <span class="font-mono text-[11px]" x-text="route.vision?.model"></span>
+                                                        </span>
+                                                        <!-- 未启用用短横线：11 行里重复 11 遍「未启用」是纯噪声，一眼扫下来只需要知道「这里没配」 -->
+                                                        <span x-show="!route.vision" class="text-sm text-muted"
+                                                              @mouseenter="showTip('未启用视觉伴随', $event)"
+                                                              @mouseleave="hideTip()"
+                                                              @focus="showTip('未启用视觉伴随', $event)"
+                                                              @blur="hideTip()" tabindex="0">—</span>
+                                                    </td>
+                                                    <!-- 历史布局中 w-px 让这列收缩到内容宽度：不限制的话它会连同 w-full 一起
+                                                         抢剩余空间（实测吃到 726px），把候选列挤到 92px 反而溢出。
+                                                         预览抽屉化后主表已有完整宽度，仍按按钮内容取宽以避免操作列抢走候选区。 -->
+                                                    <td class="w-px whitespace-nowrap px-3 py-2.5 align-top">
+                                                        <div class="flex justify-end gap-1.5">
+                                                            <button @click="moveRoute(index, -1)" :disabled="index === 0" class="btn btn-secondary px-2 py-1.5" title="上移" aria-label="上移">
+                                                                <span class="material-symbols-outlined text-[18px]">keyboard_arrow_up</span>
+                                                            </button>
+                                                            <button @click="moveRoute(index, 1)" :disabled="index === config.routes.length - 1" class="btn btn-secondary px-2 py-1.5" title="下移" aria-label="下移">
+                                                                <span class="material-symbols-outlined text-[18px]">keyboard_arrow_down</span>
+                                                            </button>
+                                                            <button @click="editRoute(index)" class="btn btn-secondary px-2 py-1.5" title="编辑" aria-label="编辑">
+                                                                <span class="material-symbols-outlined text-[18px]">edit</span>
+                                                            </button>
+                                                            <button @click="duplicateRoute(index)" class="btn btn-secondary px-2 py-1.5" title="复制为新路由" aria-label="复制为新路由">
+                                                                <span class="material-symbols-outlined text-[18px]">content_copy</span>
+                                                            </button>
+                                                            <button @click="removeRoute(index)" class="btn btn-danger px-2 py-1.5" title="删除" aria-label="删除">
+                                                                <span class="material-symbols-outlined text-[18px]">delete</span>
+                                                            </button>
+                                                        </div>
+                                                    </td>
+                                                </tr>
+                                            </template>
+                                            <tr x-show="!config.routes || config.routes.length === 0">
+                                                <td colspan="5" class="px-3 py-10 text-center text-sm text-muted">还没有路由规则</td>
+                                            </tr>
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </section>
+
+                            <section x-show="activeTab === 'settings'" x-transition class="glass rounded-lg p-4">
+                                <div class="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                                    <div>
+                                        <h2 class="text-base font-extrabold text-white">全局设置</h2>
+                                        <p class="mt-1 text-xs text-muted">监听、超时、缓存和直通模式</p>
+                                    </div>
+                                    <label class="flex cursor-pointer items-center gap-3 rounded-lg border border-line bg-ink px-3 py-2">
+                                        <input autocomplete="off" type="checkbox" x-model="config.directMode" class="h-4 w-4 rounded border-line bg-panel text-cyan2 focus:ring-cyan2">
+                                        <span class="text-sm font-bold">直通模式</span>
+                                    </label>
+                                </div>
+
+                                <div class="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+                                    <label class="block">
+                                        <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">Port</span>
+                                        <input autocomplete="off" type="number" x-model.number="config.port" class="field">
+                                    </label>
+                                    <label class="block">
+                                        <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">Host</span>
+                                        <input autocomplete="off" type="text" x-model="config.host" class="field">
+                                    </label>
+                                    <label class="block">
+                                        <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">请求超时 ms</span>
+                                        <input autocomplete="off" type="number" x-model.number="config.timeout" class="field">
+                                    </label>
+                                    <label class="block">
+                                        <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">流式活跃超时 ms</span>
+                                        <input autocomplete="off" type="number" x-model.number="config.streamActivityTimeout" class="field">
+                                    </label>
+                                    <label class="block">
+                                        <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">缓存最大天数</span>
+                                        <input autocomplete="off" type="number" x-model.number="config.cache.maxAgeDays" class="field">
+                                    </label>
+                                    <label class="block">
+                                        <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">缓存最大记录数</span>
+                                        <input autocomplete="off" type="number" x-model.number="config.cache.maxRecords" class="field">
+                                    </label>
+                                </div>
+
+                                <div x-show="config.directMode" x-transition x-cloak class="mt-4 grid grid-cols-1 gap-4 border-t border-line pt-4 md:grid-cols-3">
+                                    <label class="block">
+                                        <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">非流式超时 ms</span>
+                                        <input autocomplete="off" type="number" x-model.number="config.directTimeoutNoStream" class="field">
+                                    </label>
+                                    <label class="block">
+                                        <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">流式头超时 ms</span>
+                                        <input autocomplete="off" type="number" x-model.number="config.directTimeoutStreamHeader" class="field">
+                                    </label>
+                                    <label class="block">
+                                        <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">流式活跃超时 ms</span>
+                                        <input autocomplete="off" type="number" x-model.number="config.directTimeoutStreamActive" class="field">
+                                    </label>
+                                </div>
+                            </section>
+
+                            <section x-show="activeTab === 'settings'" x-transition class="glass rounded-lg p-4">
+                                <div class="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                                    <div>
+                                        <h2 class="text-base font-extrabold text-white">故障转移与熔断</h2>
+                                        <p class="mt-1 text-xs text-muted">仅对配置了多个候选（targets）的路由生效</p>
+                                    </div>
+                                    <div class="flex flex-wrap items-center gap-2">
+                                        <label class="flex cursor-pointer items-center gap-3 rounded-lg border border-line bg-ink px-3 py-2">
+                                            <input autocomplete="off" type="checkbox" x-model="config.failover.enabled" class="h-4 w-4 rounded border-line bg-panel text-cyan2 focus:ring-cyan2">
+                                            <span class="text-sm font-bold">故障转移</span>
+                                        </label>
+                                        <label class="flex cursor-pointer items-center gap-3 rounded-lg border border-line bg-ink px-3 py-2">
+                                            <input autocomplete="off" type="checkbox" x-model="config.breaker.enabled" class="h-4 w-4 rounded border-line bg-panel text-cyan2 focus:ring-cyan2">
+                                            <span class="text-sm font-bold">熔断</span>
+                                        </label>
+                                    </div>
+                                </div>
+
+                                <div x-show="config.failover.enabled" x-transition x-cloak>
+                                    <div class="grid grid-cols-1 gap-4 md:grid-cols-2">
+                                        <label class="block">
+                                            <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">最大尝试次数</span>
+                                            <input autocomplete="off" type="number" min="1" max="5" x-model.number="config.failover.maxAttempts" class="field" placeholder="留空用默认值 2">
+                                            <span class="mt-1.5 block text-xs text-muted">含首次尝试，1-5。熔断跳过和下面的限流跳过都不消耗额度。</span>
+                                        </label>
+                                        <label class="block">
+                                            <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">Retry-After 上限 ms</span>
+                                            <input autocomplete="off" type="number" min="0" max="60000" x-model.number="config.failover.maxRetryAfterMs" class="field" placeholder="留空用默认值 5000">
+                                            <span class="mt-1.5 block text-xs text-muted">上游 429 携带的 Retry-After 超过此值时，该候选不消耗尝试额度。填 0 表示不设上限。</span>
+                                        </label>
+                                    </div>
+
+                                    <div class="mt-4 border-t border-line pt-4">
+                                        <span class="mb-2 block text-xs font-bold uppercase tracking-wide text-muted">哪些失败允许转移</span>
+                                        <div class="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                                            <label class="flex cursor-pointer items-start gap-3 rounded-lg border border-line bg-ink px-3 py-2">
+                                                <input autocomplete="off" type="checkbox" x-model="config.failover.onTransportError" class="mt-0.5 h-4 w-4 rounded border-line bg-panel text-cyan2 focus:ring-cyan2">
+                                                <span class="text-xs"><span class="font-bold text-text">连接失败</span><span class="mt-0.5 block text-muted">DNS / TLS / 拒连，几乎不耗时</span></span>
+                                            </label>
+                                            <label class="flex cursor-pointer items-start gap-3 rounded-lg border border-line bg-ink px-3 py-2">
+                                                <input autocomplete="off" type="checkbox" x-model="config.failover.onServerError" class="mt-0.5 h-4 w-4 rounded border-line bg-panel text-cyan2 focus:ring-cyan2">
+                                                <span class="text-xs"><span class="font-bold text-text">上游 5xx</span><span class="mt-0.5 block text-muted">服务端错误</span></span>
+                                            </label>
+                                            <label class="flex cursor-pointer items-start gap-3 rounded-lg border border-line bg-ink px-3 py-2">
+                                                <input autocomplete="off" type="checkbox" x-model="config.failover.onRateLimit" class="mt-0.5 h-4 w-4 rounded border-line bg-panel text-cyan2 focus:ring-cyan2">
+                                                <span class="text-xs"><span class="font-bold text-text">上游 429</span><span class="mt-0.5 block text-muted">候选属不同厂商 / 账号时才有意义</span></span>
+                                            </label>
+                                            <label class="flex cursor-pointer items-start gap-3 rounded-lg border border-line bg-ink px-3 py-2">
+                                                <input autocomplete="off" type="checkbox" x-model="config.failover.onQueueTimeout" class="mt-0.5 h-4 w-4 rounded border-line bg-panel text-cyan2 focus:ring-cyan2">
+                                                <span class="text-xs"><span class="font-bold text-text">排队超时</span><span class="mt-0.5 block text-muted">本地队列背压，与上游健康无关</span></span>
+                                            </label>
+                                            <label class="flex cursor-pointer items-start gap-3 rounded-lg border border-line bg-ink px-3 py-2">
+                                                <input autocomplete="off" type="checkbox" x-model="config.failover.onStreamHeaderTimeout" class="mt-0.5 h-4 w-4 rounded border-line bg-panel text-cyan2 focus:ring-cyan2">
+                                                <span class="text-xs"><span class="font-bold text-text">流式响应头超时</span><span class="mt-0.5 block text-muted">客户端还没收到字节，转移边界干净</span></span>
+                                            </label>
+                                            <label class="flex cursor-pointer items-start gap-3 rounded-lg border border-line bg-ink px-3 py-2">
+                                                <input autocomplete="off" type="checkbox" x-model="config.failover.onRequestTimeout" class="mt-0.5 h-4 w-4 rounded border-line bg-panel text-cyan2 focus:ring-cyan2">
+                                                <span class="text-xs"><span class="font-bold text-warn">非流式整体超时</span><span class="mt-0.5 block text-muted">默认关闭：每个候选都要等满一整个超时预算，开启会让总耗时接近翻倍</span></span>
+                                            </label>
+                                            <label class="flex cursor-pointer items-start gap-3 rounded-lg border border-line bg-ink px-3 py-2 sm:col-span-2">
+                                                <input autocomplete="off" type="checkbox" x-model="config.failover.onAuthError" class="mt-0.5 h-4 w-4 rounded border-line bg-panel text-cyan2 focus:ring-cyan2">
+                                                <span class="text-xs"><span class="font-bold text-warn">401 / 403</span><span class="mt-0.5 block text-muted">默认关闭：密钥配错时转移只会连锁失败，还会掩盖真实原因</span></span>
+                                            </label>
+                                        </div>
+                                        <p class="mt-2 text-xs text-muted">流式活跃超时不可配置转移：那时字节已经写给客户端，重发会污染流。</p>
+                                    </div>
+                                </div>
+
+                                <div x-show="config.breaker.enabled" x-transition x-cloak
+                                     :class="config.failover.enabled ? 'mt-4 border-t border-line pt-4' : ''">
+                                    <span class="mb-2 block text-xs font-bold uppercase tracking-wide text-muted">熔断参数</span>
+                                    <div class="grid grid-cols-1 gap-4 md:grid-cols-3">
+                                        <label class="block">
+                                            <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">连续失败阈值</span>
+                                            <input autocomplete="off" type="number" min="1" max="100" x-model.number="config.breaker.consecutiveFailures" class="field" placeholder="留空用默认值 3">
+                                        </label>
+                                        <label class="block">
+                                            <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">冷却时长 ms</span>
+                                            <input autocomplete="off" type="number" min="1" max="600000" x-model.number="config.breaker.openMs" class="field" placeholder="留空用默认值 30000">
+                                        </label>
+                                        <label class="block">
+                                            <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">半开探针数</span>
+                                            <input autocomplete="off" type="number" min="1" max="10" x-model.number="config.breaker.halfOpenProbes" class="field" placeholder="留空用默认值 1">
+                                        </label>
+                                    </div>
+                                    <p class="mt-2 text-xs text-muted">
+                                        计入失败：连接错误、超时、5xx，以及拿到 2xx 响应头之后才失败（流中途断开、活跃超时）。
+                                        429 与 401/403 不计入。状态见「监控」页，也可用 /health 的 breakers 字段查看。
+                                    </p>
+                                </div>
+
+                                <p x-show="!config.failover.enabled && !config.breaker.enabled" x-cloak class="text-xs text-muted">
+                                    两者都关闭时，多候选路由只会使用第一个候选。
+                                </p>
+                            </section>
+
+                            <section x-show="activeTab === 'providers'" x-transition class="glass rounded-lg">
+                                <div class="flex flex-col gap-3 border-b border-line p-4 sm:flex-row sm:items-center sm:justify-between">
+                                    <div>
+                                        <h2 class="text-base font-extrabold text-white">Providers</h2>
+                                        <p class="mt-1 text-xs text-muted">配置上游地址、协议格式、并发和限速</p>
+                                    </div>
+                                    <button @click="addProvider()" class="btn btn-secondary">
+                                        <span class="material-symbols-outlined">add</span>
+                                        添加 Provider
+                                    </button>
+                                </div>
+                                <!-- 表格而不是卡片网格：provider 的字段都是短标量，卡片把每个字段
+                                     包成一个小方块后纵向占地是表格的几倍，数量一多就要来回滚动比对。
+                                     表格同列对齐，扫一眼就能横向比较各上游的并发和限速。 -->
+                                <div class="overflow-x-auto">
+                                    <!-- 历史布局备注：这块曾在 xl:col-span-8 里，右侧还有配置预览栏，
+                                         因而把并发/限速/队列等待三个数值合并成一列「限流」，否则表格会宽到
+                                         必须横向滚动、操作列被裁掉；当时表头和数值都 nowrap 以避免行高撑高。
+                                         预览抽屉化后恢复三个独立列，窄屏仍由外层横向滚动容器承接。 -->
+                                    <table class="w-full border-collapse text-left">
+                                        <thead class="bg-panel2 text-xs uppercase tracking-wide text-muted">
+                                            <tr>
+                                                <th scope="col" class="whitespace-nowrap px-3 py-3 font-bold">名称</th>
+                                                <th scope="col" class="whitespace-nowrap px-3 py-3 font-bold">格式</th>
+                                                <th scope="col" class="whitespace-nowrap px-3 py-3 font-bold">Base URL</th>
+                                                <th scope="col" class="whitespace-nowrap px-3 py-3 font-bold">Key</th>
+                                                <th scope="col" class="whitespace-nowrap px-3 py-3 text-right font-bold">并发</th>
+                                                <th scope="col" class="whitespace-nowrap px-3 py-3 text-right font-bold">速率</th>
+                                                <th scope="col" class="whitespace-nowrap px-3 py-3 text-right font-bold">队列等待</th>
+                                                <th scope="col" class="whitespace-nowrap px-3 py-3 text-right font-bold">操作</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody class="divide-y divide-line">
+                                            <template x-for="(provider, name) in config.providers" :key="name">
+                                                <tr class="bg-panel/35 transition hover:bg-white/[.04]">
+                                                    <!-- 历史布局曾让名称、Base URL 两列各 w-1/2 + max-w-0：
+                                                         名称列按内容定宽会被超长名称撑到近千像素，后面几列被顶出容器；
+                                                         两列都写 w-full 时长名字仍独吞空间（实测 626px）。
+                                                         现在主表已拿回全宽，去掉固定 50% 预算；max-w-0 + truncate
+                                                         仍保留，超长内容交给即时 tooltip 展示全文。 -->
+                                                    <td class="max-w-0 px-3 py-2.5">
+                                                        <span class="block truncate font-mono text-sm font-bold text-white"
+                                                              @mouseenter="showTip(name, $event)"
+                                                              @mouseleave="hideTip()"
+                                                              @focus="showTip(name, $event)"
+                                                              @blur="hideTip()"
+                                                              tabindex="0" x-text="name"></span>
+                                                    </td>
+                                                    <td class="w-px whitespace-nowrap px-2 py-2.5">
+                                                        <span class="chip px-1.5 text-[11px]" :class="provider.format === 'anthropic' ? 'border-violet/40 bg-violet/10 text-violet' : 'border-good/40 bg-good/10 text-good'" x-text="provider.format"></span>
+                                                    </td>
+                                                    <!-- 历史上 URL 列与名称列同为 w-1/2 + max-w-0，实测 1440px 下曾溢出 116px；
+                                                         主表恢复全宽后不再固定半列，但保留 max-w-0 + truncate 保护窄屏。 -->
+                                                    <td class="max-w-0 px-3 py-2.5">
+                                                        <!-- 历史上为省宽度去掉 https://；现在恢复完整地址，截断处用即时 tooltip 看全文。 -->
+                                                        <span class="block truncate font-mono text-xs text-muted"
+                                                              @mouseenter="showTip(provider.baseUrl, $event)"
+                                                              @mouseleave="hideTip()"
+                                                              @focus="showTip(provider.baseUrl, $event)"
+                                                              @blur="hideTip()"
+                                                              tabindex="0" x-text="provider.baseUrl || ''"></span>
+                                                    </td>
+                                                    <td class="w-px whitespace-nowrap px-2 py-2.5 text-center">
+                                                        <span x-show="provider.apiKeyConfigured"
+                                                              class="material-symbols-outlined text-[18px] text-good"
+                                                              @mouseenter="showTip('已配置密钥', $event)"
+                                                              @mouseleave="hideTip()"
+                                                              @focus="showTip('已配置密钥', $event)"
+                                                              @blur="hideTip()"
+                                                              tabindex="0">key</span>
+                                                        <span x-show="!provider.apiKeyConfigured"
+                                                              class="material-symbols-outlined text-[18px] text-muted"
+                                                              @mouseenter="showTip('未配置，从客户端请求头读取', $event)"
+                                                              @mouseleave="hideTip()"
+                                                              @focus="showTip('未配置，从客户端请求头读取', $event)"
+                                                              @blur="hideTip()"
+                                                              tabindex="0">key_off</span>
+                                                    </td>
+                                                    <td class="w-px whitespace-nowrap px-3 py-2.5 text-right font-mono text-xs text-text" x-text="provider.maxConcurrent || 5"></td>
+                                                    <td class="w-px whitespace-nowrap px-3 py-2.5 text-right font-mono text-xs text-muted"
+                                                        x-text="(provider.maxPerSecond || 0) === 0 ? '不限速' : provider.maxPerSecond + '/s'"></td>
+                                                    <td class="w-px whitespace-nowrap px-3 py-2.5 text-right font-mono text-xs text-muted"
+                                                        x-text="formatMs(provider.maxQueueWait || 30000)"></td>
+                                                    <td class="w-px whitespace-nowrap px-3 py-2.5">
+                                                        <div class="flex justify-end gap-1.5">
+                                                            <button @click="editProvider(name)" class="btn btn-secondary px-2 py-1.5" title="编辑 Provider">
+                                                                <span class="material-symbols-outlined text-[18px]">edit</span>
+                                                            </button>
+                                                            <button @click="duplicateProvider(name)" class="btn btn-secondary px-2 py-1.5" title="复制为新 Provider">
+                                                                <span class="material-symbols-outlined text-[18px]">content_copy</span>
+                                                            </button>
+                                                            <button @click="removeProvider(name)" class="btn btn-danger px-2 py-1.5" title="删除 Provider">
+                                                                <span class="material-symbols-outlined text-[18px]">delete</span>
+                                                            </button>
+                                                        </div>
+                                                    </td>
+                                                </tr>
+                                            </template>
+                                            <tr x-show="!config.providers || Object.keys(config.providers).length === 0">
+                                                <td colspan="8" class="px-3 py-10 text-center text-sm text-muted">还没有 Provider</td>
+                                            </tr>
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </section>
+                        </div>
+
+                    </div>
+
+                    <div x-show="isConfigTab() && editMode === 'visual' && previewDrawerOpen" x-transition.opacity x-cloak
+                         @click="closePreviewDrawer()"
+                         class="fixed bottom-0 left-0 right-0 top-16 z-[35] bg-black/50"></div>
+                    <aside id="config-preview-drawer"
+                           x-show="isConfigTab() && editMode === 'visual' && previewDrawerOpen" x-transition
+                           x-cloak @keydown.escape.window="previewDrawerOpen && closePreviewDrawer()"
+                           class="fixed bottom-0 right-0 top-16 z-50 flex w-full max-w-[calc(100vw-1rem)] flex-col border-l border-line bg-panel shadow-glow sm:w-[32rem]">
+                        <section class="flex min-h-0 flex-1 flex-col">
+                            <div class="flex shrink-0 items-center justify-between border-b border-line p-4">
+                                <div class="flex items-center gap-2 font-bold text-white">
+                                    <span class="material-symbols-outlined text-cyan">description</span>
+                                    配置预览
+                                </div>
+                                <div class="flex items-center gap-2">
+                                    <button @click="copyPreview()" class="btn btn-secondary px-2 py-2" title="复制预览" aria-label="复制预览">
+                                        <span class="material-symbols-outlined text-[18px]">content_copy</span>
+                                    </button>
+                                    <button @click="closePreviewDrawer()" class="btn btn-secondary px-2 py-2" title="收起预览" aria-label="收起预览">
+                                        <span class="material-symbols-outlined text-[18px]">close</span>
+                                    </button>
+                                </div>
+                            </div>
+                            <pre class="min-h-0 flex-1 overflow-auto bg-ink p-4 font-mono text-xs leading-5 text-slate-300" x-text="configPreview()"></pre>
+                        </section>
+                    </aside>
+
+                    <div x-show="editMode === 'yaml'" x-transition x-cloak class="glass rounded-lg lg:flex lg:min-h-0 lg:flex-1 lg:flex-col">
+                        <div class="flex flex-col gap-3 border-b border-line p-4 sm:flex-row sm:items-center sm:justify-between">
+                            <div>
+                                <h2 class="text-base font-extrabold text-white">YAML 编辑器</h2>
+                                <p class="mt-1 text-xs text-muted">直接编辑原始配置内容，保存前会执行后端校验</p>
+                            </div>
+                            <button @click="loadYamlConfig()" class="btn btn-secondary">
+                                <span class="material-symbols-outlined">refresh</span>
+                                重新读取
+                            </button>
+                        </div>
+                        <textarea autocomplete="off" x-model="yamlContent"
+                                  class="min-h-[680px] w-full resize-y rounded-b-lg border-0 bg-ink p-4 font-mono text-sm leading-6 text-slate-200 outline-none focus:ring-0 lg:min-h-0 lg:flex-1 lg:resize-none"
+                                  placeholder="加载中..."></textarea>
+                    </div>
+                </section>
+
+                <section x-show="activeTab === 'monitor'" x-transition x-cloak class="space-y-5 lg:h-full lg:min-h-0 lg:overflow-y-auto lg:pr-2">
+                    <div class="grid grid-cols-1 gap-4 md:grid-cols-2 2xl:grid-cols-4">
+                        <article class="glass rounded-lg p-4">
+                            <div class="mb-3 flex items-center justify-between">
+                                <span class="text-sm font-bold text-muted">请求速率</span>
+                                <span class="material-symbols-outlined text-cyan">speed</span>
+                            </div>
+                            <div class="text-3xl font-extrabold text-white" x-text="metricValue('windowRequests', '--')"></div>
+                            <div class="mt-1 text-xs text-muted" x-text="'最近 ' + metricWindowLabel() + '请求数'"></div>
+                        </article>
+                        <article class="glass rounded-lg p-4">
+                            <div class="mb-3 flex items-center justify-between">
+                                <span class="text-sm font-bold text-muted">成功率</span>
+                                <span class="material-symbols-outlined text-good">task_alt</span>
+                            </div>
+                            <div class="text-3xl font-extrabold text-white" x-text="metricPercent('successRate')"></div>
+                            <div class="mt-1 text-xs text-muted">最近窗口内的成功请求占比</div>
+                        </article>
+                        <article class="glass rounded-lg p-4">
+                            <div class="mb-3 flex items-center justify-between">
+                                <span class="text-sm font-bold text-muted">P95 延迟</span>
+                                <span class="material-symbols-outlined text-warn">timer</span>
+                            </div>
+                            <div class="text-3xl font-extrabold text-white" x-text="metricDuration('p95LatencyMs')"></div>
+                            <div class="mt-1 text-xs text-muted">端到端转发耗时；按桶上界近似；样本不足时显示样本数</div>
+                        </article>
+                        <article class="glass rounded-lg p-4">
+                            <div class="mb-3 flex items-center justify-between">
+                                <span class="text-sm font-bold text-muted">服务状态</span>
+                                <span class="material-symbols-outlined" :class="health?.status === 'ok' ? 'text-good' : 'text-danger'">monitor_heart</span>
+                            </div>
+                            <div class="text-3xl font-extrabold text-white" x-text="health?.status || '未知'"></div>
+                            <div class="mt-1 truncate text-xs text-muted" x-text="(health?.listenAddress || '监听地址未知') + ' · ' + (config.directMode ? '直通模式' : '队列模式')"></div>
+                        </article>
+                    </div>
+
+                    <div class="grid grid-cols-1 gap-5 xl:grid-cols-12">
+                        <section class="glass rounded-lg xl:col-span-9">
+                            <div class="flex items-center justify-between border-b border-line p-4">
+                                <div class="flex items-center gap-2 font-bold text-white">
+                                    <span class="material-symbols-outlined text-cyan">dns</span>
+                                    Provider 运行状态
+                                </div>
+                                <div class="flex gap-2">
+                                    <!-- 检测要逐个探上游、每个 5 秒超时，整体可能跑十几秒。
+                                         必须就地给出「正在跑」的信号：只靠结束时的 toast，
+                                         这段时间里按钮毫无变化，点了像没反应。 -->
+                                    <button @click="checkProviderHealth()" :disabled="checkingHealth"
+                                            class="btn btn-secondary px-2 py-2 disabled:opacity-60"
+                                            :title="checkingHealth ? '检测中…' : '检测 Provider'"
+                                            :aria-label="checkingHealth ? '检测中…' : '检测 Provider'">
+                                        <span class="material-symbols-outlined text-[18px]"
+                                              :class="checkingHealth && 'gw-spin'"
+                                              x-text="checkingHealth ? 'progress_activity' : 'health_and_safety'"></span>
+                                    </button>
+                                    <!-- 熔断未启用时后端返回 breakers: null，此时隐藏重置按钮 -->
+                                    <button x-show="health?.breakers" @click="resetBreakers()" :disabled="resettingBreakers"
+                                            class="btn btn-secondary px-2 py-2 disabled:opacity-60"
+                                            :title="resettingBreakers ? '重置中…' : '重置全部熔断器'"
+                                            :aria-label="resettingBreakers ? '重置中…' : '重置全部熔断器'">
+                                        <span class="material-symbols-outlined text-[18px]"
+                                              :class="resettingBreakers && 'gw-spin'"
+                                              x-text="resettingBreakers ? 'progress_activity' : 'restart_alt'"></span>
+                                    </button>
+                                    <button @click="refreshMonitor()" :disabled="refreshingMonitor"
+                                            class="btn btn-secondary px-2 py-2 disabled:opacity-60"
+                                            :title="refreshingMonitor ? '刷新中…' : '刷新仪表盘'"
+                                            :aria-label="refreshingMonitor ? '刷新中…' : '刷新仪表盘'">
+                                        <span class="material-symbols-outlined text-[18px]"
+                                              :class="refreshingMonitor && 'gw-spin'">refresh</span>
+                                    </button>
+                                </div>
+                            </div>
+                            <!-- 默认高度按 10 条数据算：表头 41px + 10 行 × 41px ≈ 451px。
+                                 超过 10 个 provider 时内部滚动，不再把整页顶长——这块下面还有
+                                 系统资源和路由排行，provider 一多就要滚很久才能看到它们。
+                                 表头 sticky 吸顶，滚动时列名不丢。 -->
+                            <div class="overflow-auto lg:max-h-[451px]">
+                                <!-- 历史布局用 min-w 保持 660：后七列不可压缩部分实测合计 565px，
+                                     名称列带 max-w-0 truncate 可以继续缩，所以加了「检测」列
+                                     也不必放宽 min-w（放到 720 会在 1440 宽度下多出 9px 横向滚动）。
+                                     现在监控表在 xl 使用 9/3 分栏，桌面端解除这个最小宽度；xl 以下仍保留 660，
+                                     让窄屏通过横向滚动完整查看操作列。 -->
+                                <table class="w-full min-w-[660px] border-collapse text-left xl:min-w-0">
+                                    <thead class="sticky top-0 z-10 bg-panel2 text-xs uppercase tracking-wide text-muted">
+                                        <tr>
+                                            <!-- 用百分比分配列宽而不是让某一列吃掉全部剩余空间：
+                                                 给名称列 w-full 会把它拉得极宽、其余列全挤到右边；
+                                                 全部 w-px 又会让内容挤在左侧、右边空一大片。
+                                                 百分比让各列按需要的比例铺满面板。
+
+                                                 对齐基准按内容类型分三种，且表头必须和单元格用同一种，
+                                                 否则看起来是歪的：标识列左对齐（截断要有左锚点）、
+                                                 chip 列居中（chip 宽度不等，左对齐时右边缘散开 10~60px
+                                                 不齐）、数值列右对齐（数位对齐才好比较）。 -->
+                                            <th scope="col" class="w-[22%] whitespace-nowrap px-3 py-2.5 font-bold">Provider</th>
+                                            <th scope="col" class="w-[10%] whitespace-nowrap px-2 py-2.5 text-center font-bold">健康</th>
+                                            <th scope="col" class="w-[10%] whitespace-nowrap px-2 py-2.5 text-center font-bold">熔断</th>
+                                            <th scope="col" class="w-[8%] whitespace-nowrap px-2 py-2.5 text-center font-bold">格式</th>
+                                            <th scope="col" class="w-[11%] whitespace-nowrap px-2 py-2.5 text-right font-bold" title="运行中 / 排队中">在途</th>
+                                            <th scope="col" class="w-[18%] whitespace-nowrap px-2 py-2.5 text-right font-bold" title="最大并发 / 每秒请求数">限流</th>
+                                            <!-- 状态只有「直通」/「队列」两种短 chip，份额让给限流那列 -->
+                                            <th scope="col" class="w-[11%] whitespace-nowrap px-2 py-2.5 text-center font-bold">状态</th>
+                                            <th scope="col" class="w-[10%] whitespace-nowrap px-2 py-2.5 text-center font-bold" title="只检测这一个 Provider">检测</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody class="divide-y divide-line">
+                                        <template x-for="row in providerStatusRows()" :key="row.name">
+                                            <tr class="bg-panel/35">
+                                                <td class="max-w-0 truncate px-3 py-2 font-mono text-xs font-bold text-white"
+                                                    @mouseenter="showTip(row.name, $event)"
+                                                    @mouseleave="hideTip()"
+                                                    @focus="showTip(row.name, $event)"
+                                                    @blur="hideTip()" tabindex="0" x-text="row.name"></td>
+                                                <td class="whitespace-nowrap px-2 py-2 text-center">
+                                                    <!-- 不用 title：原生 tooltip 有约 1-2 秒延迟且无法调，
+                                                         这两列的详情（剩余冷却、失败次数）是要一眼看到的。 -->
+                                                    <span class="chip px-1.5 text-[11px]" :class="row.healthClass" x-text="row.healthLabel"
+                                                          @mouseenter="showTip(row.healthTitle, $event)"
+                                                          @mouseleave="hideTip()"
+                                                          @focus="showTip(row.healthTitle, $event)"
+                                                          @blur="hideTip()"
+                                                          tabindex="0" aria-describedby="immediate-tooltip"></span>
+                                                </td>
+                                                <!-- 单行重置按钮放在熔断徽章旁边，而不是另开一列：
+                                                     重置本就属于熔断这一列的语义，且这张表在 1280px 下
+                                                     列数较多，再加一整列会加重横向滚动；桌面端现在虽已解除
+                                                     历史 min-width 限制，仍需避免为一个动作单独占列。
+                                                     只在「重置确实会改变状态」时出现（闭合且无失败计数
+                                                     时是空操作），所以多数行不占这份宽度。 -->
+                                                <td class="whitespace-nowrap px-2 py-2 text-center">
+                                                    <span class="inline-flex items-center gap-1">
+                                                        <span class="chip px-1.5 text-[11px]" :class="row.breakerClass" x-text="row.breakerLabel"
+                                                              @mouseenter="showTip(row.breakerTitle, $event)"
+                                                              @mouseleave="hideTip()"
+                                                              @focus="showTip(row.breakerTitle, $event)"
+                                                              @blur="hideTip()"
+                                                              tabindex="0" aria-describedby="immediate-tooltip"></span>
+                                                        <!-- 不可重置时用 invisible 而非 x-show：x-show 会把按钮
+                                                             从布局里摘掉，导致「有按钮的行」chip 被挤偏、
+                                                             「没按钮的行」chip 居中，同一列里位置不一致——
+                                                             那正是这张表当初显得歪的原因。始终占位才对齐。 -->
+                                                        <button @click="resetOneBreaker(row.name)"
+                                                                :class="row.breakerResettable ? '' : 'invisible pointer-events-none'"
+                                                                :aria-hidden="!row.breakerResettable"
+                                                                :tabindex="row.breakerResettable ? 0 : -1"
+                                                                :disabled="!row.breakerResettable || resettingBreakers || resettingBreaker === row.name"
+                                                                class="rounded p-0.5 text-muted transition hover:text-cyan disabled:opacity-60"
+                                                                :title="resettingBreaker === row.name ? '重置中…' : '闭合「' + row.name + '」的熔断器'"
+                                                                :aria-label="resettingBreaker === row.name ? '重置中…' : '闭合「' + row.name + '」的熔断器'">
+                                                            <span class="material-symbols-outlined text-[15px]"
+                                                                  :class="resettingBreaker === row.name && 'gw-spin'"
+                                                                  x-text="resettingBreaker === row.name ? 'progress_activity' : 'restart_alt'"></span>
+                                                        </button>
+                                                    </span>
+                                                </td>
+                                                <!-- 格式缩写成 ANT / OAI：取值只有两种，全称在这列纯占宽度，
+                                                     全称由即时 tooltip 展示。 -->
+                                                <td class="whitespace-nowrap px-2 py-2 text-center">
+                                                    <span class="chip bg-white/[.05] px-1.5 text-[11px] text-text"
+                                                          @mouseenter="showTip(row.format, $event)"
+                                                          @mouseleave="hideTip()"
+                                                          @focus="showTip(row.format, $event)"
+                                                          @blur="hideTip()" tabindex="0" aria-describedby="immediate-tooltip"
+                                                          x-text="row.format === 'anthropic' ? 'ANT' : 'OAI'"></span>
+                                                </td>
+                                                <!-- 运行中 / 排队合成一列：两个数各占一列时表头「运行中」「排队」
+                                                     比数值本身宽得多，而它们总是一起看的。排队 > 0 才高亮。 -->
+                                                <td class="whitespace-nowrap px-2 py-2 text-right font-mono text-xs">
+                                                    <span class="text-text" x-text="row.running"></span>
+                                                    <span class="text-muted">/</span>
+                                                    <span :class="row.queued > 0 ? 'text-warn' : 'text-muted'" x-text="row.queued"></span>
+                                                </td>
+                                                <td class="whitespace-nowrap px-2 py-2 text-right font-mono text-xs text-muted">
+                                                    <span class="text-text" x-text="row.maxConcurrent"></span>
+                                                    <span x-text="' · ' + (row.maxPerSecond > 0 ? row.maxPerSecond + '/s' : '不限')"></span>
+                                                </td>
+                                                <td class="whitespace-nowrap px-2 py-2 text-center">
+                                                    <span class="chip px-1.5 text-[11px]" :class="row.statusClass" x-text="row.status"></span>
+                                                </td>
+                                                <!-- 单行检测：provider 一多时整表检测要等最慢的那个，
+                                                     而用户往往只关心刚改过的那一个。用 checkingProvider
+                                                     记住是哪一行在跑，只转那一行的图标；整表检测进行中
+                                                     也一并禁用，避免两种检测互相覆盖结果。 -->
+                                                <td class="whitespace-nowrap px-2 py-2 text-center">
+                                                    <button @click="checkOneProvider(row.name)"
+                                                            :disabled="checkingHealth || checkingProvider === row.name"
+                                                            class="btn btn-secondary px-2 py-1 disabled:opacity-60"
+                                                            :title="checkingProvider === row.name ? '检测中…' : '检测「' + row.name + '」'"
+                                                            :aria-label="checkingProvider === row.name ? '检测中…' : '检测「' + row.name + '」'">
+                                                        <span class="material-symbols-outlined text-[16px]"
+                                                              :class="checkingProvider === row.name && 'gw-spin'"
+                                                              x-text="checkingProvider === row.name ? 'progress_activity' : 'health_and_safety'"></span>
+                                                    </button>
+                                                </td>
+                                            </tr>
+                                        </template>
+                                        <tr x-show="providerStatusRows().length === 0">
+                                            <td colspan="8" class="px-3 py-10 text-center text-sm text-muted">还没有 Provider</td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </section>
+
+                        <aside class="space-y-5 xl:col-span-3">
+                            <section class="glass rounded-lg p-4">
+                                <h2 class="mb-4 text-base font-extrabold text-white">系统资源</h2>
+                                <div class="grid grid-cols-2 gap-3 text-xs">
+                                    <div class="rounded-lg bg-ink p-3">
+                                        <div class="text-muted">图片缓存</div>
+                                        <div class="mt-1 font-mono text-text" x-text="cacheSummary()"></div>
+                                    </div>
+                                    <div class="rounded-lg bg-ink p-3">
+                                        <div class="text-muted">Heap</div>
+                                        <div class="mt-1 font-mono text-text" x-text="(health?.memory?.heapAllocMB ?? '--') + ' MB'"></div>
+                                    </div>
+                                    <div class="rounded-lg bg-ink p-3">
+                                        <div class="text-muted">Sys</div>
+                                        <div class="mt-1 font-mono text-text" x-text="(health?.memory?.sysMB ?? '--') + ' MB'"></div>
+                                    </div>
+                                    <div class="rounded-lg bg-ink p-3">
+                                        <div class="text-muted">超时</div>
+                                        <div class="mt-1 font-mono text-text" x-text="seconds(config.timeout) + 's'"></div>
+                                    </div>
+                                </div>
+                            </section>
+
+                            <section class="glass rounded-lg p-4">
+                                <h2 class="mb-4 text-base font-extrabold text-white">配置健康</h2>
+                                <div class="space-y-2">
+                                    <template x-for="issue in configIssues()" :key="issue">
+                                        <div class="rounded-lg border border-warn/30 bg-warn/10 px-3 py-2 text-sm text-amber-100" x-text="issue"></div>
+                                    </template>
+                                    <div x-show="configIssues().length === 0" class="rounded-lg border border-good/30 bg-good/10 px-3 py-2 text-sm text-emerald-100">
+                                        配置引用关系正常
+                                    </div>
+                                </div>
+                            </section>
+                        </aside>
+                    </div>
+
+                    <div class="grid grid-cols-1 gap-5 xl:grid-cols-12">
+                        <section class="glass rounded-lg xl:col-span-5">
+                            <div class="border-b border-line p-4 font-bold text-white">Provider 延迟排行</div>
+                            <div class="divide-y divide-line">
+                                <template x-for="row in latencyRows()" :key="row.name">
+                                    <div class="flex items-center justify-between gap-3 px-4 py-3">
+                                        <div class="min-w-0">
+                                            <div class="truncate font-mono text-sm font-bold text-text" x-text="row.name"></div>
+                                            <div class="mt-1 text-xs text-muted" x-text="row.requests + ' 次请求'"></div>
+                                        </div>
+                                        <span class="font-mono text-sm text-cyan" x-text="row.p95 + ' ms'"></span>
+                                    </div>
+                                </template>
+                                <div x-show="latencyRows().length === 0" class="px-4 py-8 text-center text-sm text-muted">暂无延迟数据</div>
+                            </div>
+                        </section>
+
+                        <section class="glass rounded-lg xl:col-span-7">
+                            <div class="border-b border-line p-4 font-bold text-white">最近错误</div>
+                            <div class="divide-y divide-line">
+                                <template x-for="err in recentErrors()" :key="errorKey(err)">
+                                    <div class="grid grid-cols-1 gap-2 px-4 py-3 md:grid-cols-[9rem_7rem_1fr] md:items-center">
+                                        <span class="font-mono text-xs text-muted" x-text="err.time || '--'"></span>
+                                        <span class="chip border-danger/35 bg-danger/10 text-rose-100" x-text="err.status || err.code || 'error'"></span>
+                                        <span class="truncate text-sm text-text" x-text="err.message || err.error || '未知错误'"></span>
+                                    </div>
+                                </template>
+                                <div x-show="recentErrors().length === 0" class="px-4 py-8 text-center text-sm text-muted">暂无错误记录</div>
+                            </div>
+                        </section>
+                    </div>
+
+                </section>
+
+                <section x-show="activeTab === 'logs'" x-transition x-cloak class="glass rounded-lg lg:h-full lg:min-h-0 lg:overflow-hidden">
+                    <div class="flex flex-col gap-3 border-b border-line p-4">
+                        <div>
+                            <h2 class="text-base font-extrabold text-white">请求日志</h2>
+                            <p class="mt-1 text-xs text-muted" x-text="requestLogs.length ? '最近 ' + requestLogs.length + ' 条请求' : '暂无请求明细'"></p>
+                        </div>
+                        <div class="grid grid-cols-1 gap-3 md:grid-cols-6">
+                            <select autocomplete="off" x-model="logFilters.status" @change="loadRequestLogs()" class="field text-sm">
+                                <option value="">全部状态</option>
+                                <option value="success">成功</option>
+                                <option value="error">错误</option>
+                                <option value="4xx">4xx</option>
+                                <option value="5xx">5xx</option>
+                            </select>
+                            <select autocomplete="off" x-model="logFilters.provider" @change="loadRequestLogs()" class="field text-sm">
+                                <option value="">全部 Provider</option>
+                                <template x-for="(provider, name) in config.providers" :key="name">
+                                    <option :value="name" x-text="name"></option>
+                                </template>
+                            </select>
+                            <select autocomplete="off" x-model="logFilters.stream" @change="loadRequestLogs()" class="field text-sm">
+                                <option value="">全部类型</option>
+                                <option value="true">流式</option>
+                                <option value="false">非流式</option>
+                            </select>
+                            <select autocomplete="off" x-model="logFilters.model" @change="loadRequestLogs()" class="field text-sm md:col-span-1">
+                                <option value="">全部模型</option>
+                                <template x-for="model in configuredModelOptions()" :key="model">
+                                    <option :value="model" x-text="model"></option>
+                                </template>
+                            </select>
+                            <input autocomplete="off" x-model="logFilters.q" @keydown.enter="loadRequestLogs()" class="field text-sm md:col-span-1" placeholder="关键词 / 请求 ID">
+                            <div class="flex gap-2">
+                                <button @click="loadRequestLogs()" class="btn btn-secondary flex-1 px-2" title="刷新">
+                                    <span class="material-symbols-outlined">refresh</span>
+                                </button>
+                                <button @click="resetLogFilters()" class="btn btn-secondary flex-1 px-2" title="清空筛选">
+                                    <span class="material-symbols-outlined">filter_alt_off</span>
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                    <!-- 12 列在 1900px 下也塞不满，结果每列都被压到强行折行：时间折 3 行、
+                         模型折 3 行、耗时折 2 行，行高 127px，一屏只看得到 7 条，错误列还被裁掉。
+                         这里合并同源信息（来源+Key 来源+指纹 → 客户端；格式并入模型行下方），
+                         列数 12 → 8，并给所有列加 nowrap，行高降到一行。 -->
+                    <div class="overflow-x-auto lg:max-h-[calc(100%-9.75rem)]">
+                        <table class="w-full min-w-[860px] border-collapse text-left">
+                            <thead class="sticky top-0 z-10 bg-panel2 text-xs uppercase tracking-wide text-muted">
+                                <tr>
+                                    <th scope="col" class="w-px whitespace-nowrap px-3 py-2.5 font-bold">时间</th>
+                                    <th scope="col" class="w-px whitespace-nowrap px-2 py-2.5 font-bold">状态</th>
+                                    <th scope="col" class="w-px whitespace-nowrap px-3 py-2.5 font-bold" title="客户端 IP · Key 来源 · Key 指纹">客户端</th>
+                                    <th scope="col" class="w-px whitespace-nowrap px-3 py-2.5 font-bold">模型</th>
+                                    <th scope="col" class="w-px whitespace-nowrap px-3 py-2.5 font-bold">Provider</th>
+                                    <th scope="col" class="w-px whitespace-nowrap px-3 py-2.5 text-right font-bold">耗时</th>
+                                    <th scope="col" class="w-px whitespace-nowrap px-3 py-2.5 font-bold">转移轨迹</th>
+                                    <th scope="col" class="w-full max-w-0 whitespace-nowrap px-3 py-2.5 font-bold">错误</th>
+                                </tr>
+                            </thead>
+                            <template x-for="log in requestLogs" :key="logKey(log)">
+                                <!-- x-for 必须只有一个根节点；用每条日志独立的 tbody 包住主行和详情行，
+                                     才能让详情紧跟对应日志，同时保持合法的 table 结构。
+                                     divide-y 只作用于同一个 tbody 内的相邻子元素；跨 tbody 的日志行
+                                     由除第一个日志 tbody 外的每个 tbody 自身绘制顶边。 -->
+                                <tbody class="divide-y divide-line [&:not(:first-of-type)]:border-t border-line">
+                                    <tr @click="toggleLog(log)"
+                                        @keydown.enter.prevent="toggleLog(log)"
+                                        @keydown.space.prevent="toggleLog(log)"
+                                        :aria-expanded="isLogExpanded(log)"
+                                        :aria-label="(isLogExpanded(log) ? '收起' : '展开') + '请求日志详情'"
+                                        :class="isLogExpanded(log) ? 'bg-cyan2/[.08]' : 'bg-panel/35'"
+                                        class="cursor-pointer transition hover:bg-white/[.04] focus:outline-none focus:ring-2 focus:ring-inset focus:ring-cyan2"
+                                        role="button" tabindex="0">
+                                        <!-- 只显示时分秒：整列日期都是今天，重复 100 遍还把时间折成三行。
+                                             完整时间戳和请求 ID 改由即时 tooltip 显示，展开面板也会列出完整值。 -->
+                                        <td class="w-px whitespace-nowrap px-3 py-2 font-mono text-xs text-muted"
+                                            @mouseenter="showTip((log.time || log.startedAt || '') + '　' + (log.id || log.requestId || ''), $event)"
+                                            @mouseleave="hideTip()"
+                                            @focus="showTip((log.time || log.startedAt || '') + '　' + (log.id || log.requestId || ''), $event)"
+                                            @blur="hideTip()"
+                                            tabindex="0" x-text="logClock(log)"></td>
+                                        <td class="w-px whitespace-nowrap px-2 py-2">
+                                            <span class="chip px-1.5 text-[11px]" :class="statusClass(log.status)" x-text="log.status || '--'"></span>
+                                        </td>
+                                        <!-- 来源 IP / Key 来源 / Key 指纹三列合一：三者都是「谁发来的」，
+                                             各占一列时每列都要留出中文表头宽度，信息密度却很低。 -->
+                                        <td class="w-px whitespace-nowrap px-3 py-2 font-mono text-[11px] text-muted"
+                                            @mouseenter="showTip('IP: ' + (log.clientIp || '--') + '\nKey 来源: ' + (log.keySource || '--') + '\nKey 指纹: ' + (log.keyFingerprint || '--'), $event)"
+                                            @mouseleave="hideTip()"
+                                            @focus="showTip('IP: ' + (log.clientIp || '--') + '\nKey 来源: ' + (log.keySource || '--') + '\nKey 指纹: ' + (log.keyFingerprint || '--'), $event)"
+                                            @blur="hideTip()" tabindex="0">
+                                            <span class="text-text" x-text="log.clientIp || '--'"></span>
+                                            <span x-show="log.keySource" x-text="' · ' + log.keySource"></span>
+                                            <span x-show="log.keyFingerprint" class="opacity-70" x-text="' · ' + log.keyFingerprint"></span>
+                                        </td>
+                                        <!-- 格式作为副行放在模型下方：它取值只有 anthropic/openai-chat/openai-responses
+                                             三种，单独占一列不划算，但排查跨格式转换问题时需要看见。 -->
+                                        <td class="w-px whitespace-nowrap px-3 py-2">
+                                            <span class="block font-mono text-xs text-cyan" x-text="log.model || '--'"></span>
+                                            <span class="block text-[10px] text-muted" x-text="log.format || log.clientFormat || ''"></span>
+                                        </td>
+                                        <td class="w-px whitespace-nowrap px-3 py-2 font-mono text-xs text-text" x-text="log.provider || '--'"></td>
+                                        <td class="w-px whitespace-nowrap px-3 py-2 text-right font-mono text-xs"
+                                            :class="slowClass(log.durationMs || log.latencyMs)"
+                                            x-text="durationText(log.durationMs || log.latencyMs)"></td>
+                                        <td class="w-px max-w-[16rem] truncate px-3 py-2 font-mono text-[11px]"
+                                            :class="log.attemptTrail ? 'text-warn' : 'text-muted'"
+                                            @mouseenter="showTip(log.attemptTrail || '', $event)"
+                                            @mouseleave="hideTip()"
+                                            @focus="showTip(log.attemptTrail || '', $event)"
+                                            @blur="hideTip()" tabindex="0" x-text="attemptTrailText(log)"></td>
+                                        <td class="w-full max-w-0 truncate px-3 py-2 text-xs text-muted"
+                                            @mouseenter="showTip(log.error || '', $event)"
+                                            @mouseleave="hideTip()"
+                                            @focus="showTip(log.error || '', $event)"
+                                            @blur="hideTip()" tabindex="0" x-text="log.error || '—'"></td>
+                                    </tr>
+                                    <tr x-show="isLogExpanded(log)" x-transition x-cloak class="bg-ink/70">
+                                        <td colspan="8" class="px-3 py-4 sm:px-4">
+                                            <div class="mb-3 flex items-center justify-between gap-3">
+                                                <span class="text-sm font-bold text-cyan">请求详情</span>
+                                                <span class="text-xs text-muted">再次点击日志行收起</span>
+                                            </div>
+                                            <dl class="grid grid-cols-1 gap-x-4 gap-y-3 text-xs sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+                                                <div>
+                                                    <dt class="text-muted">HTTP 方法</dt>
+                                                    <dd class="mt-1 font-mono text-text" x-text="log.method || '--'"></dd>
+                                                </div>
+                                                <div>
+                                                    <dt class="text-muted">请求路径</dt>
+                                                    <dd class="mt-1 break-words font-mono text-text" x-text="log.path || '--'"></dd>
+                                                </div>
+                                                <div>
+                                                    <dt class="text-muted">请求 ID</dt>
+                                                    <dd class="mt-1 break-all font-mono text-text" x-text="log.id || log.requestId || '--'"></dd>
+                                                </div>
+                                                <div>
+                                                    <dt class="text-muted">完整时间</dt>
+                                                    <dd class="mt-1 break-words font-mono text-text" x-text="log.time || log.startedAt || '--'"></dd>
+                                                </div>
+                                                <div>
+                                                    <dt class="text-muted">状态</dt>
+                                                    <dd class="mt-1 font-mono text-text" x-text="log.status || '--'"></dd>
+                                                </div>
+                                                <div>
+                                                    <dt class="text-muted">客户端模型</dt>
+                                                    <dd class="mt-1 break-words font-mono text-text" x-text="log.model || '--'"></dd>
+                                                </div>
+                                                <div>
+                                                    <dt class="text-muted">Provider</dt>
+                                                    <dd class="mt-1 break-words font-mono text-text" x-text="log.provider || '--'"></dd>
+                                                </div>
+                                                <div>
+                                                    <dt class="text-muted">流式</dt>
+                                                    <dd class="mt-1 text-text" x-text="log.stream ? '是' : '否'"></dd>
+                                                </div>
+                                                <div x-show="hasLogValue(log.route)">
+                                                    <dt class="text-muted">命中路由</dt>
+                                                    <dd class="mt-1 break-words font-mono text-text" x-text="log.route"></dd>
+                                                </div>
+                                                <div x-show="hasLogValue(log.targetModel)">
+                                                    <dt class="text-muted">上游目标模型</dt>
+                                                    <dd class="mt-1 break-words font-mono text-cyan" x-text="log.targetModel"></dd>
+                                                </div>
+                                                <div>
+                                                    <dt class="text-muted">客户端格式</dt>
+                                                    <dd class="mt-1 break-words font-mono text-text" x-text="log.clientFormat || '--'"></dd>
+                                                </div>
+                                                <div>
+                                                    <dt class="text-muted">上游格式</dt>
+                                                    <dd class="mt-1 break-words font-mono text-text" x-text="log.format || '--'"></dd>
+                                                </div>
+                                                <div>
+                                                    <dt class="text-muted">总耗时</dt>
+                                                    <dd class="mt-1 font-mono text-text" x-text="durationText(log.durationMs ?? log.latencyMs)"></dd>
+                                                </div>
+                                                <div x-show="hasLogValue(log.queueWaitMs)">
+                                                    <dt class="text-muted">队列等待</dt>
+                                                    <dd class="mt-1 font-mono text-warn" x-text="formatMs(log.queueWaitMs)"></dd>
+                                                </div>
+                                                <div x-show="hasLogValue(log.upstreamStatus)">
+                                                    <dt class="text-muted">上游状态码</dt>
+                                                    <dd class="mt-1 font-mono text-text" x-text="log.upstreamStatus"></dd>
+                                                </div>
+                                                <div x-show="hasLogValue(log.responseBytes)">
+                                                    <dt class="text-muted">响应大小</dt>
+                                                    <dd class="mt-1 font-mono text-text" x-text="formatBytes(log.responseBytes)"></dd>
+                                                </div>
+                                                <div x-show="log.vision === true">
+                                                    <dt class="text-muted">视觉翻译</dt>
+                                                    <dd class="mt-1 text-cyan" x-text="'已启用'"></dd>
+                                                </div>
+                                                <div x-show="hasLogValue(log.clientIp)">
+                                                    <dt class="text-muted">客户端 IP</dt>
+                                                    <dd class="mt-1 break-words font-mono text-text" x-text="log.clientIp"></dd>
+                                                </div>
+                                                <div x-show="hasLogValue(log.keySource)">
+                                                    <dt class="text-muted">Key 来源</dt>
+                                                    <dd class="mt-1 break-words font-mono text-text" x-text="log.keySource"></dd>
+                                                </div>
+                                                <div x-show="hasLogValue(log.keyFingerprint)">
+                                                    <dt class="text-muted">Key 指纹</dt>
+                                                    <dd class="mt-1 break-all font-mono text-text" x-text="log.keyFingerprint"></dd>
+                                                </div>
+                                                <div x-show="hasLogValue(log.attempts)">
+                                                    <dt class="text-muted">尝试次数</dt>
+                                                    <dd class="mt-1 font-mono text-text" x-text="log.attempts"></dd>
+                                                </div>
+                                            </dl>
+                                            <div x-show="hasLogValue(log.attemptTrail)" class="mt-4 rounded-lg border border-warn/25 bg-warn/5 px-3 py-2">
+                                                <div class="text-xs text-muted">转移轨迹</div>
+                                                <div class="mt-1 break-words font-mono text-xs text-warn" x-text="log.attemptTrail"></div>
+                                            </div>
+                                            <div x-show="hasLogValue(log.error)" class="mt-3 rounded-lg border border-danger/25 bg-danger/5 px-3 py-2">
+                                                <div class="text-xs text-muted">错误全文</div>
+                                                <div class="mt-1 whitespace-pre-wrap break-words text-xs text-rose-100" x-text="log.error"></div>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                </tbody>
+                            </template>
+                            <tbody class="divide-y divide-line">
+                                <tr x-show="requestLogs.length === 0">
+                                    <td colspan="8" class="px-3 py-12 text-center text-sm text-muted">暂无请求明细</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </section>
+            </main>
+        </div>
+    </div>
+
+    <!-- 不用 @click.away 关闭：表单填到一半点空白处就全丢了，代价和「点错一下」不对等。
+         关闭入口只留 ESC、右上角 X 和取消按钮。 -->
+    <div x-show="showProviderModal" x-transition.opacity x-cloak
+         @keydown.escape.window="escapeProviderModal()"
+         class="fixed inset-0 z-50 grid place-items-center bg-black/70 p-4">
+        <div class="glass w-full max-w-2xl rounded-lg shadow-glow">
+            <div class="flex items-center justify-between border-b border-line p-5">
+                <h3 class="text-lg font-extrabold text-white" x-text="editingProvider ? '编辑 Provider' : '添加 Provider'"></h3>
+                <button @click="showProviderModal = false" class="btn btn-secondary px-2 py-2">
+                    <span class="material-symbols-outlined">close</span>
+                </button>
+            </div>
+            <div class="grid grid-cols-1 gap-4 p-5 md:grid-cols-2">
+                <label class="block">
+                    <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">名称</span>
+                    <!-- maxlength 按 UTF-16 码元数截，和后端的 rune 计数在 BMP 内一致；
+                         emoji 等代理对会被前端多算，最终以后端校验为准。 -->
+                    <input autocomplete="off" type="text" :maxlength="maxProviderNameLen" x-model="providerForm.name" :disabled="editingProvider" class="field">
+                    <span class="mt-1 block text-[11px] text-muted" x-show="!editingProvider" x-cloak
+                          x-text="`最多 ${maxProviderNameLen} 个字符，已用 ${[...(providerForm.name || '')].length}`"></span>
+                </label>
+                <label class="block">
+                    <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">格式</span>
+                    <select autocomplete="off" x-model="providerForm.format" class="field">
+                        <option value="anthropic">Anthropic</option>
+                        <option value="openai">OpenAI</option>
+                    </select>
+                </label>
+                <label class="block md:col-span-2">
+                    <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">Base URL</span>
+                    <input autocomplete="off" type="text" x-model="providerForm.baseUrl" placeholder="https://api.example.com" class="field">
+                </label>
+                <div class="block md:col-span-2">
+                    <label for="provider-api-key" class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">API Key</label>
+                    <input autocomplete="off" id="provider-api-key" type="password" x-model="providerForm.apiKey"
+                           :placeholder="providerForm.apiKeyConfigured ? '已配置，留空保持不变' : '留空则从客户端请求头提取'"
+                           class="field">
+                    <label for="provider-clear-api-key" x-show="providerForm.apiKeyConfigured" x-cloak class="mt-2 flex items-center gap-2 text-xs text-muted">
+                        <input autocomplete="off" id="provider-clear-api-key" type="checkbox" x-model="providerForm.clearApiKey" class="h-4 w-4 rounded border-line bg-panel text-cyan2 focus:ring-cyan2">
+                        清除已有密钥，改用客户端请求头
+                    </label>
+                </div>
+                <label class="block">
+                    <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">最大并发</span>
+                    <input autocomplete="off" type="number" x-model.number="providerForm.maxConcurrent" class="field">
+                </label>
+                <label class="block">
+                    <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">每秒请求数</span>
+                    <input autocomplete="off" type="number" x-model.number="providerForm.maxPerSecond" placeholder="0 = 不限" class="field">
+                </label>
+                <label class="block md:col-span-2">
+                    <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">队列最大等待 ms</span>
+                    <input autocomplete="off" type="number" x-model.number="providerForm.maxQueueWait" class="field">
+                </label>
+            </div>
+            <div class="flex justify-end gap-3 border-t border-line p-5">
+                <button @click="showProviderModal = false" class="btn btn-secondary">取消</button>
+                <button @click="saveProvider()" class="btn btn-primary">保存 Provider</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 同 Provider 弹窗：不用 @click.away，只留 ESC / X / 取消 三个关闭入口 -->
+    <div x-show="showRouteModal" x-transition.opacity x-cloak
+         @keydown.escape.window="escapeRouteModal()"
+         class="fixed inset-0 z-50 grid place-items-center bg-black/70 p-4">
+        <div class="glass w-full max-w-2xl rounded-lg shadow-glow">
+            <div class="flex items-center justify-between border-b border-line p-5">
+                <h3 class="text-lg font-extrabold text-white" x-text="editingRouteIndex >= 0 ? '编辑路由' : '添加路由'"></h3>
+                <button @click="showRouteModal = false" class="btn btn-secondary px-2 py-2">
+                    <span class="material-symbols-outlined">close</span>
+                </button>
+            </div>
+            <div class="grid grid-cols-1 gap-4 p-5 md:grid-cols-2">
+                <label class="block">
+                    <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">匹配模式</span>
+                    <input autocomplete="off" type="text" x-model="routeForm.match" placeholder="例如: claude-* 或 gpt-4" class="field font-mono">
+                </label>
+                <div class="md:col-span-2">
+                    <div class="mb-1.5 flex items-center justify-between">
+                        <span class="text-xs font-bold uppercase tracking-wide text-muted">目标候选</span>
+                        <span class="text-xs text-muted">按顺序尝试，第一个为主目标</span>
+                    </div>
+                    <div class="space-y-2">
+                        <template x-for="(target, ti) in routeForm.targets" :key="ti">
+                            <div class="flex flex-col gap-1">
+                                <div class="flex items-center gap-2">
+                                    <span class="w-6 shrink-0 font-mono text-xs text-muted" x-text="'#' + (ti + 1)"></span>
+                                    <!-- :selected 不能省：弹窗是 x-show、DOM 常驻，外层 x-for 为新增候选
+                                         建好 <select> 并让 x-model 写 select.value 时，内层 x-for 的 <option>
+                                         还没渲染出来，赋值落空、浏览器回落到第一项（看起来就是「每行都是同一个
+                                         provider」），options 补齐后 x-model 也不会再回写一次。让每个 option
+                                         自己认领选中态，才与 model 无条件一致。 -->
+                                    <select autocomplete="off" x-model="target.provider" @change="onRouteTargetProviderChange(ti)" class="field w-1/3">
+                                        <template x-for="(provider, name) in config.providers" :key="name">
+                                            <option :value="name" :selected="name === target.provider" x-text="name"></option>
+                                        </template>
+                                    </select>
+                                    <div class="relative flex flex-1">
+                                        <input autocomplete="off" type="text" x-model="target.model" placeholder="上游实际使用的模型名" class="field flex-1 font-mono pr-9">
+                                        <button type="button" @click="fetchProviderModels(ti)"
+                                                :disabled="!target.provider || target.modelsLoading"
+                                                :title="target.provider ? '查询该 Provider 的上游模型列表' : '请先选择 Provider'"
+                                                class="absolute right-1 top-1/2 -translate-y-1/2 rounded p-1 text-muted hover:text-cyan disabled:opacity-40">
+                                            <span class="material-symbols-outlined text-[18px]" x-show="!target.modelsLoading">search</span>
+                                            <span class="material-symbols-outlined animate-spin text-[18px]" x-show="target.modelsLoading" x-cloak>progress_activity</span>
+                                        </button>
+                                    </div>
+                                    <button @click="moveRouteTarget(ti, -1)" :disabled="ti === 0" class="btn btn-secondary px-2 py-2" title="上移">
+                                        <span class="material-symbols-outlined text-[18px]">keyboard_arrow_up</span>
+                                    </button>
+                                    <button @click="moveRouteTarget(ti, 1)" :disabled="ti === routeForm.targets.length - 1" class="btn btn-secondary px-2 py-2" title="下移">
+                                        <span class="material-symbols-outlined text-[18px]">keyboard_arrow_down</span>
+                                    </button>
+                                    <button @click="removeRouteTarget(ti)" :disabled="routeForm.targets.length <= 1" class="btn btn-secondary px-2 py-2" title="删除该候选">
+                                        <span class="material-symbols-outlined text-[18px]">delete</span>
+                                    </button>
+                                </div>
+                                <!-- 上游模型列表：查询成功后展开，点选填入；列表为空时收起 -->
+                                <ul x-show="target.models && target.models.length" x-cloak x-transition
+                                    @click.away="target.models = []"
+                                    class="ml-8 max-h-44 overflow-y-auto rounded border border-line bg-panel3 py-1 text-xs">
+                                    <template x-for="m in target.models" :key="m">
+                                        <li @click="target.model = m; target.models = []"
+                                            class="cursor-pointer px-3 py-1.5 font-mono hover:bg-cyan2/10"
+                                            x-text="m"></li>
+                                    </template>
+                                </ul>
+                            </div>
+                        </template>
+                    </div>
+                    <button @click="addRouteTarget()" :disabled="routeForm.targets.length >= maxRouteTargets" class="btn btn-secondary mt-2 text-xs">
+                        <span class="material-symbols-outlined text-[16px]">add</span>
+                        <span x-text="'添加候选（最多 ' + maxRouteTargets + ' 个）'"></span>
+                    </button>
+                    <p x-show="routeForm.targets.length > 1" x-cloak class="mt-2 text-xs text-muted">
+                        多候选需在「基础设置」开启 failover 才会真正转移，否则只用第一个候选。
+                    </p>
+                </div>
+                <div x-show="routeForm.targets.length > 1" x-transition x-cloak class="md:col-span-2">
+                    <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">候选选择策略</span>
+                    <select autocomplete="off" x-model="routeForm.strategy" class="field">
+                        <template x-for="option in routeStrategies" :key="option.value">
+                            <option :value="option.value" :selected="option.value === routeForm.strategy" x-text="option.label"></option>
+                        </template>
+                    </select>
+                    <p class="mt-2 text-xs text-muted">
+                        策略决定「先试谁」，failover 决定「失败了还能试谁」，两者互不影响。
+                        round-robin / least-queue 会按会话前缀做粘性，尽量让同一会话固定在一个上游。
+                    </p>
+                    <p x-show="routeForm.strategy === 'least-queue' && config.directMode" x-cloak class="mt-1 text-xs text-amber-300/90">
+                        直通模式下没有队列，在途量恒为 0，least-queue 会退化成 round-robin。
+                    </p>
+                </div>
+                <div class="rounded-lg border border-cyan2/20 bg-cyan2/5 p-4 md:col-span-2">
+                    <label class="mb-4 flex cursor-pointer items-center gap-3">
+                        <input autocomplete="off" type="checkbox" x-model="routeForm.enableVision" class="h-4 w-4 rounded border-line bg-panel text-cyan2 focus:ring-cyan2">
+                        <span class="text-sm font-bold text-cyan">启用视觉伴随模型</span>
+                    </label>
+                    <div x-show="routeForm.enableVision" x-transition x-cloak class="grid grid-cols-1 gap-4 md:grid-cols-2">
+                        <label class="block">
+                            <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">视觉 Provider</span>
+                            <select autocomplete="off" x-model="routeForm.visionProvider" class="field">
+                                <template x-for="(provider, name) in config.providers" :key="name">
+                                    <option :value="name" :selected="name === routeForm.visionProvider" x-text="name"></option>
+                                </template>
+                            </select>
+                        </label>
+                        <label class="block">
+                            <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">视觉模型</span>
+                            <input autocomplete="off" type="text" x-model="routeForm.visionModel" placeholder="例如: gpt-4o-mini" class="field font-mono">
+                        </label>
+                    </div>
+                </div>
+            </div>
+            <div class="flex justify-end gap-3 border-t border-line p-5">
+                <button @click="showRouteModal = false" class="btn btn-secondary">取消</button>
+                <button @click="saveRoute()" class="btn btn-primary">保存路由</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 自定义 tooltip：fixed 定位而不是 CSS ::after，因为徽章所在表格外层是
+         overflow-x-auto，绝对定位的气泡会被滚动容器裁掉。z-[70] 在错误提示之上。 -->
+    <div id="immediate-tooltip" x-show="tip.show" x-cloak role="tooltip"
+         :style="`left: ${tip.x}px; top: ${tip.y}px;`"
+         class="pointer-events-none fixed z-[70] max-w-xs -translate-x-1/2 -translate-y-full whitespace-pre-line rounded-lg border border-line bg-panel3 px-3 py-2 text-xs font-semibold leading-relaxed text-text shadow-glow">
+        <span x-text="tip.text"></span>
+    </div>
+
+    <!-- 自定义确认弹窗，替代 window.confirm。
+         原生 confirm 阻塞主线程、样式不可控、在部分浏览器里可被用户永久屏蔽
+         （勾了「不再显示对话框」之后直接返回 false，删除会静默失效）。 -->
+    <div x-show="confirmDialog.open" x-transition.opacity x-cloak
+         class="fixed inset-0 z-[80] grid place-items-center bg-black/70 p-4"
+         @keydown.escape.window="resolveConfirm(false)">
+        <div class="glass w-full max-w-md rounded-lg shadow-glow" role="alertdialog" aria-modal="true"
+             @click.away="resolveConfirm(false)">
+            <div class="flex items-start gap-3 border-b border-line p-5">
+                <span class="material-symbols-outlined shrink-0 text-danger">warning</span>
+                <div class="min-w-0">
+                    <h3 class="text-base font-extrabold text-white" x-text="confirmDialog.title"></h3>
+                    <p class="mt-1 break-words text-sm text-muted" x-text="confirmDialog.message"></p>
+                </div>
+            </div>
+            <div class="flex justify-end gap-2 p-4">
+                <button @click="resolveConfirm(false)" class="btn btn-secondary">取消</button>
+                <button x-ref="confirmOk" @click="resolveConfirm(true)" class="btn btn-danger"
+                        x-text="confirmDialog.confirmText"></button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        function gatewayApp() {
+            return {
+        //<<<GW_APP_MEMBERS>>>
+            };
+        }
+    </script>
+</body>
+</html>

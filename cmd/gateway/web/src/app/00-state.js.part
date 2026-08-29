@@ -1,0 +1,132 @@
+                activeTab: 'monitor',
+                navItems: [
+                    { id: 'monitor', label: '监控仪表盘', icon: 'monitoring', fillIcon: false },
+                    { id: 'providers', label: '提供商', icon: 'dns', fillIcon: true },
+                    { id: 'routes', label: '路由', icon: 'alt_route', fillIcon: true },
+                    { id: 'logs', label: '请求日志', icon: 'receipt_long', fillIcon: false },
+                    { id: 'settings', label: '全局设置', icon: 'tune', fillIcon: true }
+                ],
+                editMode: 'visual',
+                mobileNavOpen: false,
+                // 预览抽屉默认收起；这是界面状态，不写入配置内容。
+                previewDrawerOpen: false,
+                loading: false,
+                // 监控页三个动作各自一个进行中标志，不复用 loading：
+                // loading 管配置保存，共用会让检测期间顶部保存按钮一起变灰。
+                checkingHealth: false,
+                // 正在单独检测的 provider 名（null 表示没有）。存名字而不是布尔，
+                // 这样只有被点的那一行转图标，其余行照常可点。
+                checkingProvider: null,
+                resettingBreakers: false,
+                // 同理：正在单独重置熔断器的 provider 名
+                resettingBreaker: null,
+                refreshingMonitor: false,
+                // 未保存浮层的拖拽状态。dirtyToastPos 为 null 表示没拖过，用默认右下角。
+                draggingDirty: false,
+                dirtyToastPos: null,
+                tip: { show: false, text: '', x: 0, y: 0 },
+                // _confirmResolve 存 Promise 的 resolve，让 confirm 从阻塞调用变成 await
+                confirmDialog: { open: false, title: '', message: '', confirmText: '删除' },
+                _confirmResolve: null,
+                // 最近一次 /api/config 的原始响应，供 load 后重放以抹掉表单恢复
+                _serverConfigData: null,
+                // 用户是否真的动过表单。浏览器的表单恢复不会产生 isTrusted 的
+                // pointerdown/keydown，靠这个把「恢复污染」和「真实编辑」分开。
+                _userEdited: false,
+                _monitorPollTimer: null,
+                _monitorVisibilityHandler: null,
+                statusToasts: [],
+                _statusToastSeq: 0,
+                configPath: '',
+                revision: '',
+                restartRequired: [],
+                originalConfig: '',
+                originalYaml: '',
+                config: {
+                    port: 7789,
+                    host: '127.0.0.1',
+                    timeout: 120000,
+                    streamActivityTimeout: 60000,
+                    cache: { maxAgeDays: 7, maxRecords: 1000 },
+                    directMode: false,
+                    directTimeoutNoStream: 60000,
+                    directTimeoutStreamHeader: 60000,
+                    directTimeoutStreamActive: 120000,
+                    providers: {},
+                    routes: [],
+                    // 必须给出初始形状：loadConfig() 返回前 x-model / x-show 就会求值
+                    // config.failover.enabled，落在 undefined 上会在首次渲染直接抛错。
+                    // 数值项用 null 表示「未设置、用后端默认值」。
+                    failover: {
+                        enabled: false,
+                        maxAttempts: null,
+                        maxRetryAfterMs: null,
+                        onTransportError: true,
+                        onServerError: true,
+                        onRateLimit: true,
+                        onQueueTimeout: true,
+                        onStreamHeaderTimeout: true,
+                        onRequestTimeout: false,
+                        onAuthError: false
+                    },
+                    breaker: {
+                        enabled: false,
+                        consecutiveFailures: null,
+                        openMs: null,
+                        halfOpenProbes: null
+                    }
+                },
+                health: null,
+                metrics: null,
+                requestLogs: [],
+                expandedLogId: null,
+                logFilters: {
+                    status: '',
+                    provider: '',
+                    stream: '',
+                    model: '',
+                    q: ''
+                },
+                yamlContent: '',
+                showProviderModal: false,
+                // 与后端 config.maxProviderNameRunes 对齐，按字符（rune）而非字节计。
+                // 前端三处用到（输入框 maxlength、保存校验、副本名截断），只留这一处来源。
+                maxProviderNameLen: 100,
+                editingProvider: null,
+                providerForm: {
+                    name: '',
+                    baseUrl: '',
+                    apiKey: '',
+                    format: 'anthropic',
+                    maxConcurrent: 5,
+                    maxPerSecond: 0,
+                    maxQueueWait: 30000,
+                    apiKeyConfigured: false,
+                    clearApiKey: false
+                },
+                showRouteModal: false,
+                editingRouteIndex: -1,
+                routeForm: {
+                    match: '',
+                    // 目标候选列表，按顺序作为故障转移的尝试顺序；至少 1 个，最多 5 个
+                    // models/modelsLoading 是查询远程模型列表的瞬态状态，初始占位保证响应式
+                    targets: [{ provider: '', model: '', models: [], modelsLoading: false }],
+                    // 候选选择策略，空等同 failover（按配置顺序）
+                    strategy: '',
+                    enableVision: false,
+                    visionProvider: '',
+                    visionModel: ''
+                },
+                maxRouteTargets: 5,
+                // 与后端 balancer 的取值表对应。
+                // failover 必须写成真实枚举值、不能用空字符串当哨兵：Alpine 对
+                // :value="''" 会把 value 属性整个移除，而没有 value 属性的 <option>
+                // 按 HTML 规范取值退化成 textContent，于是 select.value 变成中文
+                // label，change 后被写进 routeForm.strategy，保存时后端 ValidStrategy
+                // 不认这个值直接报错。保存时由 saveRoute 归一化成「不写该字段」。
+                routeStrategies: [
+                    { value: 'failover', label: 'failover（默认，按顺序）' },
+                    { value: 'round-robin', label: 'round-robin（轮转分流）' },
+                    { value: 'least-queue', label: 'least-queue（按在途量）' }
+                ],
+

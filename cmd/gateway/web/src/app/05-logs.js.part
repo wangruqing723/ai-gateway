@@ -1,0 +1,22 @@
+                logKey(log) {
+                    return log?.id || (log?.time || '') + (log?.model || '');
+                },
+
+                isLogExpanded(log) {
+                    return this.expandedLogId === this.logKey(log);
+                },
+
+                toggleLog(log) {
+                    const key = this.logKey(log);
+                    this.expandedLogId = this.expandedLogId === key ? null : key;
+                },
+
+                hasLogValue(value) {
+                    return value !== undefined && value !== null && value !== '';
+                },
+
+                resetLogFilters() {
+                    this.logFilters = { status: '', provider: '', stream: '', model: '', q: '' };
+                    this.loadRequestLogs();
+                },
+

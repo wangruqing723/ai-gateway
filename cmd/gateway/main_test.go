@@ -22,6 +22,7 @@ import (
 	"ai-gateway/internal/providerhealth"
 	"ai-gateway/internal/queue"
 	"ai-gateway/internal/vision"
+	"ai-gateway/internal/webbuild"
 )
 
 const (
@@ -527,6 +528,101 @@ func TestEmbeddedAdminPageUsesLocalAssetsAndSafeConfigState(t *testing.T) {
 		if strings.Contains(page, forbidden) {
 			t.Errorf("admin page still contains unsafe/stale pattern %q", forbidden)
 		}
+	}
+}
+
+// 页面拆成 src/app/*.js.part 之后，开发模式必须实时拼装源码而不是回读产物 index.html，
+// 否则改片段要先手工跑一遍 make web-html 才能在浏览器里看到效果，热加载等于半废。
+func TestDevModeAssemblesFromSourceFragments(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "src", "app"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// 产物故意写成与源码不同的内容：拿到哪一份就能判断走了哪条路径。
+	if err := os.WriteFile(filepath.Join(dir, "index.html"), []byte("<html>STALE ARTIFACT</html></body>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tpl := "<html><body>\n" + webbuild.Marker + "\n</body></html>"
+	if err := os.WriteFile(filepath.Join(dir, "src", "index.template.html"), []byte(tpl), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "src", "app", "00-x.js.part"), []byte("FRESH_FROM_FRAGMENT\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := newBoundaryTestServer()
+	srv.webDevDir = dir
+	recorder := httptest.NewRecorder()
+	srv.handleIndex(recorder, httptest.NewRequest(http.MethodGet, "http://127.0.0.1:7789/", nil))
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", recorder.Code)
+	}
+	body := recorder.Body.String()
+	if !strings.Contains(body, "FRESH_FROM_FRAGMENT") {
+		t.Error("开发模式没有实时拼装片段")
+	}
+	if strings.Contains(body, "STALE ARTIFACT") {
+		t.Error("开发模式回读了产物 index.html，改片段将不会生效")
+	}
+	// 热加载脚本仍需注入，否则浏览器不会自动刷新。
+	if !strings.Contains(body, "/__dev/reload") {
+		t.Error("拼装路径漏了注入热加载脚本")
+	}
+
+	// 只有产物、没有 src/ 的目录应退回直接读 index.html，保持拆分前行为。
+	bare := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bare, "index.html"), []byte("<html>ONLY ARTIFACT</html></body>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srv.webDevDir = bare
+	recorder = httptest.NewRecorder()
+	srv.handleIndex(recorder, httptest.NewRequest(http.MethodGet, "http://127.0.0.1:7789/", nil))
+	if !strings.Contains(recorder.Body.String(), "ONLY ARTIFACT") {
+		t.Error("无 src/ 时应退回读 index.html")
+	}
+}
+
+// SSE 监听必须覆盖片段文件。只盯 index.html 的话，改片段时它根本不变，
+// mtime 永不前进、浏览器永不刷新——热加载看着还在，实际已经废了。
+func TestDevReloadWatchesFragmentModTime(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "src", "app"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "src", "index.template.html"), []byte(webbuild.Marker+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fragment := filepath.Join(dir, "src", "app", "00-x.js.part")
+	if err := os.WriteFile(fragment, []byte("a: 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// 产物存在但故意设成很早的 mtime，确保「最新时间」只可能来自片段。
+	artifact := filepath.Join(dir, "index.html")
+	if err := os.WriteFile(artifact, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(artifact, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := newBoundaryTestServer()
+	srv.webDevDir = dir
+
+	before := srv.webSourcesModTime()
+	if before.IsZero() {
+		t.Fatal("webSourcesModTime 返回零值")
+	}
+
+	// 把片段 mtime 推到未来，模拟一次编辑。
+	future := time.Now().Add(time.Minute)
+	if err := os.Chtimes(fragment, future, future); err != nil {
+		t.Fatal(err)
+	}
+	after := srv.webSourcesModTime()
+	if !after.After(before) {
+		t.Error("改片段后 webSourcesModTime 没有前进，SSE 不会触发刷新")
 	}
 }
 

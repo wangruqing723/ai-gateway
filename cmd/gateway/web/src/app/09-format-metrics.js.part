@@ -1,0 +1,316 @@
+                snapshotConfig() {
+                    return JSON.stringify({ providers: this.config.providers, routes: this.config.routes });
+                },
+
+                restoreConfig(snapshot) {
+                    const prev = JSON.parse(snapshot);
+                    this.config.providers = prev.providers;
+                    this.config.routes = prev.routes;
+                },
+
+                providerCount() {
+                    return Object.keys(this.config.providers || {}).length;
+                },
+
+                routeCount() {
+                    return (this.config.routes || []).length;
+                },
+
+                configuredModelOptions() {
+                    const models = new Set();
+                    (this.config.routes || []).forEach((route) => {
+                        if (route.match) models.add(route.match);
+                        if (route.model) models.add(route.model);
+                        if (route.vision?.model) models.add(route.vision.model);
+                    });
+                    return Array.from(models).sort((a, b) => a.localeCompare(b));
+                },
+
+                seconds(value) {
+                    return Math.round((Number(value) || 0) / 1000);
+                },
+
+                // 短写：3587 → 3.6s。原来输出「3587 ms」，中间那个空格是折行点，
+                // 窄列里会被折成两行把行高翻倍。
+                durationText(value) {
+                    if (value === undefined || value === null || value === '') return '--';
+                    const ms = Math.round(Number(value) || 0);
+                    if (ms < 1000) return `${ms}ms`;
+                    const seconds = ms / 1000;
+                    return seconds < 10 ? `${seconds.toFixed(1)}s` : `${Math.round(seconds)}s`;
+                },
+
+                // slowClass 按耗时量级着色：一屏几十条日志里，慢请求靠扫数字很难发现。
+                // 阈值取 10s / 30s——本地网关正常响应在秒级，10s 以上值得注意，
+                // 30s 以上基本是上游卡住或超时边缘。
+                slowClass(value) {
+                    const ms = Number(value) || 0;
+                    if (ms >= 30000) return 'text-danger';
+                    if (ms >= 10000) return 'text-warn';
+                    return 'text-text';
+                },
+
+                // logClock 只取时分秒。列表里整屏都是同一天，重复 100 遍日期没有信息量，
+                // 还会把时间列折成三行。完整时间戳挂在 title 上。
+                logClock(log) {
+                    const raw = log?.time || log?.startedAt || '';
+                    if (!raw) return '--';
+                    const matched = String(raw).match(/(\d{2}:\d{2}:\d{2})/);
+                    return matched ? matched[1] : String(raw);
+                },
+
+                // attemptTrailText 只在发生过候选转移时显示轨迹，单次直达显示 '--'
+                attemptTrailText(log) {
+                    if (log?.attemptTrail) return log.attemptTrail;
+                    return (Number(log?.attempts) || 0) > 1 ? `${log.attempts} 次尝试` : '--';
+                },
+
+                formatBytes(value) {
+                    const bytes = Number(value) || 0;
+                    if (bytes < 1024) return `${bytes} B`;
+                    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+                    return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+                },
+
+                cacheSummary() {
+                    const cache = this.health?.cache;
+                    if (!cache) return '--';
+                    return `${cache.total || 0} 条 / ${this.formatBytes(cache.contentSize)}`;
+                },
+
+                metricValue(key, fallback = '--') {
+                    const summary = this.metrics?.summary || this.metrics || {};
+                    const value = summary[key];
+                    return value === undefined || value === null ? fallback : value;
+                },
+
+                metricPercent(key) {
+                    const value = this.metricValue(key, null);
+                    if (value === null) return '--';
+                    const n = Number(value);
+                    if (!Number.isFinite(n)) return '--';
+                    return `${(n <= 1 ? n * 100 : n).toFixed(1)}%`;
+                },
+
+                metricDuration(key) {
+                    if (key === 'p95LatencyMs') {
+                        // rank 算法在小样本下会让 P95 退化为最大值，20 是避免把
+                        // 这种低可信度的桶上界近似误当成稳定延迟的展示阈值。
+                        const rawSamples = this.metricValue('latencySamples', null);
+                        const samples = Number(rawSamples === null ? this.metricValue('windowRequests', 0) : rawSamples);
+                        const count = Number.isFinite(samples) ? Math.max(0, Math.floor(samples)) : 0;
+                        if (count < 20) return count === 0 ? '--' : `${count} 个样本`;
+                    }
+                    const value = this.metricValue(key, null);
+                    return value === null ? '--' : this.durationText(value);
+                },
+
+                // 窗口标签跟随后端返回的 windowMinutes；缺省按 1 分钟兜底。
+                // 整除 60 时显示「N 小时」，否则「N 分钟」。
+                metricWindowLabel() {
+                    const m = Number(this.metricValue('windowMinutes', 1)) || 1;
+                    if (m >= 60 && m % 60 === 0) return `${m / 60} 小时`;
+                    return `${m} 分钟`;
+                },
+
+                providerStatusRows() {
+                    const queues = this.health?.queues || {};
+                    const health = this.health?.providerHealth || {};
+                    // 熔断未启用时后端返回 breakers: null，和「全部闭合」是两种语义，
+                    // 这里保留 null 往下传，由 breakerLabel 区分展示。
+                    const breakers = this.health?.breakers || null;
+                    return Object.entries(this.config.providers || {}).map(([name, provider]) => {
+                        const q = queues[name] || {};
+                        const h = health[name] || { status: 'unchecked', message: '未检测' };
+                        // 已启用但该 provider 还没被记录过，等价于闭合。
+                        const b = breakers ? (breakers[name] || { state: 'closed' }) : null;
+                        const running = Number(q.running || 0);
+                        const queued = Number(q.queued || 0);
+                        let status = '空闲';
+                        let statusClass = 'border-good/35 bg-good/10 text-emerald-100';
+                        if (this.config.directMode) {
+                            status = '直通';
+                            statusClass = 'border-cyan2/35 bg-cyan2/10 text-cyan';
+                        } else if (queued > 0) {
+                            status = '排队';
+                            statusClass = 'border-warn/35 bg-warn/10 text-amber-100';
+                        } else if (running > 0) {
+                            status = '忙碌';
+                            statusClass = 'border-cyan2/35 bg-cyan2/10 text-cyan';
+                        }
+                        return {
+                            name,
+                            format: provider.format || 'anthropic',
+                            running,
+                            queued,
+                            maxConcurrent: q.maxConcurrent || provider.maxConcurrent || 5,
+                            maxPerSecond: q.maxPerSecond ?? provider.maxPerSecond ?? 0,
+                            healthLabel: this.providerHealthLabel(h),
+                            healthClass: this.providerHealthClass(h.status),
+                            healthTitle: this.providerHealthTitle(h),
+                            breakerLabel: this.breakerLabel(b),
+                            breakerClass: this.breakerClass(b),
+                            breakerTitle: this.breakerTitle(b),
+                            // 判据与后端 ResetAll 的计数条件一致（state != closed || failures > 0）：
+                            // 闭合且无失败计数时重置是空操作，按钮不出现，免得点了没反应。
+                            breakerResettable: !!b && (b.state !== 'closed' || Number(b.consecutiveFailures || 0) > 0),
+                            status,
+                            statusClass
+                        };
+                    });
+                },
+
+                providerHealthLabel(health) {
+                    if (health.status === 'ok') return '健康';
+                    if (health.status === 'warn') return '可达';
+                    if (health.status === 'error') return '异常';
+                    return '未检测';
+                },
+
+                providerHealthClass(status) {
+                    if (status === 'ok') return 'border-good/35 bg-good/10 text-emerald-100';
+                    if (status === 'warn') return 'border-warn/35 bg-warn/10 text-amber-100';
+                    if (status === 'error') return 'border-danger/35 bg-danger/10 text-rose-100';
+                    return 'bg-white/[.05] text-muted';
+                },
+
+                providerHealthTitle(health) {
+                    const parts = [];
+                    if (health.message) parts.push(health.message);
+                    if (health.httpCode) parts.push('HTTP ' + health.httpCode);
+                    if (health.latencyMs) parts.push(health.latencyMs + ' ms');
+                    if (health.checkedAt) parts.push(health.checkedAt);
+                    return parts.join(' · ') || '未检测';
+                },
+
+                // 以下三个 helper 里 b 为 null 表示熔断未启用，必须与「已启用且闭合」分开显示，
+                // 否则看不出这套机制到底有没有生效。
+                breakerLabel(b) {
+                    if (!b) return '未启用';
+                    // 剩余冷却直接写进徽章：原来只放在 title 里，要悬停才看得见，
+                    // 而「还有多久恢复」恰恰是熔断打开时最需要立刻知道的一件事。
+                    //
+                    // retryAfterMs 缺失或为 0 不等于「马上恢复」：冷却结束后熔断器仍停在
+                    // open，要等下一个真实请求触发 Allow() 才转 half_open（后端不跑定时器）。
+                    // 所以这里写「待探测」而不是「冷却结束」，否则看着像卡住了。
+                    if (b.state === 'open') {
+                        return b.retryAfterMs > 0
+                            ? `已熔断 ${Math.ceil(b.retryAfterMs / 1000)}s`
+                            : '已熔断 待探测';
+                    }
+                    if (b.state === 'half_open') return '半开探测';
+                    // 闭合但已有失败计数时写出「几/阈值」，不只写「正常」：
+                    // 那种行旁边会出现重置按钮（判据 failures > 0），只写「正常」
+                    // 会让人以为按钮多余、甚至怀疑状态判错了。进度原本只在 title 里，
+                    // 要悬停才看得见，而这正是最该一眼看到的信息。
+                    const failures = Number(b.consecutiveFailures || 0);
+                    if (failures > 0) return `正常 ${failures}/${this.breakerThreshold()}`;
+                    return '正常';
+                },
+
+                // 熔断阈值。config.breaker 经 applyBreakerDefaults 落盘后一定带实际值，
+                // 但配置尚未加载完时 this.config 可能还是空壳，所以兜一次默认 3，
+                // 避免徽章短暂写出「1/undefined」。
+                breakerThreshold() {
+                    return Number(this.config?.breaker?.consecutiveFailures) || 3;
+                },
+
+                breakerClass(b) {
+                    if (!b) return 'bg-white/[.05] text-muted';
+                    if (b.state === 'open') return 'border-danger/35 bg-danger/10 text-rose-100';
+                    if (b.state === 'half_open') return 'border-warn/35 bg-warn/10 text-amber-100';
+                    // 闭合但有失败计数：徽章文本已经写出「正常 n/阈值」，
+                    // 改用中性底色与健康列的 warn 区分，仍不和干净闭合混为一谈。
+                    if (Number(b.consecutiveFailures || 0) > 0) return 'border-line bg-white/[.05] text-muted';
+                    return 'border-good/35 bg-good/10 text-emerald-100';
+                },
+
+                breakerTitle(b) {
+                    if (!b) return '熔断未启用';
+                    const parts = [];
+                    if (b.state === 'open') {
+                        parts.push(b.retryAfterMs > 0
+                            ? '剩余冷却 ' + Math.ceil(b.retryAfterMs / 1000) + ' s'
+                            : '冷却已过，等下一个请求充当半开探针');
+                    }
+                    if (b.state === 'half_open' && b.probesInFlight > 0) parts.push('探测中 ' + b.probesInFlight);
+                    if (b.consecutiveFailures > 0) {
+                        const n = Number(b.consecutiveFailures);
+                        const threshold = this.breakerThreshold();
+                        // 闭合状态下补一句「还差几次」：光看「连续失败 1」不知道离熔断多远，
+                        // 而这个距离决定了要不要现在就去处理这个上游。
+                        parts.push(b.state === 'closed' && threshold > n
+                            ? `连续失败 ${n}/${threshold}（还差 ${threshold - n} 次打开熔断）`
+                            : `连续失败 ${n}/${threshold}`);
+                    }
+                    if (b.openedAt) parts.push('打开于 ' + b.openedAt);
+                    if (b.totalOpens > 0) parts.push('累计打开 ' + b.totalOpens + ' 次');
+                    return parts.join(' · ') || '闭合，无失败记录';
+                },
+
+                configIssues() {
+                    const issues = [];
+                    const providers = this.config.providers || {};
+                    const routes = this.config.routes || [];
+                    if (Object.keys(providers).length === 0) issues.push('还没有配置 Provider');
+                    if (routes.length === 0) issues.push('还没有配置路由规则');
+                    Object.entries(providers).forEach(([name, provider]) => {
+                        if (!provider.baseUrl) issues.push(`Provider ${name} 缺少 baseUrl`);
+                    });
+                    routes.forEach((route) => {
+                        if (route.provider && !providers[route.provider]) issues.push(`路由 ${route.match || '(未命名)'} 引用了不存在的 Provider ${route.provider}`);
+                        if (route.vision?.provider && !providers[route.vision.provider]) issues.push(`路由 ${route.match || '(未命名)'} 的视觉 Provider 不存在`);
+                    });
+                    if (this.config.directMode) issues.push('直通模式已开启，队列运行中/排队指标不会变化');
+                    return issues;
+                },
+
+                latencyRows() {
+                    const providers = this.metrics?.providers || this.metrics?.providerStats || [];
+                    const rows = Array.isArray(providers)
+                        ? providers
+                        : Object.entries(providers).map(([name, value]) => ({ name, ...value }));
+                    return rows
+                        .map((row) => ({
+                            name: row.name || row.provider || '--',
+                            p95: Math.round(Number(row.p95LatencyMs ?? row.p95 ?? row.latencyP95Ms ?? 0)),
+                            requests: Number(row.requests ?? row.count ?? row.total ?? 0)
+                        }))
+                        .filter((row) => row.name !== '--' && row.p95 > 0)
+                        .sort((a, b) => b.p95 - a.p95)
+                        .slice(0, 6);
+                },
+
+                // errorKey 是错误条目的身份。x-for 的 :key 和 recentErrays 的去重都用它，
+                // 两处各写一份表达式必然分叉（曾经模板用 err.message、去重用 err.error）。
+                errorKey(err) {
+                    return err.id || (err.time || '') + ' ' + (err.message || err.error || '');
+                },
+
+                // recentErrors 合并两个来源：/api/metrics 的 recentErrors 和 /api/logs 里的错误行。
+                // 同一条请求会同时出现在两边，必须去重——x-for 的 :key 撞车会让 Alpine
+                // 在内部 diff 时抛 "Cannot read properties of undefined (reading 'after')"，
+                // 每次轮询刷一次错，同时列表里还会重复显示同一条错误。
+                recentErrors() {
+                    const metricErrors = this.metrics?.recentErrors || this.metrics?.errors || [];
+                    const logErrors = this.requestLogs.filter((log) => Number(log.status || 0) >= 400 || log.error);
+                    const seen = new Set();
+                    const out = [];
+                    for (const err of [...metricErrors, ...logErrors]) {
+                        const key = this.errorKey(err);
+                        if (seen.has(key)) continue;
+                        seen.add(key);
+                        out.push(err);
+                        if (out.length >= 6) break;
+                    }
+                    return out;
+                },
+
+                statusClass(status) {
+                    const code = Number(status);
+                    if (!code) return 'bg-white/[.05] text-muted';
+                    if (code >= 500) return 'border-danger/35 bg-danger/10 text-rose-100';
+                    if (code >= 400) return 'border-warn/35 bg-warn/10 text-amber-100';
+                    return 'border-good/35 bg-good/10 text-emerald-100';
+                },
+

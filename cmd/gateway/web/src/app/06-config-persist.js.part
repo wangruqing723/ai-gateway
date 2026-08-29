@@ -1,0 +1,141 @@
+                async loadOptionalJSON(path) {
+                    try {
+                        const res = await fetch(path);
+                        if (!res.ok) return null;
+                        return await res.json();
+                    } catch (_) {
+                        return null;
+                    }
+                },
+
+                // persistConfig 把当前配置写盘并热重载。
+                // 成功返回 true；失败返回 false 并已经弹过错误提示，调用方据此决定是否回滚。
+                // 弹窗保存与顶部保存共用这一条路径，避免两处各写一遍 PUT 逻辑。
+                async persistConfig() {
+                    this.loading = true;
+                    try {
+                        const yamlMode = this.editMode === 'yaml';
+                        const body = yamlMode ? this.yamlContent : JSON.stringify(this.configPayload());
+                        const headers = { 'Content-Type': yamlMode ? 'application/yaml' : 'application/json' };
+                        if (this.revision) headers['If-Match'] = `"${this.revision}"`;
+                        const res = await fetch('/api/config', {
+                            method: 'PUT',
+                            headers,
+                            body
+                        });
+
+                        if (!res.ok) {
+                            // 直接抛后端原文（多为 config_validation_error 的具体字段说明），
+                            // 不再套一层「保存失败」把原因盖掉
+                            throw new Error(await this.errorText(res, '保存失败'));
+                        }
+
+                        const result = await res.json();
+                        this.showStatus((result.message || '配置已保存') + this.restartSuffix(result), 'success');
+                        await this.loadConfig();
+                        if (this.editMode === 'yaml') await this.loadYamlConfig();
+                        return true;
+                    } catch (err) {
+                        this.showStatus('保存失败: ' + err.message, 'error');
+                        return false;
+                    } finally {
+                        this.loading = false;
+                    }
+                },
+
+                async saveConfig() {
+                    await this.persistConfig();
+                },
+
+                async reloadConfig() {
+                    this.loading = true;
+                    try {
+                        const res = await fetch('/api/config/reload', { method: 'POST' });
+                        if (!res.ok) throw new Error(await this.errorText(res, '重载失败'));
+                        const result = await res.json();
+                        this.showStatus((result.message || '配置已重载') + this.restartSuffix(result), 'success');
+                        await this.loadConfig();
+                        if (this.editMode === 'yaml') await this.loadYamlConfig();
+                    } catch (err) {
+                        this.showStatus('重载失败: ' + err.message, 'error');
+                    } finally {
+                        this.loading = false;
+                    }
+                },
+
+                restartSuffix(result) {
+                    const fields = result?.restartRequired || [];
+                    return fields.length ? `；需重启生效: ${fields.join(', ')}` : '';
+                },
+
+                // ESC 逐层退出，不一次关穿。确认弹窗（z-80）叠在编辑弹窗（z-50）之上时，
+                // 它自己的 escape 监听负责关它，这里必须让路，否则一次 ESC 会把两层一起关掉。
+                escapeProviderModal() {
+                    if (this.confirmDialog.open) return;
+                    this.showProviderModal = false;
+                },
+
+                // 路由弹窗多一层：候选的上游模型下拉展开时，ESC 先收下拉，再按才关弹窗。
+                escapeRouteModal() {
+                    if (this.confirmDialog.open) return;
+                    const open = (this.routeForm.targets || []).filter((t) => t.models && t.models.length);
+                    if (open.length) {
+                        open.forEach((t) => { t.models = []; });
+                        return;
+                    }
+                    this.showRouteModal = false;
+                },
+
+                // formatMs 把毫秒压成人读的短写法：30000 → 30s、90000 → 1.5m。
+                // 列表里 11 行都顶着「30000 ms」会白占一列宽度，而这个值的量级比精确毫秒更有用。
+                formatMs(ms) {
+                    const value = Number(ms) || 0;
+                    if (value < 1000) return value + 'ms';
+                    const seconds = value / 1000;
+                    if (seconds < 60) return (Number.isInteger(seconds) ? seconds : seconds.toFixed(1)) + 's';
+                    const minutes = seconds / 60;
+                    return (Number.isInteger(minutes) ? minutes : minutes.toFixed(1)) + 'm';
+                },
+
+                showStatus(message, type) {
+                    // 错误信息通常是后端校验原文，比成功提示长得多，5 秒读不完。
+                    // 每条 toast 单独计时：连续触发时旧提示继续可读，不被新提示顶掉。
+                    const holdMs = type === 'error' ? 20000 : 5000;
+                    const id = ++this._statusToastSeq;
+                    this.statusToasts = [...this.statusToasts, { id, message, type }];
+                    window.setTimeout(() => this.dismissStatus(id), holdMs);
+                },
+
+                dismissStatus(id) {
+                    this.statusToasts = this.statusToasts.filter((toast) => toast.id !== id);
+                },
+
+                // errorText 从失败响应里榨出可读原因。
+                // 后端统一返回 {error:{type,message}}（httputil.WriteJSONError），
+                // 之前各处读的是顶层 err.message，恒为 undefined，所以永远只剩一句
+                // 笼统的「保存失败」，真实原因只能翻浏览器控制台。
+                // 这里按 error.message → message → error 字符串 → 纯文本 body → HTTP 状态
+                // 逐级回退，任何一层拿到东西就用它。
+                async errorText(res, fallback) {
+                    const raw = await res.text().catch(() => '');
+                    if (raw) {
+                        try {
+                            const data = JSON.parse(raw);
+                            const detail = data?.error?.message
+                                || data?.message
+                                || (typeof data?.error === 'string' ? data.error : '')
+                                || data?.detail;
+                            if (detail) {
+                                // 带上错误类型（如 config_validation_error）便于判断是哪类问题
+                                const kind = data?.error?.type;
+                                return kind ? `${detail}（${kind}）` : String(detail);
+                            }
+                        } catch {
+                            // 不是 JSON：可能是反向代理返回的 HTML 或纯文本，截断后直接用
+                            const text = raw.trim().replace(/\s+/g, ' ');
+                            if (text) return text.length > 300 ? text.slice(0, 300) + '…' : text;
+                        }
+                    }
+                    return `${fallback}（HTTP ${res.status} ${res.statusText || ''}`.trim() + '）';
+                },
+

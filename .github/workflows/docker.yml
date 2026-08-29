@@ -82,6 +82,11 @@ jobs:
             exit 1
           fi
 
+      # index.html 同样是随仓库提交的构建产物（由 web/src 下的模板与片段拼成），
+      # 与样式表一样存在「改了片段忘了重建」的失步风险。-check 只比对不写盘。
+      - name: Verify built index.html is up to date
+        run: go run ./cmd/webbuild -check
+
       - name: Validate production Compose
         run: docker compose config --quiet
 
