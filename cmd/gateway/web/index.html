@@ -31,7 +31,7 @@
                     <button @click="selectNav(item.id)"
                             :class="{
                                 'mt-1': index > 0,
-                                'bg-cyan2/12 text-cyan border-l-cyan': activeTab === item.id,
+                                'bg-cyan2/[.12] text-cyan border-l-cyan': activeTab === item.id,
                                 'text-muted border-l-transparent hover:bg-white/[.04] hover:text-text': activeTab !== item.id
                             }"
                             :aria-selected="activeTab === item.id"
@@ -57,7 +57,7 @@
         </aside>
 
         <div class="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-            <header class="sticky top-0 z-30 h-16 border-b border-line bg-ink/78 backdrop-blur-xl">
+            <header class="sticky top-0 z-30 h-16 border-b border-line bg-ink/[.78] backdrop-blur-xl">
                 <div class="flex h-full items-center justify-between gap-4 px-4 sm:px-6 lg:px-8">
                     <div class="flex min-w-0 items-center gap-3">
                         <button @click="mobileNavOpen = !mobileNavOpen" class="btn btn-secondary px-3 lg:hidden" title="打开导航" aria-label="打开导航">
