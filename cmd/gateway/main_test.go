@@ -451,7 +451,7 @@ func TestStaticAssetsAndSecurityHeaders(t *testing.T) {
 	}{
 		{path: "/", contentType: "text/html"},
 		{path: "/vendor/alpine.min.js", contentType: "javascript"},
-		{path: "/vendor/tailwindcss.js", contentType: "javascript"},
+		{path: "/vendor/tailwind.css", contentType: "text/css"},
 		// 字体必须发出 font/woff2：Go 内置 MIME 表没有 .woff2，distroless 也没有
 		// /etc/mime.types 兜底，退化成 application/octet-stream 后叠加 nosniff 会被浏览器拒绝。
 		{path: "/vendor/material-symbols-outlined.woff2", contentType: "font/woff2"},
@@ -492,7 +492,8 @@ func TestEmbeddedAdminPageUsesLocalAssetsAndSafeConfigState(t *testing.T) {
 	}
 	page := string(data)
 	for _, required := range []string{
-		`src="/vendor/tailwindcss.js"`,
+		// 样式改成构建期产物后，页面只留一条 <link>；Play CDN 那个 407KB 运行时编译器已删除。
+		`href="/vendor/tailwind.css"`,
 		`src="/vendor/alpine.min.js"`,
 		`rel="icon" href="data:,"`,
 		`x-show="isConfigTab()"`,
@@ -505,14 +506,6 @@ func TestEmbeddedAdminPageUsesLocalAssetsAndSafeConfigState(t *testing.T) {
 		`If-Match`,
 		`application/yaml`,
 		`configPayload()`,
-		// 字体本地化：三个字体族都走 /vendor/ 下的 woff2。
-		`url('/vendor/material-symbols-outlined.woff2')`,
-		`url('/vendor/inter-latin.woff2')`,
-		`url('/vendor/jetbrains-mono-latin.woff2')`,
-		// 图标类必须自带 font-family 与 liga：这两条原先由 Google 的 css2 样式表提供，
-		// 少任何一条，页面上的图标都会退化成 monitoring、dns 这样的字面英文单词。
-		`font-family: 'Material Symbols Outlined'`,
-		`font-feature-settings: 'liga'`,
 	} {
 		if !strings.Contains(page, required) {
 			t.Errorf("admin page missing %q", required)
@@ -525,9 +518,93 @@ func TestEmbeddedAdminPageUsesLocalAssetsAndSafeConfigState(t *testing.T) {
 		// 字体外部依赖已去掉，CSP 也随之收紧，不能再漏回来。
 		"fonts.googleapis.com",
 		"fonts.gstatic.com",
+		// Play CDN 的运行时编译器与喂给它的内联 tailwind.config 都不该再回来。
+		// 只禁赋值形式：注释里提到源文件名 web/tailwind.config.js 是正常的。
+		"/vendor/tailwindcss.js",
+		"tailwind.config =",
+		"tailwind.config=",
 	} {
 		if strings.Contains(page, forbidden) {
 			t.Errorf("admin page still contains unsafe/stale pattern %q", forbidden)
+		}
+	}
+}
+
+// 样式从 index.html 的内联 <style> 搬到构建产物 vendor/tailwind.css 之后，
+// 原先钉在页面上的字体与图标断言必须跟着搬过来，否则 S3-3 那批保障会随迁移一起消失。
+// 产物是 minify 过的，字符串形态与源文件不同：url 与 font-family 的引号被去掉、
+// 'liga' 被规范成 "liga"，所以这里按产物的真实形态断言。
+func TestBuiltStylesheetKeepsLocalFontsAndComponentLayers(t *testing.T) {
+	data, err := webFS.ReadFile("web/vendor/tailwind.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	css := string(data)
+
+	for _, required := range []string{
+		// 字体本地化：三个字体族都走 /vendor/ 下的 woff2。
+		"url(/vendor/material-symbols-outlined.woff2)",
+		"url(/vendor/inter-latin.woff2)",
+		"url(/vendor/inter-latin-ext.woff2)",
+		"url(/vendor/jetbrains-mono-latin.woff2)",
+		"url(/vendor/jetbrains-mono-latin-ext.woff2)",
+		// 图标类必须自带 font-family 与 liga：这两条原先由 Google 的 css2 样式表提供，
+		// 少任何一条，页面上的图标都会退化成 monitoring、dns 这样的字面英文单词。
+		"font-family:Material Symbols Outlined",
+		`font-feature-settings:"liga"`,
+		// 图标字体必须 block 而不是 swap：fallback 阶段会把 ligature 名字当普通文本画出来，
+		// swap 会先闪一屏英文单词。
+		"font-display:block",
+		// 组件类只从 @layer components 来，被 Tailwind 的按需裁剪丢掉时页面会大面积失样式。
+		".btn{",
+		".btn-primary{",
+		".btn-secondary{",
+		".btn-danger{",
+		".field{",
+		".chip{",
+		".glass{",
+		".material-symbols-outlined{",
+		".icon-fill{",
+		// 这三个类只从 Alpine :class 表达式引用，写成层外普通 CSS 以免参与裁剪。
+		".gw-spin{",
+		".gw-grab{",
+		".gw-grabbing{",
+		"@keyframes gw-spin",
+	} {
+		if !strings.Contains(css, required) {
+			t.Errorf("built stylesheet missing %q", required)
+		}
+	}
+
+	if strings.Contains(css, "fonts.gstatic.com") || strings.Contains(css, "fonts.googleapis.com") {
+		t.Error("built stylesheet still references Google Fonts")
+	}
+
+	// 层叠顺序是这次迁移最容易静默坏掉的地方：Play CDN 把生成的 <style> append 到 head 末尾，
+	// 于是工具类天然排在页面自定义 CSS 之后。页面大量依赖这个顺序——
+	// .material-symbols-outlined 定死 font-size: 20px，图标按钮靠 text-[18px] 覆盖它；
+	// .btn 定死 padding: .625rem .875rem，紧凑按钮靠 px-2 py-1.5 覆盖它。
+	// 换成静态表后顺序由 @layer 保证，这里直接按字节偏移验证 components 排在 utilities 之前。
+	for _, pair := range []struct{ component, utility string }{
+		{".btn{", ".px-2{"},
+		{".material-symbols-outlined{", `.text-\[18px\]{`},
+		{".chip{", ".px-2{"},
+		{".field{", ".w-full{"},
+		// .icon-fill 与 .material-symbols-outlined 同为单类选择器，只能靠源码顺序决胜。
+		{".material-symbols-outlined{", ".icon-fill{"},
+	} {
+		first := strings.Index(css, pair.component)
+		second := strings.Index(css, pair.utility)
+		if first < 0 {
+			t.Errorf("built stylesheet missing component selector %q", pair.component)
+			continue
+		}
+		if second < 0 {
+			t.Errorf("built stylesheet missing utility selector %q", pair.utility)
+			continue
+		}
+		if first > second {
+			t.Errorf("cascade order broken: %q (at %d) must precede %q (at %d)", pair.component, first, pair.utility, second)
 		}
 	}
 }

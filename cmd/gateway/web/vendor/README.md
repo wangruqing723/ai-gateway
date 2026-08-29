@@ -2,12 +2,30 @@
 
 These files are pinned locally so the privileged admin page does not execute mutable third-party JavaScript at runtime, and so the page renders correctly with no outbound network access at all.
 
-## Scripts
+## Scripts and styles
 
 | File | Version | Source | SHA-256 |
 |---|---:|---|---|
 | `alpine.min.js` | 3.14.9 | `https://cdn.jsdelivr.net/npm/alpinejs@3.14.9/dist/cdn.min.js` | `3ed1eed252488921df65e363d6715deb04d7f92aaedb9e52199fdf73cb1e0ad3` |
-| `tailwindcss.js` | 3.4.17 | `https://cdn.tailwindcss.com/3.4.17` | `176e894661aa9cdc9a5cba6c720044cbbf7b8bd80d1c9a142a7c24b1b6c50d15` |
+| `tailwind.css` | Tailwind 3.4.17 | build output — `make web-css` from `web/src/tailwind.css` + `web/tailwind.config.js` | not pinned; changes whenever page classes change |
+
+`tailwind.css` is a **build artifact, committed to the repo** because `//go:embed` needs it at
+compile time and the runtime image is distroless with no node toolchain. It replaced the 407KB
+Tailwind Play CDN bundle, which compiled CSS in the browser on every page load.
+
+Two consequences:
+
+- Editing any `class` in `index.html` requires re-running `make web-css`. A class with no
+  corresponding rule in the artifact renders unstyled, silently. CI rebuilds with the pinned
+  version and fails on any diff against the committed file.
+- The custom component CSS (`.btn`, `.field`, `.chip`, `.glass`, `.material-symbols-outlined`,
+  `.icon-fill`) lives in `src/tailwind.css` under `@layer components`, not in `index.html`.
+  Layer order is load-bearing: the page relies on utilities beating components at equal
+  specificity (`text-[18px]` overriding the icon font-size, `px-2 py-1.5` overriding `.btn`
+  padding). Under the Play CDN this held because its injected `<style>` landed last in `<head>`;
+  now `@layer` guarantees it regardless of where the `<link>` sits. `.gw-spin` / `.gw-grab` /
+  `.gw-grabbing` stay outside any layer so they never participate in purging — they are
+  referenced only from Alpine `:class` expressions.
 
 ## Fonts
 
@@ -15,8 +33,9 @@ All three families are variable fonts (`wght` is a range, not an enumeration), s
 covers every weight the page uses. Only the `latin` and `latin-ext` subsets are vendored;
 the page has no Cyrillic, Greek, or Vietnamese content.
 
-`@font-face` rules live inline in `index.html` — they are not in a separate stylesheet,
-because `style-src` no longer allows any external origin.
+`@font-face` rules live in `src/tailwind.css` and land in the built `tailwind.css`. They sit
+outside any `@layer`: rules inside a layer participate in Tailwind's purging, and `@font-face`
+has no class name to scan for, so it would be dropped entirely.
 
 | File | Family | Axes | Source | SHA-256 |
 |---|---|---|---|---|
@@ -50,7 +69,7 @@ keyboard_arrow_up lan menu monitor_heart monitoring progress_activity receipt_lo
 restart_alt save schedule search speed sync task_alt timer tune visibility warning
 ```
 
-The `FILL` axis must survive subsetting — `.icon-fill` in `index.html` switches active nav
+The `FILL` axis must survive subsetting — `.icon-fill` in `src/tailwind.css` switches active nav
 icons to `FILL 1`. Verify with `fontTools`:
 
 ```python

@@ -50,10 +50,8 @@ jobs:
         run: |
           printf '%s  %s\n' \
             '3ed1eed252488921df65e363d6715deb04d7f92aaedb9e52199fdf73cb1e0ad3' 'cmd/gateway/web/vendor/alpine.min.js' \
-            '176e894661aa9cdc9a5cba6c720044cbbf7b8bd80d1c9a142a7c24b1b6c50d15' 'cmd/gateway/web/vendor/tailwindcss.js' \
             | sha256sum --check -
           node --check cmd/gateway/web/vendor/alpine.min.js
-          node --check cmd/gateway/web/vendor/tailwindcss.js
           node <<'NODE'
           const fs = require('fs');
           const html = fs.readFileSync('cmd/gateway/web/index.html', 'utf8');
@@ -69,6 +67,20 @@ jobs:
             }
           });
           NODE
+
+      # 样式表是构建期产物且随仓库提交，于是多了一种新的失步方式：
+      # 改了 index.html 的 class 却忘了重跑 `make web-css`，产物里就没有对应规则，
+      # 页面会静默少一块样式。这里用固定版本重建一次并比对，把「忘了重建」变成 CI 失败。
+      - name: Verify built stylesheet is up to date
+        shell: bash
+        run: |
+          cd cmd/gateway/web
+          npx --yes tailwindcss@3.4.17 -c tailwind.config.js -i src/tailwind.css -o /tmp/tailwind-rebuilt.css -m
+          if ! diff -q /tmp/tailwind-rebuilt.css vendor/tailwind.css; then
+            echo '::error::vendor/tailwind.css 与源文件不一致，请重跑 `make web-css` 后提交产物'
+            diff -u vendor/tailwind.css /tmp/tailwind-rebuilt.css | head -60
+            exit 1
+          fi
 
       - name: Validate production Compose
         run: docker compose config --quiet
