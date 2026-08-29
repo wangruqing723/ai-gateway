@@ -60,7 +60,7 @@
             <header class="sticky top-0 z-30 h-16 border-b border-line bg-ink/78 backdrop-blur-xl">
                 <div class="flex h-full items-center justify-between gap-4 px-4 sm:px-6 lg:px-8">
                     <div class="flex min-w-0 items-center gap-3">
-                        <button @click="mobileNavOpen = !mobileNavOpen" class="btn btn-secondary px-3 lg:hidden" title="打开导航">
+                        <button @click="mobileNavOpen = !mobileNavOpen" class="btn btn-secondary px-3 lg:hidden" title="打开导航" aria-label="打开导航">
                             <span class="material-symbols-outlined">menu</span>
                         </button>
                         <div class="min-w-0">
@@ -126,7 +126,7 @@
             <div x-show="mobileNavOpen" x-transition x-cloak class="fixed left-0 top-0 z-50 h-full w-72 border-r border-line bg-panel p-4 lg:hidden">
                 <div class="mb-5 flex items-center justify-between">
                     <div class="font-extrabold text-white">AI Gateway</div>
-                    <button @click="mobileNavOpen = false" class="btn btn-secondary px-3">
+                    <button @click="mobileNavOpen = false" class="btn btn-secondary px-3" aria-label="关闭导航">
                         <span class="material-symbols-outlined">close</span>
                     </button>
                 </div>
@@ -546,13 +546,13 @@
                                                         x-text="formatMs(provider.maxQueueWait || 30000)"></td>
                                                     <td class="w-px whitespace-nowrap px-3 py-2.5">
                                                         <div class="flex justify-end gap-1.5">
-                                                            <button @click="editProvider(name)" class="btn btn-secondary px-2 py-1.5" title="编辑 Provider">
+                                                            <button @click="editProvider(name)" class="btn btn-secondary px-2 py-1.5" title="编辑 Provider" aria-label="编辑 Provider">
                                                                 <span class="material-symbols-outlined text-[18px]">edit</span>
                                                             </button>
-                                                            <button @click="duplicateProvider(name)" class="btn btn-secondary px-2 py-1.5" title="复制为新 Provider">
+                                                            <button @click="duplicateProvider(name)" class="btn btn-secondary px-2 py-1.5" title="复制为新 Provider" aria-label="复制为新 Provider">
                                                                 <span class="material-symbols-outlined text-[18px]">content_copy</span>
                                                             </button>
-                                                            <button @click="removeProvider(name)" class="btn btn-danger px-2 py-1.5" title="删除 Provider">
+                                                            <button @click="removeProvider(name)" class="btn btn-danger px-2 py-1.5" title="删除 Provider" aria-label="删除 Provider">
                                                                 <span class="material-symbols-outlined text-[18px]">delete</span>
                                                             </button>
                                                         </div>
@@ -922,10 +922,10 @@
                             </select>
                             <input autocomplete="off" x-model="logFilters.q" @keydown.enter="loadRequestLogs()" class="field text-sm md:col-span-1" placeholder="关键词 / 请求 ID">
                             <div class="flex gap-2">
-                                <button @click="loadRequestLogs()" class="btn btn-secondary flex-1 px-2" title="刷新">
+                                <button @click="loadRequestLogs()" class="btn btn-secondary flex-1 px-2" title="刷新" aria-label="刷新请求日志">
                                     <span class="material-symbols-outlined">refresh</span>
                                 </button>
-                                <button @click="resetLogFilters()" class="btn btn-secondary flex-1 px-2" title="清空筛选">
+                                <button @click="resetLogFilters()" class="btn btn-secondary flex-1 px-2" title="清空筛选" aria-label="清空日志筛选">
                                     <span class="material-symbols-outlined">filter_alt_off</span>
                                 </button>
                             </div>
@@ -1131,7 +1131,7 @@
         <div class="glass w-full max-w-2xl rounded-lg shadow-glow">
             <div class="flex items-center justify-between border-b border-line p-5">
                 <h3 class="text-lg font-extrabold text-white" x-text="editingProvider ? '编辑 Provider' : '添加 Provider'"></h3>
-                <button @click="showProviderModal = false" class="btn btn-secondary px-2 py-2">
+                <button @click="showProviderModal = false" class="btn btn-secondary px-2 py-2" aria-label="关闭 Provider 弹窗">
                     <span class="material-symbols-outlined">close</span>
                 </button>
             </div>
@@ -1192,7 +1192,7 @@
         <div class="glass w-full max-w-2xl rounded-lg shadow-glow">
             <div class="flex items-center justify-between border-b border-line p-5">
                 <h3 class="text-lg font-extrabold text-white" x-text="editingRouteIndex >= 0 ? '编辑路由' : '添加路由'"></h3>
-                <button @click="showRouteModal = false" class="btn btn-secondary px-2 py-2">
+                <button @click="showRouteModal = false" class="btn btn-secondary px-2 py-2" aria-label="关闭路由弹窗">
                     <span class="material-symbols-outlined">close</span>
                 </button>
             </div>
@@ -1226,18 +1226,19 @@
                                         <button type="button" @click="fetchProviderModels(ti)"
                                                 :disabled="!target.provider || target.modelsLoading"
                                                 :title="target.provider ? '查询该 Provider 的上游模型列表' : '请先选择 Provider'"
+                                                :aria-label="target.provider ? '查询该 Provider 的上游模型列表' : '请先选择 Provider'"
                                                 class="absolute right-1 top-1/2 -translate-y-1/2 rounded p-1 text-muted hover:text-cyan disabled:opacity-40">
                                             <span class="material-symbols-outlined text-[18px]" x-show="!target.modelsLoading">search</span>
                                             <span class="material-symbols-outlined animate-spin text-[18px]" x-show="target.modelsLoading" x-cloak>progress_activity</span>
                                         </button>
                                     </div>
-                                    <button @click="moveRouteTarget(ti, -1)" :disabled="ti === 0" class="btn btn-secondary px-2 py-2" title="上移">
+                                    <button @click="moveRouteTarget(ti, -1)" :disabled="ti === 0" class="btn btn-secondary px-2 py-2" title="上移" aria-label="上移">
                                         <span class="material-symbols-outlined text-[18px]">keyboard_arrow_up</span>
                                     </button>
-                                    <button @click="moveRouteTarget(ti, 1)" :disabled="ti === routeForm.targets.length - 1" class="btn btn-secondary px-2 py-2" title="下移">
+                                    <button @click="moveRouteTarget(ti, 1)" :disabled="ti === routeForm.targets.length - 1" class="btn btn-secondary px-2 py-2" title="下移" aria-label="下移">
                                         <span class="material-symbols-outlined text-[18px]">keyboard_arrow_down</span>
                                     </button>
-                                    <button @click="removeRouteTarget(ti)" :disabled="routeForm.targets.length <= 1" class="btn btn-secondary px-2 py-2" title="删除该候选">
+                                    <button @click="removeRouteTarget(ti)" :disabled="routeForm.targets.length <= 1" class="btn btn-secondary px-2 py-2" title="删除该候选" aria-label="删除该候选">
                                         <span class="material-symbols-outlined text-[18px]">delete</span>
                                     </button>
                                 </div>
