@@ -1,5 +1,8 @@
+
                 addProvider() {
                     this.editingProvider = null;
+                    this.probingProvider = false;
+                    this.providerProbeStatus = null;
                     this.providerForm = {
                         name: '',
                         baseUrl: '',
@@ -9,6 +12,7 @@
                         maxPerSecond: 0,
                         maxQueueWait: 30000,
                         userAgent: '',
+                        proxy: '',
                         apiKeyConfigured: false,
                         clearApiKey: false
                     };
@@ -17,6 +21,8 @@
 
                 editProvider(name) {
                     this.editingProvider = name;
+                    this.probingProvider = false;
+                    this.providerProbeStatus = null;
                     const p = this.config.providers[name];
                     this.providerForm = {
                         name,
@@ -27,6 +33,7 @@
                         maxPerSecond: p.maxPerSecond,
                         maxQueueWait: p.maxQueueWait,
                         userAgent: p.userAgent || '',
+                        proxy: p.proxy || '',
                         apiKeyConfigured: !!p.apiKeyConfigured,
                         clearApiKey: false
                     };
@@ -43,6 +50,8 @@
                     const p = this.config.providers?.[name];
                     if (!p) return;
                     this.editingProvider = null;
+                    this.probingProvider = false;
+                    this.providerProbeStatus = null;
                     this.providerForm = {
                         name: this.nextCopyName(name, Object.keys(this.config.providers || {})),
                         baseUrl: p.baseUrl,
@@ -52,6 +61,8 @@
                         maxPerSecond: p.maxPerSecond,
                         maxQueueWait: p.maxQueueWait,
                         userAgent: p.userAgent || '',
+                        // 副本名在磁盘上没有旧密码可供 sentinel 回查，认证代理必须重填。
+                        proxy: (p.proxy || '').includes('__AI_GATEWAY_KEEP_PROXY_PASSWORD__') ? '' : (p.proxy || ''),
                         apiKeyConfigured: false,
                         clearApiKey: false
                     };
@@ -107,7 +118,8 @@
                         maxConcurrent: this.providerForm.maxConcurrent || 5,
                         maxPerSecond: this.providerForm.maxPerSecond || 0,
                         maxQueueWait: this.providerForm.maxQueueWait || 30000,
-                        userAgent: this.providerForm.userAgent || undefined
+                        userAgent: this.providerForm.userAgent || undefined,
+                        proxy: this.providerForm.proxy || undefined
                     };
                     // 弹窗保存直接落盘：点这个按钮已经是一次明确确认，再要求点顶部保存
                     // 等于同一件事确认两遍，实际结果是用户忘记第二步。
@@ -116,6 +128,55 @@
                         this.showProviderModal = false;
                     } else {
                         this.restoreConfig(snapshot);
+                    }
+                },
+
+                proxyHost(proxy) {
+                    if (!proxy) return '继承全局';
+                    try {
+                        const url = new URL(proxy);
+                        return url.host || '代理已配置';
+                    } catch (_) {
+                        return '代理已配置';
+                    }
+                },
+
+                async probeProviderForm() {
+                    if (this.probingProvider) return;
+                    if (!this.providerForm.name || !this.providerForm.baseUrl) {
+                        this.showStatus('名称和 URL 不能为空', 'error');
+                        return;
+                    }
+                    const existing = this.editingProvider ? this.config.providers[this.editingProvider] : null;
+                    let apiKey = this.providerForm.apiKey || '';
+                    if (!apiKey && this.providerForm.apiKeyConfigured && !this.providerForm.clearApiKey) {
+                        apiKey = existing?.apiKey || '__AI_GATEWAY_KEEP_API_KEY__';
+                    }
+                    if (this.providerForm.clearApiKey) apiKey = '';
+                    this.probingProvider = true;
+                    this.providerProbeStatus = null;
+                    try {
+                        const res = await fetch('/api/providers/probe', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                name: this.providerForm.name,
+                                baseUrl: this.providerForm.baseUrl,
+                                format: this.providerForm.format,
+                                apiKey,
+                                userAgent: this.providerForm.userAgent || '',
+                                proxy: this.providerForm.proxy || ''
+                            })
+                        });
+                        if (!res.ok) throw new Error(await this.errorText(res, '检测失败'));
+                        const data = await res.json();
+                        if (!data.status) throw new Error('响应里没有检测结果');
+                        // 只放进弹窗状态；不可写 health.providerHealth，后者只代表已落盘配置。
+                        this.providerProbeStatus = data.status;
+                    } catch (err) {
+                        this.providerProbeStatus = { status: 'error', message: err.message || '检测失败' };
+                    } finally {
+                        this.probingProvider = false;
                     }
                 },
 

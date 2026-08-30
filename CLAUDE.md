@@ -104,6 +104,15 @@ docker run --pull never --rm --name ai-gateway-dev-verify -v "$PWD":/work -w /wo
 docker run --pull never --rm --name ai-gateway-dev-verify -v "$PWD":/work -w /work golang:1.23-alpine go vet ./...
 ```
 
+race 检测需使用 Debian 版镜像（预装 gcc）：
+
+```bash
+docker run --pull never --rm --name ai-gateway-dev-verify -v "$PWD":/work -w /work golang:1.23 go test -race ./...
+```
+
+`golang:1.23-alpine` 没有 gcc；临时从 alpine 源安装 `gcc`/`musl-dev` 曾两次分别卡住
+18 分钟和 17 分钟。其余检查继续使用 Alpine 镜像，以保持镜像体积小、启动快。
+
 ```bash
 go run ./cmd/gateway
 CGO_ENABLED=0 go build -o ai-gateway ./cmd/gateway
@@ -173,10 +182,10 @@ go test ./internal/<pkg>/ -run TestName -v
 - **流式转发**：同格式直接透传；跨格式使用 `converter.NewStreamTransformer` 逐行转换，避免 `bufio.Scanner` 的大行限制。
 - **Provider User-Agent**：转发路径按固定优先级取值：`provider.userAgent` 非空时使用它；否则原样转发客户端请求的 `User-Agent`；客户端也未携带时完全不设该头，交给 Go 填默认值 `Go-http-client/1.1`。第三档必须不设头，不能 `Set("User-Agent", "")`：设空字符串会让该头彻底消失。此外 `fetchUpstreamModels`（模型列表查询）与 `providerhealth.checkOne`（健康检测）也要带上配置的 UA——它们探测 `/v1/models`，同样受上游 UA 准入影响（实测 agentrouter.org 在 Go 默认 UA 下返回 401、换成配置值返回完整列表）；不带的话模型列表查不了、健康检测把该 provider 永久误判成不健康。这两条是网关自己发起的请求，没有客户端 UA 可转发，故只有「配了就用」一档。新增走上游的请求构建路径时，都要考虑是否需要带 UA。
 - **超时控制**：`internal/proxy` 统一用 `context` 收口；流式超时后会补发合规 SSE 收尾事件。
-- **配置热重载**：`/api/config` 使用严格 YAML 解码、结构化脱敏、revision/ETag 与串行事务；`host`、`port` 只报告 `restartRequired`，其他运行时组件统一动态传播。`applyRuntimeConfig` 内 `queue`、`breaker`、`selector` 三者都要 `Reconcile`：selector 按 `route.match` 归属，删掉或改名的路由要连带丢掉轮转计数器与粘性映射（`rr` 既无 TTL 也无 LRU 兜底，不清理就随历史 match 单调增长）；`match` 未变时必须保留状态，否则每次保存配置都会冲掉全部会话粘性、让上游侧 prompt cache 作废。
+- **配置热重载**：`/api/config` 使用严格 YAML 解码、结构化脱敏、revision/ETag 与串行事务；`host`、`port` 只报告 `restartRequired`，其他运行时组件统一动态传播。`applyRuntimeConfig` 内 `queue`、`httpclient.Pool`、`breaker`、`selector` 都要 `Reconcile`：Pool 按仍被 Provider 引用的非空代理释放旧 Transport 的空闲连接；selector 按 `route.match` 归属，删掉或改名的路由要连带丢掉轮转计数器与粘性映射（`rr` 既无 TTL 也无 LRU 兜底，不清理就随历史 match 单调增长）；`match` 未变时必须保留状态，否则每次保存配置都会冲掉全部会话粘性、让上游侧 prompt cache 作废。
 - **请求观测**：最近 1000 条请求日志使用环形缓冲；累计与最近一分钟指标使用独立有界秒桶和固定延迟直方图，不受日志容量限制。
 - **Provider 健康检测**：`internal/providerhealth` 通过探测 `/v1/models` 判断上游是否可用；手动触发 `POST /api/providers/health` 后结果缓存在内存中，`/health` 响应携带缓存状态。
-- **出网代理**：`cmd/gateway/main.go` 的 `httpClient` 是所有出网路径的唯一出口（转发、vision 翻译、健康检测、模型查询），其 `Transport` 必须显式写 `Proxy: http.ProxyFromEnvironment`。自建 `Transport` 的零值 `Proxy` 语义是「完全不走代理」，只有 `http.DefaultTransport` 才默认带上；漏掉这行会让 `HTTPS_PROXY` 被静默忽略，需要代理才能出网的部署只看到 `dial ... connection refused`，看不出是代理没生效。代理由环境变量注入（compose 用 `AI_GATEWAY_HTTPS_PROXY` 等映射，默认空 = 不走代理），宿主机代理在容器内要写 `host.docker.internal`；`NO_PROXY` 是逃生口，默认排除本机回环。注意 `ProxyFromEnvironment` 内部对环境变量做了 `sync.Once` 缓存，进程启动后改 env 不生效，也因此无法用单测稳定覆盖——改动此处须做端到端验证。
+- **出网代理**：`internal/httpclient.Pool` 是所有出网路径（转发、vision 翻译、健康检测、模型查询）按 Provider 代理配置解析 client 的唯一入口，并按规范化代理 URL 复用连接池。`provider.proxy` 非空时使用该代理；空值时 Pool 的默认 client 显式设置 `Proxy: http.ProxyFromEnvironment`，由全局 `HTTPS_PROXY` / `HTTP_PROXY` 决定代理或直连。自建 `Transport` 的零值 `Proxy` 语义是「完全不走代理」，只有 `http.DefaultTransport` 才默认带上；漏掉这行会让 `HTTPS_PROXY` 被静默忽略。代理由环境变量注入（compose 用 `AI_GATEWAY_HTTPS_PROXY` 等映射，默认空 = 不走代理），宿主机代理在容器内要写 `host.docker.internal`；不能为单个 Provider 强制关闭全局代理，`NO_PROXY` 是按 host 的逃生口。注意 `ProxyFromEnvironment` 内部对环境变量做了 `sync.Once` 缓存，进程启动后改 env 不生效，也因此无法用单测稳定覆盖——改动此处须做端到端验证。
 
 ## Commit & Pull Request Guidelines
 

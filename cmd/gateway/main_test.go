@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -15,12 +16,14 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"ai-gateway/internal/cache"
 	"ai-gateway/internal/config"
 	"ai-gateway/internal/converter"
+	"ai-gateway/internal/httpclient"
 	"ai-gateway/internal/metrics"
 	"ai-gateway/internal/providerhealth"
 	"ai-gateway/internal/queue"
@@ -42,11 +45,15 @@ func newBoundaryTestServer() *server {
 			Providers: map[string]*config.Provider{},
 			Routes:    []config.Route{},
 		},
-		qm:             queue.NewManager(),
-		httpClient:     http.DefaultClient,
-		metrics:        metrics.NewCollector(10),
-		providerHealth: providerhealth.NewChecker(),
+		qm:                queue.NewManager(),
+		resolveHTTPClient: testClientResolver(http.DefaultClient),
+		metrics:           metrics.NewCollector(10),
+		providerHealth:    providerhealth.NewChecker(),
 	}
+}
+
+func testClientResolver(client *http.Client) func(string) (*http.Client, error) {
+	return func(string) (*http.Client, error) { return client, nil }
 }
 
 func TestForwardAttemptCanceledQueueUsesClientDisconnectedReason(t *testing.T) {
@@ -58,7 +65,7 @@ func TestForwardAttemptCanceledQueueUsesClientDisconnectedReason(t *testing.T) {
 	}
 	detail := metrics.AttemptDetail{}
 	reqLog := metrics.RequestLog{}
-	srv := &server{qm: queue.NewManager(), httpClient: http.DefaultClient}
+	srv := &server{qm: queue.NewManager(), resolveHTTPClient: testClientResolver(http.DefaultClient)}
 	outcome := srv.forwardAttempt(httptest.NewRecorder(), request, forwardAttemptInput{
 		cfg:          &config.Config{DirectMode: false},
 		start:        time.Now(),
@@ -796,6 +803,102 @@ func TestGetConfigUsesExactSecretSentinelAndRevision(t *testing.T) {
 	}
 }
 
+func TestPutConfigProxyPasswordRoundTrip(t *testing.T) {
+	const savedProxy = "http://alice:proxy-secret@proxy.example.com:7890"
+	raw := strings.Replace(
+		testConfigYAML("127.0.0.1", 7789, "https://api.example.com", "super-secret", 5),
+		"    format: openai",
+		"    format: openai\n    proxy: "+strconv.Quote(savedProxy),
+		1,
+	)
+	srv := newConfigTestServer(t, raw)
+
+	// 先完整读取 JSON view，再原样作为 PUT 载荷回传，证明前端 configPayload 不会把
+	// 脱敏值写回磁盘。仅删除 view 专有的响应字段。
+	get := httptest.NewRecorder()
+	srv.handle(get, httptest.NewRequest(http.MethodGet, "http://127.0.0.1:7789/api/config", nil))
+	if get.Code != http.StatusOK {
+		t.Fatalf("GET status = %d; body=%s", get.Code, get.Body.String())
+	}
+	if strings.Contains(get.Body.String(), "proxy-secret") {
+		t.Fatal("GET /api/config 泄露了代理密码")
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(get.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	providers := payload["providers"].(map[string]any)
+	primary := providers["primary"].(map[string]any)
+	if got := primary["proxy"]; got != "http://alice:"+config.ProxyPasswordKeepSentinel+"@proxy.example.com:7890" {
+		t.Fatalf("GET proxy = %#v", got)
+	}
+	// path 与 revision/restartRequired 同类：都是响应专有字段，不属于持久化配置
+	// （Config.Path 的 yaml tag 是 "-"）。GET 会带上它，而 PUT 的严格解码器不认，
+	// 所以逐字段回传前必须一并删掉。
+	//
+	// 这处 GET/PUT 不对称是有意保留的，不要"顺手修掉"：前端确实要读 path
+	// （02-config-normalize 读出来，03-config-load 显示成配置文件路径），
+	// 从 GET 里去掉会让界面上的路径显示崩掉；而让 PUT 接受 path 又等于为一个
+	// yaml:"-" 的字段削弱严格解码。正确的客户端形态是"读它但不回传它"——
+	// configPayload 走白名单，天然如此，所以真前端从来碰不到这条。
+	delete(payload, "path")
+	delete(payload, "revision")
+	delete(payload, "restartRequired")
+	delete(primary, "apiKeyConfigured")
+	body, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	put := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "http://127.0.0.1:7789/api/config", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	srv.handle(put, req)
+	if put.Code != http.StatusOK {
+		t.Fatalf("PUT status = %d; body=%s", put.Code, put.Body.String())
+	}
+	disk, err := config.DecodeAndValidate(mustReadFile(t, gotConfigPath(srv)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := disk.Providers["primary"].Proxy; got != savedProxy {
+		t.Fatalf("round-trip 后磁盘代理 = %q，want %q", got, savedProxy)
+	}
+
+	t.Run("proxy without password is returned unchanged", func(t *testing.T) {
+		plainRaw := strings.Replace(raw, strconv.Quote(savedProxy), strconv.Quote("http://proxy.example.com:7890"), 1)
+		plainServer := newConfigTestServer(t, plainRaw)
+		recorder := httptest.NewRecorder()
+		plainServer.handle(recorder, httptest.NewRequest(http.MethodGet, "http://127.0.0.1:7789/api/config", nil))
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("GET status = %d; body=%s", recorder.Code, recorder.Body.String())
+		}
+		var response struct {
+			Providers map[string]struct {
+				Proxy string `json:"proxy"`
+			} `json:"providers"`
+		}
+		if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+			t.Fatal(err)
+		}
+		if got := response.Providers["primary"].Proxy; got != "http://proxy.example.com:7890" {
+			t.Fatalf("无密码代理被改写为 %q", got)
+		}
+	})
+
+	t.Run("sentinel without saved proxy password is rejected", func(t *testing.T) {
+		noProxyServer := newConfigTestServer(t, testConfigYAML("127.0.0.1", 7789, "https://api.example.com", "super-secret", 5))
+		body := strings.Replace(
+			testConfigYAML("127.0.0.1", 7789, "https://api.example.com", config.APIKeyKeepSentinel, 5),
+			"    format: openai",
+			"    format: openai\n    proxy: "+strconv.Quote("http://alice:"+config.ProxyPasswordKeepSentinel+"@proxy.example.com:7890"),
+			1,
+		)
+		if rec := putConfig(t, noProxyServer, body, ""); rec.Code != http.StatusBadRequest {
+			t.Fatalf("PUT status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+		}
+	})
+}
+
 func TestConfigRevisionIsOpaqueAndRotatesOnSecretChange(t *testing.T) {
 	srv := newConfigTestServer(t, testConfigYAML("127.0.0.1", 7789, "https://api.example.com", "guessable-one", 5))
 	first := httptest.NewRecorder()
@@ -897,7 +1000,7 @@ func TestConfigPutMediaTypes(t *testing.T) {
 
 func TestGetRawConfigRedactsStructuredYAML(t *testing.T) {
 	raw := `providers:
-  primary: {baseUrl: https://api.example.com, apiKey: "flow-secret", format: openai, maxConcurrent: 5, maxPerSecond: 0, maxQueueWait: 30000}
+  primary: {baseUrl: https://api.example.com, apiKey: "flow-secret", format: openai, proxy: "http://alice:proxy-password@proxy.example.com:7890", maxConcurrent: 5, maxPerSecond: 0, maxQueueWait: 30000}
 routes:
   - match: "*"
     provider: primary
@@ -909,7 +1012,7 @@ routes:
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d; body=%s", recorder.Code, recorder.Body.String())
 	}
-	if strings.Contains(recorder.Body.String(), "flow-secret") || !strings.Contains(recorder.Body.String(), config.APIKeyKeepSentinel) {
+	if strings.Contains(recorder.Body.String(), "flow-secret") || strings.Contains(recorder.Body.String(), "proxy-password") || !strings.Contains(recorder.Body.String(), config.APIKeyKeepSentinel) || !strings.Contains(recorder.Body.String(), config.ProxyPasswordKeepSentinel) {
 		t.Fatalf("raw config was not safely redacted:\n%s", recorder.Body.String())
 	}
 	if got := recorder.Header().Get("Content-Type"); !strings.Contains(got, "yaml") {
@@ -918,6 +1021,218 @@ routes:
 	if _, err := config.DecodeAndValidate(recorder.Body.Bytes()); err != nil {
 		t.Fatalf("redacted YAML is invalid: %v", err)
 	}
+}
+
+func TestProviderProxyIsUsedForForwarding(t *testing.T) {
+	var received atomic.Bool
+	proxyServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received.Store(true)
+		if !r.URL.IsAbs() {
+			t.Errorf("代理收到的 URL 不是绝对 URL: %#v", r.URL)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"chatcmpl-proxy","model":"upstream","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`)
+	}))
+	defer proxyServer.Close()
+
+	raw := strings.Replace(
+		testConfigYAML("127.0.0.1", 7789, "http://upstream.invalid", "secret", 5),
+		"    format: openai",
+		"    format: openai\n    proxy: "+strconv.Quote(proxyServer.URL),
+		1,
+	)
+	srv := newConfigTestServer(t, raw)
+	pool := httpclient.NewPool()
+	srv.httpPool = pool
+	srv.resolveHTTPClient = pool.For
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:7789/v1/chat/completions", strings.NewReader(`{"model":"client-model","messages":[{"role":"user","content":"hello"}]}`))
+	req.Header.Set("Content-Type", "application/json")
+	srv.handle(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("forward status = %d; body=%s", recorder.Code, recorder.Body.String())
+	}
+	if !received.Load() {
+		t.Fatal("provider 配置的代理未收到转发请求")
+	}
+}
+
+func TestApplyRuntimeConfigReconcilesProviderProxyPool(t *testing.T) {
+	pool := httpclient.NewPool()
+	oldClient, err := pool.For("http://old-proxy.example:7890")
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldCfg := &config.Config{Providers: map[string]*config.Provider{
+		"p": {Name: "p", Proxy: "http://old-proxy.example:7890", MaxConcurrent: 1},
+	}}
+	newCfg := &config.Config{Providers: map[string]*config.Provider{
+		"p": {Name: "p", Proxy: "http://new-proxy.example:7890", MaxConcurrent: 1},
+	}}
+	srv := &server{cfg: oldCfg, qm: queue.NewManager(), httpPool: pool, resolveHTTPClient: pool.For}
+	srv.applyRuntimeConfig(newCfg, "revision")
+	newClient, err := pool.For("http://old-proxy.example:7890")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if oldClient == newClient {
+		t.Fatal("热重载更换代理后，旧代理 client 仍留在 Pool 中")
+	}
+}
+
+func TestProviderProbeEndpoint(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			t.Errorf("path = %q, want /v1/models", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+	srv := newConfigTestServer(t, testConfigYAML("127.0.0.1", 7789, upstream.URL, "saved-key", 5))
+	srv.resolveHTTPClient = testClientResolver(upstream.Client())
+
+	t.Run("success uses temporary provider and returns wrapped status", func(t *testing.T) {
+		rec := callProviderProbe(t, srv, map[string]any{
+			"name": "temporary", "baseUrl": upstream.URL, "format": "openai", "apiKey": "temporary-key",
+		})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d; body=%s", rec.Code, rec.Body.String())
+		}
+		var body struct {
+			Status providerhealth.Status `json:"status"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		if body.Status.Name != "temporary" || body.Status.Status != "ok" || body.Status.Endpoint == "" {
+			t.Fatalf("probe response = %#v", body.Status)
+		}
+	})
+
+	t.Run("boundaries and validation", func(t *testing.T) {
+		method := httptest.NewRecorder()
+		srv.handle(method, httptest.NewRequest(http.MethodGet, "http://127.0.0.1:7789/api/providers/probe", nil))
+		if method.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("method status = %d", method.Code)
+		}
+		crossSite := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:7789/api/providers/probe", strings.NewReader(`{}`))
+		request.Header.Set("Origin", "https://attacker.example")
+		request.Header.Set("Content-Type", "application/json")
+		srv.handle(crossSite, request)
+		if crossSite.Code != http.StatusForbidden {
+			t.Fatalf("Origin status = %d", crossSite.Code)
+		}
+		unsupported := httptest.NewRecorder()
+		request = httptest.NewRequest(http.MethodPost, "http://127.0.0.1:7789/api/providers/probe", strings.NewReader(`{}`))
+		request.Header.Set("Content-Type", "application/yaml")
+		srv.handle(unsupported, request)
+		if unsupported.Code != http.StatusUnsupportedMediaType {
+			t.Fatalf("Content-Type status = %d", unsupported.Code)
+		}
+		invalid := callProviderProbe(t, srv, map[string]any{"name": "p", "baseUrl": "not a URL", "format": "openai"})
+		if invalid.Code != http.StatusBadRequest || !strings.Contains(invalid.Body.String(), "config_validation_error") {
+			t.Fatalf("invalid config response = %d/%s", invalid.Code, invalid.Body.String())
+		}
+		unknown := callProviderProbe(t, srv, map[string]any{"name": "p", "baseUrl": upstream.URL, "format": "openai", "maxConcurrent": 1})
+		if unknown.Code != http.StatusBadRequest || !strings.Contains(unknown.Body.String(), "config_validation_error") {
+			t.Fatalf("unknown field response = %d/%s", unknown.Code, unknown.Body.String())
+		}
+		tooLarge := httptest.NewRecorder()
+		request = httptest.NewRequest(http.MethodPost, "http://127.0.0.1:7789/api/providers/probe", strings.NewReader(strings.Repeat("x", testMaxConfigBodyBytes+1)))
+		request.Header.Set("Content-Type", "application/json")
+		srv.handle(tooLarge, request)
+		if tooLarge.Code != http.StatusRequestEntityTooLarge {
+			t.Fatalf("body limit status = %d; body=%s", tooLarge.Code, tooLarge.Body.String())
+		}
+	})
+
+	t.Run("sentinel without stored secret is rejected", func(t *testing.T) {
+		rec := callProviderProbe(t, srv, map[string]any{
+			"name": "new", "baseUrl": upstream.URL, "format": "openai", "apiKey": config.APIKeyKeepSentinel,
+		})
+		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "没有已存密钥") {
+			t.Fatalf("apiKey sentinel = %d/%s", rec.Code, rec.Body.String())
+		}
+		rec = callProviderProbe(t, srv, map[string]any{
+			"name": "primary", "baseUrl": upstream.URL, "format": "openai", "proxy": "http://alice:" + config.ProxyPasswordKeepSentinel + "@proxy.example:7890",
+		})
+		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "没有已存密码") {
+			t.Fatalf("proxy sentinel = %d/%s", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("resolver failure is upstream status and redacts proxy password", func(t *testing.T) {
+		failing := newConfigTestServer(t, testConfigYAML("127.0.0.1", 7789, upstream.URL, "saved-key", 5))
+		failing.resolveHTTPClient = func(proxy string) (*http.Client, error) {
+			return nil, fmt.Errorf("代理不可达: %s", proxy)
+		}
+		rec := callProviderProbe(t, failing, map[string]any{
+			"name": "temporary", "baseUrl": upstream.URL, "format": "openai", "proxy": "http://alice:proxy-secret@proxy.example:7890",
+		})
+		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"status":"error"`) {
+			t.Fatalf("resolver failure = %d/%s", rec.Code, rec.Body.String())
+		}
+		if strings.Contains(rec.Body.String(), "proxy-secret") || !strings.Contains(rec.Body.String(), config.ProxyPasswordKeepSentinel) {
+			t.Fatalf("probe error leaked proxy password: %s", rec.Body.String())
+		}
+	})
+
+	t.Run("both sentinels resolve stored credentials", func(t *testing.T) {
+		const storedProxy = "http://alice:stored-proxy-password@proxy.example:7890"
+		raw := strings.Replace(
+			testConfigYAML("127.0.0.1", 7789, upstream.URL, "stored-api-key", 5),
+			"    format: openai",
+			"    format: openai\n    proxy: "+strconv.Quote(storedProxy),
+			1,
+		)
+		stored := newConfigTestServer(t, raw)
+		var usedProxy string
+		stored.resolveHTTPClient = func(proxyURL string) (*http.Client, error) {
+			usedProxy = proxyURL
+			return upstream.Client(), nil
+		}
+		rec := callProviderProbe(t, stored, map[string]any{
+			"name": "primary", "baseUrl": upstream.URL, "format": "openai",
+			"apiKey": config.APIKeyKeepSentinel,
+			"proxy":  "http://alice:" + config.ProxyPasswordKeepSentinel + "@other-proxy.example:7890",
+		})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("sentinel probe = %d/%s", rec.Code, rec.Body.String())
+		}
+		if usedProxy != "http://alice:stored-proxy-password@other-proxy.example:7890" {
+			t.Fatalf("resolved proxy = %q", usedProxy)
+		}
+	})
+
+	t.Run("busy checker is gateway failure", func(t *testing.T) {
+		busy := newConfigTestServer(t, testConfigYAML("127.0.0.1", 7789, upstream.URL, "saved-key", 5))
+		busy.providerHealth = &probeBusyHealthSpy{}
+		busy.resolveHTTPClient = testClientResolver(upstream.Client())
+		rec := callProviderProbe(t, busy, map[string]any{"name": "temporary", "baseUrl": upstream.URL, "format": "openai"})
+		if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "gateway_error") {
+			t.Fatalf("busy probe = %d/%s", rec.Code, rec.Body.String())
+		}
+	})
+}
+
+func callProviderProbe(t *testing.T, srv *server, body map[string]any) *httptest.ResponseRecorder {
+	t.Helper()
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:7789/api/providers/probe", bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	srv.handle(rec, req)
+	return rec
+}
+
+type probeBusyHealthSpy struct{ runtimeHealthSpy }
+
+func (s *probeBusyHealthSpy) ProbeAdHoc(context.Context, *config.Provider, providerhealth.ClientResolver) (providerhealth.Status, bool) {
+	return providerhealth.Status{}, false
 }
 
 // userAgent 必须能完整走通「落盘 → 回显」这条往返，否则前端编辑时读不到已配的值。
@@ -989,6 +1304,128 @@ func TestFrontendCoversAllProviderFields(t *testing.T) {
 	// 那时上面的循环会全部跳过、测试假绿。
 	if sites < 5 {
 		t.Fatalf("只识别到 %d 个 provider 重建点，少于预期；定位逻辑可能已失效", sites)
+	}
+}
+
+// TestFrontendSentinelLiteralsMatchBackend 把前端硬编码的 sentinel 字面量钉在后端常量上。
+//
+// 前端有两处必须认得 sentinel 的精确值：克隆 provider 时要剥掉代理密码占位符
+// （副本在磁盘上没有旧密码可回查），弹窗检测时要在用户未重填密钥时发回 apiKey 占位符。
+// 这两处只能写字面量——前端是静态资源，拿不到 Go 常量。
+//
+// 于是形成一处前后端耦合：Go 侧改了常量值，前端会静默失效（克隆出的副本带着
+// 占位符当密码、检测发错 sentinel 被后端当「凭空 sentinel」拒掉），且没有任何编译期
+// 或运行期报错。这与 provider 字段白名单是同一类漂移，本项目已为那类建了两条防线。
+//
+// 判据是双向的：
+//   - Go → 前端：每个常量的值都必须在前端源码里出现，否则说明改了常量没改前端。
+//   - 前端 → Go：前端出现的每个 __AI_GATEWAY_KEEP_*__ 形态字面量都必须能对上某个常量，
+//     否则说明前端拼错了（拼错的字面量永远匹配不上，行为与漏改一致但更难发现）。
+func TestFrontendSentinelLiteralsMatchBackend(t *testing.T) {
+	srcDir := filepath.Join("web", "src", "app")
+	entries, err := os.ReadDir(srcDir)
+	if err != nil {
+		t.Skipf("前端源码目录不可读，跳过: %v", err)
+	}
+
+	sentinels := map[string]string{
+		"config.APIKeyKeepSentinel":        config.APIKeyKeepSentinel,
+		"config.ProxyPasswordKeepSentinel": config.ProxyPasswordKeepSentinel,
+	}
+
+	var sources strings.Builder
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".js.part") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(srcDir, e.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		// 剥注释：注释里提到 sentinel 不算前端真的用了它。
+		sources.WriteString(stripJSComments(string(data)))
+		sources.WriteString("\n")
+	}
+	code := sources.String()
+	if strings.TrimSpace(code) == "" {
+		t.Fatal("没读到任何前端源码，测试本身失效")
+	}
+
+	for name, value := range sentinels {
+		if !strings.Contains(code, value) {
+			t.Errorf("前端源码里找不到 %s 的值 %q。"+
+				"前端必须硬编码该值（静态资源拿不到 Go 常量），改了常量就要同步前端，"+
+				"否则克隆 provider 与弹窗检测会静默失效且无任何报错。", name, value)
+		}
+	}
+
+	// 反向：前端里形似 sentinel 的字面量必须都能对上后端常量，挡住拼写错误。
+	known := make(map[string]bool, len(sentinels))
+	for _, value := range sentinels {
+		known[value] = true
+	}
+	for _, found := range regexp.MustCompile(`__AI_GATEWAY_KEEP_[A-Z_]*__`).FindAllString(code, -1) {
+		if !known[found] {
+			t.Errorf("前端出现了对不上任何后端常量的 sentinel 字面量 %q；"+
+				"疑似拼写错误——拼错的占位符永远匹配不上，表现与漏改一致但更难定位。", found)
+		}
+	}
+}
+
+// TestFrontendCoversAllRouteFields 防止 normalizeConfig 漏读新增的 Route 字段。
+//
+// 路由表单会按条件省略部分字段，不能拿它作为落盘配置的覆盖度检查；真正逐字段
+// 重建 Route 的地方只有 normalizeConfig 的 routes map 回调。检查范围必须收窄到
+// 该回调，不能查整个函数：providers 段也会出现 provider/model，范围过宽会假绿。
+func TestFrontendCoversAllRouteFields(t *testing.T) {
+	path := filepath.Join("web", "src", "app", "02-config-normalize.js.part")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Skipf("前端源码不可读，跳过: %v", err)
+	}
+
+	span, sites := routesMapCallbackSpan(string(data))
+	if sites != 1 {
+		t.Fatalf("只识别到 %d 处 routes map 回调，预期恰好 1 处；定位逻辑可能已失效", sites)
+	}
+	code := stripJSComments(span)
+
+	var want []string
+	typ := reflect.TypeOf(config.Route{})
+	for i := 0; i < typ.NumField(); i++ {
+		tag := typ.Field(i).Tag.Get("json")
+		if tag == "" || tag == "-" {
+			continue
+		}
+		field := strings.Split(tag, ",")[0]
+		if field != "" {
+			want = append(want, field)
+		}
+	}
+	if len(want) == 0 {
+		t.Fatal("反射没取到任何 route 字段，测试本身失效")
+	}
+	for _, field := range want {
+		if !routeFieldIsRebuilt(code, field) {
+			t.Errorf("normalizeConfig 的 routes map 回调缺少字段 %q；新增 Route 字段必须在此完整回显，否则保存会静默丢失。\n片段:\n%s", field, span)
+		}
+	}
+}
+
+// routeFieldIsRebuilt 判断字段是否真正被写回 route，不能只检查字段名是否出现。
+// strategy 的临时变量、targets/vision 内层对象都会复用同名字段；若只做
+// strings.Contains，删掉 route.strategy 或单目标的 provider 回写仍会假绿。
+func routeFieldIsRebuilt(code, field string) bool {
+	quoted := regexp.QuoteMeta(field)
+	switch field {
+	case "match", "provider", "model":
+		// 三个单目标字段必须在 route 初始对象里从 r 读取。只看
+		// route.provider = '' 会把多目标分支的清空误当成单目标回写。
+		return regexp.MustCompile(`\b` + quoted + `\s*:\s*pick\s*\(\s*r\s*,`).MatchString(code)
+	default:
+		// 可选字段（targets、vision、strategy）按条件直接写回 route。
+		// 新增字段若改变了这一形态，测试会明确失败，要求同步更新这条防线。
+		return regexp.MustCompile(`\broute\.` + quoted + `\s*=`).MatchString(code)
 	}
 }
 
@@ -1067,6 +1504,38 @@ func providerObjectSpans(text string) []string {
 		spans = append(spans, text[open:close+1])
 	}
 	return spans
+}
+
+// routesMapCallbackSpan 只提取 normalizeConfig 中 const routes 的完整赋值语句。
+// Strategy、Targets 与 Vision 在对象字面量之外条件赋值，因此不能只取 route 对象。
+func routesMapCallbackSpan(text string) (string, int) {
+	locations := regexp.MustCompile(`\bconst\s+routes\s*=`).FindAllStringIndex(text, -1)
+	if len(locations) != 1 {
+		return "", len(locations)
+	}
+	start := locations[0][0]
+	paren, bracket, brace := 0, 0, 0
+	for i := locations[0][1]; i < len(text); i++ {
+		switch text[i] {
+		case '(':
+			paren++
+		case ')':
+			paren--
+		case '[':
+			bracket++
+		case ']':
+			bracket--
+		case '{':
+			brace++
+		case '}':
+			brace--
+		case ';':
+			if paren == 0 && bracket == 0 && brace == 0 {
+				return text[start : i+1], 1
+			}
+		}
+	}
+	return "", 0
 }
 
 func TestPutConfigPreservesUserAgent(t *testing.T) {
@@ -1543,7 +2012,7 @@ func TestSameFormatRequestPreservesNativeExtensions(t *testing.T) {
 					Providers: providers,
 					Routes:    []config.Route{route},
 				},
-				qm: queue.NewManager(), httpClient: upstream.Client(), metrics: metrics.NewCollector(10),
+				qm: queue.NewManager(), resolveHTTPClient: testClientResolver(upstream.Client()), metrics: metrics.NewCollector(10),
 				providerHealth: providerhealth.NewChecker(), translator: &runtimeVisionSpy{},
 			}
 			recorder := httptest.NewRecorder()
@@ -1648,11 +2117,11 @@ func newConfigTestServer(t *testing.T, raw string) *server {
 	}
 	cfg.Path = path
 	return &server{
-		cfg:            cfg,
-		qm:             queue.NewManager(),
-		httpClient:     http.DefaultClient,
-		metrics:        metrics.NewCollector(10),
-		providerHealth: providerhealth.NewChecker(),
+		cfg:               cfg,
+		qm:                queue.NewManager(),
+		resolveHTTPClient: testClientResolver(http.DefaultClient),
+		metrics:           metrics.NewCollector(10),
+		providerHealth:    providerhealth.NewChecker(),
 	}
 }
 
@@ -1950,11 +2419,14 @@ type runtimeHealthSpy struct {
 func (s *runtimeHealthSpy) Snapshot(*config.Config) map[string]providerhealth.Status {
 	return map[string]providerhealth.Status{}
 }
-func (s *runtimeHealthSpy) CheckAll(context.Context, *config.Config, *http.Client) map[string]providerhealth.Status {
+func (s *runtimeHealthSpy) CheckAll(context.Context, *config.Config, providerhealth.ClientResolver) map[string]providerhealth.Status {
 	return map[string]providerhealth.Status{}
 }
-func (s *runtimeHealthSpy) CheckProvider(_ context.Context, _ *config.Config, _ *http.Client, name string) (providerhealth.Status, bool) {
+func (s *runtimeHealthSpy) CheckProvider(_ context.Context, _ *config.Config, _ providerhealth.ClientResolver, name string) (providerhealth.Status, bool) {
 	return providerhealth.Status{Name: name}, true
+}
+func (s *runtimeHealthSpy) ProbeAdHoc(context.Context, *config.Provider, providerhealth.ClientResolver) (providerhealth.Status, bool) {
+	return providerhealth.Status{}, true
 }
 func (s *runtimeHealthSpy) InvalidateChanged(oldCfg, newCfg *config.Config) {
 	s.calls++

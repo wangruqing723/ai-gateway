@@ -16,6 +16,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -33,6 +34,7 @@ import (
 	"ai-gateway/internal/cache"
 	"ai-gateway/internal/config"
 	"ai-gateway/internal/converter"
+	"ai-gateway/internal/httpclient"
 	"ai-gateway/internal/metrics"
 	"ai-gateway/internal/providerhealth"
 	"ai-gateway/internal/proxy"
@@ -58,22 +60,8 @@ func main() {
 
 	qm := queue.NewManager()
 
-	// 复用连接池的 HTTP 客户端；不设 http.Client.Timeout（非流式靠 ctx 超时，流式靠 header 超时 + 活跃超时）
-	//
-	// Proxy 必须显式设置：自建 Transport 的零值 Proxy 是「完全不走代理」，
-	// 只有 http.DefaultTransport 才默认带 ProxyFromEnvironment。不写这一行，
-	// HTTPS_PROXY / HTTP_PROXY 会被静默忽略，需要代理才能出网的部署（公司网络、
-	// 被 DNS 污染的上游域名）只会看到 dial 失败，完全看不出是代理没生效。
-	// 该 client 是所有出网路径的唯一出口：转发、vision 翻译、健康检测、模型查询。
-	// 不想走代理时用 NO_PROXY 排除，语义与 curl、docker 一致。
-	httpClient := &http.Client{
-		Transport: &http.Transport{
-			Proxy:               http.ProxyFromEnvironment,
-			MaxIdleConns:        200,
-			MaxIdleConnsPerHost: 100,
-			IdleConnTimeout:     90 * time.Second,
-		},
-	}
+	// Pool 按 provider 代理配置复用连接；空代理仍使用环境变量代理或直连。
+	httpPool := httpclient.NewPool()
 
 	// 初始化 SQLite 图片缓存
 	imgCache, err := cache.Open()
@@ -94,7 +82,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "[ai-gateway] 缓存清理: 删除 %d 条过期记录\n", res.Deleted)
 	}
 
-	translator := vision.New(imgCache, qm, httpClient, cfg.DirectMode)
+	translator := vision.New(imgCache, qm, httpPool.For, cfg.DirectMode)
 	revision, err := newConfigRevision()
 	if err != nil {
 		_ = imgCache.Close()
@@ -103,19 +91,20 @@ func main() {
 	}
 
 	srv := &server{
-		cfg:            cfg,
-		revision:       revision,
-		listenHost:     cfg.Host,
-		listenPort:     cfg.Port,
-		qm:             qm,
-		httpClient:     httpClient,
-		cache:          imgCache,
-		translator:     translator,
-		metrics:        metrics.NewCollectorWithWindow(1000, cfg.Metrics.WindowMinutes),
-		providerHealth: providerhealth.NewChecker(),
-		breaker:        breaker.New(breakerSettings(cfg)),
-		selector:       balancer.New(),
-		webDevDir:      os.Getenv("AI_GATEWAY_WEB_DIR"),
+		cfg:               cfg,
+		revision:          revision,
+		listenHost:        cfg.Host,
+		listenPort:        cfg.Port,
+		qm:                qm,
+		httpPool:          httpPool,
+		resolveHTTPClient: httpPool.For,
+		cache:             imgCache,
+		translator:        translator,
+		metrics:           metrics.NewCollectorWithWindow(1000, cfg.Metrics.WindowMinutes),
+		providerHealth:    providerhealth.NewChecker(),
+		breaker:           breaker.New(breakerSettings(cfg)),
+		selector:          balancer.New(),
+		webDevDir:         os.Getenv("AI_GATEWAY_WEB_DIR"),
 	}
 	initialLimits := make(map[string]queue.Limits, len(cfg.Providers))
 	for name, provider := range cfg.Providers {
@@ -167,8 +156,9 @@ type visionRuntime interface {
 
 type providerHealthRuntime interface {
 	Snapshot(*config.Config) map[string]providerhealth.Status
-	CheckAll(context.Context, *config.Config, *http.Client) map[string]providerhealth.Status
-	CheckProvider(context.Context, *config.Config, *http.Client, string) (providerhealth.Status, bool)
+	CheckAll(context.Context, *config.Config, providerhealth.ClientResolver) map[string]providerhealth.Status
+	CheckProvider(context.Context, *config.Config, providerhealth.ClientResolver, string) (providerhealth.Status, bool)
+	ProbeAdHoc(context.Context, *config.Provider, providerhealth.ClientResolver) (providerhealth.Status, bool)
 	InvalidateChanged(*config.Config, *config.Config)
 }
 
@@ -192,29 +182,37 @@ func shutdownThenClose(server httpShutdowner, timeout time.Duration, closeResour
 }
 
 type server struct {
-	cfg            *config.Config
-	cfgMu          sync.RWMutex // 保护 cfg 的并发读写
-	configOpMu     sync.Mutex   // 串行化保存、重载与运行时应用
-	healthStatsMu  sync.Mutex   // 串行化 /health 的缓存刷新，避免并发请求击穿 TTL
-	healthStatsAt  time.Time
-	healthCache    cache.Stats
-	healthHeapMB   uint64
-	healthSysMB    uint64
-	revision       string
-	revisionSource func() (string, error)
-	listenHost     string
-	listenPort     int
-	qm             *queue.Manager
-	httpClient     *http.Client
-	cache          cacheRuntime
-	translator     visionRuntime
-	metrics        *metrics.Collector
-	providerHealth providerHealthRuntime
-	breaker        *breaker.Breaker
+	cfg               *config.Config
+	cfgMu             sync.RWMutex // 保护 cfg 的并发读写
+	configOpMu        sync.Mutex   // 串行化保存、重载与运行时应用
+	healthStatsMu     sync.Mutex   // 串行化 /health 的缓存刷新，避免并发请求击穿 TTL
+	healthStatsAt     time.Time
+	healthCache       cache.Stats
+	healthHeapMB      uint64
+	healthSysMB       uint64
+	revision          string
+	revisionSource    func() (string, error)
+	listenHost        string
+	listenPort        int
+	qm                *queue.Manager
+	httpPool          *httpclient.Pool
+	resolveHTTPClient func(proxyURL string) (*http.Client, error)
+	cache             cacheRuntime
+	translator        visionRuntime
+	metrics           *metrics.Collector
+	providerHealth    providerHealthRuntime
+	breaker           *breaker.Breaker
 	// selector 持有跨请求的候选选择状态（per-route 轮转计数器 + prompt cache 粘性映射）。
 	// router 是无状态纯函数，这些状态只能由 server 持有并显式传入。
 	selector  *balancer.Selector
 	webDevDir string
+}
+
+func (s *server) resolveClient(proxyURL string) (*http.Client, error) {
+	if s.resolveHTTPClient == nil {
+		return nil, errors.New("HTTP client 池未初始化")
+	}
+	return s.resolveHTTPClient(proxyURL)
 }
 
 func (s *server) handle(w http.ResponseWriter, r *http.Request) {
@@ -324,6 +322,24 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.handleProviderModels(w, r)
+		return
+	}
+
+	// 用弹窗当前表单值临时探测 provider；不读入配置作为探测目标，也绝不写首页健康缓存。
+	if urlPath == "/api/providers/probe" {
+		if r.Method != http.MethodPost {
+			writeMethodNotAllowed(w, http.MethodPost)
+			return
+		}
+		if isCrossSiteRequest(r) {
+			writeForbiddenOrigin(w)
+			return
+		}
+		if requestMediaType(r) != "application/json" {
+			writeJSONError(w, http.StatusUnsupportedMediaType, "unsupported_media_type", "检测请求须使用 application/json")
+			return
+		}
+		s.handleProviderProbe(w, r)
 		return
 	}
 
@@ -816,6 +832,17 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 		// 并由外层在全部候选均不可构建时生成统一终态。
 		return forwardAttemptOutcome{buildErr: buildErr}
 	}
+	client, err := s.resolveClient(p.Proxy)
+	if err != nil {
+		buildErr := "解析 provider 代理失败: " + err.Error()
+		if in.detail != nil {
+			in.detail.Kind = "build_skip"
+			in.detail.Outcome = "build_error"
+			in.detail.Reason = "proxy_error"
+			in.detail.Error = buildErr
+		}
+		return forwardAttemptOutcome{buildErr: buildErr}
+	}
 
 	// 本次尝试真正会用到该候选，更新日志归属
 	in.reqLog.Provider = p.Name
@@ -919,7 +946,7 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 		TimeoutMs:             timeoutMs,
 		HeaderTimeoutMs:       headerTimeoutMs,
 		StreamActivityTimeout: activityTimeoutMs,
-		HTTPClient:            s.httpClient,
+		HTTPClient:            client,
 		// 记录真实上游状态码：熔断判据和请求日志都要用。proxy 只在确实拿到
 		// 响应头时回调，因此 0 恒表示「上游没给状态码」而非「上游返回 0」。
 		// 回调与 Forward 同 goroutine 同步执行，无需额外同步。
@@ -1366,7 +1393,7 @@ func (s *server) handleProviderHealthCheck(w http.ResponseWriter, r *http.Reques
 	s.cfgMu.RUnlock()
 
 	if name := r.URL.Query().Get("provider"); name != "" {
-		status, ok := s.providerHealth.CheckProvider(r.Context(), cfg, s.httpClient, name)
+		status, ok := s.providerHealth.CheckProvider(r.Context(), cfg, s.resolveClient, name)
 		if !ok {
 			writeJSONError(w, http.StatusNotFound, "gateway_error", fmt.Sprintf("未找到 provider: %s", name))
 			return
@@ -1381,7 +1408,7 @@ func (s *server) handleProviderHealthCheck(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	statuses := s.providerHealth.CheckAll(r.Context(), cfg, s.httpClient)
+	statuses := s.providerHealth.CheckAll(r.Context(), cfg, s.resolveClient)
 	out, _ := json.Marshal(map[string]any{
 		"providers": statuses,
 	})
@@ -1413,7 +1440,12 @@ func (s *server) handleProviderModels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	models, err := fetchUpstreamModels(r.Context(), provider, s.httpClient)
+	client, err := s.resolveClient(provider.Proxy)
+	if err != nil {
+		writeJSONError(w, http.StatusBadGateway, "upstream_error", "解析 provider 代理失败: "+err.Error())
+		return
+	}
+	models, err := fetchUpstreamModels(r.Context(), provider, client)
 	if err != nil {
 		writeJSONError(w, http.StatusBadGateway, "upstream_error", err.Error())
 		return
@@ -1427,6 +1459,103 @@ func (s *server) handleProviderModels(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("content-length", fmt.Sprintf("%d", len(out)))
 	w.WriteHeader(http.StatusOK)
 	w.Write(out)
+}
+
+type providerProbeRequest struct {
+	Name      string `json:"name"`
+	BaseURL   string `json:"baseUrl"`
+	Format    string `json:"format"`
+	APIKey    string `json:"apiKey"`
+	UserAgent string `json:"userAgent"`
+	Proxy     string `json:"proxy"`
+}
+
+// handleProviderProbe 用临时 provider 配置探测 /v1/models。其结果仅属于当前弹窗，
+// 因而不能复用会写 Checker.statuses 的 CheckProvider。
+func (s *server) handleProviderProbe(w http.ResponseWriter, r *http.Request) {
+	body, err := readBodyLimited(r, maxConfigBodyBytes)
+	if err != nil {
+		if errors.Is(err, errRequestBodyTooLarge) {
+			writeJSONError(w, http.StatusRequestEntityTooLarge, "request_too_large", err.Error())
+			return
+		}
+		writeJSONError(w, http.StatusBadRequest, "gateway_error", "读取请求体失败: "+err.Error())
+		return
+	}
+	var input providerProbeRequest
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&input); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "config_validation_error", "请求体 JSON 解析失败: "+err.Error())
+		return
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		writeJSONError(w, http.StatusBadRequest, "config_validation_error", "请求体 JSON 只能包含一个对象")
+		return
+	}
+	p := &config.Provider{
+		Name:      input.Name,
+		BaseURL:   input.BaseURL,
+		Format:    input.Format,
+		APIKey:    input.APIKey,
+		UserAgent: input.UserAgent,
+		Proxy:     input.Proxy,
+	}
+
+	// sentinel 仅可引用同名已落盘 provider 的秘密；不要求 URL 或格式未改变，
+	// 这与 PUT /api/config 的宽松回填语义一致。
+	s.cfgMu.RLock()
+	stored, exists := s.cfg.Providers[p.Name]
+	s.cfgMu.RUnlock()
+	if p.APIKey == config.APIKeyKeepSentinel {
+		if !exists || stored == nil || stored.APIKey == "" {
+			writeJSONError(w, http.StatusBadRequest, "config_validation_error", "无法保留已有 apiKey：磁盘上没有已存密钥")
+			return
+		}
+		p.APIKey = stored.APIKey
+	}
+	if proxyPasswordIsSentinel(p.Proxy) {
+		password, ok := proxyPassword(stored, exists)
+		if !ok {
+			writeJSONError(w, http.StatusBadRequest, "config_validation_error", "无法保留已有代理密码：磁盘上没有已存密码")
+			return
+		}
+		p.Proxy = replaceProxyPassword(p.Proxy, password)
+	}
+	if err := config.ValidateProbeProvider(p.Name, p); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "config_validation_error", err.Error())
+		return
+	}
+	status, ok := s.providerHealth.ProbeAdHoc(r.Context(), p, s.resolveClient)
+	if !ok {
+		writeJSONError(w, http.StatusServiceUnavailable, "gateway_error", "健康检测繁忙，请稍后重试")
+		return
+	}
+	status.Message = redactProbeMessage(status.Message, p)
+	out, _ := json.Marshal(map[string]providerhealth.Status{"status": status})
+	w.Header().Set("content-type", "application/json")
+	w.Header().Set("content-length", fmt.Sprintf("%d", len(out)))
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(out)
+}
+
+func redactProbeMessage(message string, p *config.Provider) string {
+	if p == nil {
+		return message
+	}
+	if p.Proxy != "" {
+		message = strings.ReplaceAll(message, p.Proxy, config.RedactProxyPassword(p.Proxy))
+		// Transport 的错误文本可能使用 URL 规范化后的转义串（例如密码含空格），
+		// 不能只替换配置原文，否则认证代理密码仍可能从错误消息漏回管理页面。
+		if parsed, err := url.Parse(p.Proxy); err == nil {
+			message = strings.ReplaceAll(message, parsed.String(), config.RedactProxyPassword(parsed.String()))
+		}
+	}
+	if p.APIKey != "" {
+		message = strings.ReplaceAll(message, p.APIKey, config.APIKeyKeepSentinel)
+	}
+	return message
 }
 
 // fetchUpstreamModels 用 provider 配置的 apiKey 调上游 /v1/models，返回模型 id 列表。
@@ -1844,9 +1973,40 @@ func (s *server) configViewSnapshot() (*config.Config, string, []string, error) 
 		if provider.APIKey != "" {
 			providerCopy.APIKey = config.APIKeyKeepSentinel
 		}
+		providerCopy.Proxy = config.RedactProxyPassword(provider.Proxy)
 		cfgCopy.Providers[name] = &providerCopy
 	}
 	return &cfgCopy, s.revision, restartRequiredFields(s.cfg, s.listenHost, s.listenPort), nil
+}
+
+func proxyPasswordIsSentinel(proxyURL string) bool {
+	parsed, err := url.Parse(proxyURL)
+	if err != nil || parsed.User == nil {
+		return false
+	}
+	password, ok := parsed.User.Password()
+	return ok && password == config.ProxyPasswordKeepSentinel
+}
+
+func proxyPassword(provider *config.Provider, exists bool) (string, bool) {
+	if !exists || provider == nil {
+		return "", false
+	}
+	parsed, err := url.Parse(provider.Proxy)
+	if err != nil || parsed.User == nil {
+		return "", false
+	}
+	password, ok := parsed.User.Password()
+	return password, ok && password != ""
+}
+
+func replaceProxyPassword(proxyURL, password string) string {
+	parsed, err := url.Parse(proxyURL)
+	if err != nil || parsed.User == nil {
+		return proxyURL
+	}
+	parsed.User = url.UserPassword(parsed.User.Username(), password)
+	return parsed.String()
 }
 
 // handleGetConfigRaw 返回原始 YAML 文本（apiKey 脱敏）
@@ -1913,20 +2073,27 @@ func (s *server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	for name, p := range newCfg.Providers {
-		if p.APIKey != config.APIKeyKeepSentinel {
-			continue
-		}
-		// 只校验磁盘上该 provider 名确有密钥可保留，不再用 SameProviderIdentity
-		// 限制「url/format 必须没变」：编辑 provider 改了 url 或格式时，
-		// 只要用户在弹窗里把 apiKey 留空（发回 sentinel），就沿用原密钥，
-		// 不强制重新填写。若该 provider 是新加的、磁盘上没有已存密钥，照旧拒绝——
-		// 那是凭空带 sentinel，不该静默吞成空密钥。
 		oldProvider, exists := oldCfg.Providers[name]
-		if !exists || oldProvider.APIKey == "" {
-			writeJSONError(w, http.StatusBadRequest, "config_validation_error", fmt.Sprintf("providers.%s 无法保留已有 apiKey：磁盘上没有已存密钥", name))
-			return
+		if p.APIKey == config.APIKeyKeepSentinel {
+			// 只校验磁盘上该 provider 名确有密钥可保留，不再用 SameProviderIdentity
+			// 限制「url/format 必须没变」：编辑 provider 改了 url 或格式时，
+			// 只要用户在弹窗里把 apiKey 留空（发回 sentinel），就沿用原密钥，
+			// 不强制重新填写。若该 provider 是新加的、磁盘上没有已存密钥，照旧拒绝——
+			// 那是凭空带 sentinel，不该静默吞成空密钥。
+			if !exists || oldProvider.APIKey == "" {
+				writeJSONError(w, http.StatusBadRequest, "config_validation_error", fmt.Sprintf("providers.%s 无法保留已有 apiKey：磁盘上没有已存密钥", name))
+				return
+			}
+			p.APIKey = oldProvider.APIKey
 		}
-		p.APIKey = oldProvider.APIKey
+		if proxyPasswordIsSentinel(p.Proxy) {
+			password, ok := proxyPassword(oldProvider, exists)
+			if !ok {
+				writeJSONError(w, http.StatusBadRequest, "config_validation_error", fmt.Sprintf("providers.%s 无法保留已有代理密码：磁盘上没有已存密码", name))
+				return
+			}
+			p.Proxy = replaceProxyPassword(p.Proxy, password)
+		}
 	}
 
 	// 设置路径并保存
@@ -1991,8 +2158,12 @@ func (s *server) handleReloadConfig(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) applyRuntimeConfig(newCfg *config.Config, revision string) []string {
 	limits := make(map[string]queue.Limits, len(newCfg.Providers))
+	activeProxies := make(map[string]struct{}, len(newCfg.Providers))
 	for name, provider := range newCfg.Providers {
 		limits[name] = queue.Limits{MaxConcurrent: provider.MaxConcurrent, MaxPerSecond: provider.MaxPerSecond}
+		if provider.Proxy != "" {
+			activeProxies[provider.Proxy] = struct{}{}
+		}
 	}
 
 	s.cfgMu.Lock()
@@ -2006,6 +2177,9 @@ func (s *server) applyRuntimeConfig(newCfg *config.Config, revision string) []st
 	restartRequired := restartRequiredFields(newCfg, s.listenHost, s.listenPort)
 	if s.qm != nil {
 		s.qm.Reconcile(limits)
+	}
+	if s.httpPool != nil {
+		s.httpPool.Reconcile(activeProxies)
 	}
 	if s.providerHealth != nil {
 		s.providerHealth.InvalidateChanged(oldCfg, newCfg)

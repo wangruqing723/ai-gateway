@@ -32,7 +32,7 @@ func newFailoverTestServer(providers map[string]*config.Provider, route config.R
 			Routes:    []config.Route{route},
 			Failover:  failover,
 		},
-		qm: queue.NewManager(), httpClient: client, metrics: metrics.NewCollector(10),
+		qm: queue.NewManager(), resolveHTTPClient: testClientResolver(client), metrics: metrics.NewCollector(10),
 		providerHealth: providerhealth.NewChecker(),
 	}
 }

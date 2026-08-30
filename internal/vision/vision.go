@@ -31,11 +31,14 @@ const visionPrompt = "请对这张图片进行全面详细的描述，包括所�
 // LogFunc 绑定了 reqId 的日志函数
 type LogFunc func(format string, args ...any)
 
+// ClientResolver 按视觉 provider 的代理配置返回该用的 HTTP client。
+type ClientResolver func(proxyURL string) (*http.Client, error)
+
 // Translator 图片识别翻译器
 type Translator struct {
 	cache      recognitionCache
 	qm         *queue.Manager
-	httpClient *http.Client
+	resolve    ClientResolver
 	directMode atomic.Bool // 直通模式：跳过视觉队列的并发/限速控制
 
 	mu      sync.Mutex
@@ -55,13 +58,13 @@ type recognition struct {
 	err     error
 }
 
-// New 创建翻译器。httpClient 可复用主程序的连接池。
-func New(c *cache.Cache, qm *queue.Manager, httpClient *http.Client, directMode bool) *Translator {
+// New 创建翻译器。resolve 从主程序的连接池按 provider 代理取 client。
+func New(c *cache.Cache, qm *queue.Manager, resolve ClientResolver, directMode bool) *Translator {
 	t := &Translator{
-		cache:      c,
-		qm:         qm,
-		httpClient: httpClient,
-		pending:    make(map[string]*recognition),
+		cache:   c,
+		qm:      qm,
+		resolve: resolve,
+		pending: make(map[string]*recognition),
 	}
 	t.directMode.Store(directMode)
 	return t
@@ -340,7 +343,14 @@ func (t *Translator) doRecognize(ctx context.Context, imageBlock map[string]any,
 	req.Header.Set("content-type", "application/json")
 	req.Header.Set("authorization", "Bearer "+vision.APIKey)
 
-	resp, err := t.httpClient.Do(req)
+	if t.resolve == nil {
+		return "", fmt.Errorf("HTTP client 解析器未初始化")
+	}
+	client, err := t.resolve(vision.Proxy)
+	if err != nil {
+		return "", fmt.Errorf("解析视觉 provider 代理失败: %w", err)
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return "", err
 	}

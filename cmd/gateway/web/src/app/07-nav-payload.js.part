@@ -41,7 +41,9 @@
                             // 到不了磁盘，而且**每次保存都会抹掉所有 provider 的该字段**，无任何报错。
                             // 空值发 undefined 而不是 ''：与后端 json/yaml 的 omitempty 对齐，
                             // 避免给没配的 provider 都落一行 userAgent: ""。
-                            userAgent: provider.userAgent || undefined
+                            userAgent: provider.userAgent || undefined,
+                            // 空值继承 HTTPS_PROXY/HTTP_PROXY（或直连）；不物化成空字符串。
+                            proxy: provider.proxy || undefined
                         };
                     });
                     return {
@@ -112,4 +114,3 @@
                 canSave() {
                     return this.isConfigTab() && this.isDirty();
                 },
-

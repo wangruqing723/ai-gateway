@@ -14,6 +14,10 @@ import (
 	"ai-gateway/internal/config"
 )
 
+func testResolver(client *http.Client) ClientResolver {
+	return func(string) (*http.Client, error) { return client, nil }
+}
+
 func TestCheckAllMapsStatuses(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/models" {
@@ -32,7 +36,7 @@ func TestCheckAllMapsStatuses(t *testing.T) {
 		"bad": {Name: "bad", BaseURL: server.URL, APIKey: "bad", Format: "openai"},
 	}}
 
-	statuses := NewChecker().CheckAll(context.Background(), cfg, server.Client())
+	statuses := NewChecker().CheckAll(context.Background(), cfg, testResolver(server.Client()))
 	if statuses["ok"].Status != "ok" {
 		t.Fatalf("expected ok status, got %#v", statuses["ok"])
 	}
@@ -61,7 +65,7 @@ func TestCheckSendsConfiguredUserAgent(t *testing.T) {
 		"plain": {Name: "plain", BaseURL: server.URL, APIKey: "k-plain", Format: "openai"},
 	}}
 
-	if statuses := NewChecker().CheckAll(context.Background(), cfg, server.Client()); len(statuses) != 2 {
+	if statuses := NewChecker().CheckAll(context.Background(), cfg, testResolver(server.Client())); len(statuses) != 2 {
 		t.Fatalf("statuses = %#v", statuses)
 	}
 
@@ -95,7 +99,7 @@ func TestCheckProviderChecksOnlyRequestedProvider(t *testing.T) {
 	}}
 
 	checker := NewChecker()
-	status, ok := checker.CheckProvider(context.Background(), cfg, server.Client(), "a")
+	status, ok := checker.CheckProvider(context.Background(), cfg, testResolver(server.Client()), "a")
 	if !ok {
 		t.Fatal("CheckProvider() ok = false, want true for existing provider")
 	}
@@ -122,7 +126,7 @@ func TestCheckProviderChecksOnlyRequestedProvider(t *testing.T) {
 // 未知名字必须报 false，让 HTTP 层能回 404 而不是静默当成一次成功检测。
 func TestCheckProviderReportsMissingProvider(t *testing.T) {
 	cfg := &config.Config{Providers: map[string]*config.Provider{}}
-	if _, ok := NewChecker().CheckProvider(context.Background(), cfg, http.DefaultClient, "nope"); ok {
+	if _, ok := NewChecker().CheckProvider(context.Background(), cfg, testResolver(http.DefaultClient), "nope"); ok {
 		t.Fatal("CheckProvider() ok = true for unknown provider, want false")
 	}
 }
@@ -142,12 +146,12 @@ func TestCheckProviderIgnoresCheckAllCooldown(t *testing.T) {
 	}}
 
 	checker := NewChecker()
-	checker.CheckAll(context.Background(), cfg, server.Client())
+	checker.CheckAll(context.Background(), cfg, testResolver(server.Client()))
 	before := probes.Load()
 
 	// 紧接着两次单点检测，都应真的发出请求
 	for i := 0; i < 2; i++ {
-		if _, ok := checker.CheckProvider(context.Background(), cfg, server.Client(), "a"); !ok {
+		if _, ok := checker.CheckProvider(context.Background(), cfg, testResolver(server.Client()), "a"); !ok {
 			t.Fatalf("CheckProvider() call %d ok = false", i+1)
 		}
 	}
@@ -166,7 +170,7 @@ func TestSnapshotInvalidatesStatusWhenProviderIdentityChanges(t *testing.T) {
 	original := &config.Config{Providers: map[string]*config.Provider{
 		"p": {Name: "p", BaseURL: server.URL, APIKey: "key-a", Format: "openai"},
 	}}
-	checker.CheckAll(context.Background(), original, server.Client())
+	checker.CheckAll(context.Background(), original, testResolver(server.Client()))
 
 	changed := &config.Config{Providers: map[string]*config.Provider{
 		"p": {Name: "p", BaseURL: "https://changed.invalid", APIKey: "key-b", Format: "anthropic"},
@@ -188,7 +192,7 @@ func TestInvalidateChangedRemovesDeletedAndChangedProviders(t *testing.T) {
 		"changed": {Name: "changed", BaseURL: server.URL, APIKey: "a", Format: "openai"},
 		"deleted": {Name: "deleted", BaseURL: server.URL, APIKey: "b", Format: "openai"},
 	}}
-	checker.CheckAll(context.Background(), oldCfg, server.Client())
+	checker.CheckAll(context.Background(), oldCfg, testResolver(server.Client()))
 	newCfg := &config.Config{Providers: map[string]*config.Provider{
 		"changed": {Name: "changed", BaseURL: server.URL + "/other", APIKey: "a", Format: "openai"},
 	}}
@@ -210,9 +214,9 @@ func TestInvalidateChangedKeepsCooldownForSameProviderFingerprint(t *testing.T) 
 	cfg := &config.Config{Providers: map[string]*config.Provider{
 		"p": {Name: "p", BaseURL: server.URL, APIKey: "key", Format: "openai"},
 	}}
-	checker.CheckAll(context.Background(), cfg, server.Client())
+	checker.CheckAll(context.Background(), cfg, testResolver(server.Client()))
 	checker.InvalidateChanged(cfg, cfg)
-	checker.CheckAll(context.Background(), cfg, server.Client())
+	checker.CheckAll(context.Background(), cfg, testResolver(server.Client()))
 
 	if got := calls.Load(); got != 1 {
 		t.Fatalf("unchanged provider fingerprint must keep the completed-round cooldown, got %d probes", got)
@@ -231,13 +235,13 @@ func TestChangedFingerprintBypassesCooldownWithoutLeakingSecret(t *testing.T) {
 	oldCfg := &config.Config{Providers: map[string]*config.Provider{
 		"p": {Name: "p", BaseURL: server.URL, APIKey: "old-key", Format: "openai"},
 	}}
-	checker.CheckAll(context.Background(), oldCfg, server.Client())
+	checker.CheckAll(context.Background(), oldCfg, testResolver(server.Client()))
 	const newSecret = "unique-health-secret-7f3a"
 	newCfg := &config.Config{Providers: map[string]*config.Provider{
 		"p": {Name: "p", BaseURL: server.URL, APIKey: newSecret, Format: "openai"},
 	}}
 	checker.InvalidateChanged(oldCfg, newCfg)
-	statuses := checker.CheckAll(context.Background(), newCfg, server.Client())
+	statuses := checker.CheckAll(context.Background(), newCfg, testResolver(server.Client()))
 	if got := calls.Load(); got != 2 {
 		t.Fatalf("changed provider fingerprint must bypass cooldown, got %d probes", got)
 	}
@@ -250,6 +254,22 @@ func TestChangedFingerprintBypassesCooldownWithoutLeakingSecret(t *testing.T) {
 	}
 	if strings.Contains(string(visible), newSecret) {
 		t.Fatalf("visible health status leaked provider API key: %s", visible)
+	}
+}
+
+func TestProviderFingerprintCoversUserAgentAndProxy(t *testing.T) {
+	base := &config.Provider{
+		Name: "p", BaseURL: "https://api.example.com", Format: "openai", APIKey: "secret",
+		UserAgent: "client-a", Proxy: "http://first-proxy.example:7890",
+	}
+	baseFingerprint := providerFingerprint("p", base)
+	for _, changed := range []*config.Provider{
+		{Name: "p", BaseURL: base.BaseURL, Format: base.Format, APIKey: base.APIKey, UserAgent: "client-b", Proxy: base.Proxy},
+		{Name: "p", BaseURL: base.BaseURL, Format: base.Format, APIKey: base.APIKey, UserAgent: base.UserAgent, Proxy: "http://second-proxy.example:7890"},
+	} {
+		if got := providerFingerprint("p", changed); got == baseFingerprint {
+			t.Fatalf("出网配置变更没有改变健康检测 fingerprint: %#v", changed)
+		}
 	}
 }
 
@@ -295,7 +315,7 @@ func TestInvalidateChangedRejectsResultsFromOlderInflightGeneration(t *testing.T
 			checkDone := make(chan struct{})
 			go func() {
 				defer close(checkDone)
-				checker.CheckAll(context.Background(), oldCfg, server.Client())
+				checker.CheckAll(context.Background(), oldCfg, testResolver(server.Client()))
 			}()
 
 			select {
@@ -321,7 +341,7 @@ func TestInvalidateChangedRejectsResultsFromOlderInflightGeneration(t *testing.T
 			if resurrected {
 				t.Fatal("old in-flight run resurrected invalidated provider status")
 			}
-			statuses := checker.CheckAll(context.Background(), oldCfg, server.Client())
+			statuses := checker.CheckAll(context.Background(), oldCfg, testResolver(server.Client()))
 			if got := calls.Load(); got != 2 {
 				t.Fatalf("re-added provider must start a fresh probe after stale run, got %d calls", got)
 			}
@@ -358,7 +378,7 @@ func TestInvalidateChangedCancelsStaleInflightProbe(t *testing.T) {
 	oldDone := make(chan struct{})
 	go func() {
 		defer close(oldDone)
-		checker.CheckAll(context.Background(), oldCfg, server.Client())
+		checker.CheckAll(context.Background(), oldCfg, testResolver(server.Client()))
 	}()
 
 	select {
@@ -377,7 +397,7 @@ func TestInvalidateChangedCancelsStaleInflightProbe(t *testing.T) {
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("stale probe round did not finish after cancellation")
 	}
-	if statuses := checker.CheckAll(context.Background(), newCfg, server.Client()); statuses["p"].Status != "ok" {
+	if statuses := checker.CheckAll(context.Background(), newCfg, testResolver(server.Client())); statuses["p"].Status != "ok" {
 		t.Fatalf("fresh provider probe status = %#v", statuses["p"])
 	}
 }
@@ -401,7 +421,7 @@ func TestInvalidateChangedRejectsStaleConfigProbe(t *testing.T) {
 	}}
 	checker.InvalidateChanged(oldCfg, newCfg)
 
-	statuses := checker.CheckAll(context.Background(), oldCfg, server.Client())
+	statuses := checker.CheckAll(context.Background(), oldCfg, testResolver(server.Client()))
 	if got := oldCalls.Load(); got != 0 {
 		t.Fatalf("stale config started %d provider probes after invalidation", got)
 	}
@@ -431,7 +451,7 @@ func TestConcurrentCheckAllSharesOneProbeRound(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			statuses := checker.CheckAll(context.Background(), cfg, server.Client())
+			statuses := checker.CheckAll(context.Background(), cfg, testResolver(server.Client()))
 			if statuses["a"].Status != "ok" || statuses["b"].Status != "ok" {
 				t.Errorf("unexpected statuses: %#v", statuses)
 			}
@@ -463,7 +483,7 @@ func TestCanceledLeaderDoesNotCancelSharedProbe(t *testing.T) {
 	checker := NewChecker()
 	leaderCtx, cancelLeader := context.WithCancel(context.Background())
 	leaderDone := make(chan map[string]Status, 1)
-	go func() { leaderDone <- checker.CheckAll(leaderCtx, cfg, server.Client()) }()
+	go func() { leaderDone <- checker.CheckAll(leaderCtx, cfg, testResolver(server.Client())) }()
 	select {
 	case <-started:
 	case <-time.After(time.Second):
@@ -482,7 +502,7 @@ func TestCanceledLeaderDoesNotCancelSharedProbe(t *testing.T) {
 	}
 
 	waiterDone := make(chan map[string]Status, 1)
-	go func() { waiterDone <- checker.CheckAll(context.Background(), cfg, server.Client()) }()
+	go func() { waiterDone <- checker.CheckAll(context.Background(), cfg, testResolver(server.Client())) }()
 	close(release)
 	select {
 	case statuses := <-waiterDone:
@@ -531,7 +551,7 @@ func TestCheckAllUsesCheckerWideConcurrencyLimit(t *testing.T) {
 		wg.Add(1)
 		go func(cfg *config.Config) {
 			defer wg.Done()
-			checker.checkAll(context.Background(), cfg, server.Client(), checker.generation.Load())
+			checker.checkAll(context.Background(), cfg, testResolver(server.Client()), checker.generation.Load())
 		}(cfg)
 	}
 	for i := 0; i < checkConcurrency; i++ {
@@ -559,12 +579,78 @@ func TestCheckAllHandlesNilProviderWithoutProbe(t *testing.T) {
 	}))
 	defer server.Close()
 	cfg := &config.Config{Providers: map[string]*config.Provider{"nil-provider": nil}}
-	statuses := NewChecker().CheckAll(context.Background(), cfg, server.Client())
+	statuses := NewChecker().CheckAll(context.Background(), cfg, testResolver(server.Client()))
 	if statuses["nil-provider"].Status != "error" {
 		t.Fatalf("nil provider status = %#v", statuses["nil-provider"])
 	}
 	if got := calls.Load(); got != 0 {
 		t.Fatalf("nil provider unexpectedly issued %d HTTP probes", got)
+	}
+}
+
+func TestCheckAllResolvesEachProviderProxy(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	var mu sync.Mutex
+	called := make(map[string]int)
+	resolve := func(proxyURL string) (*http.Client, error) {
+		mu.Lock()
+		called[proxyURL]++
+		mu.Unlock()
+		return upstream.Client(), nil
+	}
+	cfg := &config.Config{Providers: map[string]*config.Provider{
+		"first":  {Name: "first", BaseURL: upstream.URL, Format: "openai", Proxy: "http://first-proxy.example:7890"},
+		"second": {Name: "second", BaseURL: upstream.URL, Format: "openai", Proxy: "socks5://second-proxy.example:1080"},
+	}}
+	statuses := NewChecker().CheckAll(context.Background(), cfg, resolve)
+	if statuses["first"].Status != "ok" || statuses["second"].Status != "ok" {
+		t.Fatalf("statuses = %#v", statuses)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if called["http://first-proxy.example:7890"] != 1 || called["socks5://second-proxy.example:1080"] != 1 {
+		t.Fatalf("resolver calls = %#v", called)
+	}
+}
+
+func TestProbeAdHocDoesNotWriteStatuses(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	checker := NewChecker()
+	cfg := &config.Config{Providers: map[string]*config.Provider{
+		"saved": {Name: "saved", BaseURL: upstream.URL, Format: "openai"},
+	}}
+	if _, ok := checker.CheckProvider(context.Background(), cfg, testResolver(upstream.Client()), "saved"); !ok {
+		t.Fatal("建立已落盘健康缓存失败")
+	}
+	checker.mu.RLock()
+	before, exists := checker.statuses["saved"]
+	countBefore := len(checker.statuses)
+	checker.mu.RUnlock()
+	if !exists {
+		t.Fatal("前置条件：saved 健康缓存不存在")
+	}
+
+	status, ok := checker.ProbeAdHoc(context.Background(), &config.Provider{
+		Name: "temporary", BaseURL: upstream.URL, Format: "openai", Proxy: "http://temporary-proxy.example:7890",
+	}, testResolver(upstream.Client()))
+	if !ok || status.Status != "ok" {
+		t.Fatalf("ProbeAdHoc() = %#v, %v", status, ok)
+	}
+	checker.mu.RLock()
+	after, stillExists := checker.statuses["saved"]
+	countAfter := len(checker.statuses)
+	_, temporaryExists := checker.statuses["temporary"]
+	checker.mu.RUnlock()
+	if !stillExists || after != before || countAfter != countBefore || temporaryExists {
+		t.Fatalf("ProbeAdHoc 污染了 statuses：before=%#v/%d after=%#v/%d temporary=%v", before, countBefore, after, countAfter, temporaryExists)
 	}
 }
 

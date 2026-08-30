@@ -27,7 +27,7 @@ func TestDoRecognizeRejectsOversizedResponse(t *testing.T) {
 			Body:       io.NopCloser(strings.NewReader(strings.Repeat("x", responseLimit+1))),
 		}, nil
 	})}
-	translator := &Translator{httpClient: client}
+	translator := &Translator{resolve: func(string) (*http.Client, error) { return client, nil }}
 	provider := &config.Provider{BaseURL: "https://vision.example", APIKey: "test-key", Format: "openai"}
 
 	_, err := translator.doRecognize(context.Background(), imageBlock("oversized-response"), provider, "vision-model")
@@ -220,13 +220,14 @@ func TestCallVisionCancelsUpstreamWhenAllWaitersLeave(t *testing.T) {
 	server := httptest.NewServer(http.NotFoundHandler())
 	defer server.Close()
 	translator, provider := newTestTranslator(t, server, true)
-	translator.httpClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		requests.Add(1)
 		startedOnce.Do(func() { close(started) })
 		<-r.Context().Done()
 		canceledOnce.Do(func() { close(upstreamCanceled) })
 		return nil, r.Context().Err()
 	})}
+	translator.resolve = func(string) (*http.Client, error) { return client, nil }
 
 	image := imageBlock("shared-image-all-cancel")
 	hash := cache.ImageHash(image)
@@ -351,7 +352,7 @@ func newTestTranslator(t *testing.T, server *httptest.Server, directMode bool) (
 		MaxConcurrent: 1,
 		MaxQueueWait:  1000,
 	}
-	return New(c, queue.NewManager(), server.Client(), directMode), provider
+	return New(c, queue.NewManager(), func(string) (*http.Client, error) { return server.Client(), nil }, directMode), provider
 }
 
 func imageBlock(data string) map[string]any {

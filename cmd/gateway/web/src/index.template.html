@@ -487,6 +487,7 @@
                                                 <th scope="col" class="whitespace-nowrap px-3 py-3 font-bold">格式</th>
                                                 <th scope="col" class="whitespace-nowrap px-3 py-3 font-bold">Base URL</th>
                                                 <th scope="col" class="whitespace-nowrap px-3 py-3 font-bold">Key</th>
+                                                <th scope="col" class="whitespace-nowrap px-3 py-3 font-bold">代理</th>
                                                 <th scope="col" class="whitespace-nowrap px-3 py-3 text-right font-bold">并发</th>
                                                 <th scope="col" class="whitespace-nowrap px-3 py-3 text-right font-bold">速率</th>
                                                 <th scope="col" class="whitespace-nowrap px-3 py-3 text-right font-bold">队列等待</th>
@@ -539,6 +540,14 @@
                                                               @blur="hideTip()"
                                                               tabindex="0">key_off</span>
                                                     </td>
+                                                    <td class="max-w-0 px-3 py-2.5">
+                                                        <span class="block truncate font-mono text-xs text-muted"
+                                                              @mouseenter="showTip(proxyHost(provider.proxy), $event)"
+                                                              @mouseleave="hideTip()"
+                                                              @focus="showTip(proxyHost(provider.proxy), $event)"
+                                                              @blur="hideTip()" tabindex="0"
+                                                              x-text="proxyHost(provider.proxy)"></span>
+                                                    </td>
                                                     <td class="w-px whitespace-nowrap px-3 py-2.5 text-right font-mono text-xs text-text" x-text="provider.maxConcurrent || 5"></td>
                                                     <td class="w-px whitespace-nowrap px-3 py-2.5 text-right font-mono text-xs text-muted"
                                                         x-text="(provider.maxPerSecond || 0) === 0 ? '不限速' : provider.maxPerSecond + '/s'"></td>
@@ -560,7 +569,7 @@
                                                 </tr>
                                             </template>
                                             <tr x-show="!config.providers || Object.keys(config.providers).length === 0">
-                                                <td colspan="8" class="px-3 py-10 text-center text-sm text-muted">还没有 Provider</td>
+                                                <td colspan="9" class="px-3 py-10 text-center text-sm text-muted">还没有 Provider</td>
                                             </tr>
                                         </tbody>
                                     </table>
@@ -1210,7 +1219,11 @@
                     <span class="material-symbols-outlined">close</span>
                 </button>
             </div>
-            <div class="grid grid-cols-1 gap-4 p-5 md:grid-cols-2">
+            <!-- 改任何字段就清掉上一次的检测结果：结果对应的是点检测那一刻的表单值，
+                 用户改完 URL 后旧结论还挂着会造成误导（红着的其实已经不是当前配置了）。
+                 挂在容器上靠事件冒泡覆盖全部输入，避免六个字段各写一遍。 -->
+            <div class="grid grid-cols-1 gap-4 p-5 md:grid-cols-2"
+                 @input="providerProbeStatus = null" @change="providerProbeStatus = null">
                 <label class="block">
                     <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">名称</span>
                     <!-- maxlength 按 UTF-16 码元数截，和后端的 rune 计数在 BMP 内一致；
@@ -1258,9 +1271,24 @@
                     <input autocomplete="off" type="text" x-model="providerForm.userAgent" placeholder="留空则转发客户端真实 UA" class="field">
                     <span class="mt-1 block text-[11px] text-muted">用于兼容按客户端类型准入的上游；显式设置会覆盖客户端请求头。</span>
                 </label>
+                <label class="block md:col-span-2">
+                    <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">Provider 代理</span>
+                    <input autocomplete="off" type="text" x-model="providerForm.proxy" placeholder="http://proxy.example.com:7890" class="field">
+                    <span class="mt-1 block text-[11px] text-muted">留空则使用全局 HTTPS_PROXY/HTTP_PROXY；全局也没有则直连。仅支持 http/https/socks5/socks5h。</span>
+                    <span class="mt-1 block text-[11px] text-warn">密码位显示占位符表示沿用已存密码；要改密码请重新填写完整代理 URL。</span>
+                </label>
+            </div>
+            <div x-show="providerProbeStatus" x-cloak class="mx-5 mb-4 rounded-lg border px-3 py-2 text-sm"
+                 :class="providerProbeStatus?.status === 'ok' ? 'border-good/40 bg-good/10 text-good' : providerProbeStatus?.status === 'warn' ? 'border-warn/40 bg-warn/10 text-warn' : 'border-danger/40 bg-danger/10 text-danger'">
+                <div class="font-bold" x-text="providerProbeStatus?.message || providerProbeStatus?.status"></div>
+                <div class="mt-1 font-mono text-xs opacity-80" x-text="[providerProbeStatus?.httpCode ? 'HTTP ' + providerProbeStatus.httpCode : '', providerProbeStatus?.latencyMs ? providerProbeStatus.latencyMs + 'ms' : '', providerProbeStatus?.endpoint || ''].filter(Boolean).join(' · ')"></div>
             </div>
             <div class="flex justify-end gap-3 border-t border-line p-5">
                 <button @click="showProviderModal = false" class="btn btn-secondary">取消</button>
+                <button @click="probeProviderForm()" :disabled="probingProvider" class="btn btn-secondary disabled:opacity-60">
+                    <span class="material-symbols-outlined" :class="probingProvider && 'gw-spin'" x-text="probingProvider ? 'progress_activity' : 'health_and_safety'"></span>
+                    <span x-text="probingProvider ? '检测中…' : '检测'"></span>
+                </button>
                 <button @click="saveProvider()" class="btn btn-primary">保存 Provider</button>
             </div>
         </div>

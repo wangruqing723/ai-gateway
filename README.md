@@ -45,6 +45,7 @@ Codex CLI              ->  /v1/responses          (OpenAI Responses) ┘
 ├── internal/breaker/   # per-provider 熔断状态机
 ├── internal/balancer/  # 候选选择策略与 prompt cache 会话粘性
 ├── internal/metrics/   # 内存环形请求日志与运行指标聚合
+├── internal/httpclient/ # 按 Provider 代理配置复用 HTTP 连接池
 ├── internal/providerhealth/ # 上游 Provider 健康探测
 ├── cmd/gateway/web/    # 嵌入式管理页面资源
 ├── Dockerfile          # Go 主版本镜像构建入口
@@ -143,7 +144,7 @@ http://127.0.0.1:7789/
 配置菜单支持：
 
 - 查看 Provider、路由数量、运行模式和超时概览
-- 在“提供商”中可视化编辑 Provider、上游地址、协议格式、并发、限速、队列等待和 User-Agent
+- 在“提供商”中可视化编辑 Provider、上游地址、协议格式、并发、限速、队列等待、User-Agent 和独立代理；弹窗可用当前未保存的表单值检测上游
 - 在“路由”中可视化编辑路由规则、目标模型和视觉伴随模型
 - 在“全局设置”中可视化编辑监听、超时、缓存配置和直通模式
 - 在“全局设置”中使用 YAML 原文编辑完整配置
@@ -239,6 +240,28 @@ docker logs -f ai-gateway
 
 默认不走代理。只在「上游需要代理才能访问」时才配，例如公司网络限制出网，或上游域名被 DNS 污染——后者在容器内的典型表现是 `dial tcp <错误IP>:443: connect: connection refused`，而宿主机上同一域名却能正常访问。
 
+每个 Provider 也可在 `config.yaml` 配置自己的 `proxy`。连接池按代理地址复用，转发、上游模型列表、Provider 健康检测与 vision 翻译都会使用该 Provider 的解析结果：
+
+| `provider.proxy` | 全局 `HTTPS_PROXY` / `HTTP_PROXY` | 实际行为 |
+| --- | --- | --- |
+| 非空 | 任意 | 使用 Provider 独立代理 |
+| 空 | 已设置 | 使用全局环境代理 |
+| 空 | 未设置 | 直连 |
+
+```yaml
+providers:
+  corp-upstream:
+    baseUrl: "https://api.example.com"
+    format: openai
+    proxy: "http://proxy.corp.example:7890"
+  authenticated-proxy:
+    baseUrl: "https://api.example.com"
+    format: openai
+    proxy: "http://alice:password@proxy.corp.example:7890"
+```
+
+仅支持 `http`、`https`、`socks5`、`socks5h` 代理 URL（`socks5h` 在 Go 的 `http.Transport` 里与 `socks5` 行为一致）。空值的语义是继承全局代理，不能表达「仅这个 Provider 强制直连」；需要排除某个目标时请用 `NO_PROXY`（或 Compose 的 `AI_GATEWAY_NO_PROXY`）按 host 排除。
+
 在 `.env` 里设置（模板见 `.env.example`），然后重建容器：
 
 ```bash
@@ -261,7 +284,7 @@ docker compose up -d --force-recreate   # 单独 restart 不会更新环境变�
     -s -m 6 -o /dev/null -w '%{http_code}\n' \
     -x http://host.docker.internal:7897 https://api.github.com
   ```
-- 生效范围是网关**所有**出网请求：上游转发、vision 图片翻译、Provider 健康检测、上游模型列表查询。
+- 全局环境代理只作用于未配置独立代理的 Provider，覆盖上游转发、vision 图片翻译、Provider 健康检测、上游模型列表查询。
 - 不想让某些目标走代理就用 `AI_GATEWAY_NO_PROXY`（逗号分隔）。**本机回环自动排除，但容器网络里的服务名不会** —— 若某个 provider 的 `baseUrl` 指向同一 docker 网络内的另一个容器（如 `http://my-llm:8000`），开代理后该请求会被送去代理并失败，必须把服务名写进 `NO_PROXY`。指向局域网 IP 的 provider 同理。
 - 变量留空等于不设置，与不走代理完全一致，不会因为「配了个空值」而出错。
 

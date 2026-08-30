@@ -32,6 +32,10 @@ type Status struct {
 	CheckedAt string `json:"checkedAt,omitempty"`
 }
 
+// ClientResolver 按 provider 的代理配置返回该用的 HTTP client。
+// 空代理串表示走全局环境代理或直连。
+type ClientResolver func(proxyURL string) (*http.Client, error)
+
 // Checker 保存最近一次检测结果。
 type Checker struct {
 	mu       sync.RWMutex
@@ -84,7 +88,7 @@ func (c *Checker) Snapshot(cfg *config.Config) map[string]Status {
 }
 
 // CheckAll 并发检测所有 provider，返回检测后的快照。
-func (c *Checker) CheckAll(ctx context.Context, cfg *config.Config, client *http.Client) map[string]Status {
+func (c *Checker) CheckAll(ctx context.Context, cfg *config.Config, resolve ClientResolver) map[string]Status {
 	fingerprint := configFingerprint(cfg)
 	for {
 		generation := c.generation.Load()
@@ -126,7 +130,7 @@ func (c *Checker) CheckAll(ctx context.Context, cfg *config.Config, client *http
 		c.runMu.Unlock()
 
 		cfgCopy := copyConfig(cfg)
-		go c.executeRun(run, cfgCopy, client)
+		go c.executeRun(run, cfgCopy, resolve)
 		select {
 		case <-run.done:
 			return c.Snapshot(cfg)
@@ -136,9 +140,9 @@ func (c *Checker) CheckAll(ctx context.Context, cfg *config.Config, client *http
 	}
 }
 
-func (c *Checker) executeRun(run *checkRun, cfg *config.Config, client *http.Client) {
+func (c *Checker) executeRun(run *checkRun, cfg *config.Config, resolve ClientResolver) {
 	defer run.cancel()
-	c.checkAll(run.ctx, cfg, client, run.generation)
+	c.checkAll(run.ctx, cfg, resolve, run.generation)
 
 	c.runMu.Lock()
 	if c.inflight == run {
@@ -152,7 +156,7 @@ func (c *Checker) executeRun(run *checkRun, cfg *config.Config, client *http.Cli
 	c.runMu.Unlock()
 }
 
-func (c *Checker) checkAll(ctx context.Context, cfg *config.Config, client *http.Client, generation uint64) {
+func (c *Checker) checkAll(ctx context.Context, cfg *config.Config, resolve ClientResolver, generation uint64) {
 	type result struct {
 		name        string
 		status      Status
@@ -172,17 +176,22 @@ func (c *Checker) checkAll(ctx context.Context, cfg *config.Config, client *http
 		}
 		fingerprint := providerFingerprint(name, &pCopy)
 		wg.Add(1)
-		go func() {
+		go func(provider config.Provider, fingerprint string) {
 			defer wg.Done()
 			select {
 			case c.sem <- struct{}{}:
 				defer func() { <-c.sem }()
 			case <-ctx.Done():
-				results <- result{name: pCopy.Name, status: errorStatus(pCopy.Name, "", ctx.Err().Error(), 0), fingerprint: fingerprint}
+				results <- result{name: provider.Name, status: errorStatus(provider.Name, "", ctx.Err().Error(), 0), fingerprint: fingerprint}
 				return
 			}
-			results <- result{name: pCopy.Name, status: checkOne(ctx, &pCopy, client), fingerprint: fingerprint}
-		}()
+			client, err := resolve(provider.Proxy)
+			if err != nil {
+				results <- result{name: provider.Name, status: errorStatus(provider.Name, modelsEndpoint(provider.BaseURL), err.Error(), 0), fingerprint: fingerprint}
+				return
+			}
+			results <- result{name: provider.Name, status: checkOne(ctx, &provider, client), fingerprint: fingerprint}
+		}(pCopy, fingerprint)
 	}
 
 	wg.Wait()
@@ -206,7 +215,7 @@ func (c *Checker) checkAll(ctx context.Context, cfg *config.Config, client *http
 //
 // generation 判据保留：配置在探测期间被改掉时结果直接丢弃，
 // 否则会把旧上游的结论写到新配置的名字上。
-func (c *Checker) CheckProvider(ctx context.Context, cfg *config.Config, client *http.Client, name string) (Status, bool) {
+func (c *Checker) CheckProvider(ctx context.Context, cfg *config.Config, resolve ClientResolver, name string) (Status, bool) {
 	provider, ok := cfg.Providers[name]
 	if !ok {
 		return Status{}, false
@@ -234,9 +243,35 @@ func (c *Checker) CheckProvider(ctx context.Context, cfg *config.Config, client 
 		return Status{}, false
 	}
 
+	client, err := resolve(pCopy.Proxy)
+	if err != nil {
+		status := errorStatus(pCopy.Name, modelsEndpoint(pCopy.BaseURL), err.Error(), 0)
+		c.storeStatus(name, status, fingerprint, generation)
+		return status, true
+	}
 	status := checkOne(ctx, &pCopy, client)
 	c.storeStatus(name, status, fingerprint, generation)
 	return status, true
+}
+
+// ProbeAdHoc 用给定的临时 provider 配置探测上游，不读配置也不写健康缓存。
+// ok=false 表示没有取得并发槽位，调用方应将其视为网关繁忙而非上游异常。
+func (c *Checker) ProbeAdHoc(ctx context.Context, p *config.Provider, resolve ClientResolver) (Status, bool) {
+	if p == nil {
+		return Status{}, false
+	}
+	pCopy := *p
+	select {
+	case c.sem <- struct{}{}:
+		defer func() { <-c.sem }()
+	case <-ctx.Done():
+		return Status{}, false
+	}
+	client, err := resolve(pCopy.Proxy)
+	if err != nil {
+		return errorStatus(pCopy.Name, modelsEndpoint(pCopy.BaseURL), err.Error(), 0), true
+	}
+	return checkOne(ctx, &pCopy, client), true
 }
 
 // storeStatus 在 generation 未变时写入检测结果。
@@ -314,7 +349,8 @@ func providerFingerprint(name string, provider *config.Provider) string {
 	if provider == nil {
 		fmt.Fprintf(h, "%s\x00<nil>", name)
 	} else {
-		fmt.Fprintf(h, "%s\x00%s\x00%s\x00%s", name, provider.BaseURL, provider.Format, provider.APIKey)
+		// User-Agent 与代理都会改变 /v1/models 的实际出网请求，变更后旧缓存不能继续表示新配置。
+		fmt.Fprintf(h, "%s\x00%s\x00%s\x00%s\x00%s\x00%s", name, provider.BaseURL, provider.Format, provider.APIKey, provider.UserAgent, provider.Proxy)
 	}
 	return fmt.Sprintf("%x", h.Sum(nil))
 }

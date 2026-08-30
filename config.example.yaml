@@ -96,6 +96,8 @@ providers:
     apiKey: "sk-xxx"
     format: anthropic
     # userAgent: "claude-cli/2.1.161 (external, cli)"  # 可选：留空则转发客户端真实 UA
+    # proxy: "http://proxy.corp.example:7890"           # 可选：留空则使用全局 HTTPS_PROXY；全局也没有则直连
+    # proxy: "http://alice:password@proxy.corp.example:7890" # 带认证代理；仅支持 http/https/socks5/socks5h
     maxConcurrent: 3      # 最大并发请求数（默认 5，范围 1-100）
     maxPerSecond: 2       # 每秒最多请求数（默认 0，范围 0-100）
     maxQueueWait: 30000   # 队列最大等待毫秒（默认 30000，范围 1-600000）

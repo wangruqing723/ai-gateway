@@ -309,6 +309,45 @@ func TestValidateProviderUserAgent(t *testing.T) {
 	}
 }
 
+func TestValidateProviderProxy(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   string
+		wantErr string
+	}{
+		{name: "empty value"},
+		{name: "http proxy", value: "http://proxy.example.com:7890"},
+		{name: "https proxy", value: "https://alice:secret@proxy.example.com:443"},
+		{name: "socks5 proxy", value: "socks5://proxy.example.com:1080"},
+		// socks5h 是合法值：实测 Go 1.23 的 Transport 接受它，与 socks5 行为一致。
+		{name: "socks5h proxy", value: "socks5h://proxy.example.com:1080"},
+		{name: "invalid scheme", value: "ftp://proxy.example.com:1080", wantErr: "须为有效的 http/https/socks5/socks5h URL"},
+		{name: "empty host", value: "http://", wantErr: "须为有效的 http/https/socks5/socks5h URL"},
+		{name: "over rune limit", value: "http://" + strings.Repeat("名", maxProviderProxyRunes) + ".example.com", wantErr: "长度应不超过 256 个字符"},
+		{name: "control character", value: "http://proxy.example.com/\rpath", wantErr: "不能包含 ASCII 控制字符"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := DecodeAndValidate([]byte(validConfigYAML()))
+			if err != nil {
+				t.Fatalf("DecodeAndValidate() error = %v", err)
+			}
+			cfg.Providers["primary"].Proxy = tt.value
+			err = validate(cfg)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("validate() error = %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("validate() error = %v, want containing %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestDecodeAndValidateVisionAndNestedKnownFields(t *testing.T) {
 	withVision := strings.Replace(validConfigYAML(), "    model: upstream-model", `    model: upstream-model
     vision:
@@ -387,6 +426,53 @@ routes:
 	}
 	if provider := providers["empty"].(map[string]any); provider["apiKey"] != "" {
 		t.Fatalf("empty apiKey = %#v, want empty", provider["apiKey"])
+	}
+}
+
+func TestRedactYAMLRedactsOnlyProxyPasswords(t *testing.T) {
+	raw := `providers:
+  password:
+    baseUrl: https://password.example.com
+    format: openai
+    proxy: "http://alice:proxy-secret@proxy.example.com:7890"
+  plain:
+    baseUrl: https://plain.example.com
+    format: openai
+    proxy: "http://proxy.example.com:7890"
+  user-only:
+    baseUrl: https://user-only.example.com
+    format: openai
+    proxy: "http://alice@proxy.example.com:7890"
+routes:
+  - match: "*"
+    provider: password
+    model: upstream
+`
+
+	redacted, err := RedactYAML([]byte(raw), APIKeyKeepSentinel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(redacted), "proxy-secret") {
+		t.Fatalf("代理密码泄露:\n%s", redacted)
+	}
+	if !strings.Contains(string(redacted), ProxyPasswordKeepSentinel) {
+		t.Fatalf("代理密码没有替换为 sentinel:\n%s", redacted)
+	}
+	var decoded struct {
+		Providers map[string]*Provider `yaml:"providers"`
+	}
+	if err := yaml.Unmarshal(redacted, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if got := decoded.Providers["password"].Proxy; got != "http://alice:"+ProxyPasswordKeepSentinel+"@proxy.example.com:7890" {
+		t.Fatalf("带密码代理 = %q", got)
+	}
+	if got := decoded.Providers["plain"].Proxy; got != "http://proxy.example.com:7890" {
+		t.Fatalf("无密码代理被错误改写为 %q", got)
+	}
+	if got := decoded.Providers["user-only"].Proxy; got != "http://alice@proxy.example.com:7890" {
+		t.Fatalf("仅用户名代理被错误改写为 %q", got)
 	}
 }
 

@@ -16,7 +16,8 @@
                             // 这里是每次加载配置（含 5 秒轮询）铺进 this.config 的地方，
                             // 漏读等于刚从服务端拿到的值立刻在内存里丢掉，下次保存就写不回去。
                             // 后端 omitempty 未配时不返回该字段，故用 || '' 兜成空串。
-                            userAgent: pick(p, 'userAgent', 'UserAgent') || ''
+                            userAgent: pick(p, 'userAgent', 'UserAgent') || '',
+                            proxy: pick(p, 'proxy', 'Proxy') || ''
                         };
                     });
 

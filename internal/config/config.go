@@ -23,6 +23,8 @@ import (
 const (
 	// APIKeyKeepSentinel 是管理 API 用于表示“保留已有密钥”的精确占位符。
 	APIKeyKeepSentinel = "__AI_GATEWAY_KEEP_API_KEY__"
+	// ProxyPasswordKeepSentinel 是管理 API 用于表示“保留已有代理密码”的精确占位符。
+	ProxyPasswordKeepSentinel = "__AI_GATEWAY_KEEP_PROXY_PASSWORD__"
 
 	maxCacheAgeDays = 3650
 	maxCacheRecords = 1_000_000
@@ -56,6 +58,8 @@ const (
 	// maxProviderUserAgentRunes User-Agent 长度上限，按字符（rune）而非字节计：
 	// 配置允许使用非 ASCII 的客户端标识，按字节计会不必要地缩短其可用长度。
 	maxProviderUserAgentRunes = 256
+	// maxProviderProxyRunes 代理 URL 长度上限，按字符（rune）而非字节计。
+	maxProviderProxyRunes = 256
 
 	// 默认值集中在此，供 applyDefaults 与各 accessor 共用一处来源。
 	defaultFailoverAttempts      = 2
@@ -78,6 +82,7 @@ type Provider struct {
 	APIKey        string `yaml:"apiKey" json:"apiKey"`                           // 密钥，留空则从客户端请求头提取
 	Format        string `yaml:"format" json:"format"`                           // anthropic | openai | openai-responses
 	UserAgent     string `yaml:"userAgent,omitempty" json:"userAgent,omitempty"` // 上游请求 UA，留空则转发客户端值；两处 omitempty 见 validate 注释
+	Proxy         string `yaml:"proxy,omitempty" json:"proxy,omitempty"`         // 上游代理，留空继承全局代理；两处 omitempty 理由同 userAgent
 	MaxConcurrent int    `yaml:"maxConcurrent" json:"maxConcurrent"`             // 最大并发
 	MaxPerSecond  int    `yaml:"maxPerSecond" json:"maxPerSecond"`               // 每秒最多请求数，0 表示不限
 	MaxQueueWait  int    `yaml:"maxQueueWait" json:"maxQueueWait,omitempty"`     // 队列最大等待（毫秒）
@@ -625,7 +630,7 @@ func LoadAndValidate(data []byte) (*Config, error) {
 	return DecodeAndValidate(data)
 }
 
-// RedactYAML 使用 YAML AST 脱敏 providers 下所有已配置的 apiKey。
+// RedactYAML 使用 YAML AST 脱敏 providers 下的 apiKey 与代理密码。
 func RedactYAML(data []byte, sentinel string) ([]byte, error) {
 	if sentinel == "" {
 		return nil, fmt.Errorf("脱敏占位符不能为空")
@@ -655,7 +660,7 @@ func RedactYAML(data []byte, sentinel string) ([]byte, error) {
 	}
 	for i := 1; i < len(providers.Content); i += 2 {
 		provider := providers.Content[i]
-		redactAPIKeys(provider, sentinel, make(map[*yaml.Node]bool))
+		redactProviderSecrets(provider, sentinel, make(map[*yaml.Node]bool))
 	}
 	out, err := yaml.Marshal(&document)
 	if err != nil {
@@ -664,13 +669,13 @@ func RedactYAML(data []byte, sentinel string) ([]byte, error) {
 	return out, nil
 }
 
-func redactAPIKeys(node *yaml.Node, sentinel string, visited map[*yaml.Node]bool) {
+func redactProviderSecrets(node *yaml.Node, sentinel string, visited map[*yaml.Node]bool) {
 	if node == nil || visited[node] {
 		return
 	}
 	visited[node] = true
 	if node.Kind == yaml.AliasNode {
-		redactAPIKeys(node.Alias, sentinel, visited)
+		redactProviderSecrets(node.Alias, sentinel, visited)
 		return
 	}
 	if node.Kind == yaml.MappingNode {
@@ -680,12 +685,16 @@ func redactAPIKeys(node *yaml.Node, sentinel string, visited map[*yaml.Node]bool
 				redactAPIKeyValue(value, sentinel)
 				continue
 			}
-			redactAPIKeys(value, sentinel, visited)
+			if key.Kind == yaml.ScalarNode && key.Value == "proxy" {
+				redactProxyPasswordValue(value)
+				continue
+			}
+			redactProviderSecrets(value, sentinel, visited)
 		}
 		return
 	}
 	for _, child := range node.Content {
-		redactAPIKeys(child, sentinel, visited)
+		redactProviderSecrets(child, sentinel, visited)
 	}
 }
 
@@ -708,6 +717,45 @@ func redactAPIKeyValue(value *yaml.Node, sentinel string) {
 	target.Style = yaml.DoubleQuotedStyle
 	target.Content = nil
 	target.Alias = nil
+}
+
+func redactProxyPasswordValue(value *yaml.Node) {
+	target := value
+	seen := make(map[*yaml.Node]bool)
+	for target != nil && target.Kind == yaml.AliasNode {
+		if seen[target] {
+			return
+		}
+		seen[target] = true
+		target = target.Alias
+	}
+	if target == nil || target.Kind != yaml.ScalarNode {
+		return
+	}
+	redacted := RedactProxyPassword(target.Value)
+	if redacted == target.Value {
+		return
+	}
+	target.Kind = yaml.ScalarNode
+	target.Tag = "!!str"
+	target.Value = redacted
+	target.Style = yaml.DoubleQuotedStyle
+	target.Content = nil
+	target.Alias = nil
+}
+
+// RedactProxyPassword 将代理 URL 中的密码替换为精确 sentinel；无密码时保持原样。
+func RedactProxyPassword(proxyURL string) string {
+	parsed, err := url.Parse(proxyURL)
+	if err != nil || parsed.User == nil {
+		return proxyURL
+	}
+	password, ok := parsed.User.Password()
+	if !ok || password == "" {
+		return proxyURL
+	}
+	parsed.User = url.UserPassword(parsed.User.Username(), ProxyPasswordKeepSentinel)
+	return parsed.String()
 }
 
 func rejectDuplicateMappingKeys(node *yaml.Node, visited map[*yaml.Node]bool) error {
@@ -794,44 +842,8 @@ func validate(c *Config) error {
 		return fmt.Errorf("metrics.windowMinutes 应在 1-%d 之间", maxMetricsWindowMinutes)
 	}
 	for name, p := range c.Providers {
-		if p == nil {
-			return fmt.Errorf("providers.%s 不能为空", name)
-		}
-		if strings.TrimSpace(name) == "" {
-			return fmt.Errorf("provider 名称不能为空")
-		}
-		if n := utf8.RuneCountInString(name); n > maxProviderNameRunes {
-			return fmt.Errorf("provider 名称长度应不超过 %d 个字符（当前 %d）", maxProviderNameRunes, n)
-		}
-		parsedURL, err := url.ParseRequestURI(p.BaseURL)
-		if err != nil || parsedURL.Host == "" || parsedURL.Scheme != "http" && parsedURL.Scheme != "https" {
-			return fmt.Errorf("providers.%s.baseUrl 须为有效的 http/https URL", name)
-		}
-		if p.Format != "anthropic" && p.Format != "openai" && p.Format != "openai-responses" {
-			return fmt.Errorf("providers.%s.format 须为 anthropic、openai 或 openai-responses", name)
-		}
-		if p.MaxConcurrent < 1 || p.MaxConcurrent > 100 {
-			return fmt.Errorf("providers.%s.maxConcurrent 应在 1-100 之间", name)
-		}
-		if p.MaxPerSecond < 0 || p.MaxPerSecond > 100 {
-			return fmt.Errorf("providers.%s.maxPerSecond 应在 0-100 之间（0 表示不限制）", name)
-		}
-		if p.MaxQueueWait < 1 || p.MaxQueueWait > maxQueueWaitMs {
-			return fmt.Errorf("providers.%s.maxQueueWait 应在 1-%d 之间", name, maxQueueWaitMs)
-		}
-		// UserAgent 的 yaml 与 json 都带 omitempty：PUT 保存会按结构体重新序列化
-		// 整个配置文件，yaml 少了 omitempty 就会给每个没配该字段的 provider 落一行
-		// userAgent: ""，纯噪音；json 少了则前端拿到一堆空字段。
-		// 空值是合法终态（语义为「不配置」），applyDefaults 不碰它。
-		if p.UserAgent != "" {
-			if n := utf8.RuneCountInString(p.UserAgent); n > maxProviderUserAgentRunes {
-				return fmt.Errorf("providers.%s.userAgent 长度应不超过 %d 个字符（当前 %d）", name, maxProviderUserAgentRunes, n)
-			}
-			for _, r := range p.UserAgent {
-				if (r < 0x20 && r != '\t') || r == 0x7F {
-					return fmt.Errorf("providers.%s.userAgent 不能包含 ASCII 控制字符", name)
-				}
-			}
+		if err := validateProvider(name, p, true); err != nil {
+			return err
 		}
 	}
 	for _, r := range c.Routes {
@@ -861,6 +873,76 @@ func validate(c *Config) error {
 	}
 	if err := validateBreaker(&c.Breaker); err != nil {
 		return err
+	}
+	return nil
+}
+
+// ValidateProbeProvider 校验临时探测所需的 provider 字段。
+// 探测不经过队列，因此并发、限速和排队字段不属于输入面。
+func ValidateProbeProvider(name string, p *Provider) error {
+	return validateProvider(name, p, false)
+}
+
+func validateProvider(name string, p *Provider, validateLimits bool) error {
+	if p == nil {
+		return fmt.Errorf("providers.%s 不能为空", name)
+	}
+	if strings.TrimSpace(name) == "" {
+		return fmt.Errorf("provider 名称不能为空")
+	}
+	if n := utf8.RuneCountInString(name); n > maxProviderNameRunes {
+		return fmt.Errorf("provider 名称长度应不超过 %d 个字符（当前 %d）", maxProviderNameRunes, n)
+	}
+	parsedURL, err := url.ParseRequestURI(p.BaseURL)
+	if err != nil || parsedURL.Host == "" || parsedURL.Scheme != "http" && parsedURL.Scheme != "https" {
+		return fmt.Errorf("providers.%s.baseUrl 须为有效的 http/https URL", name)
+	}
+	if p.Format != "anthropic" && p.Format != "openai" && p.Format != "openai-responses" {
+		return fmt.Errorf("providers.%s.format 须为 anthropic、openai 或 openai-responses", name)
+	}
+	if validateLimits {
+		if p.MaxConcurrent < 1 || p.MaxConcurrent > 100 {
+			return fmt.Errorf("providers.%s.maxConcurrent 应在 1-100 之间", name)
+		}
+		if p.MaxPerSecond < 0 || p.MaxPerSecond > 100 {
+			return fmt.Errorf("providers.%s.maxPerSecond 应在 0-100 之间（0 表示不限制）", name)
+		}
+		if p.MaxQueueWait < 1 || p.MaxQueueWait > maxQueueWaitMs {
+			return fmt.Errorf("providers.%s.maxQueueWait 应在 1-%d 之间", name, maxQueueWaitMs)
+		}
+	}
+	// UserAgent 的 yaml 与 json 都带 omitempty：PUT 保存会按结构体重新序列化
+	// 整个配置文件，yaml 少了 omitempty 就会给每个没配该字段的 provider 落一行
+	// userAgent: ""，纯噪音；json 少了则前端拿到一堆空字段。
+	// 空值是合法终态（语义为「不配置」），applyDefaults 不碰它。
+	if p.UserAgent != "" {
+		if n := utf8.RuneCountInString(p.UserAgent); n > maxProviderUserAgentRunes {
+			return fmt.Errorf("providers.%s.userAgent 长度应不超过 %d 个字符（当前 %d）", name, maxProviderUserAgentRunes, n)
+		}
+		for _, r := range p.UserAgent {
+			if (r < 0x20 && r != '\t') || r == 0x7F {
+				return fmt.Errorf("providers.%s.userAgent 不能包含 ASCII 控制字符", name)
+			}
+		}
+	}
+	// Proxy 与 UserAgent 同样是可选字段：空值表示继承全局环境代理（或直连），
+	// yaml/json 使用 omitempty，applyDefaults 不碰它，避免把空值物化进配置文件。
+	if p.Proxy != "" {
+		if n := utf8.RuneCountInString(p.Proxy); n > maxProviderProxyRunes {
+			return fmt.Errorf("providers.%s.proxy 长度应不超过 %d 个字符（当前 %d）", name, maxProviderProxyRunes, n)
+		}
+		for _, r := range p.Proxy {
+			if (r < 0x20 && r != '\t') || r == 0x7F {
+				return fmt.Errorf("providers.%s.proxy 不能包含 ASCII 控制字符", name)
+			}
+		}
+		proxyURL, err := url.Parse(p.Proxy)
+		// socks5h 与 socks5 一并接受：实测 Go 1.23 的 http.Transport 对两者行为一致，
+		// 都会去拨代理（而不是报 unsupported protocol scheme）。只放 socks5 会让校验
+		// 比运行时更严——用户从 curl 那边抄来的 socks5h:// 明明能用却被拒。
+		if err != nil || proxyURL.Host == "" || (proxyURL.Scheme != "http" && proxyURL.Scheme != "https" && proxyURL.Scheme != "socks5" && proxyURL.Scheme != "socks5h") {
+			return fmt.Errorf("providers.%s.proxy 须为有效的 http/https/socks5/socks5h URL", name)
+		}
 	}
 	return nil
 }

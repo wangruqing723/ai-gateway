@@ -17,6 +17,9 @@
                 // 正在单独检测的 provider 名（null 表示没有）。存名字而不是布尔，
                 // 这样只有被点的那一行转图标，其余行照常可点。
                 checkingProvider: null,
+                // 弹窗临时探测与首页已落盘 provider 的健康缓存隔离，绝不复用 checkingProvider。
+                probingProvider: false,
+                providerProbeStatus: null,
                 resettingBreakers: false,
                 // 同理：正在单独重置熔断器的 provider 名
                 resettingBreaker: null,
@@ -108,6 +111,7 @@
                     maxPerSecond: 0,
                     maxQueueWait: 30000,
                     userAgent: '',
+                    proxy: '',
                     apiKeyConfigured: false,
                     clearApiKey: false
                 },
