@@ -72,6 +72,7 @@ providers:
     baseUrl: "https://your-provider.com"
     apiKey: "sk-xxx"
     format: anthropic
+    # userAgent: "claude-cli/2.1.161 (external, cli)" # 可选：显式覆盖上游 User-Agent
 
   mimo_vision:
     baseUrl: "https://your-vision-provider.com/v1"
@@ -90,6 +91,12 @@ routes:
     provider: mimo
     model: "your-main-model"
 ```
+
+### Provider 的 User-Agent
+
+每个 Provider 可选配 `userAgent`。取值优先级固定为：`provider.userAgent` 非空时使用该值；否则原样转发客户端请求中的 `User-Agent`；客户端也未携带时完全不设置该头，由 Go 自动填入 `Go-http-client/1.1`。
+
+这是一次有意的行为变更：过去未配置时，所有上游都会收到 `Go-http-client/1.1`；现在未配置的 Provider 会转发客户端的真实 UA。这样可兼容按客户端类型准入的上游（例如 ar-gh），但会向上游泄露客户端身份和版本。若要固定值或避免随客户端变化，请为该 Provider 显式配置 `userAgent`。
 
 ## 本地开发
 
@@ -134,7 +141,7 @@ http://127.0.0.1:7789/
 配置菜单支持：
 
 - 查看 Provider、路由数量、运行模式和超时概览
-- 在“提供商”中可视化编辑 Provider、上游地址、协议格式、并发、限速和队列等待
+- 在“提供商”中可视化编辑 Provider、上游地址、协议格式、并发、限速、队列等待和 User-Agent
 - 在“路由”中可视化编辑路由规则、目标模型和视觉伴随模型
 - 在“全局设置”中可视化编辑监听、超时、缓存配置和直通模式
 - 在“全局设置”中使用 YAML 原文编辑完整配置

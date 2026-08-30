@@ -170,6 +170,7 @@ go test ./internal/<pkg>/ -run TestName -v
 - **可配置的转移边界**：非流式整体超时用独立的 `onRequestTimeout`（默认 **false**），不并入 `onTransportError`——后者覆盖的连接失败几乎不耗时、是 failover 最该管的场景，而整体超时每个候选都要等满一整个 `timeout` 预算，转移会让总耗时接近翻倍。流式活跃超时不可配置转移：那时字节已写给客户端。
 - **配置零值语义**：`Failover` / `Breaker` 的数值项一律用 `*int`，`applyDefaults` 只在 `nil` 时填默认值。值类型分不清「写了 0」和「没写」：`maxRetryAfterMs: 0` 是合法的「不设上限」会被改掉，而 `maxAttempts` / `breaker` 三项写 0 本该报错，却会被静默改成默认值、让 `validate` 的下界检查变成死代码。读取统一走 accessor（`AttemptLimit()` / `RetryAfterCapMs()` / `FailureThreshold()` / `CooldownMs()` / `ProbeLimit()`），默认值只留一处来源。
 - **流式转发**：同格式直接透传；跨格式使用 `converter.NewStreamTransformer` 逐行转换，避免 `bufio.Scanner` 的大行限制。
+- **Provider User-Agent**：上游请求按固定优先级取值：`provider.userAgent` 非空时使用它；否则原样转发客户端请求的 `User-Agent`；客户端也未携带时完全不设该头，交给 Go 填默认值 `Go-http-client/1.1`。第三档必须不设头，不能 `Set("User-Agent", "")`：设空字符串会让该头彻底消失。
 - **超时控制**：`internal/proxy` 统一用 `context` 收口；流式超时后会补发合规 SSE 收尾事件。
 - **配置热重载**：`/api/config` 使用严格 YAML 解码、结构化脱敏、revision/ETag 与串行事务；`host`、`port` 只报告 `restartRequired`，其他运行时组件统一动态传播。`applyRuntimeConfig` 内 `queue`、`breaker`、`selector` 三者都要 `Reconcile`：selector 按 `route.match` 归属，删掉或改名的路由要连带丢掉轮转计数器与粘性映射（`rr` 既无 TTL 也无 LRU 兜底，不清理就随历史 match 单调增长）；`match` 未变时必须保留状态，否则每次保存配置都会冲掉全部会话粘性、让上游侧 prompt cache 作废。
 - **请求观测**：最近 1000 条请求日志使用环形缓冲；累计与最近一分钟指标使用独立有界秒桶和固定延迟直方图，不受日志容量限制。

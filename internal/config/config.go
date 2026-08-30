@@ -53,6 +53,10 @@ const (
 	// 名称会进日志、响应头 x-ai-gateway-provider 和前端表格，需要有个上限。
 	maxProviderNameRunes = 100
 
+	// maxProviderUserAgentRunes User-Agent 长度上限，按字符（rune）而非字节计：
+	// 配置允许使用非 ASCII 的客户端标识，按字节计会不必要地缩短其可用长度。
+	maxProviderUserAgentRunes = 256
+
 	// 默认值集中在此，供 applyDefaults 与各 accessor 共用一处来源。
 	defaultFailoverAttempts      = 2
 	defaultMaxRetryAfterMs       = 5000
@@ -73,6 +77,7 @@ type Provider struct {
 	BaseURL       string `yaml:"baseUrl" json:"baseUrl"`                     // 上游地址
 	APIKey        string `yaml:"apiKey" json:"apiKey"`                       // 密钥，留空则从客户端请求头提取
 	Format        string `yaml:"format" json:"format"`                       // anthropic | openai | openai-responses
+	UserAgent     string `yaml:"userAgent" json:"userAgent,omitempty"`       // 上游请求 User-Agent，留空则转发客户端值
 	MaxConcurrent int    `yaml:"maxConcurrent" json:"maxConcurrent"`         // 最大并发
 	MaxPerSecond  int    `yaml:"maxPerSecond" json:"maxPerSecond"`           // 每秒最多请求数，0 表示不限
 	MaxQueueWait  int    `yaml:"maxQueueWait" json:"maxQueueWait,omitempty"` // 队列最大等待（毫秒）
@@ -813,6 +818,16 @@ func validate(c *Config) error {
 		}
 		if p.MaxQueueWait < 1 || p.MaxQueueWait > maxQueueWaitMs {
 			return fmt.Errorf("providers.%s.maxQueueWait 应在 1-%d 之间", name, maxQueueWaitMs)
+		}
+		if p.UserAgent != "" {
+			if n := utf8.RuneCountInString(p.UserAgent); n > maxProviderUserAgentRunes {
+				return fmt.Errorf("providers.%s.userAgent 长度应不超过 %d 个字符（当前 %d）", name, maxProviderUserAgentRunes, n)
+			}
+			for _, r := range p.UserAgent {
+				if (r < 0x20 && r != '\t') || r == 0x7F {
+					return fmt.Errorf("providers.%s.userAgent 不能包含 ASCII 控制字符", name)
+				}
+			}
 		}
 	}
 	for _, r := range c.Routes {

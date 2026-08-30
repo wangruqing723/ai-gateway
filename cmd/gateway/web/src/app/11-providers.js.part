@@ -8,6 +8,7 @@
                         maxConcurrent: 5,
                         maxPerSecond: 0,
                         maxQueueWait: 30000,
+                        userAgent: '',
                         apiKeyConfigured: false,
                         clearApiKey: false
                     };
@@ -25,6 +26,7 @@
                         maxConcurrent: p.maxConcurrent,
                         maxPerSecond: p.maxPerSecond,
                         maxQueueWait: p.maxQueueWait,
+                        userAgent: p.userAgent || '',
                         apiKeyConfigured: !!p.apiKeyConfigured,
                         clearApiKey: false
                     };
@@ -49,6 +51,7 @@
                         maxConcurrent: p.maxConcurrent,
                         maxPerSecond: p.maxPerSecond,
                         maxQueueWait: p.maxQueueWait,
+                        userAgent: p.userAgent || '',
                         apiKeyConfigured: false,
                         clearApiKey: false
                     };
@@ -103,7 +106,8 @@
                         format: this.providerForm.format,
                         maxConcurrent: this.providerForm.maxConcurrent || 5,
                         maxPerSecond: this.providerForm.maxPerSecond || 0,
-                        maxQueueWait: this.providerForm.maxQueueWait || 30000
+                        maxQueueWait: this.providerForm.maxQueueWait || 30000,
+                        userAgent: this.providerForm.userAgent || undefined
                     };
                     // 弹窗保存直接落盘：点这个按钮已经是一次明确确认，再要求点顶部保存
                     // 等于同一件事确认两遍，实际结果是用户忘记第二步。

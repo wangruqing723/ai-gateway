@@ -95,6 +95,7 @@ providers:
     baseUrl: "https://token-plan-cn.xiaomimimo.com"
     apiKey: "sk-xxx"
     format: anthropic
+    # userAgent: "claude-cli/2.1.161 (external, cli)"  # 可选：留空则转发客户端真实 UA
     maxConcurrent: 3      # 最大并发请求数（默认 5，范围 1-100）
     maxPerSecond: 2       # 每秒最多请求数（默认 0，范围 0-100）
     maxQueueWait: 30000   # 队列最大等待毫秒（默认 30000，范围 1-600000）

@@ -1253,6 +1253,11 @@
                     <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">队列最大等待 ms</span>
                     <input autocomplete="off" type="number" x-model.number="providerForm.maxQueueWait" class="field">
                 </label>
+                <label class="block md:col-span-2">
+                    <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">User-Agent</span>
+                    <input autocomplete="off" type="text" x-model="providerForm.userAgent" placeholder="留空则转发客户端真实 UA" class="field">
+                    <span class="mt-1 block text-[11px] text-muted">用于兼容按客户端类型准入的上游；显式设置会覆盖客户端请求头。</span>
+                </label>
             </div>
             <div class="flex justify-end gap-3 border-t border-line p-5">
                 <button @click="showProviderModal = false" class="btn btn-secondary">取消</button>

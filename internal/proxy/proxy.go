@@ -332,7 +332,11 @@ func Forward(opts *Options) error {
 			writeJSONError(opts.ClientRes, http.StatusBadGateway, "proxy_error", err.Error())
 			return err
 		}
-		setUpstreamHeaders(req, opts.Provider)
+		clientUserAgent := ""
+		if opts.ClientReq != nil {
+			clientUserAgent = opts.ClientReq.Header.Get("User-Agent")
+		}
+		setUpstreamHeaders(req, opts.Provider, clientUserAgent)
 
 		var headerTimedOut atomic.Bool
 		headerTimerDone := make(chan struct{})
@@ -405,7 +409,11 @@ func Forward(opts *Options) error {
 		writeJSONError(opts.ClientRes, http.StatusBadGateway, "proxy_error", err.Error())
 		return err
 	}
-	setUpstreamHeaders(req, opts.Provider)
+	clientUserAgent := ""
+	if opts.ClientReq != nil {
+		clientUserAgent = opts.ClientReq.Header.Get("User-Agent")
+	}
+	setUpstreamHeaders(req, opts.Provider, clientUserAgent)
 
 	resp, err := opts.HTTPClient.Do(req)
 	if err != nil {

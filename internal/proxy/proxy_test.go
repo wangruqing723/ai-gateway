@@ -594,6 +594,62 @@ func TestForwardClientCancelAfterHeaders(t *testing.T) {
 	}
 }
 
+func TestForwardSendsExpectedUserAgent(t *testing.T) {
+	tests := []struct {
+		name       string
+		providerUA string
+		clientUA   string
+		wantUA     string
+	}{
+		{
+			name:       "provider user agent overrides client user agent",
+			providerUA: "provider-agent/1.0",
+			clientUA:   "client-agent/2.0",
+			wantUA:     "provider-agent/1.0",
+		},
+		{
+			name:     "client user agent is forwarded when provider is not configured",
+			clientUA: "client-agent/2.0",
+			wantUA:   "client-agent/2.0",
+		},
+		{
+			name:   "go default is sent when neither source provides a user agent",
+			wantUA: "Go-http-client/1.1",
+		},
+		{
+			name:       "provider user agent is sent without a client user agent",
+			providerUA: "provider-agent/1.0",
+			wantUA:     "provider-agent/1.0",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			receivedUA := make(chan string, 1)
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				receivedUA <- r.Header.Get("User-Agent")
+				w.Header().Set("content-type", "application/json")
+				_, _ = io.WriteString(w, `{"id":"chatcmpl-test","model":"test","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`)
+			}))
+			defer upstream.Close()
+
+			recorder := httptest.NewRecorder()
+			opts := forwardTestOptions(upstream, recorder, "openai", "openai-chat", false, 0, 0)
+			opts.Provider.UserAgent = tt.providerUA
+			if tt.clientUA != "" {
+				opts.ClientReq.Header.Set("User-Agent", tt.clientUA)
+			}
+
+			if err := Forward(opts); err != nil {
+				t.Fatalf("Forward() error = %v", err)
+			}
+			if got := <-receivedUA; got != tt.wantUA {
+				t.Fatalf("upstream User-Agent = %q, want %q", got, tt.wantUA)
+			}
+		})
+	}
+}
+
 func forwardTestOptions(upstream *httptest.Server, recorder http.ResponseWriter, providerFormat, clientFormat string, streaming bool, headerTimeoutMs, activityTimeoutMs int) *Options {
 	return &Options{
 		ClientReq:             httptest.NewRequest(http.MethodPost, "http://client.test/v1/messages", nil),

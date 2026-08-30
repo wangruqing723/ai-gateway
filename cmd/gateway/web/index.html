@@ -1253,6 +1253,11 @@
                     <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">队列最大等待 ms</span>
                     <input autocomplete="off" type="number" x-model.number="providerForm.maxQueueWait" class="field">
                 </label>
+                <label class="block md:col-span-2">
+                    <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">User-Agent</span>
+                    <input autocomplete="off" type="text" x-model="providerForm.userAgent" placeholder="留空则转发客户端真实 UA" class="field">
+                    <span class="mt-1 block text-[11px] text-muted">用于兼容按客户端类型准入的上游；显式设置会覆盖客户端请求头。</span>
+                </label>
             </div>
             <div class="flex justify-end gap-3 border-t border-line p-5">
                 <button @click="showProviderModal = false" class="btn btn-secondary">取消</button>
@@ -1525,6 +1530,7 @@
                     maxConcurrent: 5,
                     maxPerSecond: 0,
                     maxQueueWait: 30000,
+                    userAgent: '',
                     apiKeyConfigured: false,
                     clearApiKey: false
                 },
@@ -2840,6 +2846,7 @@
                         maxConcurrent: 5,
                         maxPerSecond: 0,
                         maxQueueWait: 30000,
+                        userAgent: '',
                         apiKeyConfigured: false,
                         clearApiKey: false
                     };
@@ -2857,6 +2864,7 @@
                         maxConcurrent: p.maxConcurrent,
                         maxPerSecond: p.maxPerSecond,
                         maxQueueWait: p.maxQueueWait,
+                        userAgent: p.userAgent || '',
                         apiKeyConfigured: !!p.apiKeyConfigured,
                         clearApiKey: false
                     };
@@ -2881,6 +2889,7 @@
                         maxConcurrent: p.maxConcurrent,
                         maxPerSecond: p.maxPerSecond,
                         maxQueueWait: p.maxQueueWait,
+                        userAgent: p.userAgent || '',
                         apiKeyConfigured: false,
                         clearApiKey: false
                     };
@@ -2935,7 +2944,8 @@
                         format: this.providerForm.format,
                         maxConcurrent: this.providerForm.maxConcurrent || 5,
                         maxPerSecond: this.providerForm.maxPerSecond || 0,
-                        maxQueueWait: this.providerForm.maxQueueWait || 30000
+                        maxQueueWait: this.providerForm.maxQueueWait || 30000,
+                        userAgent: this.providerForm.userAgent || undefined
                     };
                     // 弹窗保存直接落盘：点这个按钮已经是一次明确确认，再要求点顶部保存
                     // 等于同一件事确认两遍，实际结果是用户忘记第二步。

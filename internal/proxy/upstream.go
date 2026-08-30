@@ -25,10 +25,15 @@ func buildUpstreamURL(p *config.Provider) (base, path string) {
 	}
 }
 
-// setUpstreamHeaders 按 provider 格式设置鉴权头。
-func setUpstreamHeaders(req *http.Request, p *config.Provider) {
+// setUpstreamHeaders 按 provider 格式设置鉴权头，并按优先级设置 User-Agent。
+func setUpstreamHeaders(req *http.Request, p *config.Provider, clientUserAgent string) {
 	req.Header.Set("content-type", "application/json")
 	req.Header.Set("accept", "application/json, text/event-stream")
+	if p.UserAgent != "" {
+		req.Header.Set("User-Agent", p.UserAgent)
+	} else if clientUserAgent != "" {
+		req.Header.Set("User-Agent", clientUserAgent)
+	}
 	if p.Format == "anthropic" {
 		req.Header.Set("x-api-key", p.APIKey)
 		req.Header.Set("anthropic-version", "2023-06-01")

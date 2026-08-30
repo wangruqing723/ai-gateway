@@ -264,6 +264,51 @@ func TestDecodeAndValidateProviderNameLength(t *testing.T) {
 	}
 }
 
+func TestValidateProviderUserAgent(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   string
+		wantErr string
+	}{
+		{name: "legal value", value: "claude-cli/2.1.161 (external, cli)"},
+		{name: "empty value"},
+		{
+			name:    "over rune limit",
+			value:   strings.Repeat("名", maxProviderUserAgentRunes+1),
+			wantErr: "providers.primary.userAgent 长度应不超过 256 个字符（当前 257）",
+		},
+		{name: "carriage return", value: "bad\rvalue", wantErr: "providers.primary.userAgent 不能包含 ASCII 控制字符"},
+		{name: "line feed", value: "bad\nvalue", wantErr: "providers.primary.userAgent 不能包含 ASCII 控制字符"},
+		{name: "NUL", value: "bad\x00value", wantErr: "providers.primary.userAgent 不能包含 ASCII 控制字符"},
+		{name: "horizontal tab is allowed", value: "tab\there"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// validConfigYAML 是不含 userAgent 的旧配置，先解码成功以保证兼容性。
+			cfg, err := DecodeAndValidate([]byte(validConfigYAML()))
+			if err != nil {
+				t.Fatalf("DecodeAndValidate() legacy config error = %v", err)
+			}
+			if got := cfg.Providers["primary"].UserAgent; got != "" {
+				t.Fatalf("legacy provider UserAgent = %q, want empty", got)
+			}
+
+			cfg.Providers["primary"].UserAgent = tt.value
+			err = validate(cfg)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("validate() error = %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("validate() error = %v, want containing %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestDecodeAndValidateVisionAndNestedKnownFields(t *testing.T) {
 	withVision := strings.Replace(validConfigYAML(), "    model: upstream-model", `    model: upstream-model
     vision:
