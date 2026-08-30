@@ -15,7 +15,12 @@ services:
     # 默认值 501:20 面向 macOS；其它机器请设置 AI_GATEWAY_UID/GID（见 .env.example）。
     user: "${AI_GATEWAY_UID:-501}:${AI_GATEWAY_GID:-20}"
     ports:
-      - "7789:7789"
+      # 只发布到本机回环：网关没有强制 gateway token，而 /api/config 能改写磁盘
+      # 配置并热重载，绑所有网卡等于把配置写权限开放给整个局域网。
+      # 容器内仍必须监听 0.0.0.0:7789（见 config.yaml 的 host），这里限制的是宿主侧。
+      # 需要跨机器管理时用 SSH 本地端口转发，仍以 127.0.0.1 访问：
+      #   ssh -N -L 7789:127.0.0.1:7789 <user>@<host>
+      - "127.0.0.1:7789:7789"
     volumes:
       # 挂载配置文件；管理页面保存配置时需要写权限。
       - ./config.yaml:/app/config.yaml

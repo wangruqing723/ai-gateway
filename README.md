@@ -292,6 +292,14 @@ docker run -d \
 
 裸进程可在修改 `host`/`port` 后重启进程生效。Compose 部署必须保持容器内监听为 `0.0.0.0:7789`，因为默认端口映射固定为 `127.0.0.1:7789:7789`；若确需修改端口，要同步修改 Compose 的 container target，并执行 `docker compose up -d --force-recreate`，单独 `docker compose restart` 不会更新端口映射。
 
+改动端口映射后建议自查一次实际绑定，确认没有意外暴露到所有网卡：
+
+```bash
+docker port ai-gateway 7789      # 期望只有 127.0.0.1:7789，不应出现 0.0.0.0 或 [::]
+```
+
+注意请求日志里的 `clientIp` **无法用来判断是否有局域网访问**：Docker 的 NAT 会把所有经端口映射进来的连接都改写成容器网络的网桥地址（如 `172.23.0.1`），本机来源与局域网来源在日志里完全一样。要确认暴露面只能看实际绑定，不能看日志。
+
 ### SQLite 数据卷注意事项
 
 Go 版用真正的 SQLite（`modernc.org/sqlite`），会用文件锁保证并发安全。只要 `data` 目录所在文件系统支持正常文件锁语义，bind mount 与 named volume 都可用。
