@@ -59,6 +59,7 @@ This file provides guidance to AI coding assistants (Claude Code, Codex, and oth
 - 委托前必须先用 `/codex:setup` 检查 Codex 可用性；缺失/未认证则**停下询问用户**，不擅自实现、不重试。
 - 展示 `TASKS.md` 摘要并**等用户明确确认**后，才用 `/codex:rescue` 委托。
 - 默认**不自动提交**；Codex 产出后走全局「提交确认」规则，由用户拍板 `git commit`。
+- **验收不信自述，只信实跑输出**：Codex 自报「测试全绿」不作为验收依据，Claude 必须自己在容器内跑一遍并贴出完整输出。改了 `cmd/gateway/web/src/` 的任务，还要单独确认 `webbuild -check` exit=0 —— 已连续两轮出现「改了前端源码、忘了重建 `index.html` 产物」却自报全绿的情况，`TestRepoArtifactMatchesSources` 会失败但不会被自述暴露。
 
 
 ---
