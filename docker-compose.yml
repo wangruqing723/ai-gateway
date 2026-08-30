@@ -23,10 +23,13 @@ services:
       - ./cmd/gateway/web:/app/web:ro
       # 持久化数据目录（SQLite 缓存）
       - ./data:/app/data
-    # 容器内访问宿主机服务（如本机代理）用 host.docker.internal。
-    # macOS/Windows 的 Docker Desktop 自带该域名，原生 Linux 需要这条映射才有。
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+    # 注意：这里**故意不写** extra_hosts 的 host.docker.internal 映射。
+    # macOS/Windows 的 Docker Desktop 与 colima 都自带可用的 host.docker.internal；
+    # 强制成 host-gateway 反而会把它覆盖成 compose 网络在虚拟机内的网桥网关
+    # （如 172.23.0.1），那个地址上没有任何东西监听，代理会 connection refused。
+    # 原生 Linux 默认没有该域名，需要代理的 Linux 用户自行在此加：
+    #   extra_hosts:
+    #     - "host.docker.internal:host-gateway"
     environment:
       - TZ=Asia/Shanghai
       - AI_GATEWAY_WEB_DIR=/app/web

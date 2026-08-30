@@ -250,7 +250,15 @@ docker compose up -d --force-recreate   # 单独 restart 不会更新环境变�
 
 要点：
 
-- **宿主机代理必须写 `host.docker.internal`，不能写 `127.0.0.1`** —— 后者在容器里指容器自己。compose 已配好该域名的跨平台映射（macOS/Windows 的 Docker Desktop 自带，原生 Linux 靠 `extra_hosts` 的 `host-gateway`）。
+- **宿主机代理必须写 `host.docker.internal`，不能写 `127.0.0.1`** —— 后者在容器里指容器自己。macOS/Windows 的 Docker Desktop 与 colima 都自带该域名。**原生 Linux 默认没有**，需要在 `docker-compose.yml` 里自行加 `extra_hosts`（文件内有注释掉的现成写法）。
+- **不要把 `host.docker.internal` 强制映射成 `host-gateway`**：在 colima 上它会解析成 compose 网络在虚拟机内的网桥网关（如 `172.23.0.1`），那个地址上没有东西监听，代理请求全部 `proxyconnect ... connection refused`，而且会覆盖掉本来正确的内置映射。`docker run --add-host` 与 compose 的 `extra_hosts` 对 `host-gateway` 的解析结果不同，用前者验证过不代表后者可用。
+- **填之前先自测地址真的通**（把 7897 换成你的端口，返回 200 才算通）：
+
+  ```bash
+  docker run --rm --network ai-gateway_default curlimages/curl:latest \
+    -s -m 6 -o /dev/null -w '%{http_code}\n' \
+    -x http://host.docker.internal:7897 https://api.github.com
+  ```
 - 生效范围是网关**所有**出网请求：上游转发、vision 图片翻译、Provider 健康检测、上游模型列表查询。
 - 不想让某些目标走代理就用 `AI_GATEWAY_NO_PROXY`（逗号分隔）。**本机回环自动排除，但容器网络里的服务名不会** —— 若某个 provider 的 `baseUrl` 指向同一 docker 网络内的另一个容器（如 `http://my-llm:8000`），开代理后该请求会被送去代理并失败，必须把服务名写进 `NO_PROXY`。指向局域网 IP 的 provider 同理。
 - 变量留空等于不设置，与不走代理完全一致，不会因为「配了个空值」而出错。
