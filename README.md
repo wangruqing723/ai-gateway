@@ -233,6 +233,45 @@ curl http://localhost:7789/health
 docker logs -f ai-gateway
 ```
 
+### 出网代理
+
+默认不走代理。只在「上游需要代理才能访问」时才配，例如公司网络限制出网，或上游域名被 DNS 污染——后者在容器内的典型表现是 `dial tcp <错误IP>:443: connect: connection refused`，而宿主机上同一域名却能正常访问。
+
+在 `.env` 里设置（模板见 `.env.example`），然后重建容器：
+
+```bash
+AI_GATEWAY_HTTPS_PROXY=http://host.docker.internal:7897
+AI_GATEWAY_HTTP_PROXY=http://host.docker.internal:7897
+```
+
+```bash
+docker compose up -d --force-recreate   # 单独 restart 不会更新环境变量
+```
+
+要点：
+
+- **宿主机代理必须写 `host.docker.internal`，不能写 `127.0.0.1`** —— 后者在容器里指容器自己。compose 已配好该域名的跨平台映射（macOS/Windows 的 Docker Desktop 自带，原生 Linux 靠 `extra_hosts` 的 `host-gateway`）。
+- 生效范围是网关**所有**出网请求：上游转发、vision 图片翻译、Provider 健康检测、上游模型列表查询。
+- 不想让某些目标走代理就用 `AI_GATEWAY_NO_PROXY`（逗号分隔）。**本机回环自动排除，但容器网络里的服务名不会** —— 若某个 provider 的 `baseUrl` 指向同一 docker 网络内的另一个容器（如 `http://my-llm:8000`），开代理后该请求会被送去代理并失败，必须把服务名写进 `NO_PROXY`。指向局域网 IP 的 provider 同理。
+- 变量留空等于不设置，与不走代理完全一致，不会因为「配了个空值」而出错。
+
+独立 `docker run` 加代理时，同样要带上 `--add-host`：
+
+```bash
+docker run -d \
+  --name ai-gateway \
+  --user "$(id -u):$(id -g)" \
+  -p 127.0.0.1:7789:7789 \
+  -v "$(pwd)/config.yaml:/app/config.yaml" \
+  -v "$(pwd)/data:/app/data" \
+  -e TZ=Asia/Shanghai \
+  --add-host=host.docker.internal:host-gateway \
+  -e HTTPS_PROXY=http://host.docker.internal:7897 \
+  -e NO_PROXY=localhost,127.0.0.1,::1 \
+  --memory=128m \
+  ai-gateway:go
+```
+
 ### 本地安全边界
 
 本项目按个人本机使用设计，不新增强制 gateway token。默认 `docker-compose.yml` 只把端口发布到 `127.0.0.1:7789`；应用同时校验推理和配置接口的 HTTP method、浏览器 Origin、`Content-Type` 与请求体大小。

@@ -23,9 +23,21 @@ services:
       - ./cmd/gateway/web:/app/web:ro
       # 持久化数据目录（SQLite 缓存）
       - ./data:/app/data
+    # 容器内访问宿主机服务（如本机代理）用 host.docker.internal。
+    # macOS/Windows 的 Docker Desktop 自带该域名，原生 Linux 需要这条映射才有。
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       - TZ=Asia/Shanghai
       - AI_GATEWAY_WEB_DIR=/app/web
+      # 出网代理：默认空 = 不走代理，与不设该变量等价。
+      # 宿主机代理要写 host.docker.internal 而非 127.0.0.1，后者在容器里指容器自己。
+      # 只在需要代理才能访问上游时才填（在 .env 里设置，见 .env.example）。
+      - HTTPS_PROXY=${AI_GATEWAY_HTTPS_PROXY:-}
+      - HTTP_PROXY=${AI_GATEWAY_HTTP_PROXY:-}
+      # NO_PROXY 是逃生口：列在这里的目标绕过代理直连。
+      # 本机回环必须排除，否则指向本地服务的 provider 会被绕去代理。
+      - NO_PROXY=${AI_GATEWAY_NO_PROXY:-localhost,127.0.0.1,::1}
     deploy:
       resources:
         limits:

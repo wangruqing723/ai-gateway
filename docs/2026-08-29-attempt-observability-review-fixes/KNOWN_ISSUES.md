@@ -16,7 +16,8 @@
 - 影响面：请求体字段映射、响应体反向转换、错误语义透传三处都可能与真实 Responses 端点不一致，且单元测试的桩响应是按官方文档手写的，不是抓包。
 - 状态：**已获端到端实证（2026-08-30），但未打通真实 Responses 上游**。
   - 已验证：用本地 echo 假上游（把网关实发 body 原样落盘）跑通四种组合，全部 `HTTP 200`：Anthropic 客户端→Responses 上游（非流式 + 流式）、Chat 客户端→Responses 上游、Responses 客户端→Responses 上游同格式透传。抓到的 body 确认网关打的是 `/v1/responses`（KI-1 最关心的第 1 项），`instructions` / `input[].type=message` / `max_output_tokens` / `tool_choice` 对象形式均符合协议。
-  - 未验证：真实 `ar-gh`（`https://agentrouter.org`，glm-5.3）返回 `HTTP 401` + `unauthorized_client_error`（措辞为 `unauthorized client detected`，非普通 key 无效）。请求已确实抵达上游（网关侧 `X-Ai-Gateway-Provider: ar-gh`、`Attempts: 1`），故**协议构建无误、凭据或客户端准入待确认**。需要人工判断该 key 是否仍有效。
+  - 未验证：真实 `ar-gh`（`https://agentrouter.org`，glm-5.3）返回 `HTTP 401` + `unauthorized_client_error`（措辞为 `unauthorized client detected`）。请求已确实抵达上游（网关侧 `X-Ai-Gateway-Provider: ar-gh`、`Attempts: 1`），故**协议构建无误**。
+  - 该 401 不能用于判断凭据状态：后续用**伪造 key** 复现出字节级相同的错误正文，说明上游在校验凭据之前就按客户端特征（IP / UA / 代理出口）拒绝了准入。因此既无法确认该 key 有效，也无法确认其失效——需要换一个可用的 Responses 上游才能收口本条。
   - 附带发现：容器内 `agentrouter.org` 被 DNS 污染（解析到 Meta 地址段 `31.13.95.35` / `199.96.58.177`），必须经代理才能出网——这暴露了 KI-6 记录的代理缺陷。
 
 ## [2026-08-29] KI-2：跨协议流式转换未经真实 SSE 长连接验证

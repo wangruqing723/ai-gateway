@@ -175,6 +175,7 @@ go test ./internal/<pkg>/ -run TestName -v
 - **配置热重载**：`/api/config` 使用严格 YAML 解码、结构化脱敏、revision/ETag 与串行事务；`host`、`port` 只报告 `restartRequired`，其他运行时组件统一动态传播。`applyRuntimeConfig` 内 `queue`、`breaker`、`selector` 三者都要 `Reconcile`：selector 按 `route.match` 归属，删掉或改名的路由要连带丢掉轮转计数器与粘性映射（`rr` 既无 TTL 也无 LRU 兜底，不清理就随历史 match 单调增长）；`match` 未变时必须保留状态，否则每次保存配置都会冲掉全部会话粘性、让上游侧 prompt cache 作废。
 - **请求观测**：最近 1000 条请求日志使用环形缓冲；累计与最近一分钟指标使用独立有界秒桶和固定延迟直方图，不受日志容量限制。
 - **Provider 健康检测**：`internal/providerhealth` 通过探测 `/v1/models` 判断上游是否可用；手动触发 `POST /api/providers/health` 后结果缓存在内存中，`/health` 响应携带缓存状态。
+- **出网代理**：`cmd/gateway/main.go` 的 `httpClient` 是所有出网路径的唯一出口（转发、vision 翻译、健康检测、模型查询），其 `Transport` 必须显式写 `Proxy: http.ProxyFromEnvironment`。自建 `Transport` 的零值 `Proxy` 语义是「完全不走代理」，只有 `http.DefaultTransport` 才默认带上；漏掉这行会让 `HTTPS_PROXY` 被静默忽略，需要代理才能出网的部署只看到 `dial ... connection refused`，看不出是代理没生效。代理由环境变量注入（compose 用 `AI_GATEWAY_HTTPS_PROXY` 等映射，默认空 = 不走代理），宿主机代理在容器内要写 `host.docker.internal`；`NO_PROXY` 是逃生口，默认排除本机回环。注意 `ProxyFromEnvironment` 内部对环境变量做了 `sync.Once` 缓存，进程启动后改 env 不生效，也因此无法用单测稳定覆盖——改动此处须做端到端验证。
 
 ## Commit & Pull Request Guidelines
 
