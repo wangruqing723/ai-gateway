@@ -59,8 +59,16 @@ func main() {
 	qm := queue.NewManager()
 
 	// 复用连接池的 HTTP 客户端；不设 http.Client.Timeout（非流式靠 ctx 超时，流式靠 header 超时 + 活跃超时）
+	//
+	// Proxy 必须显式设置：自建 Transport 的零值 Proxy 是「完全不走代理」，
+	// 只有 http.DefaultTransport 才默认带 ProxyFromEnvironment。不写这一行，
+	// HTTPS_PROXY / HTTP_PROXY 会被静默忽略，需要代理才能出网的部署（公司网络、
+	// 被 DNS 污染的上游域名）只会看到 dial 失败，完全看不出是代理没生效。
+	// 该 client 是所有出网路径的唯一出口：转发、vision 翻译、健康检测、模型查询。
+	// 不想走代理时用 NO_PROXY 排除，语义与 curl、docker 一致。
 	httpClient := &http.Client{
 		Transport: &http.Transport{
+			Proxy:               http.ProxyFromEnvironment,
 			MaxIdleConns:        200,
 			MaxIdleConnsPerHost: 100,
 			IdleConnTimeout:     90 * time.Second,

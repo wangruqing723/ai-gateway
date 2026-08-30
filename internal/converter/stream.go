@@ -1298,7 +1298,27 @@ func (t *responsesToAnthropic) appendToolArguments(outputIndex int, value string
 	})}
 }
 
-func (t *responsesToAnthropic) finish(incomplete bool) []string {
+// responsesEventUsage 从 response.completed / response.incomplete 事件里取 usage。
+// Responses 把终态快照放在事件的 response 字段下，usage 是它的子字段。
+func responsesEventUsage(data map[string]any) map[string]any {
+	response, _ := data["response"].(map[string]any)
+	usage, _ := response["usage"].(map[string]any)
+	return usage
+}
+
+// anthropicStreamUsage 把上游 usage 折成 Anthropic message_delta 的 usage 形状。
+//
+// 只带 output_tokens：Anthropic 原生流式在 message_delta 里只报增量产出，
+// input_tokens 已在 message_start 里给过。上游没给 usage 时退回 0，
+// 保持字段恒在，避免客户端读到缺字段。
+func anthropicStreamUsage(usage map[string]any) map[string]any {
+	return map[string]any{"output_tokens": getIntDefault(usage, "output_tokens", 0)}
+}
+
+// finish 收尾 Responses 流。usage 取自触发收尾的 response.completed /
+// response.incomplete 事件；Responses 协议在这两个事件里必然带 usage，
+// 硬编码 0 会让客户端侧的成本核算和配额统计全部失真。
+func (t *responsesToAnthropic) finish(incomplete bool, usage map[string]any) []string {
 	if t.completed || t.s.completed {
 		return nil
 	}
@@ -1329,7 +1349,7 @@ func (t *responsesToAnthropic) finish(incomplete bool) []string {
 		stop = "refusal"
 	}
 	out = append(out,
-		sseEvent("message_delta", map[string]any{"type": "message_delta", "delta": map[string]any{"stop_reason": stop, "stop_sequence": nil}, "usage": map[string]any{"output_tokens": 0}}),
+		sseEvent("message_delta", map[string]any{"type": "message_delta", "delta": map[string]any{"stop_reason": stop, "stop_sequence": nil}, "usage": anthropicStreamUsage(usage)}),
 		"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
 	)
 	t.completed = true
@@ -1424,9 +1444,9 @@ func (t *responsesToAnthropic) Transform(line string) []string {
 			return nil
 		}
 	case "response.completed":
-		return t.finish(false)
+		return t.finish(false, responsesEventUsage(data))
 	case "response.incomplete":
-		return t.finish(true)
+		return t.finish(true, responsesEventUsage(data))
 	case "response.failed", "error":
 		t.s.failureType = "upstream_error"
 		message := getString(data, "message")

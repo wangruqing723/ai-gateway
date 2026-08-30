@@ -715,3 +715,133 @@ func TestToolResultUnknownBlockStillRejected(t *testing.T) {
 		t.Fatalf("checked body error = %v, want unsupported some_future_block", err)
 	}
 }
+
+// TestAnthropicThinkingBlocksDroppedForNonAnthropicTargets 覆盖 Claude Code 多轮历史里的
+// thinking / redacted_thinking 块：转 Chat 与 Responses 时必须丢掉（signature 是 Anthropic
+// 专有加密签名，跨厂商无法验签），同时 text 与 tool_use 必须完整保留。
+func TestAnthropicThinkingBlocksDroppedForNonAnthropicTargets(t *testing.T) {
+	newBody := func() map[string]any {
+		return map[string]any{
+			"model": "claude-opus-5",
+			"messages": []any{
+				map[string]any{"role": "user", "content": []any{
+					map[string]any{"type": "text", "text": "问题"},
+				}},
+				map[string]any{"role": "assistant", "content": []any{
+					map[string]any{"type": "thinking", "thinking": "内部思考", "signature": "sig-abc"},
+					map[string]any{"type": "redacted_thinking", "data": "opaque"},
+					map[string]any{"type": "text", "text": "回答"},
+					map[string]any{"type": "tool_use", "id": "call_1", "name": "lookup", "input": map[string]any{"q": "x"}},
+				}},
+			},
+		}
+	}
+
+	t.Run("chat 目标丢弃思考块", func(t *testing.T) {
+		in := FromAnthropic(newBody())
+		if in.Err != nil {
+			t.Fatalf("FromAnthropic err = %v", in.Err)
+		}
+		body, err := ToOpenAIChatBodyChecked(in, "glm-5.2")
+		if err != nil {
+			t.Fatalf("ToOpenAIChatBodyChecked err = %v，思考块应被丢弃而不是报错", err)
+		}
+		raw, _ := json.Marshal(body)
+		for _, banned := range []string{"thinking", "redacted_thinking", "sig-abc", "内部思考", "opaque"} {
+			if strings.Contains(string(raw), banned) {
+				t.Fatalf("Chat 请求体仍含 %q: %s", banned, raw)
+			}
+		}
+		if !strings.Contains(string(raw), "回答") || !strings.Contains(string(raw), "lookup") {
+			t.Fatalf("text / tool_use 未保留: %s", raw)
+		}
+	})
+
+	t.Run("responses 目标丢弃思考块", func(t *testing.T) {
+		in := FromAnthropic(newBody())
+		body, err := ToOpenAIResponsesBodyChecked(in, "glm-5.3")
+		if err != nil {
+			t.Fatalf("ToOpenAIResponsesBodyChecked err = %v，思考块应被丢弃而不是报错", err)
+		}
+		raw, _ := json.Marshal(body)
+		for _, banned := range []string{"redacted_thinking", "sig-abc", "内部思考", "opaque"} {
+			if strings.Contains(string(raw), banned) {
+				t.Fatalf("Responses 请求体仍含 %q: %s", banned, raw)
+			}
+		}
+		if !strings.Contains(string(raw), "回答") || !strings.Contains(string(raw), "lookup") {
+			t.Fatalf("text / tool_use 未保留: %s", raw)
+		}
+	})
+
+	t.Run("anthropic 目标保留思考块与签名", func(t *testing.T) {
+		in := FromAnthropic(newBody())
+		body, err := ToAnthropicBodyChecked(in, "claude-opus-5")
+		if err != nil {
+			t.Fatalf("ToAnthropicBodyChecked err = %v，同厂商应原样保留", err)
+		}
+		raw, _ := json.Marshal(body)
+		for _, kept := range []string{"thinking", "redacted_thinking", "sig-abc", "内部思考"} {
+			if !strings.Contains(string(raw), kept) {
+				t.Fatalf("Anthropic 请求体丢了 %q: %s", kept, raw)
+			}
+		}
+	})
+}
+
+// TestClientSystemMessageMapsToDeveloperForResponses 覆盖 Claude Code 直接在 messages
+// 数组里放 role:"system" 的情况：Responses 只认 developer，必须映射而不是拒绝。
+func TestClientSystemMessageMapsToDeveloperForResponses(t *testing.T) {
+	in := FromAnthropic(map[string]any{
+		"model": "claude-opus-5",
+		"messages": []any{
+			map[string]any{"role": "system", "content": []any{
+				map[string]any{"type": "text", "text": "遵守规则"},
+			}},
+			map[string]any{"role": "user", "content": []any{
+				map[string]any{"type": "text", "text": "你好"},
+			}},
+		},
+	})
+	if in.Err != nil {
+		t.Fatalf("FromAnthropic err = %v", in.Err)
+	}
+	body, err := ToOpenAIResponsesBodyChecked(in, "glm-5.3")
+	if err != nil {
+		t.Fatalf("ToOpenAIResponsesBodyChecked err = %v，system 应映射为 developer", err)
+	}
+	input, ok := body["input"].([]any)
+	if !ok || len(input) == 0 {
+		t.Fatalf("input = %#v", body["input"])
+	}
+	first, _ := input[0].(map[string]any)
+	if got := getString(first, "role"); got != "developer" {
+		t.Fatalf("首条 role = %q, want developer", got)
+	}
+	raw, _ := json.Marshal(body)
+	if !strings.Contains(string(raw), "遵守规则") {
+		t.Fatalf("system 指令内容丢失: %s", raw)
+	}
+	if strings.Contains(string(raw), `"role":"system"`) {
+		t.Fatalf("Responses 请求体仍含 role:system: %s", raw)
+	}
+}
+
+// TestUnknownContentBlockStillRejected 确认这次放行只针对思考块，
+// 其他不认识的块仍要在转换前报错，不能借机把 deny-list 打穿。
+func TestUnknownContentBlockStillRejected(t *testing.T) {
+	in := FromAnthropic(map[string]any{
+		"model": "claude-opus-5",
+		"messages": []any{
+			map[string]any{"role": "assistant", "content": []any{
+				map[string]any{"type": "some_future_block", "data": "x"},
+			}},
+		},
+	})
+	if _, err := ToOpenAIChatBodyChecked(in, "glm-5.2"); err == nil || !strings.Contains(err.Error(), "some_future_block") {
+		t.Fatalf("Chat 目标 err = %v, want unsupported some_future_block", err)
+	}
+	if _, err := ToOpenAIResponsesBodyChecked(in, "glm-5.3"); err == nil || !strings.Contains(err.Error(), "some_future_block") {
+		t.Fatalf("Responses 目标 err = %v, want unsupported some_future_block", err)
+	}
+}

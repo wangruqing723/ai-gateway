@@ -858,6 +858,52 @@ func TestStreamStopReasonMappingsStayWithinTargetEnums(t *testing.T) {
 	}
 }
 
+// TestResponsesStreamCarriesUpstreamUsageToAnthropic 锁住 message_delta 里的 usage
+// 必须来自上游终态事件。Anthropic 协议里这个字段必有，硬编码 0 会让客户端的
+// 成本核算与配额统计全部失真。
+func TestResponsesStreamCarriesUpstreamUsageToAnthropic(t *testing.T) {
+	cases := []struct {
+		name  string
+		final string
+		want  float64
+	}{
+		{
+			name:  "completed 带 usage",
+			final: `data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status":"completed","output":[],"usage":{"input_tokens":11,"output_tokens":42}}}`,
+			want:  42,
+		},
+		{
+			name:  "incomplete 带 usage",
+			final: `data: {"type":"response.incomplete","response":{"id":"resp_1","model":"m","status":"incomplete","output":[],"usage":{"input_tokens":11,"output_tokens":7}}}`,
+			want:  7,
+		},
+		{
+			name:  "上游未给 usage 时退回 0",
+			final: `data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status":"completed","output":[]}}`,
+			want:  0,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out := transformAll(t, NewStreamTransformer("openai-responses", "anthropic"),
+				`data: {"type":"response.created","response":{"id":"resp_1","model":"m","status":"in_progress","output":[]}}`,
+				`data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","role":"assistant","content":[]}}`,
+				`data: {"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":"hi"}`,
+				tc.final,
+			)
+			delta := findEvent(t, captureEvents(t, out), "message_delta")
+			usage, ok := delta["usage"].(map[string]any)
+			if !ok {
+				t.Fatalf("message_delta 缺少 usage 字段: %#v", delta)
+			}
+			if got := usage["output_tokens"]; got != tc.want {
+				t.Fatalf("output_tokens = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestStreamAggregateBufferLimit(t *testing.T) {
 	transformer := NewStreamTransformer("openai", "openai-responses")
 	transformer.Transform(`data: {"model":"gpt-upstream","choices":[{"delta":{"role":"assistant"},"finish_reason":null}]}`)

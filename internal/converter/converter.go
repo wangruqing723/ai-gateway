@@ -508,7 +508,8 @@ func responsesInputFromMessages(messages []any) []any {
 		if !ok {
 			continue
 		}
-		role := getString(message, "role")
+		// Responses 用 developer 表达 system 语义；思考块跨厂商无意义，一并丢掉。
+		role := responsesRole(getString(message, "role"))
 		blocks, ok := message["content"].([]any)
 		if !ok {
 			out = append(out, map[string]any{
@@ -517,6 +518,7 @@ func responsesInputFromMessages(messages []any) []any {
 			})
 			continue
 		}
+		blocks = stripReasoningBlocks(blocks)
 
 		var ordinary []any
 		flushOrdinary := func() {
@@ -770,7 +772,8 @@ func validateAnthropicTargetMessages(messages []any) error {
 				return fmt.Errorf("anthropic message %d content block %d must be an object", messageIndex, blockIndex)
 			}
 			switch getString(block, "type") {
-			case "text", "image", "tool_result":
+			// 目标同为 Anthropic 时思考块原样保留（signature 能验签），校验器必须认它。
+			case "text", "image", "tool_result", "thinking", "redacted_thinking":
 			case "tool_use":
 				if _, ok := block["input"].(map[string]any); !ok {
 					return fmt.Errorf("anthropic message %d tool_use arguments must be a JSON object", messageIndex)
@@ -797,6 +800,9 @@ func validateOpenAIChatTargetMessages(messages []any) error {
 			}
 			switch getString(block, "type") {
 			case "text":
+			// 思考块在 canonicalMessageToOpenAIChat 里会被丢弃，这里必须放行：
+			// 校验跑在构建之前，不放行的话 Claude Code 的多轮历史永远转不过去。
+			case "thinking", "redacted_thinking":
 			case "image":
 				source, _ := block["source"].(map[string]any)
 				if source == nil || (getString(source, "url") == "" && getString(source, "data") == "") {
@@ -824,8 +830,9 @@ func validateResponsesTargetMessages(messages []any) error {
 		if !ok {
 			return fmt.Errorf("openai responses message %d must be an object", messageIndex)
 		}
+		// system 由 responsesRole 映射成 developer，这里放行；映射发生在构建阶段。
 		role := getString(message, "role")
-		if role != "user" && role != "assistant" && role != "developer" {
+		if role != "user" && role != "assistant" && role != "developer" && role != "system" {
 			return fmt.Errorf("unsupported openai responses message role %q", role)
 		}
 		blocks, ok := message["content"].([]any)
@@ -842,6 +849,9 @@ func validateResponsesTargetMessages(messages []any) error {
 			}
 			switch getString(block, "type") {
 			case "text":
+			// 思考块在 responsesInputFromMessages 里会被丢弃，这里必须放行：
+			// 校验跑在构建之前，不放行的话 Claude Code 的多轮历史永远转不过去。
+			case "thinking", "redacted_thinking":
 			case "image":
 				source, _ := block["source"].(map[string]any)
 				if source == nil || (getString(source, "url") == "" && getString(source, "data") == "") {
@@ -1201,6 +1211,57 @@ func validateOpenAIChatToolResultContent(content any) error {
 	return nil
 }
 
+// isReasoningBlock 判断内容块是否属于 Anthropic 的思考块。
+//
+// Claude Code 在多轮对话里会把上一轮 assistant 回复原样回传，其中包含 thinking /
+// redacted_thinking 块。这类块只有 Anthropic 能消费：thinking 的 signature 是
+// Anthropic 对思考内容的加密签名，只有它自己能验签，跨厂商传过去纯属噪音。
+func isReasoningBlock(block map[string]any) bool {
+	switch getString(block, "type") {
+	case "thinking", "redacted_thinking":
+		return true
+	}
+	return false
+}
+
+// stripReasoningBlocks 丢掉 thinking / redacted_thinking 块，用于目标不是 Anthropic 的场景。
+//
+// 丢弃不损失本轮推理能力：上游本轮是否思考由 reasoning_effort 决定（见 ToOpenAIChatBody），
+// 与历史思考块无关；assistant 历史回复里真正承载语义的 text 与 tool_use 块都完整保留。
+// 没有思考块时原样返回，不做多余拷贝。
+func stripReasoningBlocks(blocks []any) []any {
+	found := false
+	for _, value := range blocks {
+		if block, ok := value.(map[string]any); ok && isReasoningBlock(block) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return blocks
+	}
+	out := make([]any, 0, len(blocks))
+	for _, value := range blocks {
+		if block, ok := value.(map[string]any); ok && isReasoningBlock(block) {
+			continue
+		}
+		out = append(out, value)
+	}
+	return out
+}
+
+// responsesRole 把 canonical 消息角色映射成 Responses 允许的角色。
+//
+// Responses 用 developer 表达 Chat / Anthropic 的 system 语义。客户端（如 Claude Code）
+// 会直接在 messages 数组里放 role:"system" 的消息，这类消息承载真实指令，
+// 必须映射而不能丢。
+func responsesRole(role string) string {
+	if role == "system" {
+		return "developer"
+	}
+	return role
+}
+
 func appendCanonicalBlocks(messages *[]any, role string, blocks []any) {
 	if len(*messages) > 0 {
 		if previous, ok := (*messages)[len(*messages)-1].(map[string]any); ok && getString(previous, "role") == role {
@@ -1219,6 +1280,10 @@ func canonicalMessageToOpenAIChat(message map[string]any) []any {
 	if !ok {
 		return []any{map[string]any{"role": role, "content": toOpenAIContent(message["content"])}}
 	}
+
+	// 思考块只有 Anthropic 能消费，转 Chat 前先丢掉，否则会落到 toOpenAIContent
+	// 的 default 分支原样透传给上游。
+	blocks = stripReasoningBlocks(blocks)
 
 	if role != "assistant" {
 		var out []any
