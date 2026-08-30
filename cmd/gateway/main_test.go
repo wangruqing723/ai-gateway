@@ -918,6 +918,73 @@ routes:
 	}
 }
 
+// userAgent 必须能完整走通「落盘 → 回显」这条往返，否则前端编辑时读不到已配的值。
+//
+// 这条测试是为一类实际缺陷设的防线：前端有两处按白名单重建 provider 对象
+// （saveProvider 与 configPayload），任一处漏掉新字段，都会让配置在保存后被静默
+// 丢弃且无任何报错。后端这侧一旦回显不出来，前端再正确也没用。
+func TestPutConfigPreservesUserAgent(t *testing.T) {
+	const ua = "claude-cli/2.1.161 (external, cli)"
+
+	t.Run("configured value survives round trip and is exposed in view", func(t *testing.T) {
+		srv := newConfigTestServer(t, testConfigYAML("127.0.0.1", 7789, "https://api.example.com", "super-secret", 5))
+		body := strings.Replace(
+			testConfigYAML("127.0.0.1", 7789, "https://api.example.com", config.APIKeyKeepSentinel, 5),
+			"    format: openai",
+			"    format: openai\n    userAgent: "+strconv.Quote(ua),
+			1)
+		if rec := putConfig(t, srv, body, ""); rec.Code != http.StatusOK {
+			t.Fatalf("PUT status = %d; body=%s", rec.Code, rec.Body.String())
+		}
+
+		srv.cfgMu.RLock()
+		inMemory := srv.cfg.Providers["primary"].UserAgent
+		srv.cfgMu.RUnlock()
+		if inMemory != ua {
+			t.Fatalf("in-memory UserAgent = %q, want %q", inMemory, ua)
+		}
+
+		disk, err := config.DecodeAndValidate(mustReadFile(t, gotConfigPath(srv)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if disk.Providers["primary"].UserAgent != ua {
+			t.Fatalf("disk UserAgent = %q, want %q", disk.Providers["primary"].UserAgent, ua)
+		}
+
+		// 回显是前端 editProvider 的数据来源：读不到就等于「配了但不显示」。
+		var view struct {
+			Providers map[string]struct {
+				UserAgent string `json:"userAgent"`
+			} `json:"providers"`
+		}
+		rec := httptest.NewRecorder()
+		srv.handle(rec, httptest.NewRequest(http.MethodGet, "http://127.0.0.1:7789/api/config", nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET status = %d; body=%s", rec.Code, rec.Body.String())
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &view); err != nil {
+			t.Fatal(err)
+		}
+		if got := view.Providers["primary"].UserAgent; got != ua {
+			t.Fatalf("view userAgent = %q, want %q", got, ua)
+		}
+	})
+
+	// 没配该字段时不该在磁盘上落一行 userAgent: ""——PUT 会按结构体重新序列化整个
+	// 文件，缺 yaml omitempty 就会给每个 provider 都写一行纯噪音。
+	t.Run("unset value is not materialized on disk", func(t *testing.T) {
+		srv := newConfigTestServer(t, testConfigYAML("127.0.0.1", 7789, "https://api.example.com", "super-secret", 5))
+		body := testConfigYAML("127.0.0.1", 7789, "https://api.example.com", config.APIKeyKeepSentinel, 5)
+		if rec := putConfig(t, srv, body, ""); rec.Code != http.StatusOK {
+			t.Fatalf("PUT status = %d; body=%s", rec.Code, rec.Body.String())
+		}
+		if raw := string(mustReadFile(t, gotConfigPath(srv))); strings.Contains(raw, "userAgent") {
+			t.Fatalf("disk config should not mention userAgent when unset:\n%s", raw)
+		}
+	})
+}
+
 func TestPutConfigSecretRoundTripAndIdentityGuard(t *testing.T) {
 	t.Run("same identity preserves secret", func(t *testing.T) {
 		srv := newConfigTestServer(t, testConfigYAML("127.0.0.1", 7789, "https://api.example.com", "super-secret", 5))

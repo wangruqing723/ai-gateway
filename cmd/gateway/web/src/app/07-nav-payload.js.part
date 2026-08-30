@@ -35,7 +35,13 @@
                             format: provider.format || 'anthropic',
                             maxConcurrent: provider.maxConcurrent || 5,
                             maxPerSecond: provider.maxPerSecond || 0,
-                            maxQueueWait: provider.maxQueueWait || 30000
+                            maxQueueWait: provider.maxQueueWait || 30000,
+                            // userAgent 必须带上，理由同下面的 failover / breaker：PUT 是全量替换。
+                            // 这里是构造请求体的地方，漏掉的话 saveProvider 写进 this.config 的值
+                            // 到不了磁盘，而且**每次保存都会抹掉所有 provider 的该字段**，无任何报错。
+                            // 空值发 undefined 而不是 ''：与后端 json/yaml 的 omitempty 对齐，
+                            // 避免给没配的 provider 都落一行 userAgent: ""。
+                            userAgent: provider.userAgent || undefined
                         };
                     });
                     return {

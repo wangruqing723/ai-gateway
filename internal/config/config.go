@@ -73,14 +73,14 @@ var (
 
 // Provider 上游 provider 定义
 type Provider struct {
-	Name          string `yaml:"-" json:"name,omitempty"`                    // 运行时填充（map 的 key）
-	BaseURL       string `yaml:"baseUrl" json:"baseUrl"`                     // 上游地址
-	APIKey        string `yaml:"apiKey" json:"apiKey"`                       // 密钥，留空则从客户端请求头提取
-	Format        string `yaml:"format" json:"format"`                       // anthropic | openai | openai-responses
-	UserAgent     string `yaml:"userAgent" json:"userAgent,omitempty"`       // 上游请求 User-Agent，留空则转发客户端值
-	MaxConcurrent int    `yaml:"maxConcurrent" json:"maxConcurrent"`         // 最大并发
-	MaxPerSecond  int    `yaml:"maxPerSecond" json:"maxPerSecond"`           // 每秒最多请求数，0 表示不限
-	MaxQueueWait  int    `yaml:"maxQueueWait" json:"maxQueueWait,omitempty"` // 队列最大等待（毫秒）
+	Name          string `yaml:"-" json:"name,omitempty"`                        // 运行时填充（map 的 key）
+	BaseURL       string `yaml:"baseUrl" json:"baseUrl"`                         // 上游地址
+	APIKey        string `yaml:"apiKey" json:"apiKey"`                           // 密钥，留空则从客户端请求头提取
+	Format        string `yaml:"format" json:"format"`                           // anthropic | openai | openai-responses
+	UserAgent     string `yaml:"userAgent,omitempty" json:"userAgent,omitempty"` // 上游请求 UA，留空则转发客户端值；两处 omitempty 见 validate 注释
+	MaxConcurrent int    `yaml:"maxConcurrent" json:"maxConcurrent"`             // 最大并发
+	MaxPerSecond  int    `yaml:"maxPerSecond" json:"maxPerSecond"`               // 每秒最多请求数，0 表示不限
+	MaxQueueWait  int    `yaml:"maxQueueWait" json:"maxQueueWait,omitempty"`     // 队列最大等待（毫秒）
 }
 
 // Vision 路由上的视觉子配置
@@ -819,6 +819,10 @@ func validate(c *Config) error {
 		if p.MaxQueueWait < 1 || p.MaxQueueWait > maxQueueWaitMs {
 			return fmt.Errorf("providers.%s.maxQueueWait 应在 1-%d 之间", name, maxQueueWaitMs)
 		}
+		// UserAgent 的 yaml 与 json 都带 omitempty：PUT 保存会按结构体重新序列化
+		// 整个配置文件，yaml 少了 omitempty 就会给每个没配该字段的 provider 落一行
+		// userAgent: ""，纯噪音；json 少了则前端拿到一堆空字段。
+		// 空值是合法终态（语义为「不配置」），applyDefaults 不碰它。
 		if p.UserAgent != "" {
 			if n := utf8.RuneCountInString(p.UserAgent); n > maxProviderUserAgentRunes {
 				return fmt.Errorf("providers.%s.userAgent 长度应不超过 %d 个字符（当前 %d）", name, maxProviderUserAgentRunes, n)
