@@ -10,6 +10,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -923,6 +925,150 @@ routes:
 // 这条测试是为一类实际缺陷设的防线：前端有两处按白名单重建 provider 对象
 // （saveProvider 与 configPayload），任一处漏掉新字段，都会让配置在保存后被静默
 // 丢弃且无任何报错。后端这侧一旦回显不出来，前端再正确也没用。
+// TestFrontendCoversAllProviderFields 是一条防线，防的是本项目已重复三次的缺陷：
+// 前端有多处按白名单逐字段重建 provider 对象，新增后端字段时漏改任一处，
+// 配置就会被静默丢弃且无任何报错。三次分别发生在 route.strategy、
+// provider.userAgent 的 configPayload 与 normalizeConfig。
+//
+// 判据：每个「重建点」都必须认识全部字段，而不是「该字段在代码库某处出现过」。
+// 重建点用 maxQueueWait 定位（provider 对象必有该字段），再靠花括号配对取出所属的
+// 对象字面量逐个检查——按固定行窗口取会被注释长度影响，配对更稳。
+//
+// 字段清单用反射从 config.Provider 取，新增字段自动纳入检查，不必改这条测试。
+func TestFrontendCoversAllProviderFields(t *testing.T) {
+	srcDir := filepath.Join("web", "src", "app")
+	entries, err := os.ReadDir(srcDir)
+	if err != nil {
+		t.Skipf("前端源码目录不可读，跳过: %v", err)
+	}
+
+	// name 是 map 的 key，运行时填充，不进前端表单。
+	skip := map[string]bool{"name": true}
+	var want []string
+	typ := reflect.TypeOf(config.Provider{})
+	for i := 0; i < typ.NumField(); i++ {
+		tag := typ.Field(i).Tag.Get("json")
+		if tag == "" || tag == "-" {
+			continue
+		}
+		field := strings.Split(tag, ",")[0]
+		if field != "" && !skip[field] {
+			want = append(want, field)
+		}
+	}
+	if len(want) == 0 {
+		t.Fatal("反射没取到任何 provider 字段，测试本身失效")
+	}
+
+	sites := 0
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".js.part") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(srcDir, e.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := string(data)
+		for _, span := range providerObjectSpans(text) {
+			sites++
+			// 必须剥掉注释再判断：注释里提到字段名会让检查假通过——
+			// 本条测试第一版就栽在这里（注释写着 userAgent，代码行删了却仍判绿）。
+			code := stripJSComments(span)
+			for _, field := range want {
+				if !strings.Contains(code, field) {
+					t.Errorf("%s 的一个 provider 重建点缺少字段 %q。"+
+						"新增后端字段必须同步所有重建点（normalizeConfig / configPayload / "+
+						"providersYaml / editProvider 等），漏改会让该字段在保存后被静默丢弃。\n片段:\n%s",
+						e.Name(), field, span)
+				}
+			}
+		}
+	}
+	// 重建点数量骤降说明定位失效（例如有人改了 maxQueueWait 的写法），
+	// 那时上面的循环会全部跳过、测试假绿。
+	if sites < 5 {
+		t.Fatalf("只识别到 %d 个 provider 重建点，少于预期；定位逻辑可能已失效", sites)
+	}
+}
+
+// stripJSComments 去掉 // 行注释与 /* */ 块注释，避免注释里的字段名让检查假通过。
+// 只用于本测试的静态检查，不追求完整的 JS 词法（不处理字符串里的 // 之类），
+// 对前端片段这种规整写法足够。
+func stripJSComments(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if s[i] == '/' && i+1 < len(s) {
+			if s[i+1] == '/' {
+				for i < len(s) && s[i] != '\n' {
+					i++
+				}
+				b.WriteByte('\n')
+				continue
+			}
+			if s[i+1] == '*' {
+				i += 2
+				for i+1 < len(s) && !(s[i] == '*' && s[i+1] == '/') {
+					i++
+				}
+				i++
+				continue
+			}
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
+}
+
+// providerObjectSpans 找出所有含 maxQueueWait 的对象字面量正文。
+// 从 maxQueueWait 位置向前找最近的未闭合 {，再向后配对到对应的 }。
+func providerObjectSpans(text string) []string {
+	var spans []string
+	for _, loc := range regexp.MustCompile(`maxQueueWait\s*[:=]`).FindAllStringIndex(text, -1) {
+		open := -1
+		depth := 0
+		for i := loc[0] - 1; i >= 0; i-- {
+			switch text[i] {
+			case '}':
+				depth++
+			case '{':
+				if depth == 0 {
+					open = i
+				} else {
+					depth--
+				}
+			}
+			if open >= 0 {
+				break
+			}
+		}
+		if open < 0 {
+			continue
+		}
+		depth = 0
+		close := -1
+		for i := open; i < len(text); i++ {
+			switch text[i] {
+			case '{':
+				depth++
+			case '}':
+				depth--
+				if depth == 0 {
+					close = i
+				}
+			}
+			if close >= 0 {
+				break
+			}
+		}
+		if close < 0 {
+			continue
+		}
+		spans = append(spans, text[open:close+1])
+	}
+	return spans
+}
+
 func TestPutConfigPreservesUserAgent(t *testing.T) {
 	const ua = "claude-cli/2.1.161 (external, cli)"
 

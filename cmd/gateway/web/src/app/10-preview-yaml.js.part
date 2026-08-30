@@ -78,15 +78,21 @@
 
                 providersYaml() {
                     return Object.entries(this.config.providers || {}).map(([name, p]) => {
-                        return [
+                        const lines = [
                             `  ${name}:`,
                             `    baseUrl: "${p.baseUrl || ''}"`,
                             `    apiKey: "${p.apiKey || ''}"`,
-                            `    format: ${p.format || 'anthropic'}`,
+                            `    format: ${p.format || 'anthropic'}`
+                        ];
+                        // 只在配了时才输出，与后端 yaml omitempty 一致，避免预览里
+                        // 给每个 provider 都摆一行空 userAgent；配了却不显示则是假预览。
+                        if (p.userAgent) lines.push(`    userAgent: "${p.userAgent}"`);
+                        lines.push(
                             `    maxConcurrent: ${p.maxConcurrent || 5}`,
                             `    maxPerSecond: ${p.maxPerSecond || 0}`,
                             `    maxQueueWait: ${p.maxQueueWait || 30000}`
-                        ].join('\n');
+                        );
+                        return lines.join('\n');
                     }).join('\n');
                 },
 
