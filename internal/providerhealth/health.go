@@ -329,6 +329,13 @@ func checkOne(parent context.Context, p *config.Provider, client *http.Client) S
 		return errorStatus(p.Name, endpoint, err.Error(), 0)
 	}
 	req.Header.Set("accept", "application/json")
+	// 健康检测探测的也是 /v1/models，同样受上游的 User-Agent 准入影响。
+	// 不带这个头，UA 门禁型 provider（实测 agentrouter.org）会被永久判成不健康，
+	// 而它的转发路径其实是好的——那才是真正的误判。
+	// 这里没有客户端请求可转发（网关自己发起），故只有「配了就用」一档。
+	if p.UserAgent != "" {
+		req.Header.Set("User-Agent", p.UserAgent)
+	}
 	if p.APIKey != "" {
 		if p.Format == "anthropic" {
 			req.Header.Set("x-api-key", p.APIKey)

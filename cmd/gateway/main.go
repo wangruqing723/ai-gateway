@@ -1440,6 +1440,13 @@ func fetchUpstreamModels(parent context.Context, p *config.Provider, client *htt
 		return nil, fmt.Errorf("构建请求失败: %w", err)
 	}
 	req.Header.Set("accept", "application/json")
+	// 与转发路径同源的需求：部分上游按 User-Agent 做准入（实测 agentrouter.org 在
+	// Go 默认 UA 下对 /v1/models 返回 401 unauthorized_client_error，换成配置的
+	// UA 即返回完整列表）。不带上这个头，UA 门禁型 provider 的模型列表永远查不了。
+	// 这里没有客户端请求可转发（网关自己发起），故只有「配了就用」一档。
+	if p.UserAgent != "" {
+		req.Header.Set("User-Agent", p.UserAgent)
+	}
 	if p.APIKey != "" {
 		if p.Format == "anthropic" {
 			req.Header.Set("x-api-key", p.APIKey)

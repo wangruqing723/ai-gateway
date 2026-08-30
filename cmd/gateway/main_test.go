@@ -1822,6 +1822,54 @@ func TestHandleProviderModels(t *testing.T) {
 		}
 	})
 
+	// 部分上游按 User-Agent 做准入：实测 agentrouter.org 在 Go 默认 UA 下对
+	// /v1/models 返回 401 unauthorized_client_error，换成配置的 UA 即返回完整列表。
+	// 不带这个头，UA 门禁型 provider 的模型列表永远查不了，前端配路由时选不了它的模型。
+	t.Run("sends configured user agent", func(t *testing.T) {
+		var gotUA string
+		up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			gotUA = r.Header.Get("User-Agent")
+			w.Header().Set("content-type", "application/json")
+			_, _ = w.Write([]byte(`{"data":[{"id":"glm-5.3"}]}`))
+		}))
+		defer up.Close()
+
+		raw := strings.Replace(
+			testConfigYAML("127.0.0.1", 7789, up.URL, "test-secret", 5),
+			"    format: openai",
+			"    format: openai\n    userAgent: \"claude-cli/2.1.161 (external, cli)\"",
+			1)
+		srv := newConfigTestServer(t, raw)
+		if rec := callProviderModels(t, srv, "primary"); rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		}
+		if gotUA != "claude-cli/2.1.161 (external, cli)" {
+			t.Fatalf("upstream User-Agent = %q, want the configured value", gotUA)
+		}
+	})
+
+	// 未配置时不设该头，交给 Go 填默认值。设成空字符串会让该头彻底消失，
+	// 那不是「退回默认」而是「没有 UA」，对按 UA 判断的上游行为不同。
+	t.Run("falls back to go default user agent", func(t *testing.T) {
+		var gotUA string
+		var present bool
+		up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, present = r.Header["User-Agent"]
+			gotUA = r.Header.Get("User-Agent")
+			w.Header().Set("content-type", "application/json")
+			_, _ = w.Write([]byte(`{"data":[{"id":"gpt-4o"}]}`))
+		}))
+		defer up.Close()
+
+		srv := newConfigTestServer(t, testConfigYAML("127.0.0.1", 7789, up.URL, "test-secret", 5))
+		if rec := callProviderModels(t, srv, "primary"); rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		}
+		if !present || gotUA != "Go-http-client/1.1" {
+			t.Fatalf("User-Agent present=%v value=%q, want Go default", present, gotUA)
+		}
+	})
+
 	t.Run("anthropic uses x-api-key header", func(t *testing.T) {
 		var gotAPIKey, gotVersion string
 		up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

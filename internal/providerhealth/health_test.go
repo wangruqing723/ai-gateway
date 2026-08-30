@@ -41,6 +41,41 @@ func TestCheckAllMapsStatuses(t *testing.T) {
 	}
 }
 
+// 健康检测探测 /v1/models，而部分上游按 User-Agent 做准入（实测 agentrouter.org
+// 在 Go 默认 UA 下返回 401）。不带配置的 UA 会把这类 provider 永久判成不健康，
+// 而它的转发路径其实是好的——那是误判，不是真故障。
+func TestCheckSendsConfiguredUserAgent(t *testing.T) {
+	var mu sync.Mutex
+	seen := map[string]string{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seen[r.Header.Get("authorization")] = r.Header.Get("User-Agent")
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	cfg := &config.Config{Providers: map[string]*config.Provider{
+		"gated": {Name: "gated", BaseURL: server.URL, APIKey: "k-gated", Format: "openai",
+			UserAgent: "claude-cli/2.1.161 (external, cli)"},
+		"plain": {Name: "plain", BaseURL: server.URL, APIKey: "k-plain", Format: "openai"},
+	}}
+
+	if statuses := NewChecker().CheckAll(context.Background(), cfg, server.Client()); len(statuses) != 2 {
+		t.Fatalf("statuses = %#v", statuses)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if got := seen["Bearer k-gated"]; got != "claude-cli/2.1.161 (external, cli)" {
+		t.Fatalf("configured provider User-Agent = %q, want the configured value", got)
+	}
+	// 未配置时不设该头，由 Go 填默认值——不能是空字符串（那等于把头删掉）。
+	if got := seen["Bearer k-plain"]; got != "Go-http-client/1.1" {
+		t.Fatalf("unconfigured provider User-Agent = %q, want Go default", got)
+	}
+}
+
 // CheckProvider 只探被点的那一个，且结果要进缓存（Snapshot 能读到），
 // 其余 provider 保持未检测——整表检测在 provider 多时太慢，这是单点检测存在的理由。
 func TestCheckProviderChecksOnlyRequestedProvider(t *testing.T) {

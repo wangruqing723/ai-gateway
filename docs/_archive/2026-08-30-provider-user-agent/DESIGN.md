@@ -101,7 +101,23 @@ Go 在传输层就挡住了头注入：含 `\r` 或 `\n` 的值会让 `client.Do
   （`main.go:handleGetConfig`），加字段即自动回显。UA 不是密文，不进脱敏名单。
 - 热重载：`Provider` 是值拷贝逐请求取用，新字段随配置热重载自然生效，
   无需动 `applyRuntimeConfig` 的 `Reconcile` 三件套。
-- `internal/providerhealth`、`fetchUpstreamModels`：本次不改。它们探测
+- ~~`internal/providerhealth`、`fetchUpstreamModels`：本次不改。它们探测
   `/v1/models` 用的是另一条构建路径，与转发不共用 `setUpstreamHeaders`。
   **这是有意的范围限制**，记入 KNOWN_ISSUES 而非顺手扩大改动面——
-  健康检测若也要带 UA，属独立需求。
+  健康检测若也要带 UA，属独立需求。~~
+
+  **该判断已被实测推翻（2026-08-30 当天）。** 同一把 key、同一个代理、同一个
+  `/v1/models` 端点，唯一变量是 UA：`claude-cli/2.1.161 (external, cli)` 返回
+  HTTP 200 与完整模型列表，`Go-http-client/1.1` 返回 401
+  `unauthorized_client_error`。
+
+  后果不是「少一个便利功能」而是两处实际不可用：模型列表查不了（前端配路由时
+  选不了该 provider 的模型），健康检测把它永久判成不健康（而转发路径其实是好的，
+  属误判）。两处各加 3 行即可修，已在后续 commit 补上。
+
+  这两条路径是网关自己发起的，没有客户端请求可转发，故优先级只有「配了就用」
+  一档，不存在转发客户端 UA 的第二档。
+
+  教训：判断「另一条路径属独立需求」时，只看了代码结构的差异，没验证该路径在
+  目标场景下还能不能用。范围限制要基于「不影响本需求的目标」，而不是「代码不在
+  同一个函数里」。
