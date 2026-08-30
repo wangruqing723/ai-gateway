@@ -488,6 +488,20 @@ Responses 不只是把 messages 改名为 input。官方文档明确区分了 Me
 - text.format 是否需要与 Chat 的 response_format 做双向转换；
 - 不可转换字段是拒绝请求，还是允许显式有损降级。
 
+**落地结论（2026-08-29，提交 `73e54ff`）**
+
+第 4 条已拍板：**不可转换字段拒绝请求**，在路由前返回 `conversion_error`，不做静默有损降级。理由是静默丢弃 `previous_response_id` / `conversation` 这类字段会改变会话语义，客户端却收到一个看似正常的响应，比直接报错更难排查。
+
+但「不可转换」的判据必须精确。原实现用 `exists && value != nil` 判定，把**显式写成默认值**的字段也当成不兼容能力，导致 `store:false`、`n:1`、`parallel_tool_calls:true`、`stream_options:{include_usage:true}` 这类与目标协议行为完全等价的写法被硬拒。现改为 `isMeaningfulExtra(key, value)`，只拦截真正偏离目标协议默认值的取值，字段分三类处理（详见 `docs/2026-08-29-attempt-observability-review-fixes/DESIGN.md` §1.2）：
+
+- **必须拒**：`previous_response_id`、`conversation`、`background`、`store:true`、`n>1`、`seed`、`logprobs`、`logit_bias` 等改变会话或执行语义的字段；
+- **必须映射**：`stop_sequences` ↔ `stop`、`tool_choice` 归一化为 `{"type":"function","name":x}`（`auto`/`required`/`any` 保持字符串形态）等可无损往返的字段；
+- **可静默丢**：写成目标协议默认值、丢弃后行为不变的字段。
+
+第 3 条（`text.format` ↔ `response_format`）本次未实现，也不在 deny-list 里，属于静默丢弃。
+
+第 1 条（Codex 实际发送哪些 Responses 字段）**仍未核实** —— 至今没有真实 Codex 客户端流量对照，deny-list 与映射表的完备性只有单元测试保证。第 2 条同理，`reasoning` 事件已补进响应转换分支，但未经真实上游验证。
+
 ### 10.2 Provider 格式不是能力探测
 
 某些第三方服务只实现 OpenAI API 的一部分，声明“OpenAI 兼容”不代表同时支持 Chat 和 Responses。配置中的 format 必须表达实际端点能力；新增格式不能保证上游完整兼容 OpenAI 的全部字段。
@@ -496,19 +510,38 @@ Responses 不只是把 messages 改名为 input。官方文档明确区分了 Me
 
 错误正文对排查 500 很有价值，也可能包含内部路径、提示词片段、账号标识或敏感字段。8 KiB 上限、脱敏和仅保存在内存环形日志中应作为默认安全边界；是否允许在 UI 中复制完整正文需要单独确认。
 
+**落地结论（2026-08-29）**：三条安全边界均已实现。
+
+- 8 KiB 上限：`proxy.maxObservedErrorBodyBytes = 8 << 10`，只约束写入请求日志的观测副本，回传给客户端的正文仍走原有完整上限，两者互不影响。
+- 脱敏：写入日志前替换敏感字段为 `[REDACTED]`，`proxy_test.go:389` 断言截断标记为真、长度不超上限、含 `[REDACTED]` 且不含原始 token。
+- 仅存内存：错误正文只进 `metrics` 内存环形日志（`errorBody` / `errorBodyTruncated`），不落盘。
+
+**「UI 是否允许复制完整正文」的结论是不提供。** 当前前端只有只读展示（`index.template.html:1170-1172`：`<pre>` 带 `max-h-48 overflow-auto`，标题按 `errorBodyTruncated` 显示「上游错误正文（已截断）」），没有复制按钮。理由是复制按钮会把脱敏后仍可能残留的提示词片段一键搬出网关边界，而排查场景下选中文本已经够用；真要放开需要连带确认脱敏规则是否覆盖全部敏感字段，属于独立议题。
+
 ### 10.4 热重载和旧客户端兼容
 
 新增 Provider format 后，配置严格校验、/api/config 脱敏回显、前端选择项、热重载和运行时 switch 必须同时更新。旧配置不写新字段时，不能因为默认分支变化而从 Chat 变成 Responses。
 
+**落地结论（2026-08-29）**：各处已同步。
+
+- 配置校验：`config.go` 的合法值扩为 `anthropic` / `openai` / `openai-responses`，非法值报 `providers.%s.format 须为 anthropic、openai 或 openai-responses`，不静默兜底。
+- 前端选择项：三处已补 `openai-responses`（`index.template.html:1227` 下拉选项、`:780` 运行状态表徽章 `OAI-R`、`:1021` 格式副行）。
+- 旧配置不变：`openai` 仍走 Chat Completions，只是多了一个可选的第三值，默认分支未改，旧配置不会漂移成 Responses。已有 `config_test.go` 覆盖。
+- 待验证项：热重载中途把某 provider 的 `format` 从 `openai` 改成 `openai-responses`（或反向）尚未实测，见本次的 `KNOWN_ISSUES.md`。
+
 ### 10.5 仍需从上游确认截图中的具体 500
 
-本地代码分析可以确认请求路径和转换方向，但无法凭截图确定 muyuan 的 500 业务原因。落地阶段应使用 attemptDetails.errorBody 和 upstreamRequestId 对照 muyuan 的服务日志，优先确认：
+> **状态（2026-08-30 复核）：五项已全部拿到实测数据，muyuan 失败原因确认为两层叠加。** 观测手段（`attemptDetails.errorBody` 脱敏 + 8 KiB 上限、`upstreamRequestId` 前端展示）已在真实流量中生效，并据此定位到根因。
 
-1. 网关实际请求的是 /v1/chat/completions 还是上游期望的 /v1/responses；
-2. 请求体是否包含上游可接受的 messages / input 字段；
-3. 目标模型是否存在于该 Provider；
-4. API Key、模型权限和上游限流情况；
-5. 上游返回的 JSON error type、code、message。
+原始怀疑是「上游 500 业务错误」，实测表明是**两个独立问题叠加**，且都不在上游侧：
+
+1. **网关请求路径正确。** muyuan 配置为 `format: openai`，网关打的是 `/v1/chat/completions`；`format: openai-responses` 的 provider 打 `/v1/responses`（echo 抓包确认）。路径不是问题。
+2. **真正的失败发生在请求发出之前。** 真实 Claude Code 会话日志显示 21 次 `候选 muyuan 构建失败，跳过`：`unsupported openai chat target content block "thinking"` ×17、`unsupported openai responses message role "system"` ×4。即多轮对话里的思考块与客户端 `system` 角色过不了目标校验，请求根本没发出去，全靠 failover 兜到 anthropic 上游。修复见 `TODO-review.md` 2026/08/30 节。
+3. **目标模型确实存在但无可用渠道。** 修复后请求成功发出，muyuan 的 `/v1/models` 只列出 `glm-5.2` 一个模型，而请求 `glm-5.2` 返回 `HTTP 503`。
+4. **凭据有效，问题在上游渠道池。** 503 正文为 `{"error":{"message":"No available channel for model glm-5.2 under group auto (distributor) ...","type":"new_api_error","code":"model_not_found"}}`——上游能认证并路由，只是该模型当前无后端渠道。非网关问题，无需修复。
+5. **error type / code / message 已完整落入请求日志**，上述正文即由 `attemptDetails.errorBody` 捕获，验证了该观测能力可用。
+
+`openai-responses` 侧的对应结论：真实 `ar-gh`（`https://agentrouter.org`）返回 `HTTP 401` + `unauthorized_client_error`，请求已抵达上游（网关侧 `X-Ai-Gateway-Provider: ar-gh`、`Attempts: 1`），协议构建无误、凭据待人工确认。详见 `docs/2026-08-29-attempt-observability-review-fixes/KNOWN_ISSUES.md` KI-1。
 
 ## 11. 官方协议参考
 

@@ -4,6 +4,36 @@
 > 10 个角度发现约 50 个候选，逐个验证 + 补充扫描后，保留以下 16 个非 REFUTED 结论。
 > 下方行号是 2026/06/24 审查时的历史快照，根目录迁移和后续 hardening 后不再作为当前位置索引。对当时 PoC 而言无致命崩溃 bug，主要是并发竞争、与 Node 的边界行为偏差、超时语义差异。
 
+## 2026/08/29 openai-responses 上游协议与尝试链观测（v1.4.0）
+
+本轮 `/code-review` 针对「尝试链观测 + Responses 上游协议」的未提交改动，15 项发现全部修复（拆成 12 个任务落地）。设计取舍见 `docs/2026-08-29-attempt-observability-review-fixes/DESIGN.md`，任务拆解见同目录 `TASKS.md`，未验证边界见同目录 `KNOWN_ISSUES.md`。
+
+- [x] 发现 1–3 字段策略：`exists && value != nil` 谓词分不清「显式写默认值」与「字段缺失」，把 `store:false`、`n:1`、`parallel_tool_calls:true`、`stream_options:{include_usage:true}` 误判为不兼容而硬拒三条客户端→上游路径。改为 `isMeaningfulExtra` 三分法（必须拒 / 必须映射 / 可静默丢），并补 `tool_choice` 跨协议归一化为 `{"type":"function","name":x}`
+- [x] 发现 4：`tool_choice` 从 `copyResponsesCompatibleExtras` 移除，否则原始结构会覆盖上一条的映射结果
+- [x] 发现 5：`reasoning` 事件补进 Responses 响应转换分支；删除死代码 `ConvertOpenAIResponsesResponse`
+- [x] 发现 6 / 9 / 13：流式文本块改 `textOrder` 保序（原靠 map 迭代，顺序随机，须 `-count=20` 才复现）；`ensureTool` / `ensureResponseTool` 去重
+- [x] 发现 7 / 8 / 14 / 15：错误正文读取分路径限量——放弃路径按 `maxObservedErrorBodyBytes = 8 KiB` 截断、保留路径用完整上限；`truncateUTF8` 改 `strings.ToValidUTF8` 兜住半个 UTF-8 序列；删除死代码 `handleStreamError` / `handleError`
+- [x] 发现 10 / 11 / 12：放弃原因细分 `queue_timeout` / `client_disconnected` / `queue_error` 三支；移除 `reqLog.Format` 冗余赋值；前端补「已开始响应，未转移」标记
+- [x] `providers.*.format` 新增合法值 `openai-responses`，校验报中文错误，旧值语义与默认分支不变
+
+验证（2026/08/29–08/30）：`gofmt` / `go build` / `go vet` / `go test ./...` 14 包全绿，新增 23 个测试函数；`go test -race ./...` 14 包全绿；`webbuild -check` 判定前端产物与源码一致。镜像 `v1.4.0`（digest `5d91439f39fe`，`revision=5cf098e`）重建容器后启动无报错，真实流量实测 failover 转移链 `linxi-free:502/server → sota3:200`。
+
+边界结论（截至 2026/08/29）：`openai-responses` 只验证到「配置能加载、格式被校验接受」，**从未对真实 Responses 上游发过请求**；跨协议流式转换、「已开始响应未转移」标记渲染、`isMeaningfulExtra` 清单对真实 Codex 字段集的完备性均只有单元测试保证。详见 `KNOWN_ISSUES.md` KI-1…KI-5。其中前两项已在 2026/08/30 取得端到端实证，见下一节。
+
+## 2026/08/30 跨厂商思考块、代理与流式 usage（未发版）
+
+起因：Claude Code 在真实会话里请求 openai chat / responses 格式上游全部失败，日志显示 21 次候选构建失败（`unsupported openai chat target content block "thinking"` ×17、`unsupported openai responses message role "system"` ×4），全部靠 failover 兜到 anthropic 上游才成功——即**只要多轮对话，非 Anthropic 上游就永远不可用**。
+
+- [x] 跨厂商思考块：Anthropic 多轮历史里的 `thinking` / `redacted_thinking` 块转非 Anthropic 上游时剥离（新增 `isReasoningBlock` / `stripReasoningBlocks`）。`signature` 是 Anthropic 对思考内容的加密签名、只有它自己能验签，跨厂商传过去纯属噪音。**丢弃不损失本轮推理能力**——上游本轮是否思考由 `reasoning_effort` 决定，与历史思考块无关；承载语义的 `text` / `tool_use` 全部保留。同厂商（Anthropic 上游）仍原样保留思考块与签名。
+- [x] 客户端 `system` 角色：Claude Code 直接在 `messages` 数组里放 `role: "system"`（Anthropic 顶层 `system` 走的是 `Internal.System`，不经这里），Responses 协议用 `developer` 表达该语义，新增 `responsesRole` 做映射。这类消息承载真实指令，必须映射而不能丢。
+- [x] 三处校验同步放宽：`validate*TargetMessages` 跑在 body 构建**之前**，只在构建期处理不够——不放行则多轮历史永远转不过去。放宽是精准的：仅思考块与 `system` 角色，未知块仍返回 `conversion_error`（已实测）。
+- [x] 代理环境变量：`cmd/gateway/main.go` 自建 `http.Transport` 未设 `Proxy`，零值语义是「完全不走代理」，导致 `HTTPS_PROXY` 被静默忽略。该 client 是所有出网路径的唯一出口（转发 / vision / 健康检测 / 模型查询），补 `http.ProxyFromEnvironment`。详见 `KNOWN_ISSUES.md` KI-6。
+- [x] Responses 流式 usage：`response.completed` 的 `response.usage` 未传入 `finish`，`message_delta.usage.output_tokens` 恒为 0，使所有经 Responses 上游的流式请求产出 token 统计失真。新增 `responsesEventUsage` / `anthropicStreamUsage`。详见 `KNOWN_ISSUES.md` KI-7。
+
+验证（2026/08/30）：`gofmt` / `go vet` / `go test ./...` 全绿；新增 4 个测试函数（3 个思考块/角色映射 + 1 个 usage 三子测试）。端到端用本地 echo 假上游抓取网关实发 body 实证：思考块与 `signature` 已剥离、`system` → `developer` 已映射、`tool_calls` / `tool_result` 语义完整、流式 7 事件序列合规且 `output_tokens` 正确透传。真实 `ar-gh` 上游返回 401 业务错误（凭据待确认），协议构建本身无误。
+
+残留边界：Chat 上游流式 usage 与 `message_start.input_tokens` 有意不修，理由见 `KNOWN_ISSUES.md` KI-8。
+
 ## 2026/07/11 本机使用 hardening
 
 本轮针对当前 Go 主版本重新做了核心链路、配置管理、并发状态和部署边界审查。代码与回归测试范围已完成以下修复：
