@@ -14,7 +14,8 @@ logs:
 
 # 生成前端样式。产物 cmd/gateway/web/vendor/tailwind.css 随仓库提交，
 # 因为它要被 //go:embed 打进二进制，运行镜像里没有 node 工具链。
-# 改动 index.html 里的 class 之后必须重跑这条，否则新类名没有对应样式。
+# 改动 src/ 里的 class 之后必须重跑这条，否则新类名没有对应样式。
+# 扫描范围见 tailwind.config.js 的 content：只扫 src/，与本目标的执行顺序无关。
 web-css:
 	cd cmd/gateway/web && npx --yes tailwindcss@3.4.17 \
 		-c tailwind.config.js -i src/tailwind.css -o vendor/tailwind.css -m

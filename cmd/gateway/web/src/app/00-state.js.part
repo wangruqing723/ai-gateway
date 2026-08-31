@@ -24,6 +24,15 @@
                 // 同理：正在单独重置熔断器的 provider 名
                 resettingBreaker: null,
                 refreshingMonitor: false,
+                // 首屏是否已经取回过一轮监控数据。init() 里 loadConfig() 之后才发请求，
+                // 在那之前 health / metrics / requestLogs 全是空值，四张统计卡显示
+                // `--` / `未知`、四处列表显示「还没有 Provider」「暂无请求明细」——
+                // 与「真的没配 provider」完全同形，新用户会以为网关是空的。
+                // 用这个标志把「还没加载」和「加载完确实为空」分开：false 时渲染骨架屏，
+                // true 之后才允许出现空状态文案。
+                // 只关心「有没有回来过」，所以只置 true 一次，后续轮询失败不回退——
+                // 回退会让已经画出来的表格突然又变回骨架，比留着上一轮数据更糟。
+                _firstLoadDone: false,
                 // 未保存浮层的拖拽状态。dirtyToastPos 为 null 表示没拖过，用默认右下角。
                 draggingDirty: false,
                 dirtyToastPos: null,

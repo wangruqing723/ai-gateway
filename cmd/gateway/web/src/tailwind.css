@@ -66,6 +66,14 @@
    放进层里反而会跟着 .gw-spin 一起被裁剪判定。 */
 @keyframes gw-spin { to { transform: rotate(360deg); } }
 
+/* 骨架屏的流动亮光。translateX 而不是改 background-position：
+   前者只触发 composite，后者每帧都要重绘渐变。
+   -100% → 100% 配合 200% 宽度，让亮带完整扫过占位块再从左侧重入。 */
+@keyframes gw-shimmer {
+    from { transform: translateX(-100%); }
+    to { transform: translateX(100%); }
+}
+
 @layer base {
     html, body { height: 100%; }
     body {
@@ -170,3 +178,32 @@
 .gw-spin { animation: gw-spin 1s linear infinite; }
 .gw-grab { cursor: grab; }
 .gw-grabbing { cursor: grabbing; user-select: none; }
+
+/* 骨架屏占位块。和上面三个类同理放在层外：只从模板里的固定 class 引用，
+   但配色（bg-white/[.06] 之类）用工具类拼要写四五个类、还得处理圆角与
+   overflow，不如收成一个语义类。
+   高度不写死：各处占位块高度不同，由调用处的 h-* 决定。 */
+.gw-skeleton {
+    position: relative;
+    overflow: hidden;
+    border-radius: 6px;
+    background: rgba(255, 255, 255, .06);
+}
+
+/* 亮光靠伪元素而不是给占位块本身加 background-position 动画：
+   占位块要保持纯色底，亮带需要独立的一层才能被 overflow: hidden 裁在圆角内。 */
+.gw-skeleton::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(90deg, transparent, rgba(255, 255, 255, .09), transparent);
+    animation: gw-shimmer 1.6s ease-in-out infinite;
+}
+
+/* 尊重系统的「减少动态效果」偏好：骨架屏的作用是占位防跳，亮光只是加强提示，
+   关掉动画后占位块仍然成立。
+   .gw-spin 故意不一起关：它是那些按钮上唯一的「正在跑」信号，停了动画就只剩
+   一个静止图标，等于把反馈整个抹掉，不是弱化。 */
+@media (prefers-reduced-motion: reduce) {
+    .gw-skeleton::after { animation: none; }
+}

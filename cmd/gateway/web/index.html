@@ -623,21 +623,30 @@
                 </section>
 
                 <section x-show="activeTab === 'monitor'" x-transition x-cloak class="space-y-5 lg:h-full lg:min-h-0 lg:overflow-y-auto lg:pr-2">
+                    <!-- 首屏骨架屏（_firstLoadDone === false 期间）。
+                         骨架块的高度严格对齐它替换掉的那行文字的 line-height：
+                         text-3xl 是 36px → h-9，text-xs 是 16px → h-4，外边距也照抄，
+                         这样数据到位时只是内容替换，卡片高度不变、页面不跳。
+                         两条静态副标题（成功率 / P95 说明）不做骨架：它们是固定说明文字，
+                         不等任何请求，盖掉只是让首屏更空。 -->
                     <div class="grid grid-cols-1 gap-4 md:grid-cols-2 2xl:grid-cols-4">
                         <article class="glass rounded-lg p-4">
                             <div class="mb-3 flex items-center justify-between">
                                 <span class="text-sm font-bold text-muted">请求速率</span>
                                 <span class="material-symbols-outlined text-cyan">speed</span>
                             </div>
-                            <div class="text-3xl font-extrabold text-white" x-text="metricValue('windowRequests', '--')"></div>
-                            <div class="mt-1 text-xs text-muted" x-text="'最近 ' + metricWindowLabel() + '请求数'"></div>
+                            <div x-show="_firstLoadDone" class="text-3xl font-extrabold text-white" x-text="metricValue('windowRequests', '--')"></div>
+                            <div x-show="!_firstLoadDone" class="gw-skeleton h-9 w-20"></div>
+                            <div x-show="_firstLoadDone" class="mt-1 text-xs text-muted" x-text="'最近 ' + metricWindowLabel() + '请求数'"></div>
+                            <div x-show="!_firstLoadDone" class="gw-skeleton mt-1 h-4 w-32"></div>
                         </article>
                         <article class="glass rounded-lg p-4">
                             <div class="mb-3 flex items-center justify-between">
                                 <span class="text-sm font-bold text-muted">成功率</span>
                                 <span class="material-symbols-outlined text-good">task_alt</span>
                             </div>
-                            <div class="text-3xl font-extrabold text-white" x-text="metricPercent('successRate')"></div>
+                            <div x-show="_firstLoadDone" class="text-3xl font-extrabold text-white" x-text="metricPercent('successRate')"></div>
+                            <div x-show="!_firstLoadDone" class="gw-skeleton h-9 w-24"></div>
                             <div class="mt-1 text-xs text-muted">最近窗口内的成功请求占比</div>
                         </article>
                         <article class="glass rounded-lg p-4">
@@ -645,16 +654,22 @@
                                 <span class="text-sm font-bold text-muted">P95 延迟</span>
                                 <span class="material-symbols-outlined text-warn">timer</span>
                             </div>
-                            <div class="text-3xl font-extrabold text-white" x-text="metricDuration('p95LatencyMs')"></div>
+                            <div x-show="_firstLoadDone" class="text-3xl font-extrabold text-white" x-text="metricDuration('p95LatencyMs')"></div>
+                            <div x-show="!_firstLoadDone" class="gw-skeleton h-9 w-28"></div>
                             <div class="mt-1 text-xs text-muted">端到端转发耗时；按桶上界近似；样本不足时显示样本数</div>
                         </article>
                         <article class="glass rounded-lg p-4">
                             <div class="mb-3 flex items-center justify-between">
                                 <span class="text-sm font-bold text-muted">服务状态</span>
-                                <span class="material-symbols-outlined" :class="health?.status === 'ok' ? 'text-good' : 'text-danger'">monitor_heart</span>
+                                <!-- 加载完成前强制中性色：health 还是 null 时原表达式落到 text-danger，
+                                     首屏会先亮一颗红心，看起来像服务挂了，而其实只是还没问过。 -->
+                                <span class="material-symbols-outlined"
+                                      :class="!_firstLoadDone ? 'text-muted' : (health?.status === 'ok' ? 'text-good' : 'text-danger')">monitor_heart</span>
                             </div>
-                            <div class="text-3xl font-extrabold text-white" x-text="health?.status || '未知'"></div>
-                            <div class="mt-1 truncate text-xs text-muted" x-text="(health?.listenAddress || '监听地址未知') + ' · ' + (config.directMode ? '直通模式' : '队列模式')"></div>
+                            <div x-show="_firstLoadDone" class="text-3xl font-extrabold text-white" x-text="health?.status || '未知'"></div>
+                            <div x-show="!_firstLoadDone" class="gw-skeleton h-9 w-20"></div>
+                            <div x-show="_firstLoadDone" class="mt-1 truncate text-xs text-muted" x-text="(health?.listenAddress || '监听地址未知') + ' · ' + (config.directMode ? '直通模式' : '队列模式')"></div>
+                            <div x-show="!_firstLoadDone" class="gw-skeleton mt-1 h-4 w-40"></div>
                         </article>
                     </div>
 
@@ -819,7 +834,25 @@
                                                 </td>
                                             </tr>
                                         </template>
-                                        <tr x-show="providerStatusRows().length === 0">
+                                        <!-- 首屏骨架：3 行是按「小规模部署最常见的 provider 数」取的折中值，
+                                             既能撑出表格该有的高度，又不会在只配了 1 个 provider 时
+                                             加载完塌掉一大截。逐列给宽度而不是拉一条通栏灰条：
+                                             通栏条不占列，数据到位时列宽重新分配，表格会横向抖一下。 -->
+                                        <template x-for="i in 3" :key="'provider-skeleton-' + i">
+                                            <tr x-show="!_firstLoadDone" class="bg-panel/35">
+                                                <td class="px-3 py-2"><div class="gw-skeleton h-4 w-28"></div></td>
+                                                <td class="px-2 py-2"><div class="gw-skeleton mx-auto h-4 w-12"></div></td>
+                                                <td class="px-2 py-2"><div class="gw-skeleton mx-auto h-4 w-12"></div></td>
+                                                <td class="px-2 py-2"><div class="gw-skeleton mx-auto h-4 w-10"></div></td>
+                                                <td class="px-2 py-2"><div class="gw-skeleton ml-auto h-4 w-10"></div></td>
+                                                <td class="px-2 py-2"><div class="gw-skeleton ml-auto h-4 w-16"></div></td>
+                                                <td class="px-2 py-2"><div class="gw-skeleton mx-auto h-4 w-12"></div></td>
+                                                <td class="px-2 py-2"><div class="gw-skeleton mx-auto h-4 w-8"></div></td>
+                                            </tr>
+                                        </template>
+                                        <!-- 必须带 _firstLoadDone：providerStatusRows() 在加载完成前也是空数组，
+                                             不加这个条件就会和骨架屏同时出现。 -->
+                                        <tr x-show="_firstLoadDone && providerStatusRows().length === 0">
                                             <td colspan="8" class="px-3 py-10 text-center text-sm text-muted">还没有 Provider</td>
                                         </tr>
                                     </tbody>
@@ -877,7 +910,18 @@
                                         <span class="font-mono text-sm text-cyan" x-text="row.p95 + ' ms'"></span>
                                     </div>
                                 </template>
-                                <div x-show="latencyRows().length === 0" class="px-4 py-8 text-center text-sm text-muted">暂无延迟数据</div>
+                                <!-- 骨架条数与行内结构照抄上面的真实行：左侧两行（名称 + 次数）、
+                                     右侧一个数值，py-3 也一致，加载完成时行高不变。 -->
+                                <template x-for="i in 3" :key="'latency-skeleton-' + i">
+                                    <div x-show="!_firstLoadDone" class="flex items-center justify-between gap-3 px-4 py-3">
+                                        <div class="min-w-0">
+                                            <div class="gw-skeleton h-4 w-28"></div>
+                                            <div class="gw-skeleton mt-1 h-4 w-16"></div>
+                                        </div>
+                                        <div class="gw-skeleton h-4 w-16"></div>
+                                    </div>
+                                </template>
+                                <div x-show="_firstLoadDone && latencyRows().length === 0" class="px-4 py-8 text-center text-sm text-muted">暂无延迟数据</div>
                             </div>
                         </section>
 
@@ -891,7 +935,15 @@
                                         <span class="truncate text-sm text-text" x-text="err.message || err.error || '未知错误'"></span>
                                     </div>
                                 </template>
-                                <div x-show="recentErrors().length === 0" class="px-4 py-8 text-center text-sm text-muted">暂无错误记录</div>
+                                <!-- 沿用真实行的三段栅格，让时间 / 状态 / 描述三列的占位落在同样的位置 -->
+                                <template x-for="i in 3" :key="'error-skeleton-' + i">
+                                    <div x-show="!_firstLoadDone" class="grid grid-cols-1 gap-2 px-4 py-3 md:grid-cols-[9rem_7rem_1fr] md:items-center">
+                                        <div class="gw-skeleton h-4 w-24"></div>
+                                        <div class="gw-skeleton h-5 w-14"></div>
+                                        <div class="gw-skeleton h-4 w-full max-w-sm"></div>
+                                    </div>
+                                </template>
+                                <div x-show="_firstLoadDone && recentErrors().length === 0" class="px-4 py-8 text-center text-sm text-muted">暂无错误记录</div>
                             </div>
                         </section>
                     </div>
@@ -902,7 +954,8 @@
                     <div class="flex flex-col gap-3 border-b border-line p-4">
                         <div>
                             <h2 class="text-base font-extrabold text-white">请求日志</h2>
-                            <p class="mt-1 text-xs text-muted" x-text="requestLogs.length ? '最近 ' + requestLogs.length + ' 条请求' : '暂无请求明细'"></p>
+                            <p x-show="_firstLoadDone" class="mt-1 text-xs text-muted" x-text="requestLogs.length ? '最近 ' + requestLogs.length + ' 条请求' : '暂无请求明细'"></p>
+                            <div x-show="!_firstLoadDone" class="gw-skeleton mt-1 h-4 w-24"></div>
                         </div>
                         <!-- 常用筛选与 attempt 诊断筛选分层：前者描述客户端最终结果，后者定位
                              中间上游尝试。平铺会显得 provider / 尝试 Provider、状态 / 尝试状态
@@ -1195,9 +1248,27 @@
                                     </tr>
                                 </tbody>
                             </template>
+                            <!-- 首屏骨架：这张表默认高度按整屏算，比 provider 表长，
+                                 给 5 行才撑得住，不然骨架屏本身看着像「只有 3 条日志」。
+                                 列宽照抄表头的 w-px / w-full 分配，避免数据到位时列宽重排。 -->
                             <tbody class="divide-y divide-line">
-                                <tr x-show="requestLogs.length === 0">
-                                    <td colspan="8" class="px-3 py-12 text-center text-sm text-muted">暂无请求明细</td>
+                                <template x-for="i in 5" :key="'log-skeleton-' + i">
+                                    <tr x-show="!_firstLoadDone" class="bg-panel/35">
+                                        <td class="px-3 py-2"><div class="gw-skeleton h-4 w-16"></div></td>
+                                        <td class="px-2 py-2"><div class="gw-skeleton h-4 w-10"></div></td>
+                                        <td class="px-2 py-2"><div class="gw-skeleton h-4 w-12"></div></td>
+                                        <td class="px-3 py-2"><div class="gw-skeleton h-4 w-24"></div></td>
+                                        <td class="px-3 py-2"><div class="gw-skeleton h-4 w-28"></div></td>
+                                        <td class="px-3 py-2"><div class="gw-skeleton h-4 w-20"></div></td>
+                                        <td class="px-3 py-2"><div class="gw-skeleton ml-auto h-4 w-12"></div></td>
+                                        <td class="px-3 py-2"><div class="gw-skeleton h-4 w-16"></div></td>
+                                        <td class="px-3 py-2"><div class="gw-skeleton h-4 w-full"></div></td>
+                                    </tr>
+                                </template>
+                                <!-- colspan 从 8 改成 9：表头是 9 列（上面展开详情行也用的 9），
+                                     写 8 会让这条空态文案只横跨前 8 列、居中位置整体偏左。 -->
+                                <tr x-show="_firstLoadDone && requestLogs.length === 0">
+                                    <td colspan="9" class="px-3 py-12 text-center text-sm text-muted">暂无请求明细</td>
                                 </tr>
                             </tbody>
                         </table>
@@ -1289,7 +1360,13 @@
                     <span class="material-symbols-outlined" :class="probingProvider && 'gw-spin'" x-text="probingProvider ? 'progress_activity' : 'health_and_safety'"></span>
                     <span x-text="probingProvider ? '检测中…' : '检测'"></span>
                 </button>
-                <button @click="saveProvider()" class="btn btn-primary">保存 Provider</button>
+                <!-- 保存要走一次 PUT /api/config 并热重载，期间必须锁住按钮：
+                     连点第二下会带着同一个 revision 再发一次请求，第二次必然 412，
+                     用户看到的是「保存失败」而实际上第一次已经写盘了。 -->
+                <button @click="saveProvider()" :disabled="loading" class="btn btn-primary disabled:opacity-60">
+                    <span x-show="loading" x-cloak class="material-symbols-outlined gw-spin text-[18px]">progress_activity</span>
+                    <span x-text="loading ? '保存中…' : '保存 Provider'"></span>
+                </button>
             </div>
         </div>
     </div>
@@ -1338,7 +1415,7 @@
                                                 :aria-label="target.provider ? '查询该 Provider 的上游模型列表' : '请先选择 Provider'"
                                                 class="absolute right-1 top-1/2 -translate-y-1/2 rounded p-1 text-muted hover:text-cyan disabled:opacity-40">
                                             <span class="material-symbols-outlined text-[18px]" x-show="!target.modelsLoading">search</span>
-                                            <span class="material-symbols-outlined animate-spin text-[18px]" x-show="target.modelsLoading" x-cloak>progress_activity</span>
+                                            <span class="material-symbols-outlined gw-spin text-[18px]" x-show="target.modelsLoading" x-cloak>progress_activity</span>
                                         </button>
                                     </div>
                                     <button @click="moveRouteTarget(ti, -1)" :disabled="ti === 0" class="btn btn-secondary px-2 py-2" title="上移" aria-label="上移">
@@ -1410,7 +1487,10 @@
             </div>
             <div class="flex justify-end gap-3 border-t border-line p-5">
                 <button @click="showRouteModal = false" class="btn btn-secondary">取消</button>
-                <button @click="saveRoute()" class="btn btn-primary">保存路由</button>
+                <button @click="saveRoute()" :disabled="loading" class="btn btn-primary disabled:opacity-60">
+                    <span x-show="loading" x-cloak class="material-symbols-outlined gw-spin text-[18px]">progress_activity</span>
+                    <span x-text="loading ? '保存中…' : '保存路由'"></span>
+                </button>
             </div>
         </div>
     </div>
@@ -1479,6 +1559,15 @@
                 // 同理：正在单独重置熔断器的 provider 名
                 resettingBreaker: null,
                 refreshingMonitor: false,
+                // 首屏是否已经取回过一轮监控数据。init() 里 loadConfig() 之后才发请求，
+                // 在那之前 health / metrics / requestLogs 全是空值，四张统计卡显示
+                // `--` / `未知`、四处列表显示「还没有 Provider」「暂无请求明细」——
+                // 与「真的没配 provider」完全同形，新用户会以为网关是空的。
+                // 用这个标志把「还没加载」和「加载完确实为空」分开：false 时渲染骨架屏，
+                // true 之后才允许出现空状态文案。
+                // 只关心「有没有回来过」，所以只置 true 一次，后续轮询失败不回退——
+                // 回退会让已经画出来的表格突然又变回骨架，比留着上一轮数据更糟。
+                _firstLoadDone: false,
                 // 未保存浮层的拖拽状态。dirtyToastPos 为 null 表示没拖过，用默认右下角。
                 draggingDirty: false,
                 dirtyToastPos: null,
@@ -1843,6 +1932,11 @@
                         }
                     } finally {
                         if (showErrors) this.refreshingMonitor = false;
+                        // 首屏骨架屏收尾。放在 finally 而不是成功分支：请求失败时
+                        // 也要露出真实空态（"暂无…"），否则骨架屏会永远转下去。
+                        // activeTab 不持久化、恒从 'monitor' 起，所以第一次进这里
+                        // 走的一定是 else 分支，health / metrics / logs 都已尝试过。
+                        this._firstLoadDone = true;
                     }
                 },
 
@@ -1865,8 +1959,11 @@
                 async checkProviderHealth() {
                     if (this.checkingHealth) return;
                     this.checkingHealth = true;
-                    // 逐个探上游、每个 5 秒超时，先给个即时提示，别让用户干等
-                    this.showStatus('正在检测 Provider…', 'success');
+                    // 逐个探上游、每个 5 秒超时，先给个即时提示，别让用户干等。
+                    // 带上个数：后端分批跑，耗时上界随 provider 数量增长，
+                    // 报个数比光说"正在检测"更能让用户判断该等多久。
+                    const pending = Object.keys(this.config.providers || {}).length;
+                    this.showStatus(pending ? `正在检测 ${pending} 个 Provider…` : '正在检测 Provider…', 'success');
                     try {
                         const res = await fetch('/api/providers/health', { method: 'POST' });
                         if (!res.ok) throw new Error(await this.errorText(res, 'Provider 健康检测失败'));

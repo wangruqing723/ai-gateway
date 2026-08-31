@@ -17,6 +17,11 @@
                         }
                     } finally {
                         if (showErrors) this.refreshingMonitor = false;
+                        // 首屏骨架屏收尾。放在 finally 而不是成功分支：请求失败时
+                        // 也要露出真实空态（"暂无…"），否则骨架屏会永远转下去。
+                        // activeTab 不持久化、恒从 'monitor' 起，所以第一次进这里
+                        // 走的一定是 else 分支，health / metrics / logs 都已尝试过。
+                        this._firstLoadDone = true;
                     }
                 },
 
@@ -39,8 +44,11 @@
                 async checkProviderHealth() {
                     if (this.checkingHealth) return;
                     this.checkingHealth = true;
-                    // 逐个探上游、每个 5 秒超时，先给个即时提示，别让用户干等
-                    this.showStatus('正在检测 Provider…', 'success');
+                    // 逐个探上游、每个 5 秒超时，先给个即时提示，别让用户干等。
+                    // 带上个数：后端分批跑，耗时上界随 provider 数量增长，
+                    // 报个数比光说"正在检测"更能让用户判断该等多久。
+                    const pending = Object.keys(this.config.providers || {}).length;
+                    this.showStatus(pending ? `正在检测 ${pending} 个 Provider…` : '正在检测 Provider…', 'success');
                     try {
                         const res = await fetch('/api/providers/health', { method: 'POST' });
                         if (!res.ok) throw new Error(await this.errorText(res, 'Provider 健康检测失败'));
