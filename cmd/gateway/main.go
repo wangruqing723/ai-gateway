@@ -496,6 +496,7 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 	first := matched.Candidates[order[0]]
 	reqLog.Provider = first.Provider.Name
 	reqLog.TargetModel = first.TargetModel
+	reqLog.UpstreamFormat = first.Provider.Format
 	displayModel := first.TargetModel
 	if needVision {
 		displayModel = matched.VisionModel
@@ -847,6 +848,7 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 	// 本次尝试真正会用到该候选，更新日志归属
 	in.reqLog.Provider = p.Name
 	in.reqLog.TargetModel = targetModel
+	in.reqLog.UpstreamFormat = p.Format
 	in.reqLog.KeySource = keySource
 	in.reqLog.KeyFingerprint = keyFingerprint(apiKey)
 

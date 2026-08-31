@@ -126,7 +126,12 @@ type RequestLog struct {
 	KeyFingerprint string `json:"keyFingerprint,omitempty"`
 	Status         int    `json:"status"`
 	ClientFormat   string `json:"clientFormat"`
-	Format         string `json:"format"`
+	// Format 是 ClientFormat 的历史别名，语义恒为「客户端格式」，保留给旧前端与
+	// 外部诊断脚本。上游格式看 UpstreamFormat，不要复用本字段。
+	Format string `json:"format"`
+	// UpstreamFormat 是实际使用的候选 provider 的格式。与 Provider / TargetModel
+	// 在同一处赋值，故障转移后三者恒指向同一个候选。
+	UpstreamFormat string `json:"upstreamFormat,omitempty"`
 	Model          string `json:"model"`
 	Route          string `json:"route,omitempty"`
 	Provider       string `json:"provider"`

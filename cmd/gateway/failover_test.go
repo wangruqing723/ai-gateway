@@ -214,6 +214,11 @@ func TestFailoverCanTransferBetweenChatAndResponsesProviders(t *testing.T) {
 	if len(entry.AttemptDetails) != 2 || entry.AttemptDetails[0].ProviderFormat != "openai" || entry.AttemptDetails[1].ProviderFormat != "openai-responses" {
 		t.Fatalf("attempt details = %#v", entry.AttemptDetails)
 	}
+	// 顶层 UpstreamFormat 必须跟着实际成功的候选走，而不是停在首候选的 openai，
+	// 否则详情面板的 Provider 与「上游格式」会来自不同候选。
+	if entry.Provider != "responses" || entry.UpstreamFormat != "openai-responses" {
+		t.Fatalf("顶层归属 = %q/%q，期望 responses/openai-responses", entry.Provider, entry.UpstreamFormat)
+	}
 }
 
 func TestRequestLogFormatKeepsClientFormat(t *testing.T) {
@@ -232,6 +237,11 @@ func TestRequestLogFormatKeepsClientFormat(t *testing.T) {
 	entry := srv.metrics.Logs(metrics.LogFilter{Limit: 1})[0]
 	if entry.Format != "anthropic" || entry.ClientFormat != "anthropic" {
 		t.Fatalf("日志格式 = %q/%q，期望客户端格式 anthropic", entry.Format, entry.ClientFormat)
+	}
+	// UpstreamFormat 必须是 provider 的格式，不能跟着 Format 一起变成客户端格式：
+	// 前端详情面板的「上游格式」读它，曾误读 Format 导致 openai 上游显示成 anthropic。
+	if entry.UpstreamFormat != "openai" {
+		t.Fatalf("上游格式 = %q，期望 provider 格式 openai", entry.UpstreamFormat)
 	}
 }
 
