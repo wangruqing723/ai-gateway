@@ -1416,12 +1416,16 @@
     </div>
 
     <!-- 自定义 tooltip：fixed 定位而不是 CSS ::after，因为徽章所在表格外层是
-         overflow-x-auto，绝对定位的气泡会被滚动容器裁掉。z-[70] 在错误提示之上。 -->
-    <div id="immediate-tooltip" x-show="tip.show" x-cloak role="tooltip"
+         overflow-x-auto，绝对定位的气泡会被滚动容器裁掉。z-[70] 在错误提示之上。
+
+         x-text 必须挂在这个 div 上，不能套一层 <span x-text>：本元素带
+         whitespace-pre-line（多行 tip 靠 \n 换行），而 pre-line 保留换行符，
+         内层标签前后那两个源码换行会各渲染成一个空行，气泡就变成
+         「空行 + 正文 + 空行」，看着像上半截是空的。x-text 写在这里时
+         Alpine 直接覆写 textContent，那些空白文本节点连带被清掉。 -->
+    <div id="immediate-tooltip" x-show="tip.show" x-cloak role="tooltip" x-text="tip.text"
          :style="`left: ${tip.x}px; top: ${tip.y}px;`"
-         class="pointer-events-none fixed z-[70] max-w-xs -translate-x-1/2 -translate-y-full whitespace-pre-line rounded-lg border border-line bg-panel3 px-3 py-2 text-xs font-semibold leading-relaxed text-text shadow-glow">
-        <span x-text="tip.text"></span>
-    </div>
+         class="pointer-events-none fixed z-[70] max-w-xs -translate-x-1/2 -translate-y-full whitespace-pre-line rounded-lg border border-line bg-panel3 px-3 py-2 text-xs font-semibold leading-relaxed text-text shadow-glow"></div>
 
     <!-- 自定义确认弹窗，替代 window.confirm。
          原生 confirm 阻塞主线程、样式不可控、在部分浏览器里可被用户永久屏蔽
