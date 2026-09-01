@@ -1211,17 +1211,56 @@ func validateOpenAIChatToolResultContent(content any) error {
 	return nil
 }
 
+// isReasoningBlockType 判断块类型名是否属于 Anthropic 的思考块。
+//
+// 请求方向（客户端回传历史）与响应方向（上游本轮输出）共用这份名单，避免两边
+// 各自维护、加一种块类型时漏改一处。流式转换按 content_block.type 判定同样走它。
+func isReasoningBlockType(blockType string) bool {
+	switch blockType {
+	case "thinking", "redacted_thinking":
+		return true
+	}
+	return false
+}
+
+// isReasoningDeltaType 判断流式 delta 类型是否属于思考块的增量。
+//
+// thinking_delta 是思考正文，signature_delta 是 Anthropic 对思考内容的加密签名。
+// 两者都只在思考块内部出现，目标格式不是 Anthropic 时一并丢弃。
+func isReasoningDeltaType(deltaType string) bool {
+	switch deltaType {
+	case "thinking_delta", "signature_delta":
+		return true
+	}
+	return false
+}
+
+// isResponsesReasoningEvent 判断 Responses SSE 事件是否属于 reasoning item 的生命周期。
+//
+// OpenAI 给 reasoning item 配了一整组事件（summary part 的增删、summary text 的
+// 增量与完成）。这些事件对目标协议没有等价物，但也不该报错——它们伴随 reasoning
+// item 必然出现，报错等于任何带推理的上游都用不了。正文由
+// response.reasoning_summary_text.delta 单独承载，调用方按需取。
+func isResponsesReasoningEvent(eventType string) bool {
+	switch eventType {
+	case "response.reasoning_summary_part.added",
+		"response.reasoning_summary_part.done",
+		"response.reasoning_summary_text.delta",
+		"response.reasoning_summary_text.done",
+		"response.reasoning_text.delta",
+		"response.reasoning_text.done":
+		return true
+	}
+	return false
+}
+
 // isReasoningBlock 判断内容块是否属于 Anthropic 的思考块。
 //
 // Claude Code 在多轮对话里会把上一轮 assistant 回复原样回传，其中包含 thinking /
 // redacted_thinking 块。这类块只有 Anthropic 能消费：thinking 的 signature 是
 // Anthropic 对思考内容的加密签名，只有它自己能验签，跨厂商传过去纯属噪音。
 func isReasoningBlock(block map[string]any) bool {
-	switch getString(block, "type") {
-	case "thinking", "redacted_thinking":
-		return true
-	}
-	return false
+	return isReasoningBlockType(getString(block, "type"))
 }
 
 // stripReasoningBlocks 丢掉 thinking / redacted_thinking 块，用于目标不是 Anthropic 的场景。

@@ -270,7 +270,9 @@ func TestResponsesStreamRejectsUnsupportedSemanticEvents(t *testing.T) {
 		t.Run(target, func(t *testing.T) {
 			transformer := NewStreamTransformer("openai-responses", target)
 			transformer.Transform(`data: {"type":"response.created","response":{"model":"gpt-upstream","status":"in_progress","output":[]}}`)
-			transformer.Transform(`data: {"type":"response.reasoning_summary_text.delta","output_index":0,"delta":"hidden"}`)
+			// 用真正没有映射的事件。reasoning 相关事件现在是已知的，
+			// 见 TestResponsesReasoningStreamMapsPerTarget。
+			transformer.Transform(`data: {"type":"response.image_generation_call.partial_image","output_index":0}`)
 			if err := StreamError(transformer); err == nil || !strings.Contains(err.Error(), "unsupported") {
 				t.Fatalf("StreamError() = %v", err)
 			}
@@ -279,6 +281,94 @@ func TestResponsesStreamRejectsUnsupportedSemanticEvents(t *testing.T) {
 				t.Fatal("unsupported Responses event must generate target failure terminal")
 			}
 		})
+	}
+}
+
+// TestResponsesReasoningStreamMapsPerTarget 覆盖 r00178 那条链路：
+// openai-chat 客户端 + openai-responses 上游，上游返回 reasoning item。
+//
+// 两个目标处理不同，都要锁住：
+//   - Chat：映射成 reasoning_content（与 Anthropic→Chat 对称）
+//   - Anthropic：丢弃。伪造 thinking 块要编造 signature，客户端把这段 assistant
+//     历史回传给 Anthropic 上游时验签会失败；报错则让任何带推理的上游都不可用。
+func TestResponsesReasoningStreamMapsPerTarget(t *testing.T) {
+	lines := []string{
+		`data: {"type":"response.created","response":{"model":"gpt-upstream","status":"in_progress","output":[]}}`,
+		`data: {"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs_1","summary":[]}}`,
+		`data: {"type":"response.reasoning_summary_part.added","output_index":0,"summary_index":0,"part":{"type":"summary_text","text":""}}`,
+		`data: {"type":"response.reasoning_summary_text.delta","output_index":0,"summary_index":0,"delta":"先拆解问题。"}`,
+		`data: {"type":"response.reasoning_summary_text.done","output_index":0,"summary_index":0,"text":"先拆解问题。"}`,
+		`data: {"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"先拆解问题。"}]}}`,
+		`data: {"type":"response.output_item.added","output_index":1,"item":{"type":"message","id":"msg_1","role":"assistant","status":"in_progress","content":[]}}`,
+		`data: {"type":"response.output_text.delta","output_index":1,"delta":"答案是 42"}`,
+		`data: {"type":"response.output_item.done","output_index":1,"item":{"type":"message","id":"msg_1","role":"assistant","status":"completed","content":[{"type":"output_text","text":"答案是 42"}]}}`,
+		`data: {"type":"response.completed","response":{"model":"gpt-upstream","status":"completed","output":[]}}`,
+	}
+
+	t.Run("openai-chat", func(t *testing.T) {
+		transformer := NewStreamTransformer("openai-responses", "openai-chat")
+		out := transformAll(t, transformer, lines...)
+		if err := StreamError(transformer); err != nil {
+			t.Fatalf("stream error = %v, want nil", err)
+		}
+		var reasoning, content string
+		for _, chunk := range captureChatChunks(t, out) {
+			choices, _ := chunk["choices"].([]any)
+			if len(choices) == 0 {
+				continue
+			}
+			choice, _ := choices[0].(map[string]any)
+			delta, _ := choice["delta"].(map[string]any)
+			if value, ok := delta["reasoning_content"].(string); ok {
+				reasoning += value
+			}
+			if value, ok := delta["content"].(string); ok {
+				content += value
+			}
+		}
+		// 增量已经推过，output_item.done 里的完整 summary 不能再推一遍。
+		if reasoning != "先拆解问题。" {
+			t.Fatalf("reasoning_content = %q, want 先拆解问题。（不得重复）", reasoning)
+		}
+		if content != "答案是 42" {
+			t.Fatalf("content = %q, want 答案是 42", content)
+		}
+	})
+
+	t.Run("anthropic", func(t *testing.T) {
+		transformer := NewStreamTransformer("openai-responses", "anthropic")
+		out := transformAll(t, transformer, lines...)
+		if err := StreamError(transformer); err != nil {
+			t.Fatalf("stream error = %v, want nil", err)
+		}
+		joined := strings.Join(out, "")
+		if strings.Contains(joined, "先拆解问题。") {
+			t.Fatalf("Anthropic 目标不应带出推理内容: %s", joined)
+		}
+		if strings.Contains(joined, "thinking") {
+			t.Fatalf("Anthropic 目标不应伪造 thinking 块: %s", joined)
+		}
+		if !strings.Contains(joined, "答案是 42") {
+			t.Fatalf("正文丢失: %s", joined)
+		}
+	})
+}
+
+// 有些上游不发增量、只在 output_item.done 里给完整 summary，这时必须补发。
+func TestResponsesReasoningOnlyInDoneIsStillMapped(t *testing.T) {
+	transformer := NewStreamTransformer("openai-responses", "openai-chat")
+	out := transformAll(t, transformer,
+		`data: {"type":"response.created","response":{"model":"gpt-upstream","status":"in_progress","output":[]}}`,
+		`data: {"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs_1","summary":[]}}`,
+		`data: {"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"只在 done 里给"}]}}`,
+		`data: {"type":"response.output_text.delta","output_index":1,"delta":"答案"}`,
+		`data: {"type":"response.completed","response":{"model":"gpt-upstream","status":"completed","output":[]}}`,
+	)
+	if err := StreamError(transformer); err != nil {
+		t.Fatalf("stream error = %v, want nil", err)
+	}
+	if !strings.Contains(strings.Join(out, ""), "只在 done 里给") {
+		t.Fatalf("done 里的 summary 未补发: %s", strings.Join(out, ""))
 	}
 }
 
@@ -899,6 +989,133 @@ func TestResponsesStreamCarriesUpstreamUsageToAnthropic(t *testing.T) {
 			}
 			if got := usage["output_tokens"]; got != tc.want {
 				t.Fatalf("output_tokens = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// 上游会不请自来地给思考块（中转常给 -max 模型强开 thinking），这里曾经直接
+// addError 把整条 200 响应作废，且响应头已写出、无法转移候选。
+func TestAnthropicThinkingStreamMapsToChatReasoningContent(t *testing.T) {
+	transformer := NewStreamTransformer("anthropic", "openai-chat")
+	out := transformAll(t, transformer,
+		`data: {"type":"message_start","message":{"model":"claude-upstream"}}`,
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}`,
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"先拆解问题。"}}`,
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"EqQBCgIYAhIk"}}`,
+		`data: {"type":"content_block_stop","index":0}`,
+		`data: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}`,
+		`data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"答案是 42"}}`,
+		`data: {"type":"content_block_stop","index":1}`,
+		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}`,
+		`data: {"type":"message_stop"}`,
+	)
+	if err := StreamError(transformer); err != nil {
+		t.Fatalf("stream error = %v, want nil", err)
+	}
+	var reasoning, content string
+	for _, chunk := range captureChatChunks(t, out) {
+		choices, _ := chunk["choices"].([]any)
+		if len(choices) == 0 {
+			continue
+		}
+		choice, _ := choices[0].(map[string]any)
+		delta, _ := choice["delta"].(map[string]any)
+		if value, ok := delta["reasoning_content"].(string); ok {
+			reasoning += value
+		}
+		if value, ok := delta["content"].(string); ok {
+			content += value
+		}
+	}
+	if reasoning != "先拆解问题。" {
+		t.Fatalf("reasoning_content = %q, want 先拆解问题。", reasoning)
+	}
+	// signature 是 Anthropic 的验签串，混进 reasoning_content 就是一串乱码。
+	if strings.Contains(reasoning, "EqQBCgIYAhIk") {
+		t.Fatalf("reasoning_content 混入了 signature: %q", reasoning)
+	}
+	if content != "答案是 42" {
+		t.Fatalf("content = %q, want 答案是 42", content)
+	}
+}
+
+func TestAnthropicThinkingStreamMapsToResponsesReasoningItem(t *testing.T) {
+	transformer := NewStreamTransformer("anthropic", "openai-responses")
+	out := transformAll(t, transformer,
+		`data: {"type":"message_start","message":{"model":"claude-upstream"}}`,
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}`,
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"先拆解问题。"}}`,
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"EqQBCgIYAhIk"}}`,
+		`data: {"type":"content_block_stop","index":0}`,
+		`data: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}`,
+		`data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"答案是 42"}}`,
+		`data: {"type":"content_block_stop","index":1}`,
+		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}`,
+		`data: {"type":"message_stop"}`,
+	)
+	if err := StreamError(transformer); err != nil {
+		t.Fatalf("stream error = %v, want nil", err)
+	}
+	events := captureEvents(t, out)
+	summaryDone := findEvent(t, events, "response.reasoning_summary_text.done")
+	if got := summaryDone["text"]; got != "先拆解问题。" {
+		t.Fatalf("reasoning summary text = %v, want 先拆解问题。", got)
+	}
+	// 终态 output 必须含 reasoning item：流里已经发过它的 output_item.added，
+	// 终态漏掉会让客户端按 output_index 对不上账。
+	completed := findEvent(t, events, "response.completed")
+	response, _ := completed["response"].(map[string]any)
+	output, _ := response["output"].([]any)
+	if len(output) != 2 {
+		t.Fatalf("output 长度 = %d, want 2: %#v", len(output), output)
+	}
+	first, _ := output[0].(map[string]any)
+	if first["type"] != "reasoning" {
+		t.Fatalf("output[0].type = %v, want reasoning", first["type"])
+	}
+	summary, _ := first["summary"].([]any)
+	if len(summary) != 1 {
+		t.Fatalf("summary 长度 = %d, want 1: %#v", len(summary), summary)
+	}
+	entry, _ := summary[0].(map[string]any)
+	if entry["type"] != "summary_text" || entry["text"] != "先拆解问题。" {
+		t.Fatalf("summary[0] = %#v", entry)
+	}
+	second, _ := output[1].(map[string]any)
+	if second["type"] != "message" {
+		t.Fatalf("output[1].type = %v, want message", second["type"])
+	}
+}
+
+// redacted_thinking 的 data 是加密 blob，没有明文可呈现：不能报错，也不能建出
+// 空 reasoning item 或把 blob 当正文推给客户端。
+func TestAnthropicRedactedThinkingStreamIsDropped(t *testing.T) {
+	for _, target := range []string{"openai-chat", "openai-responses"} {
+		t.Run(target, func(t *testing.T) {
+			transformer := NewStreamTransformer("anthropic", target)
+			out := transformAll(t, transformer,
+				`data: {"type":"message_start","message":{"model":"claude-upstream"}}`,
+				`data: {"type":"content_block_start","index":0,"content_block":{"type":"redacted_thinking","data":"EroCCkYIAxgCKkBmm"}}`,
+				`data: {"type":"content_block_stop","index":0}`,
+				`data: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}`,
+				`data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"答案是 42"}}`,
+				`data: {"type":"content_block_stop","index":1}`,
+				`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}`,
+				`data: {"type":"message_stop"}`,
+			)
+			if err := StreamError(transformer); err != nil {
+				t.Fatalf("stream error = %v, want nil", err)
+			}
+			joined := strings.Join(out, "")
+			if strings.Contains(joined, "EroCCkYIAxgCKkBmm") {
+				t.Fatalf("加密 blob 被推给了客户端: %s", joined)
+			}
+			if strings.Contains(joined, "reasoning") {
+				t.Fatalf("redacted_thinking 建出了 reasoning 产物: %s", joined)
+			}
+			if !strings.Contains(joined, "答案是 42") {
+				t.Fatalf("正文丢失: %s", joined)
 			}
 		})
 	}

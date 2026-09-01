@@ -10,6 +10,7 @@ import (
 	"testing"
 	"unicode/utf8"
 
+	"ai-gateway/internal/breaker"
 	"ai-gateway/internal/config"
 	"ai-gateway/internal/metrics"
 	"ai-gateway/internal/providerhealth"
@@ -766,6 +767,235 @@ func TestFailoverNoRetryAfterStreamStarted(t *testing.T) {
 	}
 	if !strings.Contains(recorder.Body.String(), "message_start") {
 		t.Fatalf("body = %q, 期望保留已写出的 SSE 字节", recorder.Body.String())
+	}
+}
+
+// TestThinkingStreamSurvivesFullFailoverChain 端到端复现线上那条失败链路：
+// openai-chat 客户端 → 502 → 503 → 第三个候选返回带 thinking 的 anthropic 流。
+//
+// 回归点：thinking 块曾让 Anthropic→Chat 流式转换 addError，而此时 200 响应头已经
+// 写给客户端、不能再转移候选，于是三个候选全部烧掉、客户端只拿到一条
+// conversion_error SSE（截图里 342 B 的响应就是它）。上游 sota3 本身完全正常。
+func TestThinkingStreamSurvivesFullFailoverChain(t *testing.T) {
+	var thirdHits atomic.Int32
+	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = io.WriteString(w, `{"error":"bad gateway"}`)
+	}))
+	defer first.Close()
+	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = io.WriteString(w, `{"error":{"message":"No available accounts","type":"api_error"},"type":"error"}`)
+	}))
+	defer second.Close()
+	third := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		thirdHits.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher, _ := w.(http.Flusher)
+		for _, line := range []string{
+			`data: {"type":"message_start","message":{"id":"msg_1","model":"claude-opus-5-max","role":"assistant","content":[],"usage":{"input_tokens":1,"output_tokens":0}}}`,
+			`data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}`,
+			`data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"先拆解问题。"}}`,
+			`data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"EqQBCgIYAhIk"}}`,
+			`data: {"type":"content_block_stop","index":0}`,
+			`data: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}`,
+			`data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"答案是 42"}}`,
+			`data: {"type":"content_block_stop","index":1}`,
+			`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}`,
+			`data: {"type":"message_stop"}`,
+		} {
+			_, _ = io.WriteString(w, line+"\n\n")
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+	}))
+	defer third.Close()
+
+	providers := map[string]*config.Provider{
+		"x-free": {Name: "x-free", BaseURL: first.URL, Format: "anthropic", MaxConcurrent: 1, MaxQueueWait: 500},
+		"y-free": {Name: "y-free", BaseURL: second.URL, Format: "anthropic", MaxConcurrent: 1, MaxQueueWait: 500},
+		"z-paid": {Name: "z-paid", BaseURL: third.URL, Format: "anthropic", MaxConcurrent: 1, MaxQueueWait: 500},
+	}
+	route := config.Route{Match: "*", Targets: []config.Target{
+		{Provider: "x-free", Model: "claude-opus-5"},
+		{Provider: "y-free", Model: "claude-opus-5"},
+		{Provider: "z-paid", Model: "claude-opus-5-max"},
+	}}
+	failover := defaultTestFailover()
+	attempts := 3
+	failover.MaxAttempts = &attempts
+	srv := newFailoverTestServer(providers, route, first.Client(), failover)
+
+	// 客户端用 openai-chat 协议，且从不请求 thinking——上游自己给的（中转常给
+	// -max 模型强开）。
+	recorder := postInference(srv, "/v1/chat/completions",
+		`{"model":"client-model","max_tokens":16,"stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+
+	if thirdHits.Load() != 1 {
+		t.Fatalf("第三候选命中 %d 次, 期望 1 次", thirdHits.Load())
+	}
+	body := recorder.Body.String()
+	if strings.Contains(body, "conversion_error") {
+		t.Fatalf("客户端仍收到 conversion_error: %s", body)
+	}
+	if !strings.Contains(body, "答案是 42") {
+		t.Fatalf("正文丢失: %s", body)
+	}
+	if !strings.Contains(body, "reasoning_content") {
+		t.Fatalf("思考内容未映射成 reasoning_content: %s", body)
+	}
+	if !strings.Contains(body, "先拆解问题。") {
+		t.Fatalf("思考正文丢失: %s", body)
+	}
+	// signature 是 Anthropic 的验签串，混进 reasoning_content 就是一串乱码。
+	if strings.Contains(body, "EqQBCgIYAhIk") {
+		t.Fatalf("signature 泄漏给了客户端: %s", body)
+	}
+	if !strings.Contains(body, "[DONE]") {
+		t.Fatalf("缺少 Chat 流的收尾 [DONE]: %s", body)
+	}
+
+	logs := srv.metrics.Logs(metrics.LogFilter{Limit: 10})
+	if len(logs) != 1 {
+		t.Fatalf("请求日志 = %d 条, 期望 1 条", len(logs))
+	}
+	entry := logs[0]
+	if entry.Error != "" {
+		t.Errorf("Error = %q, 期望为空（本次已是成功请求）", entry.Error)
+	}
+	if entry.Provider != "z-paid" {
+		t.Errorf("Provider = %q, 期望 z-paid", entry.Provider)
+	}
+	if len(entry.AttemptDetails) != 3 {
+		t.Fatalf("AttemptDetails = %d 条, 期望 3 条（与 trail 三跳同源）", len(entry.AttemptDetails))
+	}
+	if last := entry.AttemptDetails[2]; last.Outcome != "success" {
+		t.Errorf("末次 detail = %#v, 期望 success", last)
+	}
+}
+
+// TestResponsesReasoningStreamSurvivesFailoverChain 端到端复现 r00178：
+// openai-chat 客户端 → 500 → 500 → responses 上游返回带 reasoning item 的流。
+//
+// 与 thinking 那条是同一类缺口的另一条路径：上游给了 200 干净流，网关自己转不了
+// reasoning item，于是三个候选全烧掉、客户端只拿到 conversion_error。
+func TestResponsesReasoningStreamSurvivesFailoverChain(t *testing.T) {
+	var thirdHits atomic.Int32
+	fail := func() *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = io.WriteString(w, `{"error":"boom"}`)
+		}))
+	}
+	first, second := fail(), fail()
+	defer first.Close()
+	defer second.Close()
+	third := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		thirdHits.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher, _ := w.(http.Flusher)
+		for _, line := range []string{
+			`data: {"type":"response.created","response":{"model":"deepseek-v4-flash","status":"in_progress","output":[]}}`,
+			`data: {"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs_1","summary":[]}}`,
+			`data: {"type":"response.reasoning_summary_text.delta","output_index":0,"summary_index":0,"delta":"先拆解问题。"}`,
+			`data: {"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"先拆解问题。"}]}}`,
+			`data: {"type":"response.output_item.added","output_index":1,"item":{"type":"message","id":"msg_1","role":"assistant","status":"in_progress","content":[]}}`,
+			`data: {"type":"response.output_text.delta","output_index":1,"delta":"答案是 42"}`,
+			`data: {"type":"response.completed","response":{"model":"deepseek-v4-flash","status":"completed","output":[]}}`,
+		} {
+			_, _ = io.WriteString(w, line+"\n\n")
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+	}))
+	defer third.Close()
+
+	providers := map[string]*config.Provider{
+		"ar-a": {Name: "ar-a", BaseURL: first.URL, Format: "openai-responses", MaxConcurrent: 1, MaxQueueWait: 500},
+		"ar-b": {Name: "ar-b", BaseURL: second.URL, Format: "openai-responses", MaxConcurrent: 1, MaxQueueWait: 500},
+		"ar-c": {Name: "ar-c", BaseURL: third.URL, Format: "openai-responses", MaxConcurrent: 1, MaxQueueWait: 500},
+	}
+	route := config.Route{Match: "*", Targets: []config.Target{
+		{Provider: "ar-a", Model: "deepseek-v4-flash"},
+		{Provider: "ar-b", Model: "deepseek-v4-flash"},
+		{Provider: "ar-c", Model: "deepseek-v4-flash"},
+	}}
+	failover := defaultTestFailover()
+	attempts := 3
+	failover.MaxAttempts = &attempts
+	srv := newFailoverTestServer(providers, route, first.Client(), failover)
+
+	recorder := postInference(srv, "/v1/chat/completions",
+		`{"model":"client-model","max_tokens":16,"stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+
+	if thirdHits.Load() != 1 {
+		t.Fatalf("第三候选命中 %d 次, 期望 1 次", thirdHits.Load())
+	}
+	body := recorder.Body.String()
+	if strings.Contains(body, "conversion_error") {
+		t.Fatalf("客户端仍收到 conversion_error: %s", body)
+	}
+	if !strings.Contains(body, "reasoning_content") || !strings.Contains(body, "先拆解问题。") {
+		t.Fatalf("推理内容未映射: %s", body)
+	}
+	if !strings.Contains(body, "答案是 42") {
+		t.Fatalf("正文丢失: %s", body)
+	}
+
+	logs := srv.metrics.Logs(metrics.LogFilter{Limit: 10})
+	if len(logs) != 1 {
+		t.Fatalf("请求日志 = %d 条, 期望 1 条", len(logs))
+	}
+	if entry := logs[0]; entry.Error != "" {
+		t.Errorf("Error = %q, 期望为空", entry.Error)
+	}
+}
+
+// TestConversionErrorDoesNotTripBreaker 锁定「转换失败不算上游的错」。
+//
+// 用一个真正没有映射的块类型（server_tool_use）逼出 conversion_error：上游给的是
+// 干净的 200 流，网关自己转不了。此时熔断失败计数必须保持 0——记成失败会让健康
+// provider 被连着几个同类请求熔断掉，而熔断它并不能让转换变得可行。
+func TestConversionErrorDoesNotTripBreaker(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher, _ := w.(http.Flusher)
+		for _, line := range []string{
+			`data: {"type":"message_start","message":{"id":"msg_1","model":"upstream","role":"assistant","content":[],"usage":{"input_tokens":1,"output_tokens":0}}}`,
+			`data: {"type":"content_block_start","index":0,"content_block":{"type":"server_tool_use","id":"srvtoolu_1","name":"web_search"}}`,
+		} {
+			_, _ = io.WriteString(w, line+"\n\n")
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+	}))
+	defer upstream.Close()
+
+	providers := map[string]*config.Provider{
+		"only": {Name: "only", BaseURL: upstream.URL, Format: "anthropic", MaxConcurrent: 1, MaxQueueWait: 500},
+	}
+	route := config.Route{Match: "*", Targets: []config.Target{{Provider: "only", Model: "m"}}}
+	settings := breaker.Settings{Enabled: true, ConsecutiveFailures: 3, OpenMs: 1000, HalfOpenProbes: 1}
+	srv := newBreakerTestServer(providers, route, upstream.Client(), defaultTestFailover(), settings)
+
+	recorder := postInference(srv, "/v1/chat/completions",
+		`{"model":"client-model","max_tokens":16,"stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+	if !strings.Contains(recorder.Body.String(), "conversion_error") {
+		t.Fatalf("body = %q, 期望这次确实是转换失败", recorder.Body.String())
+	}
+
+	state := srv.breaker.Snapshot()["only"]
+	if state.ConsecutiveFailures != 0 {
+		t.Errorf("ConsecutiveFailures = %d, 期望 0：转换失败是网关自己的缺口，不该记到上游头上", state.ConsecutiveFailures)
+	}
+	if state.State != breaker.StateClosed {
+		t.Errorf("State = %q, 期望保持 closed", state.State)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +16,7 @@ import (
 	"ai-gateway/internal/breaker"
 	"ai-gateway/internal/config"
 	"ai-gateway/internal/metrics"
+	"ai-gateway/internal/proxy"
 )
 
 // newBreakerTestServer 在 failover 测试网关上挂一个熔断器，参数由调用方给定。
@@ -437,8 +439,13 @@ func TestBreakerOutcomeForCountsPost2xxFailures(t *testing.T) {
 		{"2xx 干净结束", 200, nil, breaker.OutcomeSuccess},
 		{"2xx 后流被掐断", 200, io.ErrUnexpectedEOF, breaker.OutcomeFailure},
 		{"2xx 后活跃超时", 200, context.DeadlineExceeded, breaker.OutcomeFailure},
-		{"2xx 后响应转换失败", 200, errors.New("响应转换失败"), breaker.OutcomeFailure},
+		{"2xx 后其他未分类错误", 200, errors.New("响应体超限"), breaker.OutcomeFailure},
 		{"2xx 后客户端自己断开", 200, context.Canceled, breaker.OutcomeIgnored},
+		// 协议转换失败是网关自己的能力缺口，上游响应完全正常。记成失败会让健康
+		// provider 被连着几个同类请求熔断掉（默认阈值 3），而熔断它并不能让转换变得
+		// 可行；也不能记成功，那会抹掉此前累积的真实失败计数。
+		{"2xx 后协议转换失败", 200, fmt.Errorf("%w: unsupported block", proxy.ErrConversion), breaker.OutcomeIgnored},
+		{"包装后的转换失败仍可识别", 200, fmt.Errorf("转发失败: %w", fmt.Errorf("%w: unsupported block", proxy.ErrConversion)), breaker.OutcomeIgnored},
 		{"3xx 后失败", 302, io.ErrUnexpectedEOF, breaker.OutcomeFailure},
 		{"5xx", 502, nil, breaker.OutcomeFailure},
 		{"429 不计入", 429, nil, breaker.OutcomeIgnored},

@@ -1179,6 +1179,12 @@ func breakerOutcomeFor(upstreamCode int, err error) breaker.Outcome {
 		case errors.Is(err, context.Canceled):
 			// 客户端自己断开，与上游健康无关
 			return breaker.OutcomeIgnored
+		case errors.Is(err, proxy.ErrConversion):
+			// 协议转换失败是网关自己的能力缺口，上游给的响应完全正常。记成失败会
+			// 让一个健康 provider 被连着几个同类请求熔断掉（默认阈值 3 次），而熔断
+			// 它并不能让转换变得可行。也不记成功：本次请求确实失败了，强制闭合会
+			// 抹掉此前累积的真实失败计数。
+			return breaker.OutcomeIgnored
 		case err != nil:
 			return breaker.OutcomeFailure
 		default:

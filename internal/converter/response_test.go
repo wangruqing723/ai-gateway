@@ -1,6 +1,7 @@
 package converter
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -348,13 +349,15 @@ func TestCheckedResponsesRejectNonObjectFunctionArguments(t *testing.T) {
 }
 
 func TestCheckedResponsesRejectUnknownContentBlocks(t *testing.T) {
+	// 用真正没有映射的块类型。thinking / redacted_thinking 现在是已知且有映射的，
+	// 见 TestAnthropicReasoningResponseMapsToReasoningContent。
 	data := map[string]any{
-		"content": []any{map[string]any{"type": "thinking", "thinking": "secret"}},
+		"content": []any{map[string]any{"type": "server_tool_use", "id": "srvtoolu_1"}},
 	}
 	for _, target := range []string{"openai-chat", "openai-responses"} {
 		t.Run("anthropic-to-"+target, func(t *testing.T) {
 			_, err := ConvertAnthropicResponseChecked(data, target, "client-model")
-			if err == nil || !strings.Contains(err.Error(), "unsupported") || !strings.Contains(err.Error(), "thinking") {
+			if err == nil || !strings.Contains(err.Error(), "unsupported") || !strings.Contains(err.Error(), "server_tool_use") {
 				t.Fatalf("error = %v", err)
 			}
 			requireJSONEqual(t, data, ConvertAnthropicResponse(data, target, "client-model"))
@@ -375,6 +378,154 @@ func TestCheckedResponsesRejectUnknownContentBlocks(t *testing.T) {
 			requireJSONEqual(t, chatData, ConvertOpenAIChatResponse(chatData, target, "client-model"))
 		})
 	}
+}
+
+// 关掉 stream 走的是非流式这条路，映射必须与流式一致，否则同一个上游开关流
+// 会得到两种结果。
+func TestAnthropicReasoningResponseMapsToReasoningContent(t *testing.T) {
+	data := map[string]any{
+		"id": "msg_1", "type": "message", "role": "assistant", "model": "claude-upstream",
+		"content": []any{
+			map[string]any{"type": "thinking", "thinking": "先拆解问题。", "signature": "EqQBCgIYAhIk"},
+			map[string]any{"type": "text", "text": "答案是 42"},
+		},
+		"stop_reason": "end_turn",
+	}
+
+	t.Run("openai-chat", func(t *testing.T) {
+		got, err := ConvertAnthropicResponseChecked(data, "openai-chat", "client-model")
+		if err != nil {
+			t.Fatalf("error = %v, want nil", err)
+		}
+		choices, _ := got["choices"].([]any)
+		choice, _ := choices[0].(map[string]any)
+		message, _ := choice["message"].(map[string]any)
+		if got := message["reasoning_content"]; got != "先拆解问题。" {
+			t.Fatalf("reasoning_content = %v, want 先拆解问题。", got)
+		}
+		if got := message["content"]; got != "答案是 42" {
+			t.Fatalf("content = %v, want 答案是 42", got)
+		}
+	})
+
+	t.Run("openai-responses", func(t *testing.T) {
+		got, err := ConvertAnthropicResponseChecked(data, "openai-responses", "client-model")
+		if err != nil {
+			t.Fatalf("error = %v, want nil", err)
+		}
+		output, _ := got["output"].([]any)
+		if len(output) != 2 {
+			t.Fatalf("output 长度 = %d, want 2: %#v", len(output), output)
+		}
+		reasoning, _ := output[0].(map[string]any)
+		if reasoning["type"] != "reasoning" {
+			t.Fatalf("output[0].type = %v, want reasoning", reasoning["type"])
+		}
+		summary, _ := reasoning["summary"].([]any)
+		entry, _ := summary[0].(map[string]any)
+		if entry["type"] != "summary_text" || entry["text"] != "先拆解问题。" {
+			t.Fatalf("summary[0] = %#v", entry)
+		}
+		message, _ := output[1].(map[string]any)
+		if message["type"] != "message" {
+			t.Fatalf("output[1].type = %v, want message", message["type"])
+		}
+	})
+
+	// 无思考内容时不写 reasoning_content：空字符串会让客户端以为模型思考了但内容为空。
+	t.Run("openai-chat-without-thinking", func(t *testing.T) {
+		plain := map[string]any{
+			"content":     []any{map[string]any{"type": "text", "text": "答案是 42"}},
+			"stop_reason": "end_turn",
+		}
+		got, err := ConvertAnthropicResponseChecked(plain, "openai-chat", "client-model")
+		if err != nil {
+			t.Fatalf("error = %v, want nil", err)
+		}
+		choices, _ := got["choices"].([]any)
+		choice, _ := choices[0].(map[string]any)
+		message, _ := choice["message"].(map[string]any)
+		if _, exists := message["reasoning_content"]; exists {
+			t.Fatalf("无思考内容仍写了 reasoning_content: %#v", message)
+		}
+	})
+
+	t.Run("redacted-thinking-dropped", func(t *testing.T) {
+		redacted := map[string]any{
+			"content": []any{
+				map[string]any{"type": "redacted_thinking", "data": "EroCCkYIAxgCKkBmm"},
+				map[string]any{"type": "text", "text": "答案是 42"},
+			},
+			"stop_reason": "end_turn",
+		}
+		for _, target := range []string{"openai-chat", "openai-responses"} {
+			got, err := ConvertAnthropicResponseChecked(redacted, target, "client-model")
+			if err != nil {
+				t.Fatalf("%s error = %v, want nil", target, err)
+			}
+			encoded, err := json.Marshal(got)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			if strings.Contains(string(encoded), "EroCCkYIAxgCKkBmm") {
+				t.Fatalf("%s 泄漏了加密 blob: %s", target, encoded)
+			}
+			if strings.Contains(string(encoded), "reasoning") {
+				t.Fatalf("%s 为 redacted_thinking 建出了 reasoning 产物: %s", target, encoded)
+			}
+		}
+	})
+}
+
+// 非流式 Responses→Chat 必须与流式一致：reasoning item 落到 reasoning_content。
+// Anthropic 目标仍丢弃（signature 无法伪造）。
+func TestResponsesReasoningResponseMapsPerTarget(t *testing.T) {
+	data := map[string]any{
+		"id": "resp_1", "object": "response", "status": "completed", "model": "gpt-upstream",
+		"output": []any{
+			map[string]any{"type": "reasoning", "id": "rs_1", "summary": []any{
+				map[string]any{"type": "summary_text", "text": "先拆解问题。"},
+			}},
+			map[string]any{"type": "message", "id": "msg_1", "role": "assistant", "status": "completed",
+				"content": []any{map[string]any{"type": "output_text", "text": "答案是 42"}}},
+		},
+	}
+
+	t.Run("openai-chat", func(t *testing.T) {
+		got, err := ConvertOpenAIResponsesResponseChecked(data, "openai-chat", "client-model")
+		if err != nil {
+			t.Fatalf("error = %v, want nil", err)
+		}
+		choices, _ := got["choices"].([]any)
+		choice, _ := choices[0].(map[string]any)
+		message, _ := choice["message"].(map[string]any)
+		if got := message["reasoning_content"]; got != "先拆解问题。" {
+			t.Fatalf("reasoning_content = %v, want 先拆解问题。", got)
+		}
+		if got := message["content"]; got != "答案是 42" {
+			t.Fatalf("content = %v, want 答案是 42", got)
+		}
+	})
+
+	t.Run("anthropic", func(t *testing.T) {
+		got, err := ConvertOpenAIResponsesResponseChecked(data, "anthropic", "client-model")
+		if err != nil {
+			t.Fatalf("error = %v, want nil", err)
+		}
+		encoded, err := json.Marshal(got)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		if strings.Contains(string(encoded), "先拆解问题。") {
+			t.Fatalf("Anthropic 目标不应带出推理内容: %s", encoded)
+		}
+		if strings.Contains(string(encoded), "thinking") {
+			t.Fatalf("Anthropic 目标不应伪造 thinking 块: %s", encoded)
+		}
+		if !strings.Contains(string(encoded), "答案是 42") {
+			t.Fatalf("正文丢失: %s", encoded)
+		}
+	})
 }
 
 func TestCheckedResponsesRejectTopLevelChatRefusal(t *testing.T) {

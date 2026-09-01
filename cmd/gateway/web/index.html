@@ -1064,7 +1064,15 @@
                                             @blur="hideTip()"
                                             tabindex="0" x-text="logClock(log)"></td>
                                         <td class="w-px whitespace-nowrap px-2 py-2">
-                                            <span class="chip px-1.5 text-[11px]" :class="statusClass(log.status)" x-text="log.status || '--'"></span>
+                                            <!-- 徽章要连 log.error 一起看：流式响应头写出后才失败的请求（转换失败、
+                                                 流中途断开、活跃超时）状态码停在 200，只按数字上色会给绿底，
+                                                 而后端 isSuccess 要求 error 为空、这条在成功率里算失败，两边对不上。 -->
+                                            <span class="chip px-1.5 text-[11px]" :class="statusClass(log.status, log.error)"
+                                                  x-text="log.status || '--'"
+                                                  @mouseenter="showTip(statusTip(log), $event)"
+                                                  @mouseleave="hideTip()"
+                                                  @focus="showTip(statusTip(log), $event)"
+                                                  @blur="hideTip()" tabindex="0"></span>
                                         </td>
                                         <td class="w-px whitespace-nowrap px-2 py-2">
                                             <span class="chip px-1.5 text-[11px]" :class="log.stream ? 'bg-cyan2/10 text-cyan' : 'bg-white/[.05] text-muted'" x-text="log.stream ? '流式' : '非流式'"></span>
@@ -2846,12 +2854,28 @@
                     return out;
                 },
 
-                statusClass(status) {
+                // statusClass 的 error 参数不是可选装饰：判据必须和后端 isSuccess
+                // （error 为空且 2xx/3xx）一致，否则同一条记录在列表里是绿的、在成功率里
+                // 算失败。典型来源是流式响应头已写出后才失败——状态码永远停在 200。
+                // 用 danger 而非 warn：这类请求客户端拿到的是残缺响应，比 4xx 更严重，
+                // 而 4xx 往往只是这个请求上游不接受。
+                statusClass(status, error) {
                     const code = Number(status);
                     if (!code) return 'bg-white/[.05] text-muted';
                     if (code >= 500) return 'border-danger/35 bg-danger/10 text-rose-100';
                     if (code >= 400) return 'border-warn/35 bg-warn/10 text-amber-100';
+                    if (error) return 'border-danger/35 bg-danger/10 text-rose-100';
                     return 'border-good/35 bg-good/10 text-emerald-100';
+                },
+
+                // statusTip 解释 2xx 却标红的那种行，否则徽章写着 200、底色是红的，
+                // 不展开详情看不出为什么。
+                statusTip(log) {
+                    const code = Number(log?.status) || 0;
+                    if (log?.error && code >= 200 && code < 400) {
+                        return `上游返回 ${code} 并已开始响应，之后失败：${log.error}`;
+                    }
+                    return log?.error || `HTTP ${code || '--'}`;
                 },
 
                 configPreview() {

@@ -76,16 +76,21 @@ func anthropicToOpenAIChatResponse(data map[string]any, model string) (map[strin
 	out := getIntDefault(usage, "output_tokens", 0)
 	stop := getString(data, "stop_reason")
 	finish := anthropicStopReasonToChat(stop)
-	text, toolCalls, _, err := anthropicContentToOpenAIChat(data["content"])
+	parsed, err := anthropicContentToOpenAIChat(data["content"])
 	if err != nil {
 		return nil, err
 	}
-	message := map[string]any{"role": "assistant", "content": text}
-	if text == "" && len(toolCalls) > 0 {
+	message := map[string]any{"role": "assistant", "content": parsed.text}
+	if parsed.text == "" && len(parsed.toolCalls) > 0 {
 		message["content"] = nil
 	}
-	if len(toolCalls) > 0 {
-		message["tool_calls"] = toolCalls
+	// reasoning_content 只在真有思考内容时才写：空字符串会让客户端以为模型思考了
+	// 但内容为空，而绝大多数请求根本不带思考。
+	if parsed.reasoning != "" {
+		message["reasoning_content"] = parsed.reasoning
+	}
+	if len(parsed.toolCalls) > 0 {
+		message["tool_calls"] = parsed.toolCalls
 	}
 	result := map[string]any{
 		"id":      "chatcmpl-" + shortID(),
@@ -175,6 +180,11 @@ func responsesToOpenAIChatResponse(data map[string]any, model string) (map[strin
 	if parsed.text == "" && parsed.refusal == "" && len(parsed.toolCalls) > 0 {
 		message["content"] = nil
 	}
+	// 与流式的 responsesToChat 一致：reasoning item 落到 reasoning_content。
+	// 空字符串不写，避免客户端以为模型思考了但内容为空。
+	if parsed.reasoning != "" {
+		message["reasoning_content"] = parsed.reasoning
+	}
 	if len(parsed.toolCalls) > 0 {
 		message["tool_calls"] = parsed.toolCalls
 	}
@@ -242,7 +252,10 @@ func responsesToAnthropicResponse(data map[string]any, model string) (map[string
 }
 
 type parsedResponsesOutput struct {
-	text       string
+	text string
+	// reasoning 是 reasoning item 的 summary 正文。只有 Chat 目标会落地成
+	// reasoning_content；Anthropic 目标丢弃，见 parseResponsesOutput 的注释。
+	reasoning  string
 	refusal    string
 	toolCalls  []any
 	incomplete bool
@@ -300,7 +313,10 @@ func parseResponsesOutput(data map[string]any) (parsedResponsesOutput, error) {
 				"function": map[string]any{"name": getString(item, "name"), "arguments": arguments},
 			})
 		case "reasoning":
-			// 第一阶段不向其他协议伪装推理内容，保留可转换的文本和工具调用。
+			// 取出 summary 正文，由调用方决定怎么落地：Chat 目标写 reasoning_content，
+			// Anthropic 目标丢弃（伪造 thinking 块要编造 signature，客户端把这段
+			// 历史回传给 Anthropic 时验签会失败）。这里只负责解析，不做协议决策。
+			parsed.reasoning += responsesSummaryText(item)
 		default:
 			return parsedResponsesOutput{}, fmt.Errorf("unsupported responses output item %q", getString(item, "type"))
 		}
@@ -420,25 +436,35 @@ func rejectOpenAIChatRefusal(message map[string]any) error {
 	return fmt.Errorf("unsupported openai chat refusal %q", text)
 }
 
-func anthropicContentToOpenAIChat(content any) (string, []any, bool, error) {
+// parsedAnthropicContent 是 Anthropic 响应内容拆解后的结果。
+type parsedAnthropicContent struct {
+	text string
+	// reasoning 是 thinking 块的正文，映射到 Chat 的 reasoning_content 或
+	// Responses 的 reasoning item。redacted_thinking 不进这里：加密 blob 没有明文。
+	reasoning   string
+	toolCalls   []any
+	textPresent bool
+}
+
+func anthropicContentToOpenAIChat(content any) (parsedAnthropicContent, error) {
 	blocks, err := checkedAnthropicResponseBlocks(content)
 	if err != nil {
-		return "", nil, false, err
+		return parsedAnthropicContent{}, err
 	}
-	var text string
-	var toolCalls []any
-	textPresent := false
+	var parsed parsedAnthropicContent
 	for _, block := range blocks {
-		switch getString(block, "type") {
-		case "text":
-			textPresent = true
-			text += getString(block, "text")
-		case "tool_use":
+		switch blockType := getString(block, "type"); {
+		case blockType == "text":
+			parsed.textPresent = true
+			parsed.text += getString(block, "text")
+		case blockType == "thinking":
+			parsed.reasoning += getString(block, "thinking")
+		case blockType == "tool_use":
 			input, ok := block["input"].(map[string]any)
 			if !ok {
-				return "", nil, false, fmt.Errorf("anthropic tool_use %q arguments must be a JSON object", getString(block, "id"))
+				return parsedAnthropicContent{}, fmt.Errorf("anthropic tool_use %q arguments must be a JSON object", getString(block, "id"))
 			}
-			toolCalls = append(toolCalls, map[string]any{
+			parsed.toolCalls = append(parsed.toolCalls, map[string]any{
 				"id": getString(block, "id"), "type": "function",
 				"function": map[string]any{
 					"name": getString(block, "name"), "arguments": marshalFunctionArguments(input),
@@ -446,23 +472,38 @@ func anthropicContentToOpenAIChat(content any) (string, []any, bool, error) {
 			})
 		}
 	}
-	return text, toolCalls, textPresent, nil
+	return parsed, nil
 }
 
 func anthropicContentToResponsesOutput(content any) ([]any, error) {
-	text, toolCalls, textPresent, err := anthropicContentToOpenAIChat(content)
+	parsed, err := anthropicContentToOpenAIChat(content)
 	if err != nil {
 		return nil, err
 	}
-	calls := make([]any, 0, len(toolCalls))
-	for _, value := range toolCalls {
+	calls := make([]any, 0, len(parsed.toolCalls))
+	for _, value := range parsed.toolCalls {
 		call, _ := value.(map[string]any)
 		function, _ := call["function"].(map[string]any)
 		calls = append(calls, responsesFunctionCallItem(
 			getString(call, "id"), getString(function, "name"), getString(function, "arguments"),
 		))
 	}
-	return responsesOutput(text, calls, textPresent), nil
+	out := responsesOutput(parsed.text, calls, parsed.textPresent)
+	if parsed.reasoning == "" {
+		return out, nil
+	}
+	// reasoning item 排在 message / function_call 之前，与上游给出的块顺序一致
+	// （Anthropic 总是先思考再回答），也与流式路径按 output_index 的排布一致。
+	return append([]any{responsesReasoningItem(parsed.reasoning)}, out...), nil
+}
+
+// responsesReasoningItem 组装非流式的 reasoning output item。
+// 结构与流式的 streamReasoningItem 保持一致，两条路径产出必须能互换。
+func responsesReasoningItem(text string) map[string]any {
+	return map[string]any{
+		"type": "reasoning", "id": "rs_" + shortID(), "status": "completed",
+		"summary": []any{map[string]any{"type": "summary_text", "text": text}},
+	}
 }
 
 func openAIChatContentToResponsesOutput(content, toolCalls any) ([]any, error) {
@@ -545,9 +586,12 @@ func checkedAnthropicResponseBlocks(content any) ([]map[string]any, error) {
 		if !ok {
 			return nil, fmt.Errorf("unsupported anthropic response content block %T", value)
 		}
-		switch blockType := getString(block, "type"); blockType {
-		case "text", "tool_use":
+		switch blockType := getString(block, "type"); {
+		case blockType == "text" || blockType == "tool_use" || blockType == "thinking":
 			out = append(out, block)
+		case blockType == "redacted_thinking":
+			// 加密 blob 没有明文可呈现，整块丢弃。放行但不产出字段会更绕：调用方
+			// 拿到块还得再判一次类型。
 		default:
 			return nil, fmt.Errorf("unsupported anthropic response content block %q", blockType)
 		}

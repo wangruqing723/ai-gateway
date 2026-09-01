@@ -1064,7 +1064,15 @@
                                             @blur="hideTip()"
                                             tabindex="0" x-text="logClock(log)"></td>
                                         <td class="w-px whitespace-nowrap px-2 py-2">
-                                            <span class="chip px-1.5 text-[11px]" :class="statusClass(log.status)" x-text="log.status || '--'"></span>
+                                            <!-- 徽章要连 log.error 一起看：流式响应头写出后才失败的请求（转换失败、
+                                                 流中途断开、活跃超时）状态码停在 200，只按数字上色会给绿底，
+                                                 而后端 isSuccess 要求 error 为空、这条在成功率里算失败，两边对不上。 -->
+                                            <span class="chip px-1.5 text-[11px]" :class="statusClass(log.status, log.error)"
+                                                  x-text="log.status || '--'"
+                                                  @mouseenter="showTip(statusTip(log), $event)"
+                                                  @mouseleave="hideTip()"
+                                                  @focus="showTip(statusTip(log), $event)"
+                                                  @blur="hideTip()" tabindex="0"></span>
                                         </td>
                                         <td class="w-px whitespace-nowrap px-2 py-2">
                                             <span class="chip px-1.5 text-[11px]" :class="log.stream ? 'bg-cyan2/10 text-cyan' : 'bg-white/[.05] text-muted'" x-text="log.stream ? '流式' : '非流式'"></span>

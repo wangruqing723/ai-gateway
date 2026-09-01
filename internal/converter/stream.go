@@ -22,17 +22,18 @@ func NewStreamTransformer(providerFormat, clientFormat string) StreamTransformer
 		return passthrough{}
 	}
 	st := &streamState{
-		msgID:  "chatcmpl-" + shortID(),
-		respID: "resp_" + shortID(),
-		itemID: "msg_" + shortID(),
-		texts:  make(map[int]*streamText),
-		tools:  make(map[int]*streamTool),
+		msgID:      "chatcmpl-" + shortID(),
+		respID:     "resp_" + shortID(),
+		itemID:     "msg_" + shortID(),
+		texts:      make(map[int]*streamText),
+		tools:      make(map[int]*streamTool),
+		reasonings: make(map[int]*streamReasoning),
 	}
 	switch {
 	case providerFormat == "anthropic" && clientFormat == "openai-chat":
-		return &anthropicToChat{s: st, toolIndexes: make(map[int]int)}
+		return &anthropicToChat{s: st, toolIndexes: make(map[int]int), reasoningBlocks: make(map[int]string)}
 	case providerFormat == "anthropic" && clientFormat == "openai-responses":
-		return &anthropicToResponses{s: st}
+		return &anthropicToResponses{s: st, reasoningBlocks: make(map[int]string)}
 	case providerFormat == "openai" && clientFormat == "anthropic":
 		return &openAIToAnthropic{s: st, tools: make(map[int]*streamTool)}
 	case providerFormat == "openai" && clientFormat == "openai-responses":
@@ -60,12 +61,24 @@ type streamState struct {
 	textOrder   []int
 	tools       map[int]*streamTool
 	toolOrder   []int
-	aggregate   int
-	incomplete  bool
-	err         error
+	// reasonings 是 Responses 的 reasoning output item，与 texts / tools 共用
+	// nextOutput 分配 output_index，三者一起决定最终 response.output 的顺序。
+	reasonings     map[int]*streamReasoning
+	reasoningOrder []int
+	aggregate      int
+	incomplete     bool
+	err            error
 }
 
 type streamText struct {
+	itemID      string
+	outputIndex int
+	text        strings.Builder
+	done        bool
+}
+
+// streamReasoning 是 Anthropic thinking 块在 Responses 侧对应的 reasoning item。
+type streamReasoning struct {
 	itemID      string
 	outputIndex int
 	text        strings.Builder
@@ -289,8 +302,14 @@ func openAIToolCallDeltas(delta map[string]any) []any {
 type anthropicToChat struct {
 	s           *streamState
 	toolIndexes map[int]int
-	nextTool    int
-	doneSent    bool
+	// reasoningBlocks 记下思考块的下标及其原始类型（thinking / redacted_thinking），
+	// 用于让后续 delta 与 content_block_stop 走对分支。不能只存布尔：两种块的增量
+	// 处理不同，thinking 转 reasoning_content，redacted 的加密 blob 丢弃。
+	// 也不能只看 s.tools[index] == nil：那个条件对思考块和未知块一样成立，
+	// 区分不出「已知的思考块」与「压根没见过」。
+	reasoningBlocks map[int]string
+	nextTool        int
+	doneSent        bool
 }
 
 func (t *anthropicToChat) Err() error        { return t.s.err }
@@ -332,6 +351,25 @@ func (t *anthropicToChat) Transform(line string) []string {
 		if blockType == "text" {
 			return nil
 		}
+		// 思考块映射到 reasoning_content（DeepSeek 引入、OpenRouter/vLLM 跟进的事实
+		// 标准，internal/vision 读取的也是这个字段）。上游是否思考由它自己决定——中转
+		// 常给 -max 模型强开，网关从不在请求里写 thinking 也照样会收到——报错等于把
+		// 一次本来成功的 200 响应作废，且响应头已写出、无法再转移候选。
+		//
+		// 记下块类型而不只是布尔：redacted_thinking 的 data 是加密 blob，没有明文可
+		// 呈现，它的增量必须丢弃，而 thinking 的增量要转成 reasoning_content。
+		if isReasoningBlockType(blockType) {
+			sourceIndex := valueIndex(data["index"])
+			t.reasoningBlocks[sourceIndex] = blockType
+			if blockType != "thinking" {
+				return nil
+			}
+			// content_block_start 可以自带首段思考文本，非流式回放时整段都在这里。
+			if initial := getString(block, "thinking"); initial != "" {
+				return []string{chatDelta(t.s.msgID, t.s.model, map[string]any{"reasoning_content": initial}, nil)}
+			}
+			return nil
+		}
 		if blockType != "tool_use" {
 			t.s.addError(fmt.Errorf("unsupported anthropic stream content block %q", blockType))
 			return nil
@@ -367,28 +405,18 @@ func (t *anthropicToChat) Transform(line string) []string {
 			},
 		}}}, nil)}
 	case "content_block_delta":
-		switch deltaType(data) {
-		case "text_delta":
-			return []string{chatDelta(t.s.msgID, t.s.model, map[string]any{"content": deltaText(data)}, nil)}
-		case "input_json_delta":
-			delta, _ := data["delta"].(map[string]any)
-			sourceIndex := valueIndex(data["index"])
-			partial := getString(delta, "partial_json")
-			if tool := t.s.tools[sourceIndex]; tool != nil {
-				if !t.s.appendAggregate(&tool.arguments, partial) {
-					return nil
-				}
-			}
-			toolIndex := t.toolIndexes[sourceIndex]
-			return []string{chatDelta(t.s.msgID, t.s.model, map[string]any{"tool_calls": []any{map[string]any{
-				"index":    toolIndex,
-				"function": map[string]any{"arguments": partial},
-			}}}, nil)}
-		default:
-			t.s.addError(fmt.Errorf("unsupported anthropic stream delta %q", deltaType(data)))
+		// 思考块的增量跟着整块一起丢；不能落到下面的 default 分支报错。
+		if isReasoningDeltaType(deltaType(data)) {
+			return t.reasoningDelta(data)
 		}
+		return t.contentDelta(data)
 	case "content_block_stop":
-		tool := t.s.tools[valueIndex(data["index"])]
+		sourceIndex := valueIndex(data["index"])
+		if t.reasoningBlocks[sourceIndex] != "" {
+			// 思考块没有需要收尾的聚合状态，reasoning_content 是逐段直接推出去的。
+			return nil
+		}
+		tool := t.s.tools[sourceIndex]
 		if tool == nil {
 			return nil
 		}
@@ -408,6 +436,50 @@ func (t *anthropicToChat) Transform(line string) []string {
 				return []string{chatDelta(t.s.msgID, t.s.model, map[string]any{}, finish), "data: [DONE]\n\n"}
 			}
 		}
+	}
+	return nil
+}
+
+// reasoningDelta 把 thinking_delta 转成 reasoning_content 增量。
+//
+// signature_delta 一律丢弃：那是 Anthropic 对思考内容的加密签名，只有它自己能验签，
+// 拼进 reasoning_content 会变成一串乱码。redacted_thinking 的增量同理。
+func (t *anthropicToChat) reasoningDelta(data map[string]any) []string {
+	if deltaType(data) != "thinking_delta" {
+		return nil
+	}
+	// 块类型未记录时按 thinking 处理：漏了 content_block_start 也不该静默吞掉正文。
+	if blockType := t.reasoningBlocks[valueIndex(data["index"])]; blockType != "" && blockType != "thinking" {
+		return nil
+	}
+	delta, _ := data["delta"].(map[string]any)
+	text := getString(delta, "thinking")
+	if text == "" {
+		return nil
+	}
+	return []string{chatDelta(t.s.msgID, t.s.model, map[string]any{"reasoning_content": text}, nil)}
+}
+
+func (t *anthropicToChat) contentDelta(data map[string]any) []string {
+	switch deltaType(data) {
+	case "text_delta":
+		return []string{chatDelta(t.s.msgID, t.s.model, map[string]any{"content": deltaText(data)}, nil)}
+	case "input_json_delta":
+		delta, _ := data["delta"].(map[string]any)
+		sourceIndex := valueIndex(data["index"])
+		partial := getString(delta, "partial_json")
+		if tool := t.s.tools[sourceIndex]; tool != nil {
+			if !t.s.appendAggregate(&tool.arguments, partial) {
+				return nil
+			}
+		}
+		toolIndex := t.toolIndexes[sourceIndex]
+		return []string{chatDelta(t.s.msgID, t.s.model, map[string]any{"tool_calls": []any{map[string]any{
+			"index":    toolIndex,
+			"function": map[string]any{"arguments": partial},
+		}}}, nil)}
+	default:
+		t.s.addError(fmt.Errorf("unsupported anthropic stream delta %q", deltaType(data)))
 	}
 	return nil
 }
@@ -468,6 +540,73 @@ func appendResponseText(state *streamState, sourceIndex int, value string) []str
 		}))
 	}
 	return out
+}
+
+// ensureResponseReasoning 按需建出 reasoning item 并发 output_item.added。
+//
+// 结构与 ensureResponseText 平行，但没有 content_part：reasoning item 的文本挂在
+// summary 数组里，Responses 协议不给它发 content_part.added。
+func ensureResponseReasoning(state *streamState, sourceIndex int) (*streamReasoning, []string) {
+	if reasoning := state.reasonings[sourceIndex]; reasoning != nil {
+		return reasoning, nil
+	}
+	reasoning := &streamReasoning{itemID: "rs_" + shortID(), outputIndex: state.nextOutput}
+	state.reasonings[sourceIndex] = reasoning
+	state.reasoningOrder = append(state.reasoningOrder, sourceIndex)
+	state.nextOutput++
+	return reasoning, []string{responseEvent(state, "response.output_item.added", map[string]any{
+		"type": "response.output_item.added", "output_index": reasoning.outputIndex,
+		"item": streamReasoningItem(reasoning, "in_progress"),
+	})}
+}
+
+func appendResponseReasoning(state *streamState, sourceIndex int, value string) []string {
+	reasoning, out := ensureResponseReasoning(state, sourceIndex)
+	if reasoning.done {
+		state.addError(fmt.Errorf("responses reasoning item %s received delta after done", reasoning.itemID))
+		return nil
+	}
+	if !state.appendAggregate(&reasoning.text, value) {
+		return nil
+	}
+	if value != "" {
+		out = append(out, responseEvent(state, "response.reasoning_summary_text.delta", map[string]any{
+			"type": "response.reasoning_summary_text.delta", "item_id": reasoning.itemID,
+			"output_index": reasoning.outputIndex, "summary_index": 0, "delta": value,
+		}))
+	}
+	return out
+}
+
+func finishResponseReasoning(state *streamState, sourceIndex int) []string {
+	reasoning := state.reasonings[sourceIndex]
+	if reasoning == nil || reasoning.done {
+		return nil
+	}
+	reasoning.done = true
+	fullText := reasoning.text.String()
+	return []string{
+		responseEvent(state, "response.reasoning_summary_text.done", map[string]any{
+			"type": "response.reasoning_summary_text.done", "item_id": reasoning.itemID,
+			"output_index": reasoning.outputIndex, "summary_index": 0, "text": fullText,
+		}),
+		responseEvent(state, "response.output_item.done", map[string]any{
+			"type": "response.output_item.done", "output_index": reasoning.outputIndex,
+			"item": streamReasoningItem(reasoning, "completed"),
+		}),
+	}
+}
+
+// streamReasoningItem 组装 reasoning item。summary 为空时给空数组而不是省略字段：
+// 客户端按 item.summary 遍历，缺字段会拿到 undefined。
+func streamReasoningItem(reasoning *streamReasoning, status string) map[string]any {
+	summary := []any{}
+	if text := reasoning.text.String(); text != "" {
+		summary = append(summary, map[string]any{"type": "summary_text", "text": text})
+	}
+	return map[string]any{
+		"type": "reasoning", "id": reasoning.itemID, "summary": summary, "status": status,
+	}
 }
 
 func ensureResponseTool(state *streamState, sourceIndex int, callID, name string) (*streamTool, []string) {
@@ -593,6 +732,9 @@ func validateAllResponseToolArguments(state *streamState) error {
 
 func finishAllResponseItems(state *streamState) []string {
 	var out []string
+	for _, sourceIndex := range state.reasoningOrder {
+		out = append(out, finishResponseReasoning(state, sourceIndex)...)
+	}
 	for _, sourceIndex := range state.textOrder {
 		out = append(out, finishResponseText(state, sourceIndex)...)
 	}
@@ -611,6 +753,10 @@ func streamFunctionCallItem(tool *streamTool, status string) map[string]any {
 
 func completedResponseOutput(state *streamState) []any {
 	ordered := make([]any, state.nextOutput)
+	for _, sourceIndex := range state.reasoningOrder {
+		reasoning := state.reasonings[sourceIndex]
+		ordered[reasoning.outputIndex] = streamReasoningItem(reasoning, "completed")
+	}
 	for _, sourceIndex := range state.textOrder {
 		text := state.texts[sourceIndex]
 		ordered[text.outputIndex] = map[string]any{
@@ -654,7 +800,13 @@ func completeResponse(state *streamState) []string {
 
 // ── Anthropic → OpenAI Responses ─────────────
 
-type anthropicToResponses struct{ s *streamState }
+type anthropicToResponses struct {
+	s *streamState
+	// reasoningBlocks 见 anthropicToChat.reasoningBlocks。这里漏记的话
+	// content_block_stop 会落到 finishResponseText，凭思考块的下标凭空建出一个
+	// 空 output_text item 推给客户端。
+	reasoningBlocks map[int]string
+}
 
 func (t *anthropicToResponses) Err() error        { return t.s.err }
 func (t *anthropicToResponses) Failure() []string { return responsesStreamFailure(t.s) }
@@ -662,6 +814,25 @@ func (t *anthropicToResponses) Completed() bool   { return t.s.completed }
 func (t *anthropicToResponses) Abort(kind, message string) []string {
 	t.s.abort(kind, message)
 	return t.Failure()
+}
+
+// reasoningDelta 把 thinking_delta 累进 reasoning item 的 summary。
+// signature_delta 与 redacted_thinking 的增量丢弃，理由见 anthropicToChat.reasoningDelta。
+func (t *anthropicToResponses) reasoningDelta(data map[string]any) []string {
+	if deltaType(data) != "thinking_delta" {
+		return nil
+	}
+	sourceIndex := valueIndex(data["index"])
+	if blockType := t.reasoningBlocks[sourceIndex]; blockType != "" && blockType != "thinking" {
+		return nil
+	}
+	delta, _ := data["delta"].(map[string]any)
+	text := getString(delta, "thinking")
+	if text == "" {
+		return nil
+	}
+	out := ensureResponseStarted(t.s)
+	return append(out, appendResponseReasoning(t.s, sourceIndex, text)...)
 }
 
 func (t *anthropicToResponses) Transform(line string) []string {
@@ -683,6 +854,29 @@ func (t *anthropicToResponses) Transform(line string) []string {
 		block, _ := data["content_block"].(map[string]any)
 		sourceIndex := valueIndex(data["index"])
 		blockType := getString(block, "type")
+		// 思考块映射成 reasoning output item，文本走 summary_text。理由同
+		// anthropicToChat：上游会不请自来地给思考块，报错等于作废一次成功响应。
+		// redacted_thinking 只记类型不建 item：加密 blob 没有明文可放进 summary，
+		// 建了就是个空 item。
+		if isReasoningBlockType(blockType) {
+			t.reasoningBlocks[sourceIndex] = blockType
+			out := ensureResponseStarted(t.s)
+			if blockType != "thinking" {
+				return out
+			}
+			reasoning, added := ensureResponseReasoning(t.s, sourceIndex)
+			out = append(out, added...)
+			if initial := getString(block, "thinking"); initial != "" {
+				if !t.s.appendAggregate(&reasoning.text, initial) {
+					return nil
+				}
+				out = append(out, responseEvent(t.s, "response.reasoning_summary_text.delta", map[string]any{
+					"type": "response.reasoning_summary_text.delta", "item_id": reasoning.itemID,
+					"output_index": reasoning.outputIndex, "summary_index": 0, "delta": initial,
+				}))
+			}
+			return out
+		}
 		if blockType != "text" && blockType != "tool_use" {
 			t.s.addError(fmt.Errorf("unsupported anthropic stream content block %q", blockType))
 			return nil
@@ -712,6 +906,11 @@ func (t *anthropicToResponses) Transform(line string) []string {
 		}
 		return out
 	case "content_block_delta":
+		// 必须在 appendResponseText 之前拦掉：思考正文流进 text item 会被当成回复
+		// 正文，混进客户端看到的答案里。
+		if isReasoningDeltaType(deltaType(data)) {
+			return t.reasoningDelta(data)
+		}
 		if deltaType(data) != "text_delta" && deltaType(data) != "input_json_delta" {
 			t.s.addError(fmt.Errorf("unsupported anthropic stream delta %q", deltaType(data)))
 			return nil
@@ -729,6 +928,9 @@ func (t *anthropicToResponses) Transform(line string) []string {
 		return out
 	case "content_block_stop":
 		sourceIndex := valueIndex(data["index"])
+		if t.reasoningBlocks[sourceIndex] != "" {
+			return finishResponseReasoning(t.s, sourceIndex)
+		}
 		if tool := t.s.tools[sourceIndex]; tool != nil {
 			return finishResponseTool(t.s, tool)
 		}
@@ -1010,6 +1212,38 @@ type responsesToChat struct {
 	roleSent    bool
 	doneSent    bool
 	refused     bool
+	// reasoningSent 记住思考内容是否已通过增量事件推出去，避免 output_item.done
+	// 里的完整 summary 造成重复推送。
+	reasoningSent bool
+}
+
+// reasoningFromSummary 把 reasoning item 自带的 summary 文本转成 reasoning_content。
+//
+// summary 是 [{type:"summary_text", text:"…"}] 形式的数组；只认 summary_text，
+// 其他条目跳过而不报错——OpenAI 后续加新条目类型不该让整条流作废。
+func (t *responsesToChat) reasoningFromSummary(item map[string]any) []string {
+	text := responsesSummaryText(item)
+	if text == "" {
+		return nil
+	}
+	t.reasoningSent = true
+	return []string{chatDelta(t.s.msgID, t.s.model, map[string]any{"reasoning_content": text}, nil)}
+}
+
+// responsesSummaryText 拼出 reasoning item 的 summary 正文，供流式与非流式共用。
+func responsesSummaryText(item map[string]any) string {
+	summary, _ := item["summary"].([]any)
+	var text string
+	for _, value := range summary {
+		part, ok := value.(map[string]any)
+		if !ok {
+			continue
+		}
+		if getString(part, "type") == "summary_text" {
+			text += getString(part, "text")
+		}
+	}
+	return text
 }
 
 func (t *responsesToChat) Err() error        { return t.s.err }
@@ -1128,6 +1362,11 @@ func (t *responsesToChat) Transform(line string) []string {
 			}
 			_ = tool
 			return out
+		case "reasoning":
+			// reasoning item 映射到 reasoning_content，与 Anthropic→Chat 一致。
+			// item 自带的 summary 在 added 事件里通常是空数组，正文随后由
+			// response.reasoning_summary_text.delta 送来。
+			return append(out, t.reasoningFromSummary(item)...)
 		default:
 			t.s.addError(fmt.Errorf("unsupported responses stream output item %q", getString(item, "type")))
 			return nil
@@ -1135,6 +1374,13 @@ func (t *responsesToChat) Transform(line string) []string {
 	case "response.output_text.delta":
 		out := t.start(t.s.model)
 		return append(out, chatDelta(t.s.msgID, t.s.model, map[string]any{"content": getString(data, "delta")}, nil))
+	case "response.reasoning_summary_text.delta", "response.reasoning_text.delta":
+		out := t.start(t.s.model)
+		if delta := getString(data, "delta"); delta != "" {
+			t.reasoningSent = true
+			out = append(out, chatDelta(t.s.msgID, t.s.model, map[string]any{"reasoning_content": delta}, nil))
+		}
+		return out
 	case "response.content_part.added", "response.content_part.done", "response.output_text.done", "response.refusal.done":
 		part, _ := data["part"].(map[string]any)
 		if part != nil {
@@ -1171,6 +1417,13 @@ func (t *responsesToChat) Transform(line string) []string {
 				return append(added, t.appendToolArguments(outputIndex, getString(item, "arguments"))...)
 			}
 			return added
+		case "reasoning":
+			// 只有在增量事件一次都没来过时才补发：有些上游只在 done 里给完整
+			// summary，不发 delta。已经流过就不能重复推，否则思考内容出现两遍。
+			if t.reasoningSent {
+				return nil
+			}
+			return t.reasoningFromSummary(item)
 		default:
 			t.s.addError(fmt.Errorf("unsupported responses stream output item %q", getString(item, "type")))
 			return nil
@@ -1192,8 +1445,15 @@ func (t *responsesToChat) Transform(line string) []string {
 		}
 		t.s.addError(errors.New(message))
 	default:
-		if strings.HasPrefix(getString(data, "type"), "response.") {
-			t.s.addError(fmt.Errorf("unsupported responses stream event %q", getString(data, "type")))
+		eventType := getString(data, "type")
+		// reasoning item 的生命周期事件（summary part 增删、summary text 完成等）
+		// 没有目标协议等价物，但它们伴随 reasoning item 必然出现，报错等于任何带
+		// 推理的上游都用不了。正文已在上面的显式分支里取走。
+		if isResponsesReasoningEvent(eventType) {
+			return nil
+		}
+		if strings.HasPrefix(eventType, "response.") {
+			t.s.addError(fmt.Errorf("unsupported responses stream event %q", eventType))
 		}
 	}
 	return nil
@@ -1388,6 +1648,12 @@ func (t *responsesToAnthropic) Transform(line string) []string {
 				out = append(out, t.appendToolArguments(outputIndex, arguments)...)
 			}
 			return out
+		case "reasoning":
+			// 丢弃而不是转成 thinking 块：thinking 的 signature 是 Anthropic 的加密
+			// 签名，只有它自己能签发。伪造一个，客户端（如 Claude Code）把这段
+			// assistant 历史回传给 Anthropic 上游时验签会失败，下一轮直接 400。
+			// 报错也不行：那会让任何带推理的 Responses 上游彻底不可用。
+			return out
 		default:
 			t.s.addError(fmt.Errorf("unsupported responses stream output item %q", getString(item, "type")))
 			return nil
@@ -1439,6 +1705,8 @@ func (t *responsesToAnthropic) Transform(line string) []string {
 				return append(added, t.appendToolArguments(outputIndex, getString(item, "arguments"))...)
 			}
 			return added
+		case "reasoning":
+			// 丢弃，理由见 output_item.added 的同名分支。
 		default:
 			t.s.addError(fmt.Errorf("unsupported responses stream output item %q", getString(item, "type")))
 			return nil
@@ -1460,8 +1728,15 @@ func (t *responsesToAnthropic) Transform(line string) []string {
 		}
 		t.s.addError(errors.New(message))
 	default:
-		if strings.HasPrefix(getString(data, "type"), "response.") {
-			t.s.addError(fmt.Errorf("unsupported responses stream event %q", getString(data, "type")))
+		eventType := getString(data, "type")
+		// reasoning item 的生命周期事件（summary part 增删、summary text 完成等）
+		// 没有目标协议等价物，但它们伴随 reasoning item 必然出现，报错等于任何带
+		// 推理的上游都用不了。正文已在上面的显式分支里取走。
+		if isResponsesReasoningEvent(eventType) {
+			return nil
+		}
+		if strings.HasPrefix(eventType, "response.") {
+			t.s.addError(fmt.Errorf("unsupported responses stream event %q", eventType))
 		}
 	}
 	return nil
