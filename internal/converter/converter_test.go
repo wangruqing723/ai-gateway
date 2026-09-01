@@ -563,13 +563,54 @@ func TestUnsupportedResponsesFunctionOutputBlockReturnsError(t *testing.T) {
 	requireInternalError(t, in, "unsupported", "input_file")
 }
 
-func TestUnsupportedResponsesStatefulInputReturnsConversionErrorForCrossProtocol(t *testing.T) {
+// TestResponsesReasoningInputIsDroppedNotRejected
+//
+// 原先这里断言 reasoning input item 必须报错，理由是「不得静默转换」。但网关自己
+// 就会向 Responses 客户端产出 reasoning item（anthropicToResponses），透传场景下
+// 上游的 reasoning item 也会原样到达客户端；客户端按协议回传完整对话历史，报错
+// 等于任何带推理的多轮会话在第二轮必然 400（实测 /v1/responses 返回
+// conversion_error）。改为丢弃，与 stripReasoningBlocks 处理 Anthropic thinking
+// 历史的口径一致。
+func TestResponsesReasoningInputIsDroppedNotRejected(t *testing.T) {
 	in := FromOpenAIResponses(map[string]any{"input": []any{
-		map[string]any{"type": "reasoning", "id": "rs_123", "summary": []any{}},
+		map[string]any{"type": "message", "role": "user", "content": []any{
+			map[string]any{"type": "input_text", "text": "1+1"},
+		}},
+		map[string]any{"type": "reasoning", "id": "rs_123", "summary": []any{
+			map[string]any{"type": "summary_text", "text": "上一轮的思考"},
+		}},
+		map[string]any{"type": "message", "role": "assistant", "content": []any{
+			map[string]any{"type": "output_text", "text": "2"},
+		}},
 	}})
-	requireInternalError(t, in, "unsupported", "reasoning")
-	if _, err := ToOpenAIChatBodyChecked(in, "gpt-upstream"); err == nil {
-		t.Fatal("Responses reasoning input must not silently convert to Chat")
+	if in.Err != nil {
+		t.Fatalf("Err = %v, want nil（reasoning 历史应被丢弃而非报错）", in.Err)
+	}
+	// 三个 item 里只有两条消息该进 messages，reasoning 不占位。
+	if len(in.Messages) != 2 {
+		t.Fatalf("Messages = %d 条, want 2: %#v", len(in.Messages), in.Messages)
+	}
+	for _, target := range []string{"chat", "anthropic"} {
+		var body map[string]any
+		var err error
+		if target == "chat" {
+			body, err = ToOpenAIChatBodyChecked(in, "gpt-upstream")
+		} else {
+			body, err = ToAnthropicBodyChecked(in, "claude-upstream")
+		}
+		if err != nil {
+			t.Fatalf("%s: error = %v, want nil", target, err)
+		}
+		encoded, marshalErr := json.Marshal(body)
+		if marshalErr != nil {
+			t.Fatalf("marshal: %v", marshalErr)
+		}
+		if strings.Contains(string(encoded), "上一轮的思考") {
+			t.Fatalf("%s: 推理历史不应转发给上游: %s", target, encoded)
+		}
+		if !strings.Contains(string(encoded), "2") {
+			t.Fatalf("%s: assistant 正文丢失: %s", target, encoded)
+		}
 	}
 }
 

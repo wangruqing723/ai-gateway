@@ -157,6 +157,15 @@ func FromOpenAIResponses(body map[string]any) *Internal {
 				"tool_use_id": getString(item, "call_id"),
 				"content":     content,
 			}})
+		case "reasoning":
+			// 丢弃上一轮的推理项，与 stripReasoningBlocks 处理 Anthropic thinking
+			// 历史的口径一致：本轮是否思考由 reasoning_effort 决定，与历史推理无关，
+			// 真正承载语义的 output_text 与 function_call 都在别的 item 里完整保留。
+			//
+			// 必须放行而不是报错：网关自己会向 Responses 客户端产出 reasoning item
+			// （见 anthropicToResponses 与 responsesToChat 的对称处理），透传场景下
+			// 上游的 reasoning item 也会原样到达客户端。客户端按协议回传完整对话
+			// 历史，报错等于任何带推理的多轮会话在第二轮必然 400。
 		default:
 			if item["type"] != "message" && item["role"] == nil {
 				conversionErr = errors.Join(conversionErr, fmt.Errorf("unsupported responses input item %q", getString(item, "type")))

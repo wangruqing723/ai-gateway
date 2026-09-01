@@ -955,6 +955,55 @@ func TestResponsesReasoningStreamSurvivesFailoverChain(t *testing.T) {
 	}
 }
 
+// TestResponsesClientCanEchoReasoningHistory 锁定 Codex 那条往返链路。
+//
+// 网关自己会向 Responses 客户端产出 reasoning item，透传场景下上游的 reasoning
+// item 也会原样到达客户端。客户端按协议回传完整对话历史，所以入站必须接受
+// reasoning item。此前会 400（实测 r00030：unsupported responses input item
+// "reasoning"），等于任何带推理的多轮会话在第二轮必然中断。
+func TestResponsesClientCanEchoReasoningHistory(t *testing.T) {
+	var captured atomic.Value
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		captured.Store(string(body))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, anthropicOKBody)
+	}))
+	defer upstream.Close()
+
+	providers := map[string]*config.Provider{
+		"up": {Name: "up", BaseURL: upstream.URL, Format: "anthropic", MaxConcurrent: 1, MaxQueueWait: 500},
+	}
+	route := config.Route{Match: "*", Targets: []config.Target{{Provider: "up", Model: "m"}}}
+	srv := newFailoverTestServer(providers, route, upstream.Client(), defaultTestFailover())
+
+	recorder := postInference(srv, "/v1/responses", `{"model":"client-model","max_output_tokens":64,"input":[
+		{"type":"message","role":"user","content":[{"type":"input_text","text":"1+1 等于几"}]},
+		{"type":"reasoning","id":"rs_abc","summary":[{"type":"summary_text","text":"这是上一轮的思考"}]},
+		{"type":"message","role":"assistant","content":[{"type":"output_text","text":"2"}]},
+		{"type":"message","role":"user","content":[{"type":"input_text","text":"再加一"}]}
+	]}`)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status/body = %d/%s, 期望 200", recorder.Code, recorder.Body.String())
+	}
+
+	sent, _ := captured.Load().(string)
+	if sent == "" {
+		t.Fatal("上游未收到请求")
+	}
+	// 推理历史不转发给上游：signature 无法跨厂商验签，且本轮是否思考由
+	// reasoning_effort 决定，与历史推理无关。
+	if strings.Contains(sent, "这是上一轮的思考") {
+		t.Errorf("推理历史被转发给了上游: %s", sent)
+	}
+	// 真正承载语义的部分必须完整保留。
+	for _, want := range []string{"1+1 等于几", "再加一", "2"} {
+		if !strings.Contains(sent, want) {
+			t.Errorf("上游请求缺少 %q: %s", want, sent)
+		}
+	}
+}
+
 // TestConversionErrorDoesNotTripBreaker 锁定「转换失败不算上游的错」。
 //
 // 用一个真正没有映射的块类型（server_tool_use）逼出 conversion_error：上游给的是
