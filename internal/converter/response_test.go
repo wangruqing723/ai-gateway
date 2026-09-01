@@ -528,6 +528,34 @@ func TestResponsesReasoningResponseMapsPerTarget(t *testing.T) {
 	})
 }
 
+// reasoning item 的两套承载方式都要认：summary/summary_text 与
+// content/reasoning_text。后者是实测 deepseek-v4-flash 用的形态。
+func TestResponsesReasoningTextContentMapsToReasoningContent(t *testing.T) {
+	data := map[string]any{
+		"id": "resp_1", "object": "response", "status": "completed", "model": "deepseek-v4-flash",
+		"output": []any{
+			map[string]any{"type": "reasoning", "id": "rs_1", "content": []any{
+				map[string]any{"type": "reasoning_text", "text": "先拆解问题。"},
+			}},
+			map[string]any{"type": "message", "id": "msg_1", "role": "assistant", "status": "completed",
+				"content": []any{map[string]any{"type": "output_text", "text": "答案是 42"}}},
+		},
+	}
+	got, err := ConvertOpenAIResponsesResponseChecked(data, "openai-chat", "client-model")
+	if err != nil {
+		t.Fatalf("error = %v, want nil", err)
+	}
+	choices, _ := got["choices"].([]any)
+	choice, _ := choices[0].(map[string]any)
+	message, _ := choice["message"].(map[string]any)
+	if got := message["reasoning_content"]; got != "先拆解问题。" {
+		t.Fatalf("reasoning_content = %v, want 先拆解问题。", got)
+	}
+	if got := message["content"]; got != "答案是 42" {
+		t.Fatalf("content = %v, want 答案是 42", got)
+	}
+}
+
 func TestCheckedResponsesRejectTopLevelChatRefusal(t *testing.T) {
 	data := map[string]any{
 		"choices": []any{map[string]any{"message": map[string]any{

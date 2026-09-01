@@ -354,6 +354,90 @@ func TestResponsesReasoningStreamMapsPerTarget(t *testing.T) {
 	})
 }
 
+// TestResponsesReasoningTextPartMapsPerTarget 覆盖 r00113 那条链路：
+// deepseek-v4-flash 用的是 content 数组 + reasoning_text 这套较新约定，
+// 而不是 summary 数组 + summary_text。此前 content_part 分支只放行
+// output_text / refusal，reasoning_text 落进 default 报
+// `unsupported responses stream content part "reasoning_text"`。
+func TestResponsesReasoningTextPartMapsPerTarget(t *testing.T) {
+	lines := []string{
+		`data: {"type":"response.created","response":{"model":"deepseek-v4-flash","status":"in_progress","output":[]}}`,
+		`data: {"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs_1","content":[]}}`,
+		`data: {"type":"response.content_part.added","output_index":0,"content_index":0,"part":{"type":"reasoning_text","text":""}}`,
+		`data: {"type":"response.reasoning_text.delta","output_index":0,"content_index":0,"delta":"先拆解问题。"}`,
+		`data: {"type":"response.reasoning_text.done","output_index":0,"content_index":0,"text":"先拆解问题。"}`,
+		`data: {"type":"response.content_part.done","output_index":0,"content_index":0,"part":{"type":"reasoning_text","text":"先拆解问题。"}}`,
+		`data: {"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"rs_1","content":[{"type":"reasoning_text","text":"先拆解问题。"}]}}`,
+		`data: {"type":"response.output_item.added","output_index":1,"item":{"type":"message","id":"msg_1","role":"assistant","status":"in_progress","content":[]}}`,
+		`data: {"type":"response.content_part.added","output_index":1,"content_index":0,"part":{"type":"output_text","text":""}}`,
+		`data: {"type":"response.output_text.delta","output_index":1,"delta":"答案是 42"}`,
+		`data: {"type":"response.completed","response":{"model":"deepseek-v4-flash","status":"completed","output":[]}}`,
+	}
+
+	t.Run("openai-chat", func(t *testing.T) {
+		transformer := NewStreamTransformer("openai-responses", "openai-chat")
+		out := transformAll(t, transformer, lines...)
+		if err := StreamError(transformer); err != nil {
+			t.Fatalf("stream error = %v, want nil", err)
+		}
+		var reasoning, content string
+		for _, chunk := range captureChatChunks(t, out) {
+			choices, _ := chunk["choices"].([]any)
+			if len(choices) == 0 {
+				continue
+			}
+			choice, _ := choices[0].(map[string]any)
+			delta, _ := choice["delta"].(map[string]any)
+			if value, ok := delta["reasoning_content"].(string); ok {
+				reasoning += value
+			}
+			if value, ok := delta["content"].(string); ok {
+				content += value
+			}
+		}
+		// 增量已推过，content_part.done 与 output_item.done 里的全文都不能再推。
+		if reasoning != "先拆解问题。" {
+			t.Fatalf("reasoning_content = %q, want 先拆解问题。（不得重复）", reasoning)
+		}
+		if content != "答案是 42" {
+			t.Fatalf("content = %q, want 答案是 42", content)
+		}
+	})
+
+	t.Run("anthropic", func(t *testing.T) {
+		transformer := NewStreamTransformer("openai-responses", "anthropic")
+		out := transformAll(t, transformer, lines...)
+		if err := StreamError(transformer); err != nil {
+			t.Fatalf("stream error = %v, want nil", err)
+		}
+		joined := strings.Join(out, "")
+		if strings.Contains(joined, "先拆解问题。") {
+			t.Fatalf("Anthropic 目标不应带出推理内容: %s", joined)
+		}
+		if !strings.Contains(joined, "答案是 42") {
+			t.Fatalf("正文丢失: %s", joined)
+		}
+	})
+}
+
+// 只有 content_part 事件、没有 reasoning_text.delta 的上游，正文得从 part.text 补出来。
+func TestResponsesReasoningTextOnlyInPartIsStillMapped(t *testing.T) {
+	transformer := NewStreamTransformer("openai-responses", "openai-chat")
+	out := transformAll(t, transformer,
+		`data: {"type":"response.created","response":{"model":"gpt-upstream","status":"in_progress","output":[]}}`,
+		`data: {"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs_1","content":[]}}`,
+		`data: {"type":"response.content_part.done","output_index":0,"content_index":0,"part":{"type":"reasoning_text","text":"只在 part 里给"}}`,
+		`data: {"type":"response.output_text.delta","output_index":1,"delta":"答案"}`,
+		`data: {"type":"response.completed","response":{"model":"gpt-upstream","status":"completed","output":[]}}`,
+	)
+	if err := StreamError(transformer); err != nil {
+		t.Fatalf("stream error = %v, want nil", err)
+	}
+	if !strings.Contains(strings.Join(out, ""), "只在 part 里给") {
+		t.Fatalf("part.text 未补发: %s", strings.Join(out, ""))
+	}
+}
+
 // 有些上游不发增量、只在 output_item.done 里给完整 summary，这时必须补发。
 func TestResponsesReasoningOnlyInDoneIsStillMapped(t *testing.T) {
 	transformer := NewStreamTransformer("openai-responses", "openai-chat")

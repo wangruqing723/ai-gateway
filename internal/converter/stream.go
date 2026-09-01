@@ -1230,17 +1230,29 @@ func (t *responsesToChat) reasoningFromSummary(item map[string]any) []string {
 	return []string{chatDelta(t.s.msgID, t.s.model, map[string]any{"reasoning_content": text}, nil)}
 }
 
-// responsesSummaryText 拼出 reasoning item 的 summary 正文，供流式与非流式共用。
+// responsesSummaryText 拼出 reasoning item 的推理正文，供流式与非流式共用。
+//
+// Responses 有两套承载方式，都要认：
+//   - summary 数组 + summary_text（较早的约定，OpenAI 官方推理摘要）
+//   - content 数组 + reasoning_text（较新的约定，实测 deepseek-v4-flash 用这套）
+//
+// 两者都在时按 summary 优先并各自拼接——同一个 item 里同时给两套的上游没见过，
+// 但真出现时宁可多带出内容，也不要静默丢掉其中一份。
 func responsesSummaryText(item map[string]any) string {
-	summary, _ := item["summary"].([]any)
 	var text string
-	for _, value := range summary {
-		part, ok := value.(map[string]any)
-		if !ok {
-			continue
-		}
-		if getString(part, "type") == "summary_text" {
-			text += getString(part, "text")
+	for _, spec := range []struct{ field, partType string }{
+		{"summary", "summary_text"},
+		{"content", "reasoning_text"},
+	} {
+		parts, _ := item[spec.field].([]any)
+		for _, value := range parts {
+			part, ok := value.(map[string]any)
+			if !ok {
+				continue
+			}
+			if getString(part, "type") == spec.partType {
+				text += getString(part, "text")
+			}
 		}
 	}
 	return text
@@ -1386,6 +1398,20 @@ func (t *responsesToChat) Transform(line string) []string {
 		if part != nil {
 			switch getString(part, "type") {
 			case "output_text", "refusal":
+			case "reasoning_text":
+				// 较新的 Responses 约定把推理正文放在 reasoning item 的 content
+				// 数组里，part 类型是 reasoning_text（旧约定用 summary 数组的
+				// summary_text，见 reasoningFromSummary）。实测 deepseek-v4-flash
+				// 走的是这套，两套都要认。
+				//
+				// 只在增量一次都没来过时才从 part.text 补发：正常情况下正文由
+				// response.reasoning_text.delta 送来，重复推会让思考出现两遍。
+				if !t.reasoningSent {
+					if text := getString(part, "text"); text != "" {
+						t.reasoningSent = true
+						return []string{chatDelta(t.s.msgID, t.s.model, map[string]any{"reasoning_content": text}, nil)}
+					}
+				}
 			default:
 				t.s.addError(fmt.Errorf("unsupported responses stream content part %q", getString(part, "type")))
 			}
@@ -1679,6 +1705,10 @@ func (t *responsesToAnthropic) Transform(line string) []string {
 			case "output_text", "refusal":
 				out := t.start(t.s.model)
 				return append(out, t.ensureText(valueIndex(data["output_index"]))...)
+			case "reasoning_text":
+				// 放行但**不能** ensureText：那会按这个 output_index 建一个文本块，
+				// 把模型的内部推理当成回复正文推给客户端。Anthropic 目标一律丢弃
+				// 推理内容，理由见 output_item.added 的 reasoning 分支。
 			default:
 				t.s.addError(fmt.Errorf("unsupported responses stream content part %q", getString(part, "type")))
 			}
