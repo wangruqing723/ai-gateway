@@ -212,14 +212,15 @@ func FromOpenAIResponses(body map[string]any) *Internal {
 
 // ToAnthropicBody 内部格式 → Anthropic 请求体。
 func ToAnthropicBody(in *Internal, targetModel string) map[string]any {
+	messages, system := hoistInstructionMessages(in.Messages, in.System)
 	body := map[string]any{
 		"model":      targetModel,
-		"messages":   in.Messages,
+		"messages":   messages,
 		"max_tokens": in.MaxTokens,
 		"stream":     in.Stream,
 	}
-	if in.System != nil && in.System != "" {
-		body["system"] = in.System
+	if system != nil && system != "" {
+		body["system"] = system
 	}
 	if in.Tools != nil {
 		body["tools"] = in.Tools
@@ -270,10 +271,13 @@ func ToAnthropicBodyChecked(in *Internal, targetModel string) (map[string]any, e
 // ToOpenAIChatBody 内部格式 → OpenAI Chat 请求体。
 func ToOpenAIChatBody(in *Internal, targetModel string) map[string]any {
 	var messages []any
-	if s := systemTextFromContent(in.System); s != "" {
+	// Chat 官方认 developer，但第三方兼容入口对它的支持不一致，而 system 是通用的；
+	// 归一到 system 语义不丢、兼容面更宽。
+	canonicalMessages, canonicalSystem := hoistInstructionMessages(in.Messages, in.System)
+	if s := systemTextFromContent(canonicalSystem); s != "" {
 		messages = append(messages, map[string]any{"role": "system", "content": s})
 	}
-	for _, m := range in.Messages {
+	for _, m := range canonicalMessages {
 		msg, ok := m.(map[string]any)
 		if !ok {
 			continue
@@ -825,6 +829,12 @@ func validateAnthropicTargetMessages(messages []any) error {
 		if !ok {
 			return fmt.Errorf("anthropic message %d must be an object", messageIndex)
 		}
+		// system / developer 由 hoistInstructionMessages 在构建阶段提到顶层 system，
+		// 这里放行。其余角色 Anthropic 一律不认，且它返回的 400 不指向具体字段，
+		// 与其把请求送出去换一个无从反查的上游错误，不如在构建前直接失败。
+		if role := getString(message, "role"); role != "" && role != "user" && role != "assistant" && !isInstructionRole(role) {
+			return fmt.Errorf("unsupported anthropic target message role %q", role)
+		}
 		blocks, ok := message["content"].([]any)
 		if !ok {
 			continue
@@ -854,6 +864,11 @@ func validateOpenAIChatTargetMessages(messages []any) error {
 		message, ok := value.(map[string]any)
 		if !ok {
 			return fmt.Errorf("openai chat message %d must be an object", messageIndex)
+		}
+		// 与 Anthropic 目标同理：system / developer 会被 hoistInstructionMessages
+		// 归一成顶层 system 消息，其余角色 Chat 不认。
+		if role := getString(message, "role"); role != "" && role != "user" && role != "assistant" && !isInstructionRole(role) {
+			return fmt.Errorf("unsupported openai chat target message role %q", role)
 		}
 		blocks, _ := message["content"].([]any)
 		for blockIndex, blockValue := range blocks {
@@ -1369,6 +1384,96 @@ func responsesRole(role string) string {
 		return "developer"
 	}
 	return role
+}
+
+// isInstructionRole 判断该角色承载的是「指令」而非对话轮次。Responses 用 developer
+// 表达 system 语义（`developer` 是 OpenAI 给 system 起的新名字），Chat 两个都收。
+func isInstructionRole(role string) bool {
+	return role == "system" || role == "developer"
+}
+
+// hoistInstructionMessages 把 messages 里的 system / developer 消息提到顶层 system。
+// Anthropic 的 messages 只认 user 和 assistant，混进第三种角色时整个请求体会被
+// 判为格式非法（实测 GLM 的 Anthropic 兼容入口返回 400 "Request body format
+// invalid"，且错误正文不指向具体字段，很难反查）。Codex 的 Responses 请求首个
+// input item 恰好就是 `role: developer`，这条路径必然撞上。
+//
+// 顺序上把顶层 instructions 放在前、消息里提出来的指令放在后：Responses 的
+// instructions 是全局提示，input 里的 developer item 是本轮追加的项目级指令，
+// 这个先后与客户端原始请求一致。
+//
+// 含非文本块（图片等）的指令消息不做提升——Anthropic 的 system 只接受文本，
+// 提升等于静默丢图。这类消息降级成 user，内容完整保留。
+func hoistInstructionMessages(messages []any, system any) ([]any, any) {
+	hasInstructionRole := false
+	for _, value := range messages {
+		message, ok := value.(map[string]any)
+		if ok && isInstructionRole(getString(message, "role")) {
+			hasInstructionRole = true
+			break
+		}
+	}
+	if !hasInstructionRole {
+		return messages, system
+	}
+
+	out := make([]any, 0, len(messages))
+	parts := make([]string, 0, 2)
+	if text := systemTextFromContent(system); text != "" {
+		parts = append(parts, text)
+	}
+	for _, value := range messages {
+		message, ok := value.(map[string]any)
+		if !ok {
+			out = append(out, value)
+			continue
+		}
+		if !isInstructionRole(getString(message, "role")) {
+			out = append(out, value)
+			continue
+		}
+		if !instructionContentIsTextOnly(message["content"]) {
+			demoted := make(map[string]any, len(message))
+			for key, value := range message {
+				demoted[key] = value
+			}
+			demoted["role"] = "user"
+			out = append(out, demoted)
+			continue
+		}
+		if text := systemTextFromContent(message["content"]); text != "" {
+			parts = append(parts, text)
+		}
+	}
+	if len(parts) == 0 {
+		return out, nil
+	}
+	return out, strings.Join(parts, "\n")
+}
+
+// instructionContentIsTextOnly 判断指令消息能否无损压成一段文本。
+func instructionContentIsTextOnly(content any) bool {
+	switch v := content.(type) {
+	case nil:
+		return true
+	case string:
+		return true
+	case []any:
+		for _, value := range v {
+			switch block := value.(type) {
+			case string:
+			case map[string]any:
+				if getString(block, "type") != "text" {
+					return false
+				}
+			default:
+				return false
+			}
+		}
+		return true
+	default:
+		return false
+	}
 }
 
 func appendCanonicalBlocks(messages *[]any, role string, blocks []any) {

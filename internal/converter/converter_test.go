@@ -952,6 +952,125 @@ func TestClientSystemMessageMapsToDeveloperForResponses(t *testing.T) {
 	}
 }
 
+// TestInstructionRoleMessagesHoistToSystem 锁定 Codex → Anthropic 的实际故障：
+// Codex 的 Responses 请求首个 input item 是 role: developer，而 Anthropic 的
+// messages 只认 user / assistant。实测 GLM 的 Anthropic 兼容入口收到第三种角色时
+// 返回 400 "Request body format invalid"，正文不指向具体字段。
+func TestInstructionRoleMessagesHoistToSystem(t *testing.T) {
+	for _, role := range []string{"developer", "system"} {
+		t.Run(role, func(t *testing.T) {
+			in := FromOpenAIResponses(map[string]any{
+				"model":        "gpt-5.6-sol",
+				"instructions": "全局指令",
+				"input": []any{
+					map[string]any{"type": "message", "role": role, "content": []any{
+						map[string]any{"type": "input_text", "text": "项目指令"},
+					}},
+					map[string]any{"type": "message", "role": "user", "content": []any{
+						map[string]any{"type": "input_text", "text": "你好"},
+					}},
+				},
+			})
+			if in.Err != nil {
+				t.Fatalf("FromOpenAIResponses err = %v", in.Err)
+			}
+
+			body, err := ToAnthropicBodyChecked(in, "glm-5.2")
+			if err != nil {
+				t.Fatalf("ToAnthropicBodyChecked err = %v", err)
+			}
+			messages, _ := body["messages"].([]any)
+			if len(messages) != 1 {
+				t.Fatalf("messages 长度 = %d, want 1（指令消息应提升到 system）: %#v", len(messages), messages)
+			}
+			first, _ := messages[0].(map[string]any)
+			if got := getString(first, "role"); got != "user" {
+				t.Fatalf("messages[0].role = %q, want user", got)
+			}
+			// 顶层 instructions 在前、消息里的指令在后，与客户端原始顺序一致
+			if got := body["system"]; got != "全局指令\n项目指令" {
+				t.Fatalf("system = %#v, want \"全局指令\\n项目指令\"", got)
+			}
+
+			// Chat 目标做同样的归一：官方虽认 developer，第三方兼容入口支持不一致。
+			chat, err := ToOpenAIChatBodyChecked(in, "glm-5.2")
+			if err != nil {
+				t.Fatalf("ToOpenAIChatBodyChecked err = %v", err)
+			}
+			chatMessages, _ := chat["messages"].([]any)
+			if len(chatMessages) != 2 {
+				t.Fatalf("chat messages 长度 = %d, want 2: %#v", len(chatMessages), chatMessages)
+			}
+			head, _ := chatMessages[0].(map[string]any)
+			if getString(head, "role") != "system" || head["content"] != "全局指令\n项目指令" {
+				t.Fatalf("chat 首条 = %#v, want role=system 且含两段指令", head)
+			}
+			if raw, _ := json.Marshal(chat); strings.Contains(string(raw), `"role":"developer"`) {
+				t.Fatalf("Chat 请求体仍含 role:developer: %s", raw)
+			}
+		})
+	}
+}
+
+// TestInstructionRoleWithImageDemotesToUser 覆盖含非文本块的指令消息：Anthropic 的
+// system 只接受文本，提升等于静默丢图，这类消息要降级成 user 并完整保留内容。
+func TestInstructionRoleWithImageDemotesToUser(t *testing.T) {
+	in := FromOpenAIResponses(map[string]any{
+		"model": "gpt-5.6-sol",
+		"input": []any{
+			map[string]any{"type": "message", "role": "developer", "content": []any{
+				map[string]any{"type": "input_text", "text": "看图"},
+				map[string]any{"type": "input_image", "image_url": "https://example.com/a.png"},
+			}},
+			map[string]any{"type": "message", "role": "user", "content": []any{
+				map[string]any{"type": "input_text", "text": "这是什么"},
+			}},
+		},
+	})
+	if in.Err != nil {
+		t.Fatalf("FromOpenAIResponses err = %v", in.Err)
+	}
+	body, err := ToAnthropicBodyChecked(in, "glm-5.2")
+	if err != nil {
+		t.Fatalf("ToAnthropicBodyChecked err = %v", err)
+	}
+	messages, _ := body["messages"].([]any)
+	if len(messages) != 2 {
+		t.Fatalf("messages 长度 = %d, want 2（降级而非丢弃）: %#v", len(messages), messages)
+	}
+	first, _ := messages[0].(map[string]any)
+	if got := getString(first, "role"); got != "user" {
+		t.Fatalf("messages[0].role = %q, want user", got)
+	}
+	if _, exists := body["system"]; exists {
+		t.Fatalf("system = %#v, 含图消息不应被提升", body["system"])
+	}
+	if raw, _ := json.Marshal(body); !strings.Contains(string(raw), "example.com/a.png") {
+		t.Fatalf("图片内容丢失: %s", raw)
+	}
+}
+
+// TestUnsupportedTargetMessageRoleRejectedBeforeSend 确认放行只覆盖
+// system / developer：其他角色要在构建阶段失败，而不是送出去换一个
+// 不指向字段的上游 400。
+func TestUnsupportedTargetMessageRoleRejectedBeforeSend(t *testing.T) {
+	in := &Internal{
+		Model:     "glm-5.2",
+		MaxTokens: 64,
+		Messages: []any{
+			map[string]any{"role": "tool", "content": []any{
+				map[string]any{"type": "text", "text": "结果"},
+			}},
+		},
+	}
+	if _, err := ToAnthropicBodyChecked(in, "glm-5.2"); err == nil || !strings.Contains(err.Error(), `role "tool"`) {
+		t.Fatalf("Anthropic 目标 err = %v, want unsupported role \"tool\"", err)
+	}
+	if _, err := ToOpenAIChatBodyChecked(in, "glm-5.2"); err == nil || !strings.Contains(err.Error(), `role "tool"`) {
+		t.Fatalf("Chat 目标 err = %v, want unsupported role \"tool\"", err)
+	}
+}
+
 // TestUnknownContentBlockStillRejected 确认这次放行只针对思考块，
 // 其他不认识的块仍要在转换前报错，不能借机把 deny-list 打穿。
 func TestUnknownContentBlockStillRejected(t *testing.T) {

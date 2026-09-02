@@ -1078,6 +1078,36 @@ func TestRealCodexRequestReachesAnthropicUpstream(t *testing.T) {
 		t.Errorf("namespace 容器未被展平")
 	}
 
+	// Codex 的首个 input item 是 role: developer。Anthropic 的 messages 只认
+	// user / assistant，混进第三种角色时整个请求体被判非法（实测 GLM 兼容入口
+	// 返回 400 "Request body format invalid"，正文不指向字段，很难反查）。
+	var sentBody map[string]any
+	if err := json.Unmarshal([]byte(sent), &sentBody); err != nil {
+		t.Fatalf("解析上游请求失败: %v", err)
+	}
+	sentMessages, _ := sentBody["messages"].([]any)
+	if len(sentMessages) == 0 {
+		t.Fatal("上游请求没有 messages")
+	}
+	for i, value := range sentMessages {
+		message, ok := value.(map[string]any)
+		if !ok {
+			t.Fatalf("messages[%d] 不是对象", i)
+		}
+		if role := message["role"]; role != "user" && role != "assistant" {
+			t.Errorf("messages[%d].role = %v, Anthropic 只认 user / assistant", i, role)
+		}
+	}
+	// developer item 的正文要落到顶层 system，而不是被丢掉
+	system, _ := sentBody["system"].(string)
+	if !strings.Contains(system, "developer instructions placeholder") {
+		t.Errorf("developer 指令未合并进 system, system=%q", system)
+	}
+	// 顶层 instructions 在前、input 里的 developer 指令在后，与客户端原始顺序一致
+	if instructions := "You are Codex"; strings.Index(system, instructions) > strings.Index(system, "developer instructions placeholder") {
+		t.Errorf("system 拼接顺序颠倒: %q", system)
+	}
+
 	// 响应侧：上游的扁平名要还原成 Codex 认识的 {name, namespace}
 	var response map[string]any
 	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
