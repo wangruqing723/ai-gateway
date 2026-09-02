@@ -23,7 +23,11 @@ type Internal struct {
 	MaxTokens int
 	Tools     any            // 数组或 nil
 	Extra     map[string]any // 原始请求体，用于透传 temperature 等
-	Err       error          // 请求协议无法无损规范化时的转换错误
+	// ToolNamespaces 是 Codex namespace 工具展平后的「扁平名 → 原始身份」映射，
+	// 仅 Responses 客户端且声明了 namespace 工具时非空。响应侧据它把上游返回的
+	// 扁平 function_call 名还原成 {name, namespace}，否则 Codex 认不出自己的工具。
+	ToolNamespaces map[string]NamespacedName
+	Err            error // 请求协议无法无损规范化时的转换错误
 }
 
 // DetectClientFormat 按端点路径识别客户端格式（对齐 Node 版）。
@@ -128,6 +132,10 @@ func FromOpenAIResponses(body map[string]any) *Internal {
 		input = []any{map[string]any{"role": "user", "content": v}}
 	}
 
+	// tools 必须先规范化：下面回放历史里的 function_call 要用它产出的 namespace
+	// 映射把 {name, namespace} 改写成上游认识的扁平名。
+	tools, owners, toolsErr := normalizeResponsesTools(body["tools"])
+
 	var messages []any
 	var conversionErr error
 	for _, it := range input {
@@ -141,10 +149,19 @@ func FromOpenAIResponses(body map[string]any) *Internal {
 			if err != nil {
 				conversionErr = errors.Join(conversionErr, fmt.Errorf("responses function call %q arguments: %w", getString(item, "call_id"), err))
 			}
+			// 带 namespace 的历史调用改用扁平名：上游收到的工具列表已被展平，
+			// 保留客户端那套裸名会让历史调用与工具声明对不上。
+			name := getString(item, "name")
+			if namespace := strings.TrimSpace(getString(item, "namespace")); namespace != "" {
+				flat := flattenNamespaceToolName(namespace, strings.TrimSpace(name))
+				if entry, exists := owners[flat]; exists && entry.Namespace == namespace {
+					name = flat
+				}
+			}
 			appendCanonicalBlocks(&messages, "assistant", []any{map[string]any{
 				"type":  "tool_use",
 				"id":    getString(item, "call_id"),
-				"name":  getString(item, "name"),
+				"name":  name,
 				"input": input,
 			}})
 		case "function_call_output":
@@ -177,17 +194,17 @@ func FromOpenAIResponses(body map[string]any) *Internal {
 			})
 		}
 	}
-	tools, toolsErr := normalizeResponsesTools(body["tools"])
 
 	return &Internal{
-		Model:     getString(body, "model"),
-		Messages:  messages,
-		System:    normalizeSystem(body["instructions"]),
-		Stream:    getBool(body, "stream"),
-		MaxTokens: getIntDefault(body, "max_output_tokens", 4096),
-		Tools:     tools,
-		Extra:     body,
-		Err:       errors.Join(conversionErr, toolsErr),
+		Model:          getString(body, "model"),
+		Messages:       messages,
+		System:         normalizeSystem(body["instructions"]),
+		Stream:         getBool(body, "stream"),
+		MaxTokens:      getIntDefault(body, "max_output_tokens", 4096),
+		Tools:          tools,
+		ToolNamespaces: owners,
+		Extra:          body,
+		Err:            errors.Join(conversionErr, toolsErr),
 	}
 }
 
@@ -212,18 +229,23 @@ func ToAnthropicBody(in *Internal, targetModel string) map[string]any {
 			body[k] = v
 		}
 	}
-	if toolChoice, exists := in.Extra["tool_choice"]; exists && toolChoice != nil {
-		if mapped, err := toolChoiceToAnthropic(toolChoice); err == nil && mapped != nil {
-			body["tool_choice"] = mapped
+	// tool_choice 只在确实带了 tools 时才转发。Anthropic 对「有 tool_choice 无 tools」
+	// 返回 400 且不可重试（"tool_choice may only be specified while providing tools"），
+	// 而一个只声明了 web_search 之类内置工具的请求，规范化后 tools 会是空。
+	if in.Tools != nil {
+		if toolChoice, exists := in.Extra["tool_choice"]; exists && toolChoice != nil {
+			if mapped, err := toolChoiceToAnthropic(toolChoice); err == nil && mapped != nil {
+				body["tool_choice"] = mapped
+			}
 		}
-	}
-	if parallel, exists := in.Extra["parallel_tool_calls"]; exists && parallel == false {
-		toolChoice, _ := body["tool_choice"].(map[string]any)
-		if toolChoice == nil {
-			toolChoice = map[string]any{"type": "auto"}
-			body["tool_choice"] = toolChoice
+		if parallel, exists := in.Extra["parallel_tool_calls"]; exists && parallel == false {
+			toolChoice, _ := body["tool_choice"].(map[string]any)
+			if toolChoice == nil {
+				toolChoice = map[string]any{"type": "auto"}
+				body["tool_choice"] = toolChoice
+			}
+			toolChoice["disable_parallel_tool_use"] = true
 		}
-		toolChoice["disable_parallel_tool_use"] = true
 	}
 	return body
 }
@@ -321,9 +343,12 @@ func ToOpenAIResponsesBody(in *Internal, targetModel string) map[string]any {
 		body["tools"] = canonicalToolsToOpenAIResponses(in.Tools)
 	}
 	copyResponsesCompatibleExtras(body, in.Extra)
-	if toolChoice, exists := in.Extra["tool_choice"]; exists && toolChoice != nil {
-		if mapped, err := toolChoiceToResponses(toolChoice); err == nil && mapped != nil {
-			body["tool_choice"] = mapped
+	// 同 ToAnthropicBody：工具被规范化掉之后不留悬空 tool_choice。
+	if in.Tools != nil {
+		if toolChoice, exists := in.Extra["tool_choice"]; exists && toolChoice != nil {
+			if mapped, err := toolChoiceToResponses(toolChoice); err == nil && mapped != nil {
+				body["tool_choice"] = mapped
+			}
 		}
 	}
 	return body
@@ -421,24 +446,48 @@ func normalizeOpenAIChatTools(tools any) (any, error) {
 	return out, nil
 }
 
-func normalizeResponsesTools(tools any) (any, error) {
+// normalizeResponsesTools 把 Responses 的 tools 规范化成内部（Anthropic-like）形状。
+//
+// 返回规范化后的工具、namespace 还原映射、错误。
+//
+// 对未知 tool type 的处理是**丢弃而非报错**：Codex CLI 会声明 web_search 这类由
+// OpenAI 服务端执行的内置工具，第三方上游既不认也无法代为执行。报错会让整个请求
+// 400（实测 Codex 每一轮都发 web_search，等于完全不可用），丢掉则只损失该工具本身，
+// 其余 8 个 function 工具照常可用。这也是 cc-switch 的取舍。
+func normalizeResponsesTools(tools any) (any, map[string]NamespacedName, error) {
 	if tools == nil {
-		return nil, nil
+		return nil, nil, nil
 	}
 	arr, ok := tools.([]any)
 	if !ok {
-		return nil, fmt.Errorf("responses tools must be an array")
+		return nil, nil, fmt.Errorf("responses tools must be an array")
 	}
-	out := make([]any, 0, len(arr))
-	for _, value := range arr {
+	// 先展平 namespace，后续按普通工具处理。
+	flattened, owners, err := flattenNamespaceTools(arr)
+	if err != nil {
+		return nil, nil, err
+	}
+	out := make([]any, 0, len(flattened))
+	for _, value := range flattened {
 		tool, ok := value.(map[string]any)
 		if !ok {
-			return nil, fmt.Errorf("unsupported responses tool definition %T", value)
+			// 非对象条目丢弃：无法从中读出工具名，留着也没法转换。
+			continue
 		}
-		if toolType := getString(tool, "type"); toolType != "function" {
-			return nil, fmt.Errorf("unsupported responses tool type %q", toolType)
+		switch getString(tool, "type") {
+		case "function", "custom":
+			// custom 工具是自由文本入参的变体，没有 JSON Schema。按无参 function
+			// 转换，保住工具本身可被调用，而不是整条请求失败。
+		default:
+			// web_search / tool_search / image_generation / local_shell 等服务端内置
+			// 工具：上游无法代为执行，丢弃。
+			continue
 		}
-		canonical := map[string]any{"name": tool["name"]}
+		name := strings.TrimSpace(getString(tool, "name"))
+		if name == "" {
+			continue
+		}
+		canonical := map[string]any{"name": name}
 		if description, exists := tool["description"]; exists {
 			canonical["description"] = description
 		}
@@ -450,7 +499,12 @@ func normalizeResponsesTools(tools any) (any, error) {
 		}
 		out = append(out, canonical)
 	}
-	return out, nil
+	if len(out) == 0 {
+		// 工具全被丢弃：返回 nil 而不是空数组。空数组会让 ToAnthropicBody 写出
+		// "tools": []，而 Anthropic 在有 tool_choice 时会 400（且不可重试）。
+		return nil, owners, nil
+	}
+	return out, owners, nil
 }
 
 func canonicalToolsToOpenAIChat(tools any) any {
@@ -1080,6 +1134,10 @@ func toolChoiceToAnthropic(value any) (map[string]any, error) {
 			return map[string]any{"type": "auto"}, nil
 		case "any", "required":
 			return map[string]any{"type": "any"}, nil
+		case "namespace":
+			// namespace 工具已被展平，「强制使用某个命名空间」在展平后无法表达
+			// （它对应多个顶层工具）。降级成 auto，而不是让整条请求失败。
+			return map[string]any{"type": "auto"}, nil
 		case "tool":
 			if name := getString(choice, "name"); name != "" {
 				return map[string]any{"type": "tool", "name": name}, nil
@@ -1106,6 +1164,9 @@ func toolChoiceToResponses(value any) (any, error) {
 		switch getString(choice, "type") {
 		case "auto", "required", "any":
 			return getString(choice, "type"), nil
+		case "namespace":
+			// 理由同 toolChoiceToAnthropic：展平后无法表达「限定某命名空间」。
+			return "auto", nil
 		case "tool":
 			if name := getString(choice, "name"); name != "" {
 				return map[string]any{"type": "function", "name": name}, nil

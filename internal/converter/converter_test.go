@@ -148,6 +148,14 @@ func TestCheckedBodiesApplyExtraFieldPolicy(t *testing.T) {
 	t.Run("Chat 到 Anthropic 映射工具选择和并行开关", func(t *testing.T) {
 		in := FromOpenAIChat(map[string]any{
 			"messages": []any{map[string]any{"role": "user", "content": "你好"}},
+			// 必须带 tools：tool_choice 只在有工具时才转发，否则 Anthropic 对
+			// 「有 tool_choice 无 tools」返回不可重试的 400。
+			"tools": []any{map[string]any{
+				"type": "function",
+				"function": map[string]any{
+					"name": "lookup", "parameters": map[string]any{"type": "object"},
+				},
+			}},
 			"tool_choice": map[string]any{
 				"type":     "function",
 				"function": map[string]any{"name": "lookup"},
@@ -189,6 +197,17 @@ func TestCheckedBodiesApplyExtraFieldPolicy(t *testing.T) {
 }
 
 func TestToolChoiceToResponses(t *testing.T) {
+	// 每个用例都要带 tools：tool_choice 只在确实有工具时才转发，否则上游会因
+	// 「有 tool_choice 无 tools」返回不可重试的 400。见 ToOpenAIResponsesBody。
+	lookupTool := []any{map[string]any{
+		"name": "lookup", "input_schema": map[string]any{"type": "object"},
+	}}
+	chatTool := []any{map[string]any{
+		"type": "function",
+		"function": map[string]any{
+			"name": "lookup", "parameters": map[string]any{"type": "object"},
+		},
+	}}
 	tests := []struct {
 		name string
 		in   *Internal
@@ -198,6 +217,7 @@ func TestToolChoiceToResponses(t *testing.T) {
 			name: "Anthropic 指定工具",
 			in: FromAnthropic(map[string]any{
 				"messages":    []any{map[string]any{"role": "user", "content": "你好"}},
+				"tools":       lookupTool,
 				"tool_choice": map[string]any{"type": "tool", "name": "lookup"},
 			}),
 			want: map[string]any{"type": "function", "name": "lookup"},
@@ -206,6 +226,7 @@ func TestToolChoiceToResponses(t *testing.T) {
 			name: "Chat 指定函数",
 			in: FromOpenAIChat(map[string]any{
 				"messages": []any{map[string]any{"role": "user", "content": "你好"}},
+				"tools":    chatTool,
 				"tool_choice": map[string]any{
 					"type":     "function",
 					"function": map[string]any{"name": "lookup"},
@@ -217,9 +238,18 @@ func TestToolChoiceToResponses(t *testing.T) {
 			name: "auto 保持字符串",
 			in: FromOpenAIChat(map[string]any{
 				"messages":    []any{map[string]any{"role": "user", "content": "你好"}},
+				"tools":       chatTool,
 				"tool_choice": "auto",
 			}),
 			want: "auto",
+		},
+		{
+			name: "无 tools 时不转发 tool_choice",
+			in: FromOpenAIChat(map[string]any{
+				"messages":    []any{map[string]any{"role": "user", "content": "你好"}},
+				"tool_choice": "auto",
+			}),
+			want: nil,
 		},
 	}
 	for _, tt := range tests {
@@ -523,13 +553,9 @@ func TestUnsupportedRequestToolsReturnExplicitError(t *testing.T) {
 			}}),
 		},
 		{
-			name: "responses",
-			in: FromOpenAIResponses(map[string]any{"tools": []any{
-				map[string]any{"type": "function", "name": "ok", "parameters": map[string]any{"type": "object"}},
-				map[string]any{"type": "web_search_preview"},
-			}}),
-		},
-		{
+			// Responses 侧的内置工具改为丢弃，见
+			// TestResponsesHostedToolsAreDroppedNotRejected；这里只保留 chat 与
+			// anthropic 两条仍应报错的路径。
 			name: "anthropic",
 			in: FromAnthropic(map[string]any{"tools": []any{
 				map[string]any{"type": "computer_20241022", "name": "computer"},
@@ -541,6 +567,64 @@ func TestUnsupportedRequestToolsReturnExplicitError(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			requireInternalError(t, tt.in, "unsupported", "tool")
 		})
+	}
+}
+
+// Responses 的服务端内置工具（web_search / tool_search / image_generation 等）由
+// OpenAI 后端执行，第三方上游既不认也无法代为执行。必须丢弃而非报错：Codex CLI
+// 每一轮都声明 web_search，报错等于整个 Codex 完全不可用（实测 400
+// `unsupported responses tool type "namespace"` / web_search）。
+func TestResponsesHostedToolsAreDroppedNotRejected(t *testing.T) {
+	in := FromOpenAIResponses(map[string]any{"tools": []any{
+		map[string]any{"type": "function", "name": "ok", "parameters": map[string]any{"type": "object"}},
+		map[string]any{"type": "web_search", "external_web_access": true},
+		map[string]any{"type": "web_search_preview"},
+		map[string]any{"type": "image_generation"},
+		map[string]any{"type": "local_shell"},
+	}})
+	if in.Err != nil {
+		t.Fatalf("Err = %v, want nil（内置工具应被丢弃）", in.Err)
+	}
+	tools, _ := in.Tools.([]any)
+	if len(tools) != 1 {
+		t.Fatalf("Tools = %#v, want 只保留 1 个 function", tools)
+	}
+	tool, _ := tools[0].(map[string]any)
+	if getString(tool, "name") != "ok" {
+		t.Fatalf("保留的工具 = %#v, want name=ok", tool)
+	}
+}
+
+// 工具全是内置类型时 Tools 必须为 nil 而非空数组，且不得留下悬空 tool_choice：
+// Anthropic 对「有 tool_choice 无 tools」返回不可重试的 400。
+func TestResponsesAllHostedToolsLeaveNoDanglingToolChoice(t *testing.T) {
+	in := FromOpenAIResponses(map[string]any{
+		"tools":       []any{map[string]any{"type": "web_search"}},
+		"tool_choice": "auto",
+	})
+	if in.Err != nil {
+		t.Fatalf("Err = %v, want nil", in.Err)
+	}
+	if in.Tools != nil {
+		t.Fatalf("Tools = %#v, want nil", in.Tools)
+	}
+	for _, target := range []string{"anthropic", "openai-responses"} {
+		var body map[string]any
+		var err error
+		if target == "anthropic" {
+			body, err = ToAnthropicBodyChecked(in, "claude-upstream")
+		} else {
+			body, err = ToOpenAIResponsesBodyChecked(in, "gpt-upstream")
+		}
+		if err != nil {
+			t.Fatalf("%s: error = %v", target, err)
+		}
+		if _, exists := body["tools"]; exists {
+			t.Errorf("%s: 不应写出 tools: %#v", target, body["tools"])
+		}
+		if _, exists := body["tool_choice"]; exists {
+			t.Errorf("%s: 不应留下悬空 tool_choice: %#v", target, body["tool_choice"])
+		}
 	}
 }
 

@@ -5,6 +5,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -1001,6 +1003,102 @@ func TestResponsesClientCanEchoReasoningHistory(t *testing.T) {
 		if !strings.Contains(sent, want) {
 			t.Errorf("上游请求缺少 %q: %s", want, sent)
 		}
+	}
+}
+
+// TestRealCodexRequestReachesAnthropicUpstream 用抓包得到的真实 Codex CLI 请求体
+// 跑完整链路：Responses 客户端 → Anthropic 上游。
+//
+// 固件 testdata/codex-responses-request.json 来自 codex exec 的实际请求，含 8 个
+// function、1 个 namespace（内嵌 5 个子工具）、1 个 web_search。此前网关对
+// namespace 与 web_search 都报错，Codex 每一轮都 400（实测 r00274：
+// `unsupported responses tool type "namespace"`），完全不可用。
+func TestRealCodexRequestReachesAnthropicUpstream(t *testing.T) {
+	fixture, err := os.ReadFile(filepath.Join("testdata", "codex-responses-request.json"))
+	if err != nil {
+		t.Fatalf("读取固件失败: %v", err)
+	}
+
+	var captured atomic.Value
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		captured.Store(string(body))
+		w.Header().Set("Content-Type", "application/json")
+		// 上游按展平名回一个工具调用，验证响应侧能还原
+		_, _ = io.WriteString(w, `{"id":"msg_1","type":"message","role":"assistant",`+
+			`"model":"upstream","content":[{"type":"tool_use","id":"toolu_1",`+
+			`"name":"multi_agent_v1__spawn_agent","input":{"prompt":"go"}}],`+
+			`"stop_reason":"tool_use","usage":{"input_tokens":1,"output_tokens":1}}`)
+	}))
+	defer upstream.Close()
+
+	providers := map[string]*config.Provider{
+		"up": {Name: "up", BaseURL: upstream.URL, Format: "anthropic", MaxConcurrent: 1, MaxQueueWait: 500},
+	}
+	route := config.Route{Match: "*", Targets: []config.Target{{Provider: "up", Model: "claude-opus-4-8"}}}
+	srv := newFailoverTestServer(providers, route, upstream.Client(), defaultTestFailover())
+
+	// 固件里 stream=true，这里改成非流式以便直接断言 JSON 结构；
+	// 流式路径由 converter 的 TestNamespaceRestoreWrapsStreamTransformer 覆盖。
+	var body map[string]any
+	if err := json.Unmarshal(fixture, &body); err != nil {
+		t.Fatalf("解析固件失败: %v", err)
+	}
+	body["stream"] = false
+	payload, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("序列化失败: %v", err)
+	}
+
+	recorder := postInference(srv, "/v1/responses", string(payload))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status/body = %d/%s, 期望 200", recorder.Code, recorder.Body.String())
+	}
+
+	sent, _ := captured.Load().(string)
+	if sent == "" {
+		t.Fatal("上游未收到请求")
+	}
+	// namespace 子工具已展平到顶层，且带上命名空间前缀
+	for _, want := range []string{
+		"multi_agent_v1__spawn_agent",
+		"multi_agent_v1__close_agent",
+		"exec_command", // 顶层 function 原样保留
+	} {
+		if !strings.Contains(sent, want) {
+			t.Errorf("上游请求缺少工具 %q", want)
+		}
+	}
+	// web_search 是 OpenAI 服务端内置工具，上游无法代为执行，必须丢弃
+	if strings.Contains(sent, "web_search") {
+		t.Errorf("web_search 未被丢弃: %s", sent[:min(len(sent), 400)])
+	}
+	// namespace 容器本身不该出现在上游请求里
+	if strings.Contains(sent, `"namespace"`) {
+		t.Errorf("namespace 容器未被展平")
+	}
+
+	// 响应侧：上游的扁平名要还原成 Codex 认识的 {name, namespace}
+	var response map[string]any
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("解析响应失败: %v, body=%s", err, recorder.Body.String())
+	}
+	output, _ := response["output"].([]any)
+	var call map[string]any
+	for _, item := range output {
+		if m, ok := item.(map[string]any); ok && m["type"] == "function_call" {
+			call = m
+			break
+		}
+	}
+	if call == nil {
+		t.Fatalf("响应里没有 function_call: %s", recorder.Body.String())
+	}
+	if call["name"] != "spawn_agent" {
+		t.Errorf("name = %v, 期望还原成裸名 spawn_agent", call["name"])
+	}
+	if call["namespace"] != "multi_agent_v1" {
+		t.Errorf("namespace = %v, 期望 multi_agent_v1", call["namespace"])
 	}
 }
 

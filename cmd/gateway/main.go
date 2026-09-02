@@ -949,6 +949,9 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 		HeaderTimeoutMs:       headerTimeoutMs,
 		StreamActivityTimeout: activityTimeoutMs,
 		HTTPClient:            client,
+		// Codex 的 namespace 工具在请求侧被展平成顶层 function，响应侧要按这张映射
+		// 把扁平名改回 {name, namespace}，否则 Codex 报 unsupported call。
+		ToolNamespaces: in.internal.ToolNamespaces,
 		// 记录真实上游状态码：熔断判据和请求日志都要用。proxy 只在确实拿到
 		// 响应头时回调，因此 0 恒表示「上游没给状态码」而非「上游返回 0」。
 		// 回调与 Forward 同 goroutine 同步执行，无需额外同步。

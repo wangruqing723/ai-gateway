@@ -110,6 +110,10 @@ type Options struct {
 	OnErrorBody ErrorBodyFunc
 	// OnResponseStarted 在向客户端写响应头或正文前调用。
 	OnResponseStarted ResponseStartedFunc
+	// ToolNamespaces 是请求侧展平 Codex namespace 工具时得到的「扁平名 → 原始身份」
+	// 映射，为空表示无需还原。响应侧据它把上游返回的扁平 function_call 名改回
+	// {name, namespace}，否则 Codex 报 unsupported call。透传路径同样需要。
+	ToolNamespaces map[string]converter.NamespacedName
 }
 
 // recordUpstreamStatus 上报上游状态码，供调用方做熔断判据与请求日志。
@@ -498,6 +502,13 @@ func handleResponse(ctx context.Context, resp *http.Response, opts *Options) err
 		return fmt.Errorf("%w: %v", ErrConversion, conversionErr)
 	}
 
+	// namespace 还原：上游按展平名返回 function_call，Codex 只认
+	// {name, namespace} 那一对。透传（Provider.Format == ClientFormat）时也要做，
+	// 那条路径不经过任何转换器。
+	if converter.RestoreNamespacedCalls(result, opts.ToolNamespaces) {
+		opts.Log("已还原 %d 个 namespace 工具名", len(opts.ToolNamespaces))
+	}
+
 	out, _ := json.Marshal(result)
 	markResponseStarted(opts)
 	return writeResponseWithDeadline(ctx, opts.ClientRes, http.StatusOK, out)
@@ -568,7 +579,10 @@ func handleStream(ctx context.Context, cancel context.CancelFunc, resp *http.Res
 	}
 
 	// 相同格式直接透传字节流，保留完整 SSE 格式与打字机效果；不同格式逐行解析转换。
-	isPassthrough := converter.IsPassthrough(opts.Provider.Format, opts.ClientFormat)
+	// 但带 namespace 映射时不能走字节透传：上游返回的是展平名，必须逐行改回
+	// {name, namespace}，否则 Codex 认不出自己的工具（实测 unsupported call）。
+	isPassthrough := converter.IsPassthrough(opts.Provider.Format, opts.ClientFormat) &&
+		len(opts.ToolNamespaces) == 0
 
 	if isPassthrough {
 		buf := make([]byte, 16*1024)
@@ -589,6 +603,9 @@ func handleStream(ctx context.Context, cancel context.CancelFunc, resp *http.Res
 	// 不同格式：逐行解析并经 transformer 转换（对齐 Node 的按 \n 切分逻辑）。
 	// 手动按 \n 分行读取，并将跨格式单事件限制在 8 MiB。
 	transform := converter.NewStreamTransformer(opts.Provider.Format, opts.ClientFormat)
+	// 套一层 namespace 还原。放在最外层，使转换器与透传器（同格式时 IsPassthrough
+	// 已被上面的条件排除，这里拿到的是 passthrough{}）都被覆盖。
+	transform = converter.WithNamespaceRestore(transform, opts.ToolNamespaces)
 	readBuf := make([]byte, 64*1024)
 	var lineBuf []byte
 	for {
