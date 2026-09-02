@@ -1088,12 +1088,17 @@
                                             <span x-show="log.keySource" x-text="' · ' + log.keySource"></span>
                                             <span x-show="log.keyFingerprint" class="opacity-70" x-text="' · ' + log.keyFingerprint"></span>
                                         </td>
-                                        <!-- 格式作为副行放在模型下方：它取值只有 anthropic/openai-chat/openai-responses
-                                             三种，单独占一列不划算，但排查跨格式转换问题时需要看见。 -->
+                                        <!-- 模型列两行都是「客户端 → 上游」对比：主行 modelTrail（模型映射，
+                                             如 gpt-5.6-sol → glm-5.2），副行 formatTrail（协议转换，如
+                                             openai-responses → anthropic）。同侧相同则折叠为单值，不增噪声。
+                                             把一次路由的全部转换收在同一列，不拆到模型/提供商两列去拼。 -->
                                         <td class="w-px whitespace-nowrap px-3 py-2">
-                                            <span class="block font-mono text-xs text-cyan" x-text="log.model || '--'"></span>
-                                            <span class="block text-[10px] text-muted" x-text="log.format || log.clientFormat || ''"></span>
+                                            <span class="block font-mono text-xs text-cyan" x-text="modelTrail(log)"></span>
+                                            <span class="block text-[10px] text-muted" x-text="formatTrail(log)"></span>
                                         </td>
+                                        <!-- Provider 列只留 provider 名：上游目标模型已并入模型列的 modelTrail，
+                                             避免把同一次映射拆到两列去拼。该 provider 把请求打到了 modelTrail
+                                             里的上游模型。 -->
                                         <td class="w-px whitespace-nowrap px-3 py-2 font-mono text-xs text-text" x-text="log.provider || '--'"></td>
                                         <td class="w-px whitespace-nowrap px-3 py-2 text-right font-mono text-xs"
                                             :class="slowClass(log.durationMs || log.latencyMs)"
@@ -2611,6 +2616,26 @@
                 attemptTrailText(log) {
                     if (log?.attemptTrail) return log.attemptTrail;
                     return (Number(log?.attempts) || 0) > 1 ? `${log.attempts} 次尝试` : '--';
+                },
+
+                // modelTrail 把客户端模型与上游目标模型做成对比短写：gpt-5.6-sol → glm-5.2。
+                // 路由映射改写模型名时一眼能看出实际打到上游的是哪个模型；
+                // 两侧相同或只一侧有值时退化为单值，不增噪声。
+                modelTrail(log) {
+                    const client = log?.model || '';
+                    const target = log?.targetModel || '';
+                    if (client && target && client !== target) return client + ' → ' + target;
+                    return client || target || '--';
+                },
+
+                // formatTrail 把客户端格式与上游格式做成对比短写：anthropic → openai-chat。
+                // 跨协议转换是本项目高频排查项，列表里一眼能看出格式是否被转；
+                // 两侧相同或只一侧有值时退化为单值，和原来只写客户端格式一致，不增噪声。
+                formatTrail(log) {
+                    const client = log?.format || log?.clientFormat || '';
+                    const upstream = log?.upstreamFormat || '';
+                    if (client && upstream && client !== upstream) return client + ' → ' + upstream;
+                    return client || upstream;
                 },
 
                 formatBytes(value) {

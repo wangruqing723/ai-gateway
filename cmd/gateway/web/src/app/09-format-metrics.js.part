@@ -65,6 +65,26 @@
                     return (Number(log?.attempts) || 0) > 1 ? `${log.attempts} 次尝试` : '--';
                 },
 
+                // modelTrail 把客户端模型与上游目标模型做成对比短写：gpt-5.6-sol → glm-5.2。
+                // 路由映射改写模型名时一眼能看出实际打到上游的是哪个模型；
+                // 两侧相同或只一侧有值时退化为单值，不增噪声。
+                modelTrail(log) {
+                    const client = log?.model || '';
+                    const target = log?.targetModel || '';
+                    if (client && target && client !== target) return client + ' → ' + target;
+                    return client || target || '--';
+                },
+
+                // formatTrail 把客户端格式与上游格式做成对比短写：anthropic → openai-chat。
+                // 跨协议转换是本项目高频排查项，列表里一眼能看出格式是否被转；
+                // 两侧相同或只一侧有值时退化为单值，和原来只写客户端格式一致，不增噪声。
+                formatTrail(log) {
+                    const client = log?.format || log?.clientFormat || '';
+                    const upstream = log?.upstreamFormat || '';
+                    if (client && upstream && client !== upstream) return client + ' → ' + upstream;
+                    return client || upstream;
+                },
+
                 formatBytes(value) {
                     const bytes = Number(value) || 0;
                     if (bytes < 1024) return `${bytes} B`;
