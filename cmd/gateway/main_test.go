@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"ai-gateway/internal/breaker"
 	"ai-gateway/internal/cache"
 	"ai-gateway/internal/config"
 	"ai-gateway/internal/converter"
@@ -86,6 +87,42 @@ func TestForwardAttemptCanceledQueueUsesClientDisconnectedReason(t *testing.T) {
 	}
 	if outcome.abandoned || outcome.requestStarted {
 		t.Fatalf("取消的队列结果 = %#v", outcome)
+	}
+}
+
+func TestForwardAttemptCanceledBeforeUpstreamResponseIsLogged(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	request := httptest.NewRequest(http.MethodPost, "http://client.test/v1/messages", nil).WithContext(ctx)
+	provider := &config.Provider{
+		Name: "primary", BaseURL: "http://127.0.0.1:1", Format: "anthropic",
+	}
+	detail := metrics.AttemptDetail{}
+	reqLog := metrics.RequestLog{}
+	srv := &server{resolveHTTPClient: testClientResolver(http.DefaultClient)}
+	outcome := srv.forwardAttempt(httptest.NewRecorder(), request, forwardAttemptInput{
+		cfg:          &config.Config{DirectMode: true, DirectTimeoutStreamHeader: 1000},
+		start:        time.Now(),
+		clientFormat: "anthropic",
+		internal: converter.FromAnthropic(map[string]any{
+			"model": "client-model", "messages": []any{map[string]any{"role": "user", "content": "你好"}},
+		}),
+		rawBody:   map[string]any{"model": "client-model", "messages": []any{}},
+		candidate: router.Candidate{Provider: provider, TargetModel: "upstream-model"},
+		reqLog:    &reqLog,
+		detail:    &detail,
+	})
+	if outcome.abandoned || !outcome.requestStarted {
+		t.Fatalf("上游响应前取消结果 = %#v，期望记为已发起但不转移", outcome)
+	}
+	if outcome.breakerOutcome != breaker.OutcomeIgnored {
+		t.Fatalf("客户端断开熔断结果 = %v，期望 ignored", outcome.breakerOutcome)
+	}
+	if detail.Outcome != "skipped" || detail.Reason != "client_disconnected" {
+		t.Fatalf("客户端断开明细 = %#v，期望 skipped/client_disconnected", detail)
+	}
+	if reqLog.Error != "客户端在上游响应前断开连接" {
+		t.Fatalf("客户端断开日志错误 = %q", reqLog.Error)
 	}
 }
 

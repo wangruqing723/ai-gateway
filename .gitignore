@@ -8,3 +8,6 @@ data-node
 node_modules
 .superpowers/
 .playwright-cli/
+# Windows NTFS 的备用数据流（ADS）：从挂载目录往 Linux 侧拷文件时，
+# WSL 的 drvfs 会把它暴露成独立文件被一起拷进来，在 Linux 上无作用。
+*:Zone.Identifier

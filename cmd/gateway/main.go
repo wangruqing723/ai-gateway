@@ -1015,6 +1015,28 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 	}
 
 	upstreamStatus := attemptStatus
+	// 上游还没给出响应头时客户端就断开了：proxy 在 Do 阶段命中
+	// clientRequestCanceled 会返回 nil（客户端已走，不该写响应也不该算上游故障）。
+	// 但 forwardErr == nil 且 upstreamStatus == 0 落到下面的分类里会被打成
+	// outcome=final_error 而 reason 为空，同时没人写响应、statusRecorder 回落成
+	// 200，结果一次客户端中断在日志里显示绿色 200、还被 metrics.isSuccess
+	// （要求 Error 为空且 2xx）算成成功，污染成功率。
+	//
+	// 用词与队列那条路的 client_disconnected 对齐。只覆盖「上游未响应」这一种：
+	// 响应头之后再断开时 upstreamStatus 已是 200、字节已经写给客户端，那种记
+	// success 是对的。
+	if forwardErr == nil && upstreamStatus == 0 && errors.Is(r.Context().Err(), context.Canceled) {
+		in.reqLog.Error = "客户端在上游响应前断开连接"
+		if in.detail != nil {
+			in.detail.Outcome = "skipped"
+			in.detail.Reason = "client_disconnected"
+		}
+		return forwardAttemptOutcome{
+			trail:          p.Name + ":client_disconnected",
+			requestStarted: true,
+			breakerOutcome: breaker.OutcomeIgnored,
+		}
+	}
 	if forwardErr != nil {
 		in.reqLog.Error = forwardErr.Error()
 		if in.detail != nil {
