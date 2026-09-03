@@ -193,13 +193,16 @@
                                 <span class="hidden sm:inline">Mode</span>
                                 <span class="font-mono text-text" x-text="config.directMode ? '直通' : '队列'"></span>
                             </span>
-                            <span class="chip bg-ink" aria-label="常规请求超时">
+                            <span class="chip bg-ink" aria-label="当前生效的非流式超时" :title="config.directMode ? '直通模式 · 非流式整体超时' : '队列模式 · 请求超时'">
                                 <span class="material-symbols-outlined text-[16px] text-warn">timer</span>
                                 <span class="hidden sm:inline">Timeout</span>
-                                <span class="font-mono text-text"><span x-text="seconds(config.timeout)"></span>s</span>
+                                <span class="font-mono text-text"><span x-text="seconds(effectiveTimeoutMs())"></span>s</span>
                             </span>
                             <span class="chip bg-ink"><span class="material-symbols-outlined text-[16px]">lan</span><span x-text="config.host || '127.0.0.1'"></span></span>
-                            <span class="chip bg-ink"><span class="material-symbols-outlined text-[16px]">schedule</span><span x-text="seconds(config.streamActivityTimeout) + 's stream'"></span></span>
+                            <span class="chip bg-ink" aria-label="当前生效的流式活跃超时" :title="config.directMode ? '直通模式 · 流式活跃超时' : '队列模式 · 流式活跃超时'">
+                                <span class="material-symbols-outlined text-[16px]">schedule</span>
+                                <span x-text="seconds(effectiveStreamActivityMs()) + 's stream'"></span>
+                            </span>
                         </div>
                     </div>
 
@@ -332,14 +335,6 @@
                                         <input autocomplete="off" type="text" x-model="config.host" class="field">
                                     </label>
                                     <label class="block">
-                                        <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">请求超时 ms</span>
-                                        <input autocomplete="off" type="number" x-model.number="config.timeout" class="field">
-                                    </label>
-                                    <label class="block">
-                                        <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">流式活跃超时 ms</span>
-                                        <input autocomplete="off" type="number" x-model.number="config.streamActivityTimeout" class="field">
-                                    </label>
-                                    <label class="block">
                                         <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">缓存最大天数</span>
                                         <input autocomplete="off" type="number" x-model.number="config.cache.maxAgeDays" class="field">
                                     </label>
@@ -349,19 +344,50 @@
                                     </label>
                                 </div>
 
-                                <div x-show="config.directMode" x-transition x-cloak class="mt-4 grid grid-cols-1 gap-4 border-t border-line pt-4 md:grid-cols-3">
-                                    <label class="block">
-                                        <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">非流式超时 ms</span>
-                                        <input autocomplete="off" type="number" x-model.number="config.directTimeoutNoStream" class="field">
-                                    </label>
-                                    <label class="block">
-                                        <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">流式头超时 ms</span>
-                                        <input autocomplete="off" type="number" x-model.number="config.directTimeoutStreamHeader" class="field">
-                                    </label>
-                                    <label class="block">
-                                        <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">流式活跃超时 ms</span>
-                                        <input autocomplete="off" type="number" x-model.number="config.directTimeoutStreamActive" class="field">
-                                    </label>
+                                <div class="mt-4 border-t border-line pt-4" :class="config.directMode ? 'opacity-70' : ''">
+                                    <div class="mb-3 flex flex-wrap items-center justify-between gap-2">
+                                        <span class="text-xs font-bold uppercase tracking-wide text-muted">队列模式超时</span>
+                                        <span class="rounded-full px-2 py-0.5 text-[10px] font-bold"
+                                              :class="config.directMode ? 'bg-white/[.05] text-muted' : 'bg-good/10 text-good'"
+                                              x-text="config.directMode ? '切换后生效' : '当前生效'"></span>
+                                    </div>
+                                    <div class="grid grid-cols-1 gap-4 md:grid-cols-2">
+                                        <label class="block">
+                                            <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">请求超时 ms</span>
+                                            <input autocomplete="off" type="number" x-model.number="config.timeout" class="field">
+                                            <span class="mt-1.5 block text-[11px] text-muted">非流式整体等待。直通模式不读这个值。</span>
+                                        </label>
+                                        <label class="block">
+                                            <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">流式活跃超时 ms</span>
+                                            <input autocomplete="off" type="number" x-model.number="config.streamActivityTimeout" class="field">
+                                            <span class="mt-1.5 block text-[11px] text-muted">流已开始后，中途无数据即断。直通模式不读这个值。</span>
+                                        </label>
+                                    </div>
+                                </div>
+
+                                <div class="mt-4 border-t border-line pt-4" :class="config.directMode ? '' : 'opacity-70'">
+                                    <div class="mb-3 flex flex-wrap items-center justify-between gap-2">
+                                        <span class="text-xs font-bold uppercase tracking-wide text-muted">直通模式超时</span>
+                                        <span class="rounded-full px-2 py-0.5 text-[10px] font-bold"
+                                              :class="config.directMode ? 'bg-good/10 text-good' : 'bg-white/[.05] text-muted'"
+                                              x-text="config.directMode ? '当前生效' : '切换后生效'"></span>
+                                    </div>
+                                    <div class="grid grid-cols-1 gap-4 md:grid-cols-3">
+                                        <label class="block">
+                                            <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">非流式整体超时 ms</span>
+                                            <input autocomplete="off" type="number" x-model.number="config.directTimeoutNoStream" class="field">
+                                        </label>
+                                        <label class="block">
+                                            <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">流式响应头超时 ms</span>
+                                            <input autocomplete="off" type="number" x-model.number="config.directTimeoutStreamHeader" class="field">
+                                            <span class="mt-1.5 block text-[11px] text-muted">等上游 HTTP 响应头。头到了才切到活跃超时。</span>
+                                        </label>
+                                        <label class="block">
+                                            <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">流式活跃超时 ms</span>
+                                            <input autocomplete="off" type="number" x-model.number="config.directTimeoutStreamActive" class="field">
+                                            <span class="mt-1.5 block text-[11px] text-muted">流已开始后，中途无数据即断。</span>
+                                        </label>
+                                    </div>
                                 </div>
                             </section>
 
@@ -878,7 +904,7 @@
                                     </div>
                                     <div class="rounded-lg bg-ink p-3">
                                         <div class="text-muted">超时</div>
-                                        <div class="mt-1 font-mono text-text" x-text="seconds(config.timeout) + 's'"></div>
+                                        <div class="mt-1 font-mono text-text" x-text="seconds(effectiveTimeoutMs()) + 's'"></div>
                                     </div>
                                 </div>
                             </section>

@@ -30,6 +30,19 @@
                     return Math.round((Number(value) || 0) / 1000);
                 },
 
+                // 当前模式真正生效的非流式整体超时。直通模式覆盖 timeout，
+                // 顶部徽章和监控页必须读这个，否则会把队列预设当成在跑。
+                effectiveTimeoutMs() {
+                    if (this.config.directMode) return Number(this.config.directTimeoutNoStream) || 0;
+                    return Number(this.config.timeout) || 0;
+                },
+
+                // 当前模式真正生效的流式活跃超时。直通模式覆盖 streamActivityTimeout。
+                effectiveStreamActivityMs() {
+                    if (this.config.directMode) return Number(this.config.directTimeoutStreamActive) || 0;
+                    return Number(this.config.streamActivityTimeout) || 0;
+                },
+
                 // 短写：3587 → 3.6s。原来输出「3587 ms」，中间那个空格是折行点，
                 // 窄列里会被折成两行把行高翻倍。
                 durationText(value) {
