@@ -1068,17 +1068,19 @@ func validateAnthropicTargetExtras(extra map[string]any) error {
 
 // validateResponsesTargetExtras 校验 Anthropic/Chat 规范化后无法表达的字段。
 // Responses 原生状态允许保留，因为直通请求在视觉翻译后仍可能需要重建请求体。
+//
+// stop_sequences 不在此名单：Responses API 无 stop 等价字段、无法映射，但它是
+// 次要采样参数（与 top_k 同级），且 max_output_tokens 已兜住响应长度，丢掉不会
+// 失控。原先拒绝会让带 stop_sequences 的请求（如 Claude Code）在 Responses 格式
+// 候选上必然 build_error、整条候选作废——这比丢一个采样参数代价大得多，所以改为
+// 在 copyResponsesCompatibleExtras 里静默不拷贝（与 top_k 处理一致）。
 func validateResponsesTargetExtras(extra map[string]any) error {
 	if extra == nil {
 		return nil
 	}
-	for _, key := range []string{"logprobs", "top_logprobs", "n", "seed", "logit_bias", "prediction", "modalities", "audio", "stop_sequences"} {
+	for _, key := range []string{"logprobs", "top_logprobs", "n", "seed", "logit_bias", "prediction", "modalities", "audio"} {
 		if value, exists := extra[key]; exists && isMeaningfulExtra(key, value) {
-			fieldSource := "OpenAI Chat"
-			if key == "stop_sequences" {
-				fieldSource = "Anthropic"
-			}
-			return fmt.Errorf("无法将 %s 字段 %q 转换为 OpenAI Responses，避免丢失语义", fieldSource, key)
+			return fmt.Errorf("无法将 OpenAI Chat 字段 %q 转换为 OpenAI Responses，避免丢失语义", key)
 		}
 	}
 	if responseFormat, exists := extra["response_format"]; exists && responseFormat != nil {

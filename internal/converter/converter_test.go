@@ -145,6 +145,28 @@ func TestCheckedBodiesApplyExtraFieldPolicy(t *testing.T) {
 		}
 	})
 
+	t.Run("Anthropic 到 Responses 丢弃 stop_sequences", func(t *testing.T) {
+		in := FromAnthropic(map[string]any{
+			"messages":       []any{map[string]any{"role": "user", "content": "你好"}},
+			"stop_sequences": []any{"结束"},
+			"temperature":    0.7,
+		})
+		body, err := ToOpenAIResponsesBodyChecked(in, "glm-upstream")
+		if err != nil {
+			t.Fatalf("带 stop_sequences 转 Responses 不应报错（应静默丢弃）: %v", err)
+		}
+		if _, exists := body["stop_sequences"]; exists {
+			t.Errorf("Responses 体不应包含 stop_sequences（应丢弃）")
+		}
+		if _, exists := body["stop"]; exists {
+			t.Errorf("Responses API 无 stop 字段，不应映射")
+		}
+		// temperature 仍正常透传，确认丢弃只针对 stop_sequences
+		if body["temperature"] != 0.7 {
+			t.Errorf("temperature 应透传，得到 %v", body["temperature"])
+		}
+	})
+
 	t.Run("Chat 到 Anthropic 映射工具选择和并行开关", func(t *testing.T) {
 		in := FromOpenAIChat(map[string]any{
 			"messages": []any{map[string]any{"role": "user", "content": "你好"}},
