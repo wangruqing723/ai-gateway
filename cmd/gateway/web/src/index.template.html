@@ -26,17 +26,23 @@
                 </div>
             </div>
 
+            <!-- 选中态不再用 border-l-4：直角竖条 + 直角底色，两个尖角叠在一起偏硬。
+                 改成 rounded-xl 胶囊底 + 左侧独立的圆头指示条（absolute，不占布局宽度，
+                 因此选中/未选中的文字起始位置一致，切换时不会横向抖动）。 -->
             <nav class="flex-1 px-3 py-5" role="tablist">
                 <template x-for="(item, index) in navItems" :key="item.id">
                     <button @click="selectNav(item.id)"
                             :class="{
-                                'mt-1': index > 0,
-                                'bg-cyan2/[.12] text-cyan border-l-cyan': activeTab === item.id,
-                                'text-muted border-l-transparent hover:bg-white/[.04] hover:text-text': activeTab !== item.id
+                                'mt-1.5': index > 0,
+                                'bg-cyan2/[.12] text-cyan': activeTab === item.id,
+                                'text-muted hover:bg-white/[.05] hover:text-text': activeTab !== item.id
                             }"
                             :aria-selected="activeTab === item.id"
                             role="tab"
-                            class="flex w-full items-center gap-3 border-l-4 px-4 py-3 text-sm font-bold transition">
+                            class="relative flex w-full items-center gap-3 rounded-xl px-4 py-3 text-sm font-bold transition-colors duration-150">
+                        <span x-show="activeTab === item.id" x-cloak
+                              class="absolute left-0 top-1/2 h-5 w-1 -translate-y-1/2 rounded-full bg-cyan"
+                              aria-hidden="true"></span>
                         <span class="material-symbols-outlined"
                               :class="item.fillIcon && activeTab === item.id ? 'icon-fill' : ''"
                               x-text="item.icon"></span>
@@ -1048,23 +1054,36 @@
                             </select>
                         </div>
                     </div>
-                    <!-- 12 列在 1900px 下也塞不满，结果每列都被压到强行折行：时间折 3 行、
-                         模型折 3 行、耗时折 2 行，行高 127px，一屏只看得到 7 条，错误列还被裁掉。
-                         这里合并同源信息（来源+Key 来源+指纹 → 客户端；格式并入模型行下方），
-                         列数 12 → 9，并给所有列加 nowrap，行高降到一行。 -->
+                    <!-- table-fixed + colgroup 按比例分宽。table-auto 会按内容比例摊，
+                         模型名最长，宽屏就在模型和 Provider 之间空出一大块。
+                         模型给 22%：20% 会把 claude-opus-4-8 → claude-opus-5-thinking
+                         截成 claude-opus-5-thin…。多出的 2% 从 Provider 挪来
+                         （provider 名都是 sota3 / gor3 这种短名，8% 够用）。
+                         再长仍截断走 tooltip。转移轨迹 / 错误各 16%，空的时候也不会变成沙漠。 -->
                     <div class="overflow-x-auto lg:max-h-[calc(100%-9.75rem)]">
-                        <table class="w-full min-w-[930px] border-collapse text-left">
+                        <table class="w-full min-w-[930px] table-fixed border-collapse text-left">
+                            <colgroup>
+                                <col style="width:10%">
+                                <col style="width:6%">
+                                <col style="width:7%">
+                                <col style="width:8%">
+                                <col style="width:22%">
+                                <col style="width:8%">
+                                <col style="width:7%">
+                                <col style="width:16%">
+                                <col style="width:16%">
+                            </colgroup>
                             <thead class="sticky top-0 z-10 bg-panel2 text-xs uppercase tracking-wide text-muted">
                                 <tr>
-                                    <th scope="col" class="w-px whitespace-nowrap px-3 py-2.5 font-bold">时间</th>
-                                    <th scope="col" class="w-px whitespace-nowrap px-2 py-2.5 font-bold">状态</th>
-                                    <th scope="col" class="w-px whitespace-nowrap px-2 py-2.5 font-bold">流式</th>
-                                    <th scope="col" class="w-px whitespace-nowrap px-3 py-2.5 font-bold" title="客户端 IP · Key 来源 · Key 指纹">客户端</th>
-                                    <th scope="col" class="w-px whitespace-nowrap px-3 py-2.5 font-bold">模型</th>
-                                    <th scope="col" class="w-px whitespace-nowrap px-3 py-2.5 font-bold">Provider</th>
-                                    <th scope="col" class="w-px whitespace-nowrap px-3 py-2.5 text-right font-bold">耗时</th>
-                                    <th scope="col" class="w-px whitespace-nowrap px-3 py-2.5 font-bold">转移轨迹</th>
-                                    <th scope="col" class="w-full max-w-0 whitespace-nowrap px-3 py-2.5 font-bold">错误</th>
+                                    <th scope="col" class="whitespace-nowrap px-4 py-2.5 font-bold" title="时分秒，悬停看完整时间戳">时间</th>
+                                    <th scope="col" class="whitespace-nowrap px-3 py-2.5 font-bold">状态</th>
+                                    <th scope="col" class="whitespace-nowrap px-3 py-2.5 font-bold">流式</th>
+                                    <th scope="col" class="whitespace-nowrap px-4 py-2.5 font-bold" title="网关请求 ID，对应 stderr 里的 [r00013]">请求 ID</th>
+                                    <th scope="col" class="whitespace-nowrap px-4 py-2.5 font-bold">模型</th>
+                                    <th scope="col" class="whitespace-nowrap px-4 py-2.5 font-bold">Provider</th>
+                                    <th scope="col" class="whitespace-nowrap px-4 py-2.5 text-right font-bold">耗时</th>
+                                    <th scope="col" class="whitespace-nowrap px-4 py-2.5 font-bold">转移轨迹</th>
+                                    <th scope="col" class="whitespace-nowrap px-4 py-2.5 font-bold">错误</th>
                                 </tr>
                             </thead>
                             <template x-for="log in requestLogs" :key="logKey(log)">
@@ -1081,15 +1100,16 @@
                                         :class="isLogExpanded(log) ? 'bg-cyan2/[.08]' : 'bg-panel/35'"
                                         class="cursor-pointer transition hover:bg-white/[.04] focus:outline-none focus:ring-2 focus:ring-inset focus:ring-cyan2"
                                         role="button" tabindex="0">
-                                        <!-- 只显示时分秒：整列日期都是今天，重复 100 遍还把时间折成三行。
-                                             完整时间戳和请求 ID 改由即时 tooltip 显示，展开面板也会列出完整值。 -->
-                                        <td class="w-px whitespace-nowrap px-3 py-2 font-mono text-xs text-muted"
-                                            @mouseenter="showTip((log.time || log.startedAt || '') + '　' + (log.id || log.requestId || ''), $event)"
+                                        <!-- 只显示时分秒：整列日期都是今天，重复 100 遍没有信息量。
+                                             不再前缀请求序号——它就是请求 ID 去掉前导零，与右侧「请求 ID」列重复。
+                                             完整时间戳走 tooltip，展开详情也会列出。 -->
+                                        <td class="whitespace-nowrap px-4 py-2.5 font-mono text-xs text-muted"
+                                            @mouseenter="showTip(log.time || log.startedAt || '', $event)"
                                             @mouseleave="hideTip()"
-                                            @focus="showTip((log.time || log.startedAt || '') + '　' + (log.id || log.requestId || ''), $event)"
+                                            @focus="showTip(log.time || log.startedAt || '', $event)"
                                             @blur="hideTip()"
                                             tabindex="0" x-text="logClock(log)"></td>
-                                        <td class="w-px whitespace-nowrap px-2 py-2">
+                                        <td class="whitespace-nowrap px-3 py-2.5">
                                             <!-- 徽章要连 log.error 一起看：流式响应头写出后才失败的请求（转换失败、
                                                  流中途断开、活跃超时）状态码停在 200，只按数字上色会给绿底，
                                                  而后端 isSuccess 要求 error 为空、这条在成功率里算失败，两边对不上。 -->
@@ -1100,42 +1120,42 @@
                                                   @focus="showTip(statusTip(log), $event)"
                                                   @blur="hideTip()" tabindex="0"></span>
                                         </td>
-                                        <td class="w-px whitespace-nowrap px-2 py-2">
+                                        <td class="whitespace-nowrap px-3 py-2.5">
                                             <span class="chip px-1.5 text-[11px]" :class="log.stream ? 'bg-cyan2/10 text-cyan' : 'bg-white/[.05] text-muted'" x-text="log.stream ? '流式' : '非流式'"></span>
                                         </td>
-                                        <!-- 来源 IP / Key 来源 / Key 指纹三列合一：三者都是「谁发来的」，
-                                             各占一列时每列都要留出中文表头宽度，信息密度却很低。 -->
-                                        <td class="w-px whitespace-nowrap px-3 py-2 font-mono text-[11px] text-muted"
-                                            @mouseenter="showTip('IP: ' + (log.clientIp || '--') + '\nKey 来源: ' + (log.keySource || '--') + '\nKey 指纹: ' + (log.keyFingerprint || '--'), $event)"
+                                        <!-- 主行放请求 ID，方便对照 stderr；IP / Key 来源 / 指纹几乎不变，
+                                             主行信息量低，改到 tooltip 和展开详情。 -->
+                                        <td class="whitespace-nowrap px-4 py-2.5 font-mono text-[11px] text-text"
+                                            @mouseenter="showTip(clientTip(log), $event)"
                                             @mouseleave="hideTip()"
-                                            @focus="showTip('IP: ' + (log.clientIp || '--') + '\nKey 来源: ' + (log.keySource || '--') + '\nKey 指纹: ' + (log.keyFingerprint || '--'), $event)"
-                                            @blur="hideTip()" tabindex="0">
-                                            <span class="text-text" x-text="log.clientIp || '--'"></span>
-                                            <span x-show="log.keySource" x-text="' · ' + log.keySource"></span>
-                                            <span x-show="log.keyFingerprint" class="opacity-70" x-text="' · ' + log.keyFingerprint"></span>
-                                        </td>
+                                            @focus="showTip(clientTip(log), $event)"
+                                            @blur="hideTip()" tabindex="0" x-text="logReqId(log)"></td>
                                         <!-- 模型列两行都是「客户端 → 上游」对比：主行 modelTrail（模型映射，
                                              如 gpt-5.6-sol → glm-5.2），副行 formatTrail（协议转换，如
                                              openai-responses → anthropic）。同侧相同则折叠为单值，不增噪声。
                                              把一次路由的全部转换收在同一列，不拆到模型/提供商两列去拼。 -->
-                                        <td class="w-px whitespace-nowrap px-3 py-2">
-                                            <span class="block font-mono text-xs text-cyan" x-text="modelTrail(log)"></span>
-                                            <span class="block text-[10px] text-muted" x-text="formatTrail(log)"></span>
+                                        <td class="min-w-0 px-4 py-2.5"
+                                            @mouseenter="showTip(modelTrail(log) + (formatTrail(log) ? '\n' + formatTrail(log) : ''), $event)"
+                                            @mouseleave="hideTip()"
+                                            @focus="showTip(modelTrail(log) + (formatTrail(log) ? '\n' + formatTrail(log) : ''), $event)"
+                                            @blur="hideTip()" tabindex="0">
+                                            <span class="block truncate font-mono text-xs text-cyan" x-text="modelTrail(log)"></span>
+                                            <span class="block truncate text-[10px] text-muted" x-text="formatTrail(log)"></span>
                                         </td>
                                         <!-- Provider 列只留 provider 名：上游目标模型已并入模型列的 modelTrail，
                                              避免把同一次映射拆到两列去拼。该 provider 把请求打到了 modelTrail
                                              里的上游模型。 -->
-                                        <td class="w-px whitespace-nowrap px-3 py-2 font-mono text-xs text-text" x-text="log.provider || '--'"></td>
-                                        <td class="w-px whitespace-nowrap px-3 py-2 text-right font-mono text-xs"
+                                        <td class="truncate px-4 py-2.5 font-mono text-xs text-text" x-text="log.provider || '--'"></td>
+                                        <td class="whitespace-nowrap px-4 py-2.5 text-right font-mono text-xs"
                                             :class="slowClass(log.durationMs || log.latencyMs)"
                                             x-text="durationText(log.durationMs || log.latencyMs)"></td>
-                                        <td class="w-px max-w-[16rem] truncate px-3 py-2 font-mono text-[11px]"
+                                        <td class="truncate px-4 py-2.5 font-mono text-[11px]"
                                             :class="log.attemptTrail ? 'text-warn' : 'text-muted'"
                                             @mouseenter="showTip(log.attemptTrail || '', $event)"
                                             @mouseleave="hideTip()"
                                             @focus="showTip(log.attemptTrail || '', $event)"
                                             @blur="hideTip()" tabindex="0" x-text="attemptTrailText(log)"></td>
-                                        <td class="w-full max-w-0 truncate px-3 py-2 text-xs text-muted"
+                                        <td class="truncate px-4 py-2.5 text-xs text-muted"
                                             @mouseenter="showTip(log.error || '', $event)"
                                             @mouseleave="hideTip()"
                                             @focus="showTip(log.error || '', $event)"
@@ -1289,19 +1309,19 @@
                             </template>
                             <!-- 首屏骨架：这张表默认高度按整屏算，比 provider 表长，
                                  给 5 行才撑得住，不然骨架屏本身看着像「只有 3 条日志」。
-                                 列宽照抄表头的 w-px / w-full 分配，避免数据到位时列宽重排。 -->
+                                 列宽与表头一致：不写 w-px / w-full，避免骨架和实数据之间列宽重排。 -->
                             <tbody class="divide-y divide-line">
                                 <template x-for="i in 5" :key="'log-skeleton-' + i">
                                     <tr x-show="!_firstLoadDone" class="bg-panel/35">
-                                        <td class="px-3 py-2"><div class="gw-skeleton h-4 w-16"></div></td>
-                                        <td class="px-2 py-2"><div class="gw-skeleton h-4 w-10"></div></td>
-                                        <td class="px-2 py-2"><div class="gw-skeleton h-4 w-12"></div></td>
-                                        <td class="px-3 py-2"><div class="gw-skeleton h-4 w-24"></div></td>
-                                        <td class="px-3 py-2"><div class="gw-skeleton h-4 w-28"></div></td>
-                                        <td class="px-3 py-2"><div class="gw-skeleton h-4 w-20"></div></td>
-                                        <td class="px-3 py-2"><div class="gw-skeleton ml-auto h-4 w-12"></div></td>
-                                        <td class="px-3 py-2"><div class="gw-skeleton h-4 w-16"></div></td>
-                                        <td class="px-3 py-2"><div class="gw-skeleton h-4 w-full"></div></td>
+                                        <td class="px-4 py-2.5"><div class="gw-skeleton h-4 w-16"></div></td>
+                                        <td class="px-3 py-2.5"><div class="gw-skeleton h-4 w-10"></div></td>
+                                        <td class="px-3 py-2.5"><div class="gw-skeleton h-4 w-12"></div></td>
+                                        <td class="px-4 py-2.5"><div class="gw-skeleton h-4 w-16"></div></td>
+                                        <td class="px-4 py-2.5"><div class="gw-skeleton h-4 w-52"></div></td>
+                                        <td class="px-4 py-2.5"><div class="gw-skeleton h-4 w-16"></div></td>
+                                        <td class="px-4 py-2.5"><div class="gw-skeleton ml-auto h-4 w-12"></div></td>
+                                        <td class="px-4 py-2.5"><div class="gw-skeleton h-4 w-8"></div></td>
+                                        <td class="px-4 py-2.5"><div class="gw-skeleton h-4 w-8"></div></td>
                                     </tr>
                                 </template>
                                 <!-- colspan 从 8 改成 9：表头是 9 列（上面展开详情行也用的 9），

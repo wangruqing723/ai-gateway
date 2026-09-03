@@ -72,6 +72,21 @@
                     return matched ? matched[1] : String(raw);
                 },
 
+                // logReqId 网关请求 ID，格式 r00013，和 stderr 的 [r00013] 同一套计数器。
+                // 时间列不再前缀序号：那是本值去掉前导零，同屏出现两次没有信息量。
+                logReqId(log) {
+                    return log?.id || log?.requestId || '--';
+                },
+
+                // clientTip 请求 ID 列的 hover：主行不再堆 IP / 来源 / 指纹。
+                clientTip(log) {
+                    return [
+                        'IP: ' + (log?.clientIp || '--'),
+                        'Key 来源: ' + (log?.keySource || '--'),
+                        'Key 指纹: ' + (log?.keyFingerprint || '--')
+                    ].join('\n');
+                },
+
                 // attemptTrailText 只在发生过候选转移时显示轨迹，单次直达显示 '--'
                 attemptTrailText(log) {
                     if (log?.attemptTrail) return log.attemptTrail;
