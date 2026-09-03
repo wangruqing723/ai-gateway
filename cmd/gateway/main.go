@@ -1070,6 +1070,9 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 			in.detail.Reason = attemptFailureReason(upstreamStatus, forwardErr)
 		}
 	}
+	if upstreamStatus >= 400 {
+		captureUpstreamBody(reqID, p.Name, targetModel, upstreamStatus, upstreamBody)
+	}
 	return forwardAttemptOutcome{
 		trail:          fmt.Sprintf("%s:%d", p.Name, status),
 		requestStarted: true,
@@ -1085,6 +1088,52 @@ func setAttemptBuildError(detail *metrics.AttemptDetail, err error) {
 	detail.Outcome = "build_error"
 	detail.Reason = "conversion_error"
 	detail.Error = err.Error()
+}
+
+// captureUpstreamBody 把上游 4xx/5xx 时的转发请求体追加到 AI_GATEWAY_DEBUG_UPSTREAM_BODY
+// 指向的文件（JSONL），用于排查不指向字段的上游 400。
+//
+// 起因：GLM-5.3（常驻思考）对真实 Claude Code 请求返回 [1210]「不支持关闭思考」，
+// 但直接拿 config 的 key 对上游盲探几十个 thinking/temperature/system/tools/多轮
+// 变体全部 200，无法复现——触发字段藏在真实转发体里。anthropic→anthropic 走透传
+// （upstreamMap = 客户端原始 body 浅拷贝 + 改 model），所以这里落盘的是真实转发体。
+//
+// env 为空（默认）时完全跳过，不影响主流程；设为输出文件路径即启用。每行一个 JSON：
+// {time, reqID, provider, targetModel, upstreamStatus, body}。写盘失败只记一行日志。
+func captureUpstreamBody(reqID, provider, targetModel string, upstreamStatus int, body []byte) {
+	path := os.Getenv("AI_GATEWAY_DEBUG_UPSTREAM_BODY")
+	if path == "" {
+		return
+	}
+	rec := struct {
+		Time           string          `json:"time"`
+		ReqID          string          `json:"reqID"`
+		Provider       string          `json:"provider"`
+		TargetModel    string          `json:"targetModel"`
+		UpstreamStatus int             `json:"upstreamStatus"`
+		Body           json.RawMessage `json:"body"`
+	}{
+		Time:           time.Now().Format(time.RFC3339),
+		ReqID:          reqID,
+		Provider:       provider,
+		TargetModel:    targetModel,
+		UpstreamStatus: upstreamStatus,
+		Body:           json.RawMessage(body),
+	}
+	line, err := json.Marshal(rec)
+	if err != nil {
+		return
+	}
+	line = append(line, '\n')
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		logf(reqID, "  upstream body 抓包写盘失败: %s", err.Error())
+		return
+	}
+	defer f.Close()
+	if _, err := f.Write(line); err != nil {
+		logf(reqID, "  upstream body 抓包写入失败: %s", err.Error())
+	}
 }
 
 func attemptFailureReason(status int, err error) string {

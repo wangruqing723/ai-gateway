@@ -2658,3 +2658,45 @@ func callProviderModels(t *testing.T, srv *server, provider string) *httptest.Re
 	srv.handle(recorder, request)
 	return recorder
 }
+
+func TestCaptureUpstreamBodyWritesJSONLWhenEnvSet(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "upstream_debug.jsonl")
+	t.Setenv("AI_GATEWAY_DEBUG_UPSTREAM_BODY", path)
+
+	body := []byte(`{"model":"glm-5.3","thinking":{"type":"disabled"},"messages":[{"role":"user","content":"hi"}]}`)
+	captureUpstreamBody("r00099", "ar-ld", "glm-5.3", 400, body)
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("抓包文件未生成: %v", err)
+	}
+	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("期望 1 行 JSONL，得到 %d 行: %q", len(lines), string(data))
+	}
+	var rec map[string]any
+	if err := json.Unmarshal([]byte(lines[0]), &rec); err != nil {
+		t.Fatalf("JSONL 行解析失败: %v", err)
+	}
+	if rec["reqID"] != "r00099" || rec["provider"] != "ar-ld" || rec["targetModel"] != "glm-5.3" {
+		t.Fatalf("抓包元数据不符: %#v", rec)
+	}
+	if got := int(rec["upstreamStatus"].(float64)); got != 400 {
+		t.Fatalf("upstreamStatus = %v，期望 400", got)
+	}
+	bodyObj, ok := rec["body"].(map[string]any)
+	if !ok {
+		t.Fatalf("body 应为 JSON 对象，得到 %T", rec["body"])
+	}
+	if bodyObj["model"] != "glm-5.3" {
+		t.Fatalf("body.model = %v，期望 glm-5.3", bodyObj["model"])
+	}
+
+	// 关闭 env 后不再写盘
+	t.Setenv("AI_GATEWAY_DEBUG_UPSTREAM_BODY", "")
+	captureUpstreamBody("r00100", "ar-ld", "glm-5.3", 400, body)
+	data2, _ := os.ReadFile(path)
+	if strings.Count(string(data2), "\n") != 1 {
+		t.Fatalf("关闭 env 后仍写入: %q", string(data2))
+	}
+}
