@@ -602,9 +602,13 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 				Outcome:        "skipped",
 				Reason:         "context_window_exceeded",
 			})
-			// 没有进入 forwardAttempt，也没有借出半开探针额度；因此这里不能
-			// 调 breaker.Report。buildErr 分支则相反：它已进入 forwardAttempt，
-			// 需要 Report(OutcomeIgnored) 归还已经借出的探针。
+			// Allow 返回 true 时在半开状态下已经借出探针额度（probesInFlight++），
+			// context skip 没有进入 forwardAttempt、拿不到上游结论，必须归还探针，
+			// 否则该 provider 会被永久卡在「探针额度已满」。OutcomeIgnored 正是为此
+			// 设计：归还探针、不改判据，与 buildErr 分支同构。
+			if s.breaker != nil {
+				s.breaker.Report(name, breaker.OutcomeIgnored)
+			}
 			logf(reqID, "  候选 %s 装不下请求，跳过（估算输入 %d、可用预算 %d）", name, estimatedInputTokens, contextBudget)
 			continue
 		}
@@ -1103,6 +1107,15 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 			in.detail.Outcome = "transferred"
 			in.detail.Reason = reason
 			in.detail.FreeAttempt = abandonFree
+		}
+		// 被转移的 4xx/5xx 同样要抓取转发请求体：排查「哪个字段触发上游拒绝」
+		// 只需要这个。终态分支（下面的 upstreamStatus >= 400）抓不到这里，因为
+		// 转移在它之前就 return 了。attemptStatus 由 OnUpstreamStatus 回调写入，
+		// 在 abandonAttempt 判定之前就已赋值（proxy.go 里 recordUpstreamHeaders
+		// 先于 ShouldRetry），所以这里拿得到真实上游状态码。传输错误/超时转移时
+		// attemptStatus == 0，不进这个分支。
+		if attemptStatus >= 400 {
+			captureUpstreamBody(reqID, p.Name, targetModel, attemptStatus, upstreamBody)
 		}
 		return forwardAttemptOutcome{
 			abandoned:      true,
