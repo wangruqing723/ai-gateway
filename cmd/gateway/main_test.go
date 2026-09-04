@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -2698,5 +2699,272 @@ func TestCaptureUpstreamBodyWritesJSONLWhenEnvSet(t *testing.T) {
 	data2, _ := os.ReadFile(path)
 	if strings.Count(string(data2), "\n") != 1 {
 		t.Fatalf("关闭 env 后仍写入: %q", string(data2))
+	}
+}
+
+func TestCaptureUpstreamStreamWritesJSONLWhenEnvSet(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "upstream_stream.jsonl")
+	t.Setenv("AI_GATEWAY_DEBUG_UPSTREAM_STREAM", path)
+
+	raw := []byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"path\\\":\"}}\n\n")
+	convErr := errors.New(`stream function call "toolu_1f23" arguments: invalid JSON: unexpected end of JSON input`)
+	captureUpstreamStream("r00086", "znrx", "glm-5.2", "openai-responses", "anthropic", raw, true, convErr)
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("抓包文件未生成: %v", err)
+	}
+	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("期望 1 行 JSONL，得到 %d 行: %q", len(lines), string(data))
+	}
+	var rec map[string]any
+	if err := json.Unmarshal([]byte(lines[0]), &rec); err != nil {
+		t.Fatalf("JSONL 行解析失败: %v", err)
+	}
+	if rec["reqID"] != "r00086" || rec["provider"] != "znrx" || rec["targetModel"] != "glm-5.2" {
+		t.Fatalf("抓包元数据不符: %#v", rec)
+	}
+	if rec["clientFormat"] != "openai-responses" || rec["providerFormat"] != "anthropic" {
+		t.Fatalf("格式元数据不符: %#v", rec)
+	}
+	if rec["truncated"] != true {
+		t.Fatalf("truncated = %v，期望 true", rec["truncated"])
+	}
+	// rawStream 必须原样保留换行，否则拿去重放会缺 SSE 分隔。
+	if rec["rawStream"] != string(raw) {
+		t.Fatalf("rawStream 与原始字节不一致:\n得到 %q\n期望 %q", rec["rawStream"], string(raw))
+	}
+	if !strings.Contains(rec["convErr"].(string), "unexpected end of JSON input") {
+		t.Fatalf("convErr 未落盘: %v", rec["convErr"])
+	}
+
+	// 关闭 env 后不再写盘
+	t.Setenv("AI_GATEWAY_DEBUG_UPSTREAM_STREAM", "")
+	captureUpstreamStream("r00087", "znrx", "glm-5.2", "openai-responses", "anthropic", raw, false, convErr)
+	data2, _ := os.ReadFile(path)
+	if strings.Count(string(data2), "\n") != 1 {
+		t.Fatalf("关闭 env 后仍写入: %q", string(data2))
+	}
+}
+
+// TestMaxTokensOverrideReachesUpstream 是端到端一条：配置里的 maxTokens 必须真正
+// 出现在转发给上游的请求体里，且用对了字段名。
+//
+// 特别覆盖透传路径（anthropic→anthropic、responses→responses）：那条路径不经过
+// ToXxxBody，走的是客户端原始 body 浅拷贝，早期实现漏了它，导致 Claude Code /
+// Codex 直连同格式上游时完全不受配置约束。
+func TestMaxTokensOverrideReachesUpstream(t *testing.T) {
+	intp := func(v int) *int { return &v }
+
+	tests := []struct {
+		name           string
+		path           string
+		providerFormat string
+		requestBody    string
+		responseBody   string
+		providerMax    *int
+		routeMax       *int
+		wantKey        string
+		wantValue      float64
+	}{
+		{
+			name: "anthropic 透传路径也被覆盖", path: "/v1/messages", providerFormat: "anthropic",
+			requestBody:  `{"model":"client-model","max_tokens":4096,"messages":[{"role":"user","content":"hi"}]}`,
+			responseBody: `{"id":"m1","type":"message","role":"assistant","model":"upstream","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`,
+			providerMax:  intp(32768),
+			wantKey:      "max_tokens", wantValue: 32768,
+		},
+		{
+			name: "responses 透传路径也被覆盖", path: "/v1/responses", providerFormat: "openai-responses",
+			requestBody:  `{"model":"client-model","max_output_tokens":4096,"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`,
+			responseBody: `{"id":"resp1","object":"response","status":"completed","model":"upstream","output":[{"type":"message","id":"msg1","role":"assistant","status":"completed","content":[{"type":"output_text","text":"ok"}]}],"usage":{"input_tokens":1,"output_tokens":1}}`,
+			providerMax:  intp(65536),
+			wantKey:      "max_output_tokens", wantValue: 65536,
+		},
+		{
+			name: "跨格式 responses→anthropic", path: "/v1/responses", providerFormat: "anthropic",
+			requestBody:  `{"model":"client-model","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`,
+			responseBody: `{"id":"m1","type":"message","role":"assistant","model":"upstream","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`,
+			providerMax:  intp(16384),
+			wantKey:      "max_tokens", wantValue: 16384,
+		},
+		{
+			name: "route 级覆盖 provider 级", path: "/v1/messages", providerFormat: "anthropic",
+			requestBody:  `{"model":"client-model","max_tokens":4096,"messages":[{"role":"user","content":"hi"}]}`,
+			responseBody: `{"id":"m1","type":"message","role":"assistant","model":"upstream","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`,
+			providerMax:  intp(8192),
+			routeMax:     intp(24576),
+			wantKey:      "max_tokens", wantValue: 24576,
+		},
+		{
+			name: "都不配时客户端未传 → 全局默认 32768", path: "/v1/responses", providerFormat: "anthropic",
+			requestBody:  `{"model":"client-model","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`,
+			responseBody: `{"id":"m1","type":"message","role":"assistant","model":"upstream","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`,
+			wantKey:      "max_tokens", wantValue: 32768,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			captured := make(chan map[string]any, 1)
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var body map[string]any
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Errorf("decode upstream request: %v", err)
+				}
+				captured <- body
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, tt.responseBody)
+			}))
+			defer upstream.Close()
+
+			provider := &config.Provider{
+				Name: "primary", BaseURL: upstream.URL, Format: tt.providerFormat,
+				MaxConcurrent: 1, MaxQueueWait: 1000, MaxTokens: tt.providerMax,
+			}
+			srv := &server{
+				cfg: &config.Config{
+					Host: "127.0.0.1", Port: 7789, Timeout: 500, StreamActivityTimeout: 500,
+					DirectMode: true, DirectTimeoutNoStream: 500, DirectTimeoutStreamHeader: 500, DirectTimeoutStreamActive: 500,
+					Providers: map[string]*config.Provider{"primary": provider},
+					Routes: []config.Route{{
+						Match: "*", Provider: "primary", Model: "upstream", MaxTokens: tt.routeMax,
+					}},
+				},
+				qm: queue.NewManager(), resolveHTTPClient: testClientResolver(upstream.Client()),
+				metrics: metrics.NewCollector(10), providerHealth: providerhealth.NewChecker(),
+				translator: &runtimeVisionSpy{},
+			}
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:7789"+tt.path, strings.NewReader(tt.requestBody))
+			request.Header.Set("Content-Type", "application/json")
+			srv.handle(recorder, request)
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("status/body = %d/%s", recorder.Code, recorder.Body.String())
+			}
+			body := <-captured
+			got, ok := body[tt.wantKey].(float64)
+			if !ok {
+				t.Fatalf("上游请求体缺少 %q（或类型不对）: %#v", tt.wantKey, body[tt.wantKey])
+			}
+			if got != tt.wantValue {
+				t.Fatalf("%s = %v，期望 %v", tt.wantKey, got, tt.wantValue)
+			}
+		})
+	}
+}
+
+// TestMaxTokensPrecedenceClientValueBeatsGlobalDefault 覆盖优先级链里
+// 「客户端传入值 > 全局默认 32768」这一环，以及三层都没配、客户端也没传时的兜底。
+//
+// 与 TestMaxTokensOverrideReachesUpstream 的分工：那条验证「配了就硬覆盖」，
+// 这条验证「没配时不许擅自改客户端的值，也不许什么都不发」。
+func TestMaxTokensPrecedenceClientValueBeatsGlobalDefault(t *testing.T) {
+	tests := []struct {
+		name           string
+		path           string
+		providerFormat string
+		requestBody    string
+		responseBody   string
+		wantKey        string
+		wantValue      float64
+		wantAbsentKey  string
+	}{
+		{
+			// 三层都没配：客户端传的 64000 必须原样到上游，不能被 32768 压下去
+			name: "透传 anthropic：客户端值高于默认也保留", path: "/v1/messages", providerFormat: "anthropic",
+			requestBody:  `{"model":"client-model","max_tokens":64000,"messages":[{"role":"user","content":"hi"}]}`,
+			responseBody: `{"id":"m1","type":"message","role":"assistant","model":"upstream","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`,
+			wantKey:      "max_tokens", wantValue: 64000,
+		},
+		{
+			// 客户端传的比默认小也不许抬高：那是客户端的显式意图（省费用/要短输出）
+			name: "透传 anthropic：客户端值低于默认也保留", path: "/v1/messages", providerFormat: "anthropic",
+			requestBody:  `{"model":"client-model","max_tokens":512,"messages":[{"role":"user","content":"hi"}]}`,
+			responseBody: `{"id":"m1","type":"message","role":"assistant","model":"upstream","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`,
+			wantKey:      "max_tokens", wantValue: 512,
+		},
+		{
+			// 这条是补上的窄缝：透传 + 客户端没传 + 三层没配。
+			// 改之前 upstreamMap 里压根没有 max_tokens，而 Anthropic 该字段必填 → 上游 400。
+			name: "透传 anthropic：客户端未传则补默认", path: "/v1/messages", providerFormat: "anthropic",
+			requestBody:  `{"model":"client-model","messages":[{"role":"user","content":"hi"}]}`,
+			responseBody: `{"id":"m1","type":"message","role":"assistant","model":"upstream","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`,
+			wantKey:      "max_tokens", wantValue: 32768,
+		},
+		{
+			name: "透传 responses：客户端未传则补默认", path: "/v1/responses", providerFormat: "openai-responses",
+			requestBody:  `{"model":"client-model","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`,
+			responseBody: `{"id":"resp1","object":"response","status":"completed","model":"upstream","output":[{"type":"message","id":"msg1","role":"assistant","status":"completed","content":[{"type":"output_text","text":"ok"}]}],"usage":{"input_tokens":1,"output_tokens":1}}`,
+			wantKey:      "max_output_tokens", wantValue: 32768,
+		},
+		{
+			name: "透传 responses：客户端值保留", path: "/v1/responses", providerFormat: "openai-responses",
+			requestBody:  `{"model":"client-model","max_output_tokens":9000,"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`,
+			responseBody: `{"id":"resp1","object":"response","status":"completed","model":"upstream","output":[{"type":"message","id":"msg1","role":"assistant","status":"completed","content":[{"type":"output_text","text":"ok"}]}],"usage":{"input_tokens":1,"output_tokens":1}}`,
+			wantKey:      "max_output_tokens", wantValue: 9000,
+		},
+		{
+			// 跨格式：客户端 max_output_tokens 要映射成上游的 max_tokens 并保留其值
+			name: "跨格式 responses→anthropic：客户端值保留", path: "/v1/responses", providerFormat: "anthropic",
+			requestBody:  `{"model":"client-model","max_output_tokens":50000,"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`,
+			responseBody: `{"id":"m1","type":"message","role":"assistant","model":"upstream","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`,
+			wantKey:      "max_tokens", wantValue: 50000,
+			wantAbsentKey: "max_output_tokens",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			captured := make(chan map[string]any, 1)
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var body map[string]any
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Errorf("decode upstream request: %v", err)
+				}
+				captured <- body
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, tt.responseBody)
+			}))
+			defer upstream.Close()
+
+			// 三层 maxTokens 全部不配，专门验证客户端值与全局默认这两环
+			provider := &config.Provider{
+				Name: "primary", BaseURL: upstream.URL, Format: tt.providerFormat,
+				MaxConcurrent: 1, MaxQueueWait: 1000,
+			}
+			srv := &server{
+				cfg: &config.Config{
+					Host: "127.0.0.1", Port: 7789, Timeout: 500, StreamActivityTimeout: 500,
+					DirectMode: true, DirectTimeoutNoStream: 500, DirectTimeoutStreamHeader: 500, DirectTimeoutStreamActive: 500,
+					Providers: map[string]*config.Provider{"primary": provider},
+					Routes:    []config.Route{{Match: "*", Provider: "primary", Model: "upstream"}},
+				},
+				qm: queue.NewManager(), resolveHTTPClient: testClientResolver(upstream.Client()),
+				metrics: metrics.NewCollector(10), providerHealth: providerhealth.NewChecker(),
+				translator: &runtimeVisionSpy{},
+			}
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:7789"+tt.path, strings.NewReader(tt.requestBody))
+			request.Header.Set("Content-Type", "application/json")
+			srv.handle(recorder, request)
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("status/body = %d/%s", recorder.Code, recorder.Body.String())
+			}
+			body := <-captured
+			got, ok := body[tt.wantKey].(float64)
+			if !ok {
+				t.Fatalf("上游请求体缺少 %q（或类型不对）: %#v", tt.wantKey, body[tt.wantKey])
+			}
+			if got != tt.wantValue {
+				t.Fatalf("%s = %v，期望 %v", tt.wantKey, got, tt.wantValue)
+			}
+			if tt.wantAbsentKey != "" {
+				if _, exists := body[tt.wantAbsentKey]; exists {
+					t.Fatalf("上游请求体不应含 %q: %#v", tt.wantAbsentKey, body[tt.wantAbsentKey])
+				}
+			}
+		})
 	}
 }

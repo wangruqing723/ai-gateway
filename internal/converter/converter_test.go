@@ -1111,3 +1111,182 @@ func TestUnknownContentBlockStillRejected(t *testing.T) {
 		t.Fatalf("Responses 目标 err = %v, want unsupported some_future_block", err)
 	}
 }
+
+// TestOverrideMaxTokensByProviderFormat 验证按 provider 格式改写正确的字段名。
+func TestOverrideMaxTokensByProviderFormat(t *testing.T) {
+	tests := []struct {
+		name           string
+		providerFormat string
+		body           map[string]any
+		maxTokens      int
+		wantKey        string
+		wantValue      any
+		wantAbsentKeys []string
+	}{
+		{
+			name:           "anthropic 用 max_tokens",
+			providerFormat: "anthropic",
+			body:           map[string]any{"max_tokens": 4096},
+			maxTokens:      32768,
+			wantKey:        "max_tokens",
+			wantValue:      32768,
+		},
+		{
+			name:           "openai-responses 用 max_output_tokens",
+			providerFormat: "openai-responses",
+			body:           map[string]any{"max_output_tokens": 4096},
+			maxTokens:      32768,
+			wantKey:        "max_output_tokens",
+			wantValue:      32768,
+		},
+		{
+			name:           "openai chat 默认写 max_tokens",
+			providerFormat: "openai",
+			body:           map[string]any{"max_tokens": 4096},
+			maxTokens:      16384,
+			wantKey:        "max_tokens",
+			wantValue:      16384,
+			// 不能顺手补上 max_completion_tokens：部分上游把两者视为互斥字段，同时出现直接 400
+			wantAbsentKeys: []string{"max_completion_tokens"},
+		},
+		{
+			name:           "openai chat 客户端带 max_completion_tokens 时只改它",
+			providerFormat: "openai",
+			body:           map[string]any{"max_completion_tokens": 4096},
+			maxTokens:      16384,
+			wantKey:        "max_completion_tokens",
+			wantValue:      16384,
+			wantAbsentKeys: []string{"max_tokens"},
+		},
+		{
+			name:           "硬覆盖：客户端值比配置大也照改",
+			providerFormat: "anthropic",
+			body:           map[string]any{"max_tokens": 200000},
+			maxTokens:      8192,
+			wantKey:        "max_tokens",
+			wantValue:      8192,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			OverrideMaxTokens(tt.body, tt.providerFormat, tt.maxTokens)
+			if got := tt.body[tt.wantKey]; got != tt.wantValue {
+				t.Fatalf("body[%q] = %#v，期望 %#v", tt.wantKey, got, tt.wantValue)
+			}
+			for _, key := range tt.wantAbsentKeys {
+				if _, exists := tt.body[key]; exists {
+					t.Fatalf("body 不应含 %q，实际 = %#v", key, tt.body[key])
+				}
+			}
+		})
+	}
+}
+
+// maxTokens <= 0 或 body 为 nil 时必须完全不动，避免把「未配置」写成非法值。
+func TestOverrideMaxTokensIgnoresNonPositiveAndNilBody(t *testing.T) {
+	body := map[string]any{"max_tokens": 4096}
+	OverrideMaxTokens(body, "anthropic", 0)
+	if body["max_tokens"] != 4096 {
+		t.Fatalf("maxTokens=0 时被改写: %#v", body["max_tokens"])
+	}
+	OverrideMaxTokens(body, "anthropic", -1)
+	if body["max_tokens"] != 4096 {
+		t.Fatalf("maxTokens=-1 时被改写: %#v", body["max_tokens"])
+	}
+	OverrideMaxTokens(nil, "anthropic", 32768) // 不能 panic
+}
+
+// 客户端未传输出上限时，三种客户端格式都应落到全局默认 32768。
+// 4096 是曾把 Codex 推进死循环的旧默认值，这条测试就是防它回归。
+func TestClientOmittedMaxTokensDefaultsTo32768(t *testing.T) {
+	tests := []struct {
+		name string
+		in   *Internal
+	}{
+		{"anthropic", FromAnthropic(map[string]any{
+			"model": "claude", "messages": []any{map[string]any{"role": "user", "content": "hi"}},
+		})},
+		{"openai-chat", FromOpenAIChat(map[string]any{
+			"model": "gpt", "messages": []any{map[string]any{"role": "user", "content": "hi"}},
+		})},
+		{"openai-responses", FromOpenAIResponses(map[string]any{
+			"model": "gpt", "input": []any{map[string]any{"role": "user", "content": "hi"}},
+		})},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.in.MaxTokens != 32768 {
+				t.Fatalf("MaxTokens = %d，期望 32768", tt.in.MaxTokens)
+			}
+		})
+	}
+}
+
+// TestEnsureMaxTokensOnlyFillsWhenAbsent 验证优先级链的最后一环：
+// 客户端传了就保留客户端的值（客户端传入值 > 全局默认），一个都没传才补默认值。
+func TestEnsureMaxTokensOnlyFillsWhenAbsent(t *testing.T) {
+	tests := []struct {
+		name           string
+		providerFormat string
+		body           map[string]any
+		wantBody       map[string]any
+	}{
+		{
+			name: "anthropic 缺失则补默认", providerFormat: "anthropic",
+			body:     map[string]any{},
+			wantBody: map[string]any{"max_tokens": DefaultMaxTokens},
+		},
+		{
+			name: "anthropic 客户端传了就不动", providerFormat: "anthropic",
+			body:     map[string]any{"max_tokens": 64000},
+			wantBody: map[string]any{"max_tokens": 64000},
+		},
+		{
+			name: "anthropic 客户端传的比默认小也保留", providerFormat: "anthropic",
+			body:     map[string]any{"max_tokens": 512},
+			wantBody: map[string]any{"max_tokens": 512},
+		},
+		{
+			name: "responses 缺失则补默认", providerFormat: "openai-responses",
+			body:     map[string]any{},
+			wantBody: map[string]any{"max_output_tokens": DefaultMaxTokens},
+		},
+		{
+			name: "responses 客户端传了就不动", providerFormat: "openai-responses",
+			body:     map[string]any{"max_output_tokens": 8000},
+			wantBody: map[string]any{"max_output_tokens": 8000},
+		},
+		{
+			name: "openai-chat 两个键都没有则补 max_tokens", providerFormat: "openai",
+			body:     map[string]any{},
+			wantBody: map[string]any{"max_tokens": DefaultMaxTokens},
+		},
+		{
+			// 补第二个键会被部分上游判为互斥字段冲突而 400
+			name: "openai-chat 已有 max_completion_tokens 则不补 max_tokens", providerFormat: "openai",
+			body:     map[string]any{"max_completion_tokens": 8000},
+			wantBody: map[string]any{"max_completion_tokens": 8000},
+		},
+		{
+			name: "openai-chat 已有 max_tokens 则不动", providerFormat: "openai",
+			body:     map[string]any{"max_tokens": 8000},
+			wantBody: map[string]any{"max_tokens": 8000},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			EnsureMaxTokens(tt.body, tt.providerFormat)
+			if len(tt.body) != len(tt.wantBody) {
+				t.Fatalf("body 键数 = %d，期望 %d: %#v", len(tt.body), len(tt.wantBody), tt.body)
+			}
+			for key, want := range tt.wantBody {
+				if got := tt.body[key]; got != want {
+					t.Fatalf("body[%q] = %#v，期望 %#v", key, got, want)
+				}
+			}
+		})
+	}
+	EnsureMaxTokens(nil, "anthropic") // 不能 panic
+}

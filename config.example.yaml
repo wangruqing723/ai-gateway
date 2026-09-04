@@ -101,6 +101,12 @@ providers:
     maxConcurrent: 3      # 最大并发请求数（默认 5，范围 1-100）
     maxPerSecond: 2       # 每秒最多请求数（默认 0，范围 0-100）
     maxQueueWait: 30000   # 队列最大等待毫秒（默认 30000，范围 1-600000）
+    # maxTokens: 32768    # 可选：覆盖转发给该上游的输出上限（Anthropic/Chat 的 max_tokens、
+    #                     # Responses 的 max_output_tokens），配了就硬覆盖客户端传入值。
+    #                     # 完整优先级：候选 > 路由 > 上游 > 客户端传入值 > 全局默认 32768。
+    #                     # 三层都不配时客户端传了什么用什么，客户端也没传才用 32768。
+    #                     # 配得过小会让思考型模型烧光预算就被截断：工具调用参数被砍断后
+    #                     # 客户端会丢弃整条响应重投，表现为「同一条命令反复执行」。
 
   mimo_vision:
     baseUrl: "https://api.xiaomimimo.com"
@@ -160,6 +166,16 @@ routes:
   #       model: "mimo-v2.5-pro"
   #     - provider: deepseek
   #       model: "deepseek-chat"
+  #
+  # maxTokens 可写在候选、路由、上游三处。
+  # 完整优先级：候选 > 路由 > 上游 > 客户端传入值 > 全局默认 32768。
+  # 同一路由下各上游输出上限不同时写在候选上；整条路由统一时写在路由级。
+  # - match: "gpt-5*"
+  #   maxTokens: 32768              # 路由级：本路由所有候选统一用它
+  #   targets:
+  #     - provider: mimo
+  #       model: "mimo-v2.5-pro"
+  #       maxTokens: 16384          # 候选级：只覆盖这一个候选，优先于路由级
 
   - match: "*"
     provider: mimo

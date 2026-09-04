@@ -119,6 +119,7 @@
                     maxConcurrent: 5,
                     maxPerSecond: 0,
                     maxQueueWait: 30000,
+                    maxTokens: null,
                     userAgent: '',
                     proxy: '',
                     apiKeyConfigured: false,

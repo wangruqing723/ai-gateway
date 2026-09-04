@@ -420,17 +420,22 @@ func (t *anthropicToChat) Transform(line string) []string {
 		if tool == nil {
 			return nil
 		}
-		arguments := tool.arguments.String()
-		if arguments == "" {
-			arguments = "{}"
-		}
-		if _, err := parseFunctionArguments(arguments); err != nil {
+		if _, err := streamToolArguments(t.s, tool); err != nil {
 			t.s.addError(fmt.Errorf("stream function call %q arguments: %w", tool.callID, err))
+			return nil
 		}
 	case "message_delta":
 		if delta, ok := data["delta"].(map[string]any); ok {
 			if stop := getString(delta, "stop_reason"); stop != "" {
 				finish := anthropicStopReasonToChat(stop)
+				if stop == "max_tokens" {
+					t.s.incomplete = true
+				}
+				// 工具参数被砍断时改报 length：上游可能仍自报 tool_use（门面丢尾块的
+				// 情形），照搬会让客户端以为拿到了完整的工具调用。
+				if t.s.incomplete {
+					finish = "length"
+				}
 				t.doneSent = true
 				t.s.completed = true
 				return []string{chatDelta(t.s.msgID, t.s.model, map[string]any{}, finish), "data: [DONE]\n\n"}
@@ -685,7 +690,7 @@ func finishResponseTool(state *streamState, tool *streamTool) []string {
 	if tool == nil || tool.done {
 		return nil
 	}
-	arguments, err := normalizeStreamToolArguments(state, tool)
+	arguments, err := streamToolArguments(state, tool)
 	if err != nil {
 		state.addError(fmt.Errorf("stream function call %q arguments: %w", tool.callID, err))
 		return nil
@@ -703,31 +708,39 @@ func finishResponseTool(state *streamState, tool *streamTool) []string {
 	}
 }
 
-func normalizeStreamToolArguments(state *streamState, tool *streamTool) (string, error) {
+// streamToolArguments 定型工具参数，返回 (arguments, err)。
+//
+// 关键是把上游给的坏参数分成两类，只容忍其中一类：
+//
+//	被砍断（"{\"path\":" 之类不合法 JSON）→ err == nil，标记 incomplete
+//	完整但类型不对（"[]"、"\"s\""、"42"）  → err != nil，调用方作废整条响应
+//
+// 容忍截断的理由：这类值的成因几乎总是上游撞 max_tokens 砍在参数中间，而真实
+// Anthropic 在这种情况下只给 stop_reason: max_tokens。参数增量在此之前已经逐块流
+// 给客户端了，收尾时再报错既收不回那些字节，还会让客户端同时看到半截参数和一个
+// 失败终态；作废整条响应更是把已经流出去的几百 KB 正文一起废掉，比截断本身严重。
+//
+// 不容忍类型错误的理由：`[]` 是完整的合法 JSON，只是不是对象——那是上游的协议
+// 违规，不是被截断，标成 incomplete 等于替上游把「我给错了」说成「我没说完」。
+//
+// 判别用 json.Valid 而不是匹配错误文本：前者对「不合法 JSON」的定义就是「解析不完」，
+// 与 encoding/json 的错误措辞解耦。
+func streamToolArguments(state *streamState, tool *streamTool) (string, error) {
 	arguments := tool.arguments.String()
 	if arguments == "" {
 		arguments = "{}"
 		if !state.appendAggregate(&tool.arguments, arguments) {
-			return "", state.err
+			return arguments, nil
 		}
 	}
 	if _, err := parseFunctionArguments(arguments); err != nil {
-		return "", err
+		if !json.Valid([]byte(arguments)) {
+			state.incomplete = true
+			return arguments, nil
+		}
+		return arguments, err
 	}
 	return arguments, nil
-}
-
-func validateAllResponseToolArguments(state *streamState) error {
-	for _, sourceIndex := range state.toolOrder {
-		tool := state.tools[sourceIndex]
-		if tool == nil || tool.done {
-			continue
-		}
-		if _, err := normalizeStreamToolArguments(state, tool); err != nil {
-			return fmt.Errorf("stream function call %q arguments: %w", tool.callID, err)
-		}
-	}
-	return nil
 }
 
 func finishAllResponseItems(state *streamState) []string {
@@ -941,10 +954,6 @@ func (t *anthropicToResponses) Transform(line string) []string {
 		}
 		return nil
 	case "message_stop":
-		if err := validateAllResponseToolArguments(t.s); err != nil {
-			t.s.addError(err)
-			return nil
-		}
 		out := finishAllResponseItems(t.s)
 		return append(out, completeResponse(t.s)...)
 	}
@@ -1088,10 +1097,21 @@ func (t *openAIToAnthropic) Transform(line string) []string {
 
 	if finish != nil && finish != "" && !t.finishSent {
 		out = append(out, t.finishBlocks()...)
+		// 参数是「完整但不是对象」这类协议违规时 finishBlocks 已记错误，此时不能再补
+		// 成功终态，否则客户端会同时收到 message_delta 和 error。截断不走这里：
+		// streamToolArguments 对截断只标 incomplete，不置 err。
 		if t.s.err != nil {
 			return nil
 		}
 		stop := chatFinishReasonToAnthropic(fmt.Sprint(finish))
+		if finish == "length" {
+			t.s.incomplete = true
+		}
+		// 工具参数被砍断时改报 max_tokens：上游可能仍自报 tool_use（门面丢尾块的
+		// 情形），照搬会让客户端以为拿到了完整的工具调用。
+		if t.s.incomplete {
+			stop = "max_tokens"
+		}
 		out = append(out, sseEvent("message_delta", map[string]any{
 			"type": "message_delta", "delta": map[string]any{"stop_reason": stop, "stop_sequence": nil},
 			"usage": map[string]any{"output_tokens": 0},
@@ -1102,12 +1122,15 @@ func (t *openAIToAnthropic) Transform(line string) []string {
 }
 
 func (t *openAIToAnthropic) finishBlocks() []string {
+	// 参数被砍断时只标记 incomplete，由调用方把 stop_reason 改成 max_tokens。
+	// 不作废整条响应：tool_use 块的 content_block_start 与参数增量早已流给客户端，
+	// 此刻报错既收不回那些字节，还会让客户端同时看到半个工具调用和一个 error 终态。
 	for _, index := range t.toolOrder {
 		tool := t.tools[index]
 		if tool == nil || tool.done {
 			continue
 		}
-		if _, err := normalizeStreamToolArguments(t.s, tool); err != nil {
+		if _, err := streamToolArguments(t.s, tool); err != nil {
 			t.s.addError(fmt.Errorf("stream function call %q arguments: %w", tool.callID, err))
 			return nil
 		}
@@ -1148,10 +1171,6 @@ func (t *openAIToResponses) Transform(line string) []string {
 		return nil
 	}
 	if p.done {
-		if err := validateAllResponseToolArguments(t.s); err != nil {
-			t.s.addError(err)
-			return nil
-		}
 		out := ensureResponseStarted(t.s)
 		out = append(out, finishAllResponseItems(t.s)...)
 		return append(out, completeResponse(t.s)...)
@@ -1190,10 +1209,6 @@ func (t *openAIToResponses) Transform(line string) []string {
 	if finish != nil && finish != "" {
 		if finish == "length" {
 			t.s.incomplete = true
-		}
-		if err := validateAllResponseToolArguments(t.s); err != nil {
-			t.s.addError(err)
-			return nil
 		}
 		out = append(out, finishAllResponseItems(t.s)...)
 	}
@@ -1323,7 +1338,7 @@ func (t *responsesToChat) finish(finish string) []string {
 		return nil
 	}
 	for _, tool := range t.tools {
-		if _, err := normalizeStreamToolArguments(t.s, tool); err != nil {
+		if _, err := streamToolArguments(t.s, tool); err != nil {
 			t.s.addError(fmt.Errorf("responses function call %q arguments: %w", tool.callID, err))
 			return nil
 		}
@@ -1336,6 +1351,9 @@ func (t *responsesToChat) finish(finish string) []string {
 		if t.refused {
 			finish = "content_filter"
 		}
+	}
+	if t.s.incomplete {
+		finish = "length"
 	}
 	t.doneSent = true
 	t.s.completed = true
@@ -1617,7 +1635,7 @@ func (t *responsesToAnthropic) finish(incomplete bool, usage map[string]any) []s
 	}
 	for _, outputIndex := range t.toolOrder {
 		tool := t.tools[outputIndex]
-		if _, err := normalizeStreamToolArguments(t.s, tool); err != nil {
+		if _, err := streamToolArguments(t.s, tool); err != nil {
 			t.s.addError(fmt.Errorf("responses function call %q arguments: %w", tool.callID, err))
 			return nil
 		}
@@ -1627,7 +1645,7 @@ func (t *responsesToAnthropic) finish(incomplete bool, usage map[string]any) []s
 		}
 	}
 	stop := "end_turn"
-	if incomplete {
+	if incomplete || t.s.incomplete {
 		stop = "max_tokens"
 	} else if len(t.tools) > 0 {
 		stop = "tool_use"

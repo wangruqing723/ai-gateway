@@ -820,6 +820,18 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 		setAttemptBuildError(in.detail, err)
 		return forwardAttemptOutcome{buildErr: err.Error()}
 	}
+	// 输出上限的完整优先级：target > route > provider > 客户端传入值 > DefaultMaxTokens。
+	//
+	// 前三层由 router 合成到 candidate.MaxTokens，非 nil 就硬覆盖（含透传路径里客户端
+	// 原始 body 带来的值）。为 nil 表示三层都没配，此时客户端传了什么就用什么——
+	// 但客户端一个都没传时得有人兜底，否则透传路径会把「没有 max_tokens」原样发给
+	// 上游，而 Anthropic 该字段必填。跨格式路径的 ToXxxBody 已无条件写入，
+	// EnsureMaxTokens 在那里恒为空操作。
+	if in.candidate.MaxTokens != nil {
+		converter.OverrideMaxTokens(upstreamMap, p.Format, *in.candidate.MaxTokens)
+	} else {
+		converter.EnsureMaxTokens(upstreamMap, p.Format)
+	}
 	upstreamBody, err := json.Marshal(upstreamMap)
 	if err != nil {
 		buildErr := "上游请求体序列化失败: " + err.Error()
@@ -979,6 +991,12 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 			}
 		},
 	}
+	// 只在排查开关开启时挂回调：为 nil 时 proxy 完全不缓冲原始流。
+	if os.Getenv("AI_GATEWAY_DEBUG_UPSTREAM_STREAM") != "" {
+		opts.OnStreamConversionError = func(raw []byte, truncated bool, convErr error) {
+			captureUpstreamStream(reqID, p.Name, targetModel, in.clientFormat, p.Format, raw, truncated, convErr)
+		}
+	}
 	if in.allowRetry {
 		opts.ShouldRetry = func(upstreamCode int, retryAfter time.Duration, err error) bool {
 			decision := failoverReason(&cfg.Failover, upstreamCode, retryAfter, err)
@@ -1134,6 +1152,65 @@ func captureUpstreamBody(reqID, provider, targetModel string, upstreamStatus int
 	if _, err := f.Write(line); err != nil {
 		logf(reqID, "  upstream body 抓包写入失败: %s", err.Error())
 	}
+}
+
+// captureUpstreamStream 把跨格式流式转换失败时收到的上游原始 SSE 追加到
+// AI_GATEWAY_DEBUG_UPSTREAM_STREAM 指向的文件（JSONL）。
+//
+// 起因：Codex 走 /v1/responses 打到 anthropic 上游时报
+// `stream function call "toolu_…" arguments: invalid JSON: unexpected end of JSON input`。
+// 那是「累积到的 tool_use 参数是一段被砍断的合法 JSON 前缀」的专属报错，但只看网关
+// 日志分不清是上游撞 max_tokens 自然截断，还是上游那层 anthropic 门面丢了参数尾块——
+// 两者的修法完全不同。既有的 AI_GATEWAY_DEBUG_UPSTREAM_BODY 只抓 4xx/5xx 的请求体，
+// 这条链路上游返 200，抓不到。
+//
+// 只在转换失败时落盘：成功的流没有排查价值，而 467 KB 级别的流全量落盘一天就撑爆磁盘。
+// env 为空（默认）时连缓冲都不开，主流程零额外开销。每行一个 JSON：
+// {time, reqID, provider, targetModel, clientFormat, providerFormat, convErr, truncated, rawStream}。
+func captureUpstreamStream(reqID, provider, targetModel, clientFormat, providerFormat string, raw []byte, truncated bool, convErr error) {
+	path := os.Getenv("AI_GATEWAY_DEBUG_UPSTREAM_STREAM")
+	if path == "" {
+		return
+	}
+	rec := struct {
+		Time           string `json:"time"`
+		ReqID          string `json:"reqID"`
+		Provider       string `json:"provider"`
+		TargetModel    string `json:"targetModel"`
+		ClientFormat   string `json:"clientFormat"`
+		ProviderFormat string `json:"providerFormat"`
+		ConvErr        string `json:"convErr"`
+		Truncated      bool   `json:"truncated"`
+		RawStream      string `json:"rawStream"`
+	}{
+		Time:           time.Now().Format(time.RFC3339),
+		ReqID:          reqID,
+		Provider:       provider,
+		TargetModel:    targetModel,
+		ClientFormat:   clientFormat,
+		ProviderFormat: providerFormat,
+		Truncated:      truncated,
+		RawStream:      string(raw),
+	}
+	if convErr != nil {
+		rec.ConvErr = convErr.Error()
+	}
+	line, err := json.Marshal(rec)
+	if err != nil {
+		return
+	}
+	line = append(line, '\n')
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		logf(reqID, "  upstream stream 抓包写盘失败: %s", err.Error())
+		return
+	}
+	defer f.Close()
+	if _, err := f.Write(line); err != nil {
+		logf(reqID, "  upstream stream 抓包写入失败: %s", err.Error())
+		return
+	}
+	logf(reqID, "  已落盘上游原始流 %d 字节（截断=%t）到 %s", len(raw), truncated, path)
 }
 
 func attemptFailureReason(status int, err error) string {

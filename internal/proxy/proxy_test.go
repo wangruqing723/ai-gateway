@@ -516,6 +516,83 @@ func TestForwardRejectsStreamConversionError(t *testing.T) {
 	}
 }
 
+// 抓流回调必须拿到已收到的全部原始 SSE。这里用「完整但不是对象」的参数（[]）触发
+// 真正的转换失败——被砍断的参数已改为容忍（只标 incomplete），不再进这条路径。
+func TestForwardStreamConversionErrorReportsRawStream(t *testing.T) {
+	const badArgs = "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"[]\"}}\n\n"
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("content-type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher := w.(http.Flusher)
+		flusher.Flush()
+		_, _ = io.WriteString(w, "data: {\"type\":\"message_start\",\"message\":{\"model\":\"glm-5.2\"}}\n\n")
+		_, _ = io.WriteString(w, "data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1f23\",\"name\":\"Write\"}}\n\n")
+		_, _ = io.WriteString(w, badArgs)
+		_, _ = io.WriteString(w, "data: {\"type\":\"content_block_stop\",\"index\":1}\n\n")
+		flusher.Flush()
+	}))
+	defer upstream.Close()
+
+	var gotRaw []byte
+	var gotTruncated bool
+	var gotErr error
+	calls := 0
+	recorder := httptest.NewRecorder()
+	opts := forwardTestOptions(upstream, recorder, "anthropic", "openai-responses", true, 500, 500)
+	opts.OnStreamConversionError = func(raw []byte, truncatedFlag bool, convErr error) {
+		calls++
+		gotRaw = append([]byte(nil), raw...)
+		gotTruncated = truncatedFlag
+		gotErr = convErr
+	}
+
+	err := Forward(opts)
+	if err == nil || !errors.Is(err, ErrConversion) {
+		t.Fatalf("Forward() error = %v, want ErrConversion", err)
+	}
+	if calls != 1 {
+		t.Fatalf("OnStreamConversionError 调用 %d 次，期望 1 次", calls)
+	}
+	if gotErr == nil || !strings.Contains(gotErr.Error(), "arguments must be a JSON object") {
+		t.Fatalf("convErr = %v，期望包含 arguments must be a JSON object", gotErr)
+	}
+	if gotTruncated {
+		t.Fatalf("truncated = true，小流不该被标记截断")
+	}
+	// 触发报错的那一行必须在原始流里，否则抓包对排查没用。
+	if !strings.Contains(string(gotRaw), badArgs) {
+		t.Fatalf("raw 未包含触发报错的行:\n%q", string(gotRaw))
+	}
+	if !strings.Contains(string(gotRaw), "message_start") || !strings.Contains(string(gotRaw), "content_block_start") {
+		t.Fatalf("raw 应含报错前的全部事件:\n%q", string(gotRaw))
+	}
+}
+
+// 回调为 nil（排查开关关闭）时不缓冲，也不能影响既有失败路径。
+func TestForwardStreamConversionErrorWithoutHookStillFails(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("content-type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher := w.(http.Flusher)
+		flusher.Flush()
+		_, _ = io.WriteString(w, "data: {\"type\":\"message_start\",\"message\":{\"model\":\"glm-5.2\"}}\n\n")
+		_, _ = io.WriteString(w, "data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1f23\",\"name\":\"Write\"}}\n\n")
+		_, _ = io.WriteString(w, "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"[]\"}}\n\n")
+		_, _ = io.WriteString(w, "data: {\"type\":\"content_block_stop\",\"index\":1}\n\n")
+		flusher.Flush()
+	}))
+	defer upstream.Close()
+
+	recorder := httptest.NewRecorder()
+	opts := forwardTestOptions(upstream, recorder, "anthropic", "openai-responses", true, 500, 500)
+	if err := Forward(opts); err == nil || !errors.Is(err, ErrConversion) {
+		t.Fatalf("Forward() error = %v, want ErrConversion", err)
+	}
+	if body := recorder.Body.String(); !strings.Contains(body, "response.failed") {
+		t.Fatalf("stream body = %q, want responses failure terminal", body)
+	}
+}
+
 func TestForwardResponsesConversionFailureKeepsStreamIdentity(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("content-type", "text/event-stream")

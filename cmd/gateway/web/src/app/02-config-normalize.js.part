@@ -12,6 +12,9 @@
                             maxConcurrent: pick(p, 'maxConcurrent', 'MaxConcurrent') || 5,
                             maxPerSecond: pick(p, 'maxPerSecond', 'MaxPerSecond') || 0,
                             maxQueueWait: pick(p, 'maxQueueWait', 'MaxQueueWait') || 30000,
+                            // maxTokens 是 *int，未配时后端 omitempty 不返回，这里取 null。
+                            // 不能用 || 0：0 会被后端 validate 拒绝，存回去等于把「未配置」变成「非法值」。
+                            maxTokens: pick(p, 'maxTokens', 'MaxTokens') ?? null,
                             // userAgent 必须读出来，理由同下面 route.strategy 那条：
                             // 这里是每次加载配置（含 5 秒轮询）铺进 this.config 的地方，
                             // 漏读等于刚从服务端拿到的值立刻在内存里丢掉，下次保存就写不回去。
@@ -32,12 +35,20 @@
                         };
                         // strategy 必须读出来：漏读会让手写的策略在下次保存时被静默抹掉
                         if (strategy) route.strategy = strategy;
+                        // route 级 maxTokens，同 provider 级：*int 未配时为 null，不用 || 兜底。
+                        const routeMaxTokens = pick(r, 'maxTokens', 'MaxTokens') ?? null;
+                        if (routeMaxTokens !== null) route.maxTokens = routeMaxTokens;
                         // 多目标写法：保留 targets 原样，后端两种写法互斥，不能同时下发
                         if (Array.isArray(rawTargets) && rawTargets.length) {
-                            route.targets = rawTargets.map((t) => ({
-                                provider: pick(t, 'provider', 'Provider') || '',
-                                model: pick(t, 'model', 'Model') || ''
-                            }));
+                            route.targets = rawTargets.map((t) => {
+                                const tgt = {
+                                    provider: pick(t, 'provider', 'Provider') || '',
+                                    model: pick(t, 'model', 'Model') || ''
+                                };
+                                const tMax = pick(t, 'maxTokens', 'MaxTokens') ?? null;
+                                if (tMax !== null) tgt.maxTokens = tMax;
+                                return tgt;
+                            });
                             route.provider = '';
                             route.model = '';
                         }

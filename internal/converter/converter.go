@@ -14,6 +14,16 @@ import (
 	"strings"
 )
 
+// DefaultMaxTokens 是客户端未传输出上限、且 target/route/provider 三层都没配时的兜底值。
+//
+// 优先级：target > route > provider > 客户端传入值 > 本默认值。
+//
+// 取 32768 而非更小值是有代价教训的：曾用 4096，思考型上游（GLM-5.2 等）光思考就能
+// 烧光预算，响应在没轮到干活时就被 max_tokens 截断。Codex 把这种只含 reasoning 的
+// 响应当坏流丢弃并拿同一份会话重投，表现为「同一条命令反复执行两小时」；截断点若正好
+// 落在工具参数 JSON 中间，还会让整条已流出几百 KB 的 200 响应作废成 conversion_error。
+const DefaultMaxTokens = 32768
+
 // Internal 内部统一格式（Anthropic-like）
 type Internal struct {
 	Model     string
@@ -63,7 +73,7 @@ func FromAnthropic(body map[string]any) *Internal {
 		Messages:  messages,
 		System:    normalizeSystem(body["system"]),
 		Stream:    getBool(body, "stream"),
-		MaxTokens: getIntDefault(body, "max_tokens", 4096),
+		MaxTokens: getIntDefault(body, "max_tokens", DefaultMaxTokens),
 		Tools:     tools,
 		Extra:     body,
 		Err:       errors.Join(toolsErr, validateAnthropicMessages(messages)),
@@ -115,7 +125,7 @@ func FromOpenAIChat(body map[string]any) *Internal {
 		Messages:  messages,
 		System:    normalizeSystem(strings.Join(systemParts, "\n")),
 		Stream:    getBool(body, "stream"),
-		MaxTokens: getIntDefault(body, "max_tokens", 4096),
+		MaxTokens: getIntDefault(body, "max_tokens", DefaultMaxTokens),
 		Tools:     tools,
 		Extra:     body,
 		Err:       errors.Join(conversionErr, toolsErr),
@@ -200,7 +210,7 @@ func FromOpenAIResponses(body map[string]any) *Internal {
 		Messages:       messages,
 		System:         normalizeSystem(body["instructions"]),
 		Stream:         getBool(body, "stream"),
-		MaxTokens:      getIntDefault(body, "max_output_tokens", 4096),
+		MaxTokens:      getIntDefault(body, "max_output_tokens", DefaultMaxTokens),
 		Tools:          tools,
 		ToolNamespaces: owners,
 		Extra:          body,
@@ -375,6 +385,73 @@ func ToOpenAIResponsesBodyChecked(in *Internal, targetModel string) (map[string]
 		return nil, err
 	}
 	return ToOpenAIResponsesBody(in, targetModel), nil
+}
+
+// OverrideMaxTokens 按 provider 格式改写上游请求体里的输出上限字段。
+//
+// 硬覆盖客户端传入值，不取 min：配置里写的是「这个上游该输出多少」，
+// 客户端（尤其 Codex / Claude Code 这类 CLI）往往根本不传该字段，
+// 取 min 会让配置在客户端传了个更小值时形同虚设。
+//
+// 透传路径同样要调用：anthropic→anthropic 走的是客户端原始 body 浅拷贝，
+// 不经过 ToXxxBody，漏掉这里会让该路径完全不受配置约束，两类请求行为分裂。
+//
+// OpenAI Chat 的字段名有两种：新版模型只认 max_completion_tokens，旧版只认
+// max_tokens。这里只改写客户端已经带上的那个键，两个都没带时按旧版补
+// max_tokens——同时塞两个键会被部分上游判为互斥字段冲突而 400。
+func OverrideMaxTokens(body map[string]any, providerFormat string, maxTokens int) {
+	if body == nil || maxTokens <= 0 {
+		return
+	}
+	switch providerFormat {
+	case "openai-responses":
+		body["max_output_tokens"] = maxTokens
+	case "openai":
+		if _, exists := body["max_completion_tokens"]; exists {
+			body["max_completion_tokens"] = maxTokens
+			return
+		}
+		body["max_tokens"] = maxTokens
+	default:
+		body["max_tokens"] = maxTokens
+	}
+}
+
+// EnsureMaxTokens 在输出上限字段**完全缺失**时补上 DefaultMaxTokens，字段已存在则不动。
+//
+// 这是优先级链的最后一环（客户端传入值 > 本默认值）：三层配置都没配时调用它，
+// 客户端传了就保留客户端的值，一个都没有才落到默认值。
+//
+// 只有透传路径真正需要它。跨格式路径的 ToXxxBody 无条件写入 in.MaxTokens
+// （已含 getIntDefault 的默认值），字段必然存在，这里恒为空操作；而透传是客户端原始
+// body 的浅拷贝，客户端没传就真的没有该字段——Anthropic 的 max_tokens 是必填，
+// 缺了上游直接 400，那条路径会变成「只要客户端不传就必失败」。
+//
+// openai-chat 的两个键任一存在即视为已配：补第二个会被部分上游判为互斥字段冲突。
+func EnsureMaxTokens(body map[string]any, providerFormat string) {
+	if body == nil {
+		return
+	}
+	switch providerFormat {
+	case "openai-responses":
+		if _, exists := body["max_output_tokens"]; exists {
+			return
+		}
+		body["max_output_tokens"] = DefaultMaxTokens
+	case "openai":
+		if _, exists := body["max_completion_tokens"]; exists {
+			return
+		}
+		if _, exists := body["max_tokens"]; exists {
+			return
+		}
+		body["max_tokens"] = DefaultMaxTokens
+	default:
+		if _, exists := body["max_tokens"]; exists {
+			return
+		}
+		body["max_tokens"] = DefaultMaxTokens
+	}
 }
 
 func normalizeSystem(system any) any {

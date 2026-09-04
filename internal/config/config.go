@@ -32,6 +32,9 @@ const (
 
 	// maxRouteTargets 单条路由的候选上限，避免最坏耗时不可控。
 	maxRouteTargets = 5
+	// MaxOutputTokensCeiling 是 maxTokens 配置项的上限。取值只为拦住手误多打几个 0：
+	// 真实上限由上游模型决定，网关无从得知，写超了由上游报错更准确。
+	MaxOutputTokensCeiling = 1_000_000
 	// maxFailoverAttempts failover.maxAttempts 上限。
 	maxFailoverAttempts = 5
 	// maxRetryAfterCapMs Retry-After 阈值上限，借 Portkey 的 60 秒。
@@ -86,6 +89,12 @@ type Provider struct {
 	MaxConcurrent int    `yaml:"maxConcurrent" json:"maxConcurrent"`             // 最大并发
 	MaxPerSecond  int    `yaml:"maxPerSecond" json:"maxPerSecond"`               // 每秒最多请求数，0 表示不限
 	MaxQueueWait  int    `yaml:"maxQueueWait" json:"maxQueueWait,omitempty"`     // 队列最大等待（毫秒）
+	// MaxTokens 覆盖转发给该 provider 的输出上限（Anthropic / Chat 的 max_tokens、
+	// Responses 的 max_output_tokens），nil 表示不覆盖。
+	//
+	// 用 *int 而非 int：值类型分不清「写了 0」和「没写」，而 0 必须由 validate 报错，
+	// 不能被静默当成未配置。优先级 target > route > provider，见 router.Candidate。
+	MaxTokens *int `yaml:"maxTokens,omitempty" json:"maxTokens,omitempty"`
 }
 
 // Vision 路由上的视觉子配置
@@ -99,6 +108,8 @@ type Vision struct {
 type Target struct {
 	Provider string `yaml:"provider" json:"provider"`
 	Model    string `yaml:"model" json:"model"`
+	// MaxTokens 覆盖该目标的输出上限，nil 表示不覆盖。优先级 target > route > provider。
+	MaxTokens *int `yaml:"maxTokens,omitempty" json:"maxTokens,omitempty"`
 }
 
 // Route 路由规则，按顺序匹配，首条命中生效。
@@ -122,6 +133,8 @@ type Route struct {
 	// 与 failover.enabled 正交：策略决定「先试谁」，failover 决定「失败了还能试谁」。
 	// failover 关闭 + round-robin 是合法组合，表示纯分流、不转移。
 	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
+	// MaxTokens 覆盖该路由转发的输出上限，nil 表示不覆盖。优先级 target > route > provider。
+	MaxTokens *int `yaml:"maxTokens,omitempty" json:"maxTokens,omitempty"`
 }
 
 // TargetList 返回统一形态的候选列表。
@@ -856,6 +869,11 @@ func validate(c *Config) error {
 		if err := validateRouteStrategy(&r); err != nil {
 			return err
 		}
+		if r.MaxTokens != nil {
+			if *r.MaxTokens < 1 || *r.MaxTokens > MaxOutputTokensCeiling {
+				return fmt.Errorf("route %q.maxTokens 应在 1-%d 之间", r.Match, MaxOutputTokensCeiling)
+			}
+		}
 		if r.Vision != nil {
 			if strings.TrimSpace(r.Vision.Provider) == "" {
 				return fmt.Errorf("route %q.vision 缺少 provider 字段", r.Match)
@@ -944,6 +962,11 @@ func validateProvider(name string, p *Provider, validateLimits bool) error {
 			return fmt.Errorf("providers.%s.proxy 须为有效的 http/https/socks5/socks5h URL", name)
 		}
 	}
+	if p.MaxTokens != nil {
+		if *p.MaxTokens < 1 || *p.MaxTokens > MaxOutputTokensCeiling {
+			return fmt.Errorf("providers.%s.maxTokens 应在 1-%d 之间", name, MaxOutputTokensCeiling)
+		}
+	}
 	return nil
 }
 
@@ -972,8 +995,11 @@ func validateRouteTargets(c *Config, r *Route) error {
 	if len(r.Targets) > maxRouteTargets {
 		return fmt.Errorf("route %q.targets 最多 %d 个候选", r.Match, maxRouteTargets)
 	}
-	// 拒绝完全重复的 (provider, model) 对；同 provider 不同 model 合法（降级到便宜模型）
-	seen := make(map[Target]struct{}, len(r.Targets))
+	// 拒绝完全重复的 (provider, model) 对；同 provider 不同 model 合法（降级到便宜模型）。
+	// 键只取 provider+model，不能直接用 Target 做键：Target 带了 MaxTokens *int，
+	// 两个同 provider/model 的候选只要一个配了 maxTokens 指针就不相等，重复检查会失效。
+	type targetKey struct{ provider, model string }
+	seen := make(map[targetKey]struct{}, len(r.Targets))
 	for i, t := range r.Targets {
 		if strings.TrimSpace(t.Provider) == "" {
 			return fmt.Errorf("route %q.targets[%d] 缺少 provider 字段", r.Match, i)
@@ -984,10 +1010,14 @@ func validateRouteTargets(c *Config, r *Route) error {
 		if strings.TrimSpace(t.Model) == "" {
 			return fmt.Errorf("route %q.targets[%d] 缺少 model 字段", r.Match, i)
 		}
-		if _, dup := seen[t]; dup {
+		if t.MaxTokens != nil && (*t.MaxTokens < 1 || *t.MaxTokens > MaxOutputTokensCeiling) {
+			return fmt.Errorf("route %q.targets[%d].maxTokens 应在 1-%d 之间", r.Match, i, MaxOutputTokensCeiling)
+		}
+		key := targetKey{provider: t.Provider, model: t.Model}
+		if _, dup := seen[key]; dup {
 			return fmt.Errorf("route %q.targets 存在重复候选: %s/%s", r.Match, t.Provider, t.Model)
 		}
-		seen[t] = struct{}{}
+		seen[key] = struct{}{}
 	}
 	return nil
 }

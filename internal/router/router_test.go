@@ -318,3 +318,68 @@ func TestGlobMatch(t *testing.T) {
 		}
 	}
 }
+
+// TestMatchRouteMaxTokensPrecedence 验证 maxTokens 三层优先级：target > route > provider。
+func TestMatchRouteMaxTokensPrecedence(t *testing.T) {
+	intp := func(v int) *int { return &v }
+
+	tests := []struct {
+		name         string
+		providerMax  *int
+		routeMax     *int
+		targetMax    *int
+		wantResolved *int
+	}{
+		{name: "三层都没配则不覆盖"},
+		{name: "只有 provider", providerMax: intp(8192), wantResolved: intp(8192)},
+		{name: "route 盖 provider", providerMax: intp(8192), routeMax: intp(16384), wantResolved: intp(16384)},
+		{name: "target 盖 route 与 provider", providerMax: intp(8192), routeMax: intp(16384), targetMax: intp(32768), wantResolved: intp(32768)},
+		{name: "target 盖 provider（无 route）", providerMax: intp(8192), targetMax: intp(65536), wantResolved: intp(65536)},
+		{name: "只有 route", routeMax: intp(4096), wantResolved: intp(4096)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := baseConfig()
+			cfg.Providers["alpha"].MaxTokens = tt.providerMax
+			cfg.Routes = []config.Route{{
+				Match:     "claude-*",
+				MaxTokens: tt.routeMax,
+				Targets: []config.Target{
+					{Provider: "alpha", Model: "upstream-a", MaxTokens: tt.targetMax},
+				},
+			}}
+
+			m := MatchRoute("claude-opus-4", cfg)
+			if m == nil {
+				t.Fatal("期望命中路由，实际为 nil")
+			}
+			got := m.Candidates[0].MaxTokens
+			switch {
+			case tt.wantResolved == nil && got != nil:
+				t.Fatalf("MaxTokens = %d，期望 nil（不覆盖）", *got)
+			case tt.wantResolved != nil && got == nil:
+				t.Fatalf("MaxTokens = nil，期望 %d", *tt.wantResolved)
+			case tt.wantResolved != nil && *got != *tt.wantResolved:
+				t.Fatalf("MaxTokens = %d，期望 %d", *got, *tt.wantResolved)
+			}
+		})
+	}
+}
+
+// 单目标写法（provider + model，无 targets）下 route 级 maxTokens 必须生效——
+// 那是单目标路由唯一能设该值的地方。
+func TestMatchRouteSingleTargetUsesRouteMaxTokens(t *testing.T) {
+	value := 16384
+	cfg := baseConfig()
+	cfg.Routes = []config.Route{{Match: "claude-*", Provider: "alpha", Model: "upstream-a", MaxTokens: &value}}
+
+	m := MatchRoute("claude-opus-4", cfg)
+	if m == nil {
+		t.Fatal("期望命中路由，实际为 nil")
+	}
+	got := m.Candidates[0].MaxTokens
+	if got == nil || *got != 16384 {
+		t.Fatalf("单目标路由 MaxTokens = %v，期望 16384", got)
+	}
+}

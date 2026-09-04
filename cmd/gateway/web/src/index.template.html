@@ -1056,19 +1056,21 @@
                     </div>
                     <!-- table-fixed + colgroup 按比例分宽。table-auto 会按内容比例摊，
                          模型名最长，宽屏就在模型和 Provider 之间空出一大块。
-                         模型给 22%：20% 会把 claude-opus-4-8 → claude-opus-5-thinking
-                         截成 claude-opus-5-thin…。多出的 2% 从 Provider 挪来
-                         （provider 名都是 sota3 / gor3 这种短名，8% 够用）。
-                         再长仍截断走 tooltip。转移轨迹 / 错误各 16%，空的时候也不会变成沙漠。 -->
+                         模型给 23%：22% 仍会把 claude-opus-5 → claude-opus-5-thinking
+                         截成 claude-opus-5-thi…，再长仍截断走 tooltip。
+                         Provider 9%：短名（sota3 / gor3 / ar-ld）够用，长自定义名截断走 tooltip。
+                         时间 8%：只渲染时分秒（logClock），常见桌面宽度下仍宽于 HH:MM:SS。
+                         转移轨迹 / 错误各 16%，空的时候也不会变成沙漠。
+                         九列相加必须等于 100，改任一列都要在别处等量补回。 -->
                     <div class="overflow-x-auto lg:max-h-[calc(100%-9.75rem)]">
                         <table class="w-full min-w-[930px] table-fixed border-collapse text-left">
                             <colgroup>
-                                <col style="width:10%">
+                                <col style="width:8%">
                                 <col style="width:6%">
                                 <col style="width:7%">
                                 <col style="width:8%">
-                                <col style="width:22%">
-                                <col style="width:8%">
+                                <col style="width:23%">
+                                <col style="width:9%">
                                 <col style="width:7%">
                                 <col style="width:16%">
                                 <col style="width:16%">
@@ -1109,7 +1111,14 @@
                                             @focus="showTip(log.time || log.startedAt || '', $event)"
                                             @blur="hideTip()"
                                             tabindex="0" x-text="logClock(log)"></td>
-                                        <td class="whitespace-nowrap px-3 py-2.5">
+                                        <!-- 状态 / 流式两列的单元格用 px-1.5 而不是跟表头一样的 px-3：
+                                             这里的值是 .chip 徽章，它自带 1px 边框 + px-1.5 内边距，
+                                             文字比徽章外框再往右 7px。单元格照抄表头的 px-3 时，
+                                             对齐的是「表头文字 ↔ 徽章外框」，而眼睛比的是文字对文字，
+                                             于是这两列看起来整体右移。把单元格内边距减掉徽章那 7px 左右，
+                                             徽章文字就落回表头文字的位置（残差 1px，来自边框）。
+                                             其余列是纯文本、表头与单元格同为 px-4，本来就对齐。 -->
+                                        <td class="whitespace-nowrap px-1.5 py-2.5">
                                             <!-- 徽章要连 log.error 一起看：流式响应头写出后才失败的请求（转换失败、
                                                  流中途断开、活跃超时）状态码停在 200，只按数字上色会给绿底，
                                                  而后端 isSuccess 要求 error 为空、这条在成功率里算失败，两边对不上。 -->
@@ -1120,7 +1129,7 @@
                                                   @focus="showTip(statusTip(log), $event)"
                                                   @blur="hideTip()" tabindex="0"></span>
                                         </td>
-                                        <td class="whitespace-nowrap px-3 py-2.5">
+                                        <td class="whitespace-nowrap px-1.5 py-2.5">
                                             <span class="chip px-1.5 text-[11px]" :class="log.stream ? 'bg-cyan2/10 text-cyan' : 'bg-white/[.05] text-muted'" x-text="log.stream ? '流式' : '非流式'"></span>
                                         </td>
                                         <!-- 主行放请求 ID，方便对照 stderr；IP / Key 来源 / 指纹几乎不变，
@@ -1342,8 +1351,15 @@
     <div x-show="showProviderModal" x-transition.opacity x-cloak
          @keydown.escape.window="escapeProviderModal()"
          class="fixed inset-0 z-50 grid place-items-center bg-black/70 p-4">
-        <div class="glass w-full max-w-2xl rounded-lg shadow-glow">
-            <div class="flex items-center justify-between border-b border-line p-5">
+        <!-- 弹窗高度封顶 + 只让表单区滚动：设置项变多后整块会顶出视口，
+             连底部的保存按钮都点不到。三个约束缺一不可：
+             外层 flex-col + max-h 限高、表单区 min-h-0 flex-1 overflow-y-auto、
+             头尾 shrink-0。min-h-0 是关键——flex 子项默认 min-height:auto，
+             不置 0 时它拒绝收缩到内容高度以下，overflow 永远不触发。
+             限高值复用 toast 栈那个 calc(100vh-6rem)：vendor/tailwind.css 是构建期产物，
+             写一个没生成过的任意值（如 calc(100vh-2rem)）不会报错，只是静默无样式。 -->
+        <div class="glass flex max-h-[calc(100vh-6rem)] w-full max-w-2xl flex-col rounded-lg shadow-glow">
+            <div class="flex shrink-0 items-center justify-between border-b border-line p-5">
                 <h3 class="text-lg font-extrabold text-white" x-text="editingProvider ? '编辑 Provider' : '添加 Provider'"></h3>
                 <button @click="showProviderModal = false" class="btn btn-secondary px-2 py-2" aria-label="关闭 Provider 弹窗">
                     <span class="material-symbols-outlined">close</span>
@@ -1352,8 +1368,9 @@
             <!-- 改任何字段就清掉上一次的检测结果：结果对应的是点检测那一刻的表单值，
                  用户改完 URL 后旧结论还挂着会造成误导（红着的其实已经不是当前配置了）。
                  挂在容器上靠事件冒泡覆盖全部输入，避免六个字段各写一遍。 -->
-            <div class="grid grid-cols-1 gap-4 p-5 md:grid-cols-2"
-                 @input="providerProbeStatus = null" @change="providerProbeStatus = null">
+            <div class="min-h-0 flex-1 overflow-y-auto">
+                <div class="grid grid-cols-1 gap-4 p-5 md:grid-cols-2"
+                     @input="providerProbeStatus = null" @change="providerProbeStatus = null">
                 <label class="block">
                     <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">名称</span>
                     <!-- maxlength 按 UTF-16 码元数截，和后端的 rune 计数在 BMP 内一致；
@@ -1397,6 +1414,12 @@
                     <input autocomplete="off" type="number" x-model.number="providerForm.maxQueueWait" class="field">
                 </label>
                 <label class="block md:col-span-2">
+                    <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">最大输出 tokens</span>
+                    <input autocomplete="off" type="number" x-model.number="providerForm.maxTokens" placeholder="留空 = 用客户端传入值，客户端也没传则 32768" class="field">
+                    <span class="mt-1 block text-[11px] text-muted">覆盖转发给该上游的 max_tokens / max_output_tokens，配了就硬覆盖客户端传入值。完整优先级：候选 &gt; 路由 &gt; 上游 &gt; 客户端传入值 &gt; 全局默认 32768。</span>
+                    <span class="mt-1 block text-[11px] text-warn">配得过小会让思考型模型烧光预算就被截断，工具调用参数被砍断后客户端会重投，表现为「同一条命令反复执行」。</span>
+                </label>
+                <label class="block md:col-span-2">
                     <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">User-Agent</span>
                     <input autocomplete="off" type="text" x-model="providerForm.userAgent" placeholder="留空则转发客户端真实 UA" class="field">
                     <span class="mt-1 block text-[11px] text-muted">用于兼容按客户端类型准入的上游；显式设置会覆盖客户端请求头。</span>
@@ -1407,13 +1430,16 @@
                     <span class="mt-1 block text-[11px] text-muted">留空则使用全局 HTTPS_PROXY/HTTP_PROXY；全局也没有则直连。仅支持 http/https/socks5/socks5h。</span>
                     <span class="mt-1 block text-[11px] text-warn">密码位显示占位符表示沿用已存密码；要改密码请重新填写完整代理 URL。</span>
                 </label>
+                </div>
             </div>
-            <div x-show="providerProbeStatus" x-cloak class="mx-5 mb-4 rounded-lg border px-3 py-2 text-sm"
+            <!-- 检测结果留在滚动区外：它是点底部「检测」按钮的即时反馈，
+                 跟着表单滚上去就等于点了没反应。 -->
+            <div x-show="providerProbeStatus" x-cloak class="mx-5 mb-4 shrink-0 rounded-lg border px-3 py-2 text-sm"
                  :class="providerProbeStatus?.status === 'ok' ? 'border-good/40 bg-good/10 text-good' : providerProbeStatus?.status === 'warn' ? 'border-warn/40 bg-warn/10 text-warn' : 'border-danger/40 bg-danger/10 text-danger'">
                 <div class="font-bold" x-text="providerProbeStatus?.message || providerProbeStatus?.status"></div>
                 <div class="mt-1 font-mono text-xs opacity-80" x-text="[providerProbeStatus?.httpCode ? 'HTTP ' + providerProbeStatus.httpCode : '', providerProbeStatus?.latencyMs ? providerProbeStatus.latencyMs + 'ms' : '', providerProbeStatus?.endpoint || ''].filter(Boolean).join(' · ')"></div>
             </div>
-            <div class="flex justify-end gap-3 border-t border-line p-5">
+            <div class="flex shrink-0 justify-end gap-3 border-t border-line p-5">
                 <button @click="showProviderModal = false" class="btn btn-secondary">取消</button>
                 <button @click="probeProviderForm()" :disabled="probingProvider" class="btn btn-secondary disabled:opacity-60">
                     <span class="material-symbols-outlined" :class="probingProvider && 'gw-spin'" x-text="probingProvider ? 'progress_activity' : 'health_and_safety'"></span>
@@ -1434,14 +1460,16 @@
     <div x-show="showRouteModal" x-transition.opacity x-cloak
          @keydown.escape.window="escapeRouteModal()"
          class="fixed inset-0 z-50 grid place-items-center bg-black/70 p-4">
-        <div class="glass w-full max-w-2xl rounded-lg shadow-glow">
-            <div class="flex items-center justify-between border-b border-line p-5">
+        <!-- 限高与只滚表单区，理由同 Provider 弹窗 -->
+        <div class="glass flex max-h-[calc(100vh-6rem)] w-full max-w-2xl flex-col rounded-lg shadow-glow">
+            <div class="flex shrink-0 items-center justify-between border-b border-line p-5">
                 <h3 class="text-lg font-extrabold text-white" x-text="editingRouteIndex >= 0 ? '编辑路由' : '添加路由'"></h3>
                 <button @click="showRouteModal = false" class="btn btn-secondary px-2 py-2" aria-label="关闭路由弹窗">
                     <span class="material-symbols-outlined">close</span>
                 </button>
             </div>
-            <div class="grid grid-cols-1 gap-4 p-5 md:grid-cols-2">
+            <div class="min-h-0 flex-1 overflow-y-auto">
+                <div class="grid grid-cols-1 gap-4 p-5 md:grid-cols-2">
                 <label class="block">
                     <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">匹配模式</span>
                     <input autocomplete="off" type="text" x-model="routeForm.match" placeholder="例如: claude-* 或 gpt-4" class="field font-mono">
@@ -1497,6 +1525,12 @@
                                             x-text="m"></li>
                                     </template>
                                 </ul>
+                                <!-- 候选级 maxTokens：优先级最高，用于同路由下不同上游输出上限不一致 -->
+                                <div class="ml-8 flex items-center gap-2">
+                                    <span class="shrink-0 text-[11px] text-muted">最大输出 tokens</span>
+                                    <input autocomplete="off" type="number" x-model.number="target.maxTokens"
+                                           placeholder="留空 = 跟随路由/上游设置" class="field w-48 text-xs">
+                                </div>
                             </div>
                         </template>
                     </div>
@@ -1523,6 +1557,11 @@
                         直通模式下没有队列，在途量恒为 0，least-queue 会退化成 round-robin。
                     </p>
                 </div>
+                <label class="block md:col-span-2">
+                    <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">最大输出 tokens（本路由）</span>
+                    <input autocomplete="off" type="number" x-model.number="routeForm.maxTokens" placeholder="留空 = 跟随上游设置 / 客户端值 / 默认 32768" class="field">
+                    <span class="mt-1 block text-[11px] text-muted">完整优先级：候选 &gt; 路由 &gt; 上游 &gt; 客户端传入值 &gt; 全局默认 32768。多候选且各自上限不同时，请改用上面每个候选自己的设置。</span>
+                </label>
                 <div class="rounded-lg border border-cyan2/20 bg-cyan2/5 p-4 md:col-span-2">
                     <label class="mb-4 flex cursor-pointer items-center gap-3">
                         <input autocomplete="off" type="checkbox" x-model="routeForm.enableVision" class="h-4 w-4 rounded border-line bg-panel text-cyan2 focus:ring-cyan2">
@@ -1543,8 +1582,9 @@
                         </label>
                     </div>
                 </div>
+                </div>
             </div>
-            <div class="flex justify-end gap-3 border-t border-line p-5">
+            <div class="flex shrink-0 justify-end gap-3 border-t border-line p-5">
                 <button @click="showRouteModal = false" class="btn btn-secondary">取消</button>
                 <button @click="saveRoute()" :disabled="loading" class="btn btn-primary disabled:opacity-60">
                     <span x-show="loading" x-cloak class="material-symbols-outlined gw-spin text-[18px]">progress_activity</span>

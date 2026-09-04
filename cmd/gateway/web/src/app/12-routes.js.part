@@ -1,6 +1,6 @@
                 routeTargets(route) {
                     if (Array.isArray(route?.targets) && route.targets.length) return route.targets;
-                    return [{ provider: route?.provider || '', model: route?.model || '' }];
+                    return [{ provider: route?.provider || '', model: route?.model || '', maxTokens: null }];
                 },
 
                 addRoute() {
@@ -11,6 +11,7 @@
                         targets: [this.newRouteTarget(providers[0] || '')],
                         // 存真实枚举值而不是空字符串，保证下拉的 DOM 值总能匹配到一个 option
                         strategy: 'failover',
+                        maxTokens: null,
                         enableVision: false,
                         visionProvider: providers[0] || '',
                         visionModel: ''
@@ -23,10 +24,11 @@
                     const route = this.config.routes[index];
                     this.routeForm = {
                         match: route.match,
-                        targets: this.routeTargets(route).map((t) => this.newRouteTarget(t.provider || '', t.model || '')),
+                        targets: this.routeTargets(route).map((t) => this.newRouteTarget(t.provider || '', t.model || '', t.maxTokens ?? null)),
                         // 配置里没写 strategy 就是默认 failover；这里补成真实枚举值，
                         // 留空会让下拉匹配不到 option、显示回落到第一项
                         strategy: route.strategy || 'failover',
+                        maxTokens: route.maxTokens ?? null,
                         enableVision: !!route.vision,
                         visionProvider: route.vision?.provider || '',
                         visionModel: route.vision?.model || ''
@@ -44,8 +46,9 @@
                     this.editingRouteIndex = -1;
                     this.routeForm = {
                         match: route.match || '',
-                        targets: this.routeTargets(route).map((t) => this.newRouteTarget(t.provider || '', t.model || '')),
+                        targets: this.routeTargets(route).map((t) => this.newRouteTarget(t.provider || '', t.model || '', t.maxTokens ?? null)),
                         strategy: route.strategy || 'failover',
+                        maxTokens: route.maxTokens ?? null,
                         enableVision: !!route.vision,
                         visionProvider: route.vision?.provider || '',
                         visionModel: route.vision?.model || ''
@@ -54,10 +57,10 @@
                     this.showStatus(`已按「${route.match || '(空)'}」预填，记得改匹配模式`, 'success');
                 },
 
-                // 候选 target 的运行时形状：provider/model 是落盘字段，
+                // 候选 target 的运行时形状：provider/model/maxTokens 是落盘字段，
                 // models/modelsLoading 是查询远程模型列表的瞬态状态，saveRoute 不读它们。
-                newRouteTarget(provider, model = '') {
-                    return { provider, model, models: [], modelsLoading: false };
+                newRouteTarget(provider, model = '', maxTokens = null) {
+                    return { provider, model, maxTokens, models: [], modelsLoading: false };
                 },
 
                 // 切换候选的 provider 后清掉已拉的模型列表：列表是上一个上游的，
@@ -156,10 +159,17 @@
                         this.showStatus(`匹配模式「${this.routeForm.match}」已被其他路由占用，改一个再保存`, 'error');
                         return;
                     }
-                    const targets = (this.routeForm.targets || []).map((t) => ({
-                        provider: (t.provider || '').trim(),
-                        model: (t.model || '').trim()
-                    }));
+                    const targets = (this.routeForm.targets || []).map((t) => {
+                        const out = {
+                            provider: (t.provider || '').trim(),
+                            model: (t.model || '').trim()
+                        };
+                        // 只在真配了才落盘：*int 字段带 null 进 yaml 会落一行 maxTokens: null，
+                        // 后端解成 nil 虽无害，但预览和磁盘上多出一堆噪音。
+                        const max = this.numOrNull(t.maxTokens);
+                        if (max !== null) out.maxTokens = max;
+                        return out;
+                    });
                     if (!targets.length || targets.some((t) => !t.provider || !t.model)) {
                         this.showStatus('每个候选的 Provider 和模型都不能为空', 'error');
                         return;
@@ -191,6 +201,13 @@
                     if (targets.length > 1 && this.routeForm.strategy && this.routeForm.strategy !== 'failover') {
                         route.strategy = this.routeForm.strategy;
                     }
+                    // 路由级 maxTokens 同样只在配了时才落盘。
+                    // 单候选写法（provider/model）下 targets 数组不落盘，候选级的值会随之丢失，
+                    // 所以把它折进路由级——两者在单候选下语义完全等价，优先取候选级（更具体）。
+                    const routeMaxTokens = targets.length === 1 && targets[0].maxTokens != null
+                        ? targets[0].maxTokens
+                        : this.numOrNull(this.routeForm.maxTokens);
+                    if (routeMaxTokens !== null) route.maxTokens = routeMaxTokens;
                     if (this.routeForm.enableVision) {
                         route.vision = {
                             provider: this.routeForm.visionProvider,

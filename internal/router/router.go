@@ -13,6 +13,9 @@ import (
 type Candidate struct {
 	Provider    *config.Provider
 	TargetModel string
+	// MaxTokens 该候选的输出上限，nil 表示不覆盖客户端值。
+	// 优先级：target > route > provider，由 MatchRoute 合成。
+	MaxTokens *int
 }
 
 // Match 路由匹配结果。
@@ -47,7 +50,11 @@ func MatchRoute(model string, cfg *config.Config) *Match {
 			if targetModel == "" {
 				targetModel = model
 			}
-			candidates = append(candidates, Candidate{Provider: &pCopy, TargetModel: targetModel})
+			candidates = append(candidates, Candidate{
+				Provider:    &pCopy,
+				TargetModel: targetModel,
+				MaxTokens:   resolveMaxTokens(target, route, src),
+			})
 		}
 		if len(candidates) == 0 {
 			continue
@@ -63,6 +70,18 @@ func MatchRoute(model string, cfg *config.Config) *Match {
 		return m
 	}
 	return nil
+}
+
+// resolveMaxTokens 按优先级 target > route > provider 合成该候选的输出上限。
+// 三层都未配置时返回 nil，由网关全局默认 32768 兜底。
+func resolveMaxTokens(target config.Target, route config.Route, provider *config.Provider) *int {
+	if target.MaxTokens != nil {
+		return target.MaxTokens
+	}
+	if route.MaxTokens != nil {
+		return route.MaxTokens
+	}
+	return provider.MaxTokens
 }
 
 // ResolveAPIKey 优先用 provider.apiKey，否则从请求头提取（x-api-key 或 Bearer）。

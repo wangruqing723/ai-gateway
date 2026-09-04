@@ -11,6 +11,7 @@
                         maxConcurrent: 5,
                         maxPerSecond: 0,
                         maxQueueWait: 30000,
+                        maxTokens: null,
                         userAgent: '',
                         proxy: '',
                         apiKeyConfigured: false,
@@ -32,6 +33,7 @@
                         maxConcurrent: p.maxConcurrent,
                         maxPerSecond: p.maxPerSecond,
                         maxQueueWait: p.maxQueueWait,
+                        maxTokens: p.maxTokens ?? null,
                         userAgent: p.userAgent || '',
                         proxy: p.proxy || '',
                         apiKeyConfigured: !!p.apiKeyConfigured,
@@ -60,6 +62,7 @@
                         maxConcurrent: p.maxConcurrent,
                         maxPerSecond: p.maxPerSecond,
                         maxQueueWait: p.maxQueueWait,
+                        maxTokens: p.maxTokens ?? null,
                         userAgent: p.userAgent || '',
                         // 副本名在磁盘上没有旧密码可供 sentinel 回查，认证代理必须重填。
                         proxy: (p.proxy || '').includes('__AI_GATEWAY_KEEP_PROXY_PASSWORD__') ? '' : (p.proxy || ''),
@@ -118,6 +121,9 @@
                         maxConcurrent: this.providerForm.maxConcurrent || 5,
                         maxPerSecond: this.providerForm.maxPerSecond || 0,
                         maxQueueWait: this.providerForm.maxQueueWait || 30000,
+                        // numOrNull：空输入发 null（= 未配置，用全局默认 32768），
+                        // 不能兜成 0——后端 validate 会拒 0。
+                        maxTokens: this.numOrNull(this.providerForm.maxTokens),
                         userAgent: this.providerForm.userAgent || undefined,
                         proxy: this.providerForm.proxy || undefined
                     };

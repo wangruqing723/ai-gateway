@@ -1219,3 +1219,154 @@ func TestStreamAggregateBufferLimit(t *testing.T) {
 		t.Fatalf("aggregate stream error = %v, want cumulative size rejection", err)
 	}
 }
+
+// TestTruncatedToolArgumentsDoNotFailStream 是这组行为的核心回归：
+// 上游把工具参数砍在 JSON 中间（撞 max_tokens 的典型表现）时，四条跨格式路径都
+// 不得作废整条响应，而要把已收到的半截参数原样交给客户端并标出「被截断」。
+//
+// 起因是线上一条 200 响应：Codex 走 /v1/responses → anthropic 上游，已经流了
+// 467 KB / 63 秒，最后因 `arguments: invalid JSON: unexpected end of JSON input`
+// 被整条判失败。而真实 Anthropic 在这种情况下只给 stop_reason: max_tokens。
+func TestTruncatedToolArgumentsDoNotFailStream(t *testing.T) {
+	t.Run("anthropic-to-responses", func(t *testing.T) {
+		transformer := NewStreamTransformer("anthropic", "openai-responses")
+		out := transformAll(t, transformer,
+			`data: {"type":"message_start","message":{"model":"glm-5.2"}}`,
+			`data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_1f23","name":"Write"}}`,
+			`data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"path\":\"/x\",\"content\":\"aaa"}}`,
+			`data: {"type":"content_block_stop","index":1}`,
+			`data: {"type":"message_delta","delta":{"stop_reason":"max_tokens"}}`,
+			`data: {"type":"message_stop"}`,
+		)
+		if err := StreamError(transformer); err != nil {
+			t.Fatalf("截断参数不应产生转换错误: %v", err)
+		}
+		if !StreamCompleted(transformer) {
+			t.Fatal("流应正常完成，而不是失败终态")
+		}
+		joined := strings.Join(out, "")
+		if !strings.Contains(joined, "response.incomplete") {
+			t.Fatalf("应给 response.incomplete 终态:\n%s", joined)
+		}
+		if !strings.Contains(joined, "max_output_tokens") {
+			t.Fatalf("incomplete_details.reason 应为 max_output_tokens:\n%s", joined)
+		}
+		// 半截参数必须原样透传：arguments 在 Responses 里是字符串字段，截断值协议合法
+		if !strings.Contains(joined, `{\"path\":\"/x\",\"content\":\"aaa`) {
+			t.Fatalf("截断参数应原样透传:\n%s", joined)
+		}
+		if strings.Contains(joined, "response.failed") {
+			t.Fatalf("不应出现失败终态:\n%s", joined)
+		}
+	})
+
+	t.Run("anthropic-to-chat", func(t *testing.T) {
+		transformer := NewStreamTransformer("anthropic", "openai-chat")
+		out := transformAll(t, transformer,
+			`data: {"type":"message_start","message":{"model":"glm-5.2"}}`,
+			`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1f23","name":"Write"}}`,
+			`data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"path\":"}}`,
+			`data: {"type":"content_block_stop","index":0}`,
+			// 上游自报 tool_use，但参数其实是半截的——终态必须改报 length
+			`data: {"type":"message_delta","delta":{"stop_reason":"tool_use"}}`,
+		)
+		if err := StreamError(transformer); err != nil {
+			t.Fatalf("截断参数不应产生转换错误: %v", err)
+		}
+		joined := strings.Join(out, "")
+		if !strings.Contains(joined, `"finish_reason":"length"`) {
+			t.Fatalf("finish_reason 应改报 length:\n%s", joined)
+		}
+		if strings.Contains(joined, `"finish_reason":"tool_calls"`) {
+			t.Fatalf("参数被截断时不应报 tool_calls:\n%s", joined)
+		}
+	})
+
+	t.Run("openai-to-anthropic", func(t *testing.T) {
+		transformer := NewStreamTransformer("openai", "anthropic")
+		out := transformAll(t, transformer,
+			`data: {"model":"gpt-upstream","choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_a","type":"function","function":{"name":"Write","arguments":"{\"path\":"}}]},"finish_reason":null}]}`,
+			`data: {"model":"gpt-upstream","choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
+		)
+		if err := StreamError(transformer); err != nil {
+			t.Fatalf("截断参数不应产生转换错误: %v", err)
+		}
+		joined := strings.Join(out, "")
+		if !strings.Contains(joined, `"stop_reason":"max_tokens"`) {
+			t.Fatalf("stop_reason 应改报 max_tokens:\n%s", joined)
+		}
+		if strings.Contains(joined, `"stop_reason":"tool_use"`) {
+			t.Fatalf("参数被截断时不应报 tool_use:\n%s", joined)
+		}
+		if strings.Contains(joined, "event: error") {
+			t.Fatalf("不应出现错误终态:\n%s", joined)
+		}
+	})
+
+	t.Run("responses-to-anthropic", func(t *testing.T) {
+		transformer := NewStreamTransformer("openai-responses", "anthropic")
+		out := transformAll(t, transformer,
+			`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-up"}}`,
+			`data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_a","name":"Write"}}`,
+			`data: {"type":"response.function_call_arguments.delta","output_index":0,"delta":"{\"path\":"}`,
+			`data: {"type":"response.completed","response":{"id":"resp_1","status":"completed"}}`,
+		)
+		if err := StreamError(transformer); err != nil {
+			t.Fatalf("截断参数不应产生转换错误: %v", err)
+		}
+		joined := strings.Join(out, "")
+		if !strings.Contains(joined, `"stop_reason":"max_tokens"`) {
+			t.Fatalf("stop_reason 应改报 max_tokens:\n%s", joined)
+		}
+		if strings.Contains(joined, "event: error") {
+			t.Fatalf("不应出现错误终态:\n%s", joined)
+		}
+	})
+
+	t.Run("responses-to-chat", func(t *testing.T) {
+		transformer := NewStreamTransformer("openai-responses", "openai-chat")
+		out := transformAll(t, transformer,
+			`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-up"}}`,
+			`data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_a","name":"Write"}}`,
+			`data: {"type":"response.function_call_arguments.delta","output_index":0,"delta":"{\"path\":"}`,
+			`data: {"type":"response.completed","response":{"id":"resp_1","status":"completed"}}`,
+		)
+		if err := StreamError(transformer); err != nil {
+			t.Fatalf("截断参数不应产生转换错误: %v", err)
+		}
+		joined := strings.Join(out, "")
+		if !strings.Contains(joined, `"finish_reason":"length"`) {
+			t.Fatalf("finish_reason 应改报 length:\n%s", joined)
+		}
+	})
+}
+
+// TestWrongTypedToolArgumentsStillFailStream 划清容忍边界：
+// `[]` / `"s"` / `42` 是**完整且合法**的 JSON，只是不是对象——那是上游协议违规，
+// 不是被截断，必须保持硬失败。把它标成 incomplete 等于替上游把「我给错了」
+// 说成「我没说完」，客户端会拿一个类型错误的参数去执行工具。
+func TestWrongTypedToolArgumentsStillFailStream(t *testing.T) {
+	for _, args := range []string{"[]", `"str"`, "42", "null", "true"} {
+		t.Run("responses/"+args, func(t *testing.T) {
+			transformer := NewStreamTransformer("anthropic", "openai-responses")
+			transformAll(t, transformer,
+				`data: {"type":"message_start","message":{"model":"glm-5.2"}}`,
+				`data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_1f23","name":"Write"}}`,
+				`data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":`+jsonQuote(args)+`}}`,
+				`data: {"type":"content_block_stop","index":1}`,
+			)
+			err := StreamError(transformer)
+			if err == nil {
+				t.Fatalf("参数 %s 是完整但非对象的 JSON，应硬失败", args)
+			}
+			if !strings.Contains(err.Error(), "must be a JSON object") {
+				t.Fatalf("错误应说明必须是 JSON 对象，实际: %v", err)
+			}
+		})
+	}
+}
+
+func jsonQuote(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
+}

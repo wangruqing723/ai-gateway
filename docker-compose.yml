@@ -46,6 +46,10 @@ services:
       # NO_PROXY 是逃生口：列在这里的目标绕过代理直连。
       # 本机回环必须排除，否则指向本地服务的 provider 会被绕去代理。
       - NO_PROXY=${AI_GATEWAY_NO_PROXY:-localhost,127.0.0.1,::1}
+      - AI_GATEWAY_DEBUG_UPSTREAM_BODY=/app/data/upstream_debug.jsonl
+      # 跨格式流式转换失败时落盘上游原始 SSE。只在失败时写，成功的流不落盘。
+      # 排查完请清空这一行：467KB 级别的流累积起来很快。
+      - AI_GATEWAY_DEBUG_UPSTREAM_STREAM=/app/data/upstream_stream.jsonl
     deploy:
       resources:
         limits:

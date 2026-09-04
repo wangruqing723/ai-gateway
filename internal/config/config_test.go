@@ -814,3 +814,185 @@ func mustReadConfigTestFile(t *testing.T, path string) []byte {
 	}
 	return data
 }
+
+// TestMaxTokensValidation 覆盖三层 maxTokens 的边界。
+// 0 必须报错而不是被静默当成「未配置」——这正是这些字段用 *int 的原因。
+func TestMaxTokensValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		yaml    string
+		wantErr string
+	}{
+		{
+			name: "provider 级 0 报错",
+			yaml: `
+providers:
+  p1:
+    baseUrl: "https://a.example.com"
+    apiKey: "k"
+    format: anthropic
+    maxTokens: 0
+routes:
+  - match: "*"
+    provider: p1
+    model: "m"
+`,
+			wantErr: "providers.p1.maxTokens",
+		},
+		{
+			name: "provider 级负数报错",
+			yaml: `
+providers:
+  p1:
+    baseUrl: "https://a.example.com"
+    apiKey: "k"
+    format: anthropic
+    maxTokens: -1
+routes:
+  - match: "*"
+    provider: p1
+    model: "m"
+`,
+			wantErr: "providers.p1.maxTokens",
+		},
+		{
+			name: "route 级 0 报错",
+			yaml: `
+providers:
+  p1:
+    baseUrl: "https://a.example.com"
+    apiKey: "k"
+    format: anthropic
+routes:
+  - match: "*"
+    provider: p1
+    model: "m"
+    maxTokens: 0
+`,
+			wantErr: `route "*".maxTokens`,
+		},
+		{
+			name: "target 级 0 报错",
+			yaml: `
+providers:
+  p1:
+    baseUrl: "https://a.example.com"
+    apiKey: "k"
+    format: anthropic
+  p2:
+    baseUrl: "https://b.example.com"
+    apiKey: "k"
+    format: anthropic
+routes:
+  - match: "*"
+    targets:
+      - provider: p1
+        model: "m"
+      - provider: p2
+        model: "m2"
+        maxTokens: 0
+`,
+			wantErr: `route "*".targets[1].maxTokens`,
+		},
+		{
+			name: "超过上限报错",
+			yaml: `
+providers:
+  p1:
+    baseUrl: "https://a.example.com"
+    apiKey: "k"
+    format: anthropic
+    maxTokens: 2000000
+routes:
+  - match: "*"
+    provider: p1
+    model: "m"
+`,
+			wantErr: "providers.p1.maxTokens",
+		},
+		{
+			name: "三层合法值通过",
+			yaml: `
+providers:
+  p1:
+    baseUrl: "https://a.example.com"
+    apiKey: "k"
+    format: anthropic
+    maxTokens: 8192
+  p2:
+    baseUrl: "https://b.example.com"
+    apiKey: "k"
+    format: anthropic
+routes:
+  - match: "*"
+    maxTokens: 16384
+    targets:
+      - provider: p1
+        model: "m"
+        maxTokens: 32768
+      - provider: p2
+        model: "m2"
+`,
+		},
+		{
+			name: "全部不配通过（等同未配置）",
+			yaml: `
+providers:
+  p1:
+    baseUrl: "https://a.example.com"
+    apiKey: "k"
+    format: anthropic
+routes:
+  - match: "*"
+    provider: p1
+    model: "m"
+`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := DecodeAndValidate([]byte(tt.yaml))
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("期望通过校验，实际: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("期望报错含 %q，实际通过", tt.wantErr)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("错误应含 %q，实际: %v", tt.wantErr, err)
+			}
+		})
+	}
+}
+
+// 同 provider/model 的两个候选只要 maxTokens 不同，重复检查仍须拦住。
+// Target 带了 *int 字段后不能再直接用结构体做 map 键，否则这条会漏。
+func TestDuplicateTargetsDetectedRegardlessOfMaxTokens(t *testing.T) {
+	yaml := `
+providers:
+  p1:
+    baseUrl: "https://a.example.com"
+    apiKey: "k"
+    format: anthropic
+routes:
+  - match: "*"
+    targets:
+      - provider: p1
+        model: "m"
+        maxTokens: 8192
+      - provider: p1
+        model: "m"
+        maxTokens: 16384
+`
+	_, err := DecodeAndValidate([]byte(yaml))
+	if err == nil {
+		t.Fatal("期望拦住重复候选，实际通过")
+	}
+	if !strings.Contains(err.Error(), "重复候选") {
+		t.Fatalf("错误应提示重复候选，实际: %v", err)
+	}
+}

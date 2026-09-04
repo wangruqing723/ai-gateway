@@ -82,6 +82,10 @@ type ErrorBodyFunc func(body string, truncated bool)
 // ResponseStartedFunc 表示网关已经开始向客户端写入响应；此后不能再安全 failover。
 type ResponseStartedFunc func()
 
+// StreamConversionErrorFunc 报告跨格式流式转换失败时已收到的上游原始 SSE。
+// raw 是原始字节（含 SSE 换行），truncated 表示超出缓冲上限后被截断。
+type StreamConversionErrorFunc func(raw []byte, truncated bool, convErr error)
+
 // Options 转发选项
 type Options struct {
 	ClientReq             *http.Request
@@ -110,6 +114,15 @@ type Options struct {
 	OnErrorBody ErrorBodyFunc
 	// OnResponseStarted 在向客户端写响应头或正文前调用。
 	OnResponseStarted ResponseStartedFunc
+	// OnStreamConversionError 在跨格式流式转换失败时提供已收到的上游原始 SSE 字节。
+	//
+	// 为 nil 时（默认）完全不缓冲原始流，不产生额外内存开销——排查开关关闭是常态，
+	// 不能让每条流都多付一份拷贝。缓冲上限与 maxSSEEventBytes 一致，超限后停止追加
+	// 并置 truncated，而不是中断转发：抓包是旁路，不该影响客户端。
+	//
+	// 只在 ErrConversion 那条路径回调。上游提前 EOF、活跃超时走 finishTransformedStream，
+	// 那类失败原始流本身就是完整的，落盘没有增量信息。
+	OnStreamConversionError StreamConversionErrorFunc
 	// ToolNamespaces 是请求侧展平 Codex namespace 工具时得到的「扁平名 → 原始身份」
 	// 映射，为空表示无需还原。响应侧据它把上游返回的扁平 function_call 名改回
 	// {name, namespace}，否则 Codex 报 unsupported call。透传路径同样需要。
@@ -608,11 +621,14 @@ func handleStream(ctx context.Context, cancel context.CancelFunc, resp *http.Res
 	transform = converter.WithNamespaceRestore(transform, opts.ToolNamespaces)
 	readBuf := make([]byte, 64*1024)
 	var lineBuf []byte
+	// rawCapture 仅在排查开关（OnStreamConversionError 非 nil）开启时累积原始上游 SSE。
+	capture := newRawCapture(opts.OnStreamConversionError)
 	for {
 		n, readErr := resp.Body.Read(readBuf)
 		if n > 0 {
 			markActivity()
 			chunk := readBuf[:n]
+			capture.append(chunk)
 			for {
 				idx := bytes.IndexByte(chunk, '\n')
 				if idx < 0 {
@@ -639,6 +655,7 @@ func handleStream(ctx context.Context, cancel context.CancelFunc, resp *http.Res
 					continue
 				}
 				if stop, err := writeTransformedLine(transform, line, cancel, opts, flusher, activityTimeout); stop {
+					capture.reportIfConversionError(transform)
 					return err
 				}
 				if converter.StreamCompleted(transform) {
@@ -652,6 +669,7 @@ func handleStream(ctx context.Context, cancel context.CancelFunc, resp *http.Res
 				line := strings.TrimRight(string(lineBuf), "\r")
 				if line != "" {
 					if stop, err := writeTransformedLine(transform, line, cancel, opts, flusher, activityTimeout); stop {
+						capture.reportIfConversionError(transform)
 						return err
 					}
 					if converter.StreamCompleted(transform) {
@@ -662,6 +680,46 @@ func handleStream(ctx context.Context, cancel context.CancelFunc, resp *http.Res
 			return finishTransformedStream(transform, readErr, timedOut.Load(), opts, flusher)
 		}
 	}
+}
+
+// rawCapture 是流式转换失败时的原始上游 SSE 旁路缓冲。
+//
+// hook 为 nil 时所有方法都是空操作且不分配，让排查开关关闭（常态）零成本。
+type rawCapture struct {
+	hook      StreamConversionErrorFunc
+	buf       []byte
+	truncated bool
+}
+
+func newRawCapture(hook StreamConversionErrorFunc) *rawCapture {
+	return &rawCapture{hook: hook}
+}
+
+func (c *rawCapture) append(chunk []byte) {
+	if c.hook == nil || c.truncated {
+		return
+	}
+	if len(c.buf)+len(chunk) > maxSSEEventBytes {
+		// 只取填得下的部分，剩下的丢弃并标记；抓包是旁路，不能反过来打断转发。
+		if room := maxSSEEventBytes - len(c.buf); room > 0 {
+			c.buf = append(c.buf, chunk[:room]...)
+		}
+		c.truncated = true
+		return
+	}
+	c.buf = append(c.buf, chunk...)
+}
+
+// reportIfConversionError 仅在 transformer 自身报了协议转换错误时回调。
+func (c *rawCapture) reportIfConversionError(transform converter.StreamTransformer) {
+	if c.hook == nil {
+		return
+	}
+	convErr := converter.StreamError(transform)
+	if convErr == nil {
+		return
+	}
+	c.hook(c.buf, c.truncated, convErr)
 }
 
 func finishTransformedStream(transform converter.StreamTransformer, err error, timedOut bool, opts *Options, flusher http.Flusher) error {
