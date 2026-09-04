@@ -220,6 +220,102 @@ func TestDecodeAndValidateProviderAndRouteFields(t *testing.T) {
 	}
 }
 
+func TestContextWindowValidationAndDefaults(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{
+			name: "provider 为零",
+			raw:  strings.Replace(validConfigYAML(), "    format: openai", "    format: openai\n    contextWindow: 0", 1),
+			want: "providers.primary.contextWindow",
+		},
+		{
+			name: "provider 为负数",
+			raw:  strings.Replace(validConfigYAML(), "    format: openai", "    format: openai\n    contextWindow: -1", 1),
+			want: "providers.primary.contextWindow",
+		},
+		{
+			name: "route 超过上限",
+			raw:  strings.Replace(validConfigYAML(), "    model: upstream-model", "    model: upstream-model\n    contextWindow: 10000001", 1),
+			want: "route \"*\".contextWindow",
+		},
+		{
+			name: "margin 不允许负数",
+			raw:  strings.Replace(validConfigYAML(), "port: 7789", "port: 7789\ncontextSafetyMargin: -1", 1),
+			want: "contextSafetyMargin",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := DecodeAndValidate([]byte(tt.raw)); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("DecodeAndValidate() error = %v，期望包含 %q", err, tt.want)
+			}
+		})
+	}
+
+	zeroMargin := strings.Replace(validConfigYAML(), "port: 7789", "port: 7789\ncontextSafetyMargin: 0", 1)
+	cfg, err := DecodeAndValidate([]byte(zeroMargin))
+	if err != nil {
+		t.Fatalf("显式 contextSafetyMargin: 0 不应报错: %v", err)
+	}
+	if got := cfg.SafetyMargin(); got != 0 {
+		t.Fatalf("SafetyMargin() = %d，期望 0", got)
+	}
+
+	defaultCfg, err := DecodeAndValidate([]byte(validConfigYAML()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := defaultCfg.SafetyMargin(); got != DefaultContextSafetyMargin {
+		t.Fatalf("未配置 SafetyMargin() = %d，期望 %d", got, DefaultContextSafetyMargin)
+	}
+}
+
+func TestContextWindowTargetValidationAndDuplicateCheck(t *testing.T) {
+	raw := strings.Replace(validConfigYAML(), `  - match: "*"
+    provider: primary
+    model: upstream-model`, `  - match: "*"
+    targets:
+      - provider: primary
+        model: upstream-model
+        contextWindow: 100000
+      - provider: primary
+        model: upstream-model
+        contextWindow: 200000`, 1)
+	if _, err := DecodeAndValidate([]byte(raw)); err == nil || !strings.Contains(err.Error(), "重复候选") {
+		t.Fatalf("同 provider+model 的候选未被拦截: %v", err)
+	}
+
+	badTarget := strings.Replace(validConfigYAML(), `  - match: "*"
+    provider: primary
+    model: upstream-model`, `  - match: "*"
+    targets:
+      - provider: primary
+        model: upstream-model
+        contextWindow: 0`, 1)
+	if _, err := DecodeAndValidate([]byte(badTarget)); err == nil || !strings.Contains(err.Error(), "targets[0].contextWindow") {
+		t.Fatalf("target contextWindow: 0 校验错误 = %v", err)
+	}
+}
+
+func TestContextWindowOmitEmptyYAML(t *testing.T) {
+	cfg, err := DecodeAndValidate([]byte(validConfigYAML()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// applyDefaults 只物化 safety margin；三层 contextWindow 的 nil 必须保持 nil。
+	cfg.ContextSafetyMargin = nil
+	out, err := yaml.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("yaml.Marshal() error = %v", err)
+	}
+	if strings.Contains(string(out), "contextWindow") {
+		t.Fatalf("未配置 contextWindow 却出现在 YAML 中:\n%s", out)
+	}
+}
+
 func TestDecodeAndValidateAcceptsOpenAIResponsesProvider(t *testing.T) {
 	raw := strings.Replace(validConfigYAML(), "format: openai", "format: openai-responses", 1)
 	cfg, err := DecodeAndValidate([]byte(raw))

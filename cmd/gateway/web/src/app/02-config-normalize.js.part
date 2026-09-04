@@ -15,6 +15,8 @@
                             // maxTokens 是 *int，未配时后端 omitempty 不返回，这里取 null。
                             // 不能用 || 0：0 会被后端 validate 拒绝，存回去等于把「未配置」变成「非法值」。
                             maxTokens: pick(p, 'maxTokens', 'MaxTokens') ?? null,
+                            // contextWindow 同样是 *int：null 表示不启用窗口预算裁决。
+                            contextWindow: pick(p, 'contextWindow', 'ContextWindow') ?? null,
                             // userAgent 必须读出来，理由同下面 route.strategy 那条：
                             // 这里是每次加载配置（含 5 秒轮询）铺进 this.config 的地方，
                             // 漏读等于刚从服务端拿到的值立刻在内存里丢掉，下次保存就写不回去。
@@ -38,6 +40,9 @@
                         // route 级 maxTokens，同 provider 级：*int 未配时为 null，不用 || 兜底。
                         const routeMaxTokens = pick(r, 'maxTokens', 'MaxTokens') ?? null;
                         if (routeMaxTokens !== null) route.maxTokens = routeMaxTokens;
+                        // route 级 contextWindow 未配置时不挂字段，YAML 预览和保存都不制造 null 行。
+                        const routeContextWindow = pick(r, 'contextWindow', 'ContextWindow') ?? null;
+                        if (routeContextWindow !== null) route.contextWindow = routeContextWindow;
                         // 多目标写法：保留 targets 原样，后端两种写法互斥，不能同时下发
                         if (Array.isArray(rawTargets) && rawTargets.length) {
                             route.targets = rawTargets.map((t) => {
@@ -47,6 +52,8 @@
                                 };
                                 const tMax = pick(t, 'maxTokens', 'MaxTokens') ?? null;
                                 if (tMax !== null) tgt.maxTokens = tMax;
+                                const tContextWindow = pick(t, 'contextWindow', 'ContextWindow') ?? null;
+                                if (tContextWindow !== null) tgt.contextWindow = tContextWindow;
                                 return tgt;
                             });
                             route.provider = '';
@@ -78,6 +85,7 @@
                         directTimeoutNoStream: pick(data, 'directTimeoutNoStream', 'DirectTimeoutNoStream') || 60000,
                         directTimeoutStreamHeader: pick(data, 'directTimeoutStreamHeader', 'DirectTimeoutStreamHeader') || 60000,
                         directTimeoutStreamActive: pick(data, 'directTimeoutStreamActive', 'DirectTimeoutStreamActive') || 120000,
+                        contextSafetyMargin: pick(data, 'contextSafetyMargin', 'ContextSafetyMargin') ?? 4096,
                         // failover / breaker 必须读出来再回传：PUT /api/config 是全量替换、
                         // 不与旧配置合并，漏读会让任何一次表单保存把这两个块抹成零值。
                         // 后端这两个字段是值类型且无 omitempty，GET 恒返回完整块（已填默认值），

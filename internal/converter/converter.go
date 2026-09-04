@@ -454,6 +454,80 @@ func EnsureMaxTokens(body map[string]any, providerFormat string) {
 	}
 }
 
+// LimitMaxTokens 仅在 contextWindow 预算生效时把请求体里的输出上限向下压制。
+//
+// 三层 maxTokens 未命中时，调用方仍需保留客户端已经传入且不超过预算的值；字段缺失
+// 则取 DefaultMaxTokens 与 budget 的较小值。OpenAI Chat 仍只选择客户端已带的
+// max_completion_tokens 或 max_tokens 之一，避免为了限额新增互斥字段。
+func LimitMaxTokens(body map[string]any, providerFormat string, budget int) {
+	if body == nil || budget <= 0 {
+		return
+	}
+	key := maxTokensField(body, providerFormat)
+	value, exists := body[key]
+	if !exists {
+		if budget < DefaultMaxTokens {
+			body[key] = budget
+		} else {
+			// 字段缺失时既有优先级链的结果仍是全局默认值；预算只负责向下压，
+			// 不能把默认 32768 向上抬到更大的 context budget。
+			body[key] = DefaultMaxTokens
+		}
+		return
+	}
+	if current, ok := maxTokensNumber(value); ok && current > budget {
+		body[key] = budget
+	}
+}
+
+func maxTokensField(body map[string]any, providerFormat string) string {
+	switch providerFormat {
+	case "openai-responses":
+		return "max_output_tokens"
+	case "openai":
+		if _, exists := body["max_completion_tokens"]; exists {
+			return "max_completion_tokens"
+		}
+		return "max_tokens"
+	default:
+		return "max_tokens"
+	}
+}
+
+func maxTokensNumber(value any) (int, bool) {
+	switch n := value.(type) {
+	case int:
+		return n, true
+	case int8:
+		return int(n), true
+	case int16:
+		return int(n), true
+	case int32:
+		return int(n), true
+	case int64:
+		return int(n), true
+	case uint:
+		return int(n), uint64(n) <= uint64(^uint(0)>>1)
+	case uint8:
+		return int(n), true
+	case uint16:
+		return int(n), true
+	case uint32:
+		return int(n), uint64(n) <= uint64(^uint(0)>>1)
+	case uint64:
+		return int(n), n <= uint64(^uint(0)>>1)
+	case float32:
+		return int(n), float32(int(n)) == n
+	case float64:
+		return int(n), float64(int(n)) == n
+	case json.Number:
+		parsed, err := n.Int64()
+		return int(parsed), err == nil && int64(int(parsed)) == parsed
+	default:
+		return 0, false
+	}
+}
+
 func normalizeSystem(system any) any {
 	text := systemTextFromContent(system)
 	if text == "" {

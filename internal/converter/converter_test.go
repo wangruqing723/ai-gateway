@@ -2,6 +2,7 @@ package converter
 
 import (
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -1289,4 +1290,70 @@ func TestEnsureMaxTokensOnlyFillsWhenAbsent(t *testing.T) {
 		})
 	}
 	EnsureMaxTokens(nil, "anthropic") // 不能 panic
+}
+
+func TestLimitMaxTokensClampsOnlyWhenBudgetRequiresIt(t *testing.T) {
+	tests := []struct {
+		name           string
+		providerFormat string
+		body           map[string]any
+		budget         int
+		want           map[string]any
+	}{
+		{
+			name:           "anthropic 压制客户端值",
+			providerFormat: "anthropic",
+			body:           map[string]any{"max_tokens": float64(64000)},
+			budget:         8000,
+			want:           map[string]any{"max_tokens": 8000},
+		},
+		{
+			name:           "anthropic 保留较小客户端值",
+			providerFormat: "anthropic",
+			body:           map[string]any{"max_tokens": float64(4000)},
+			budget:         8000,
+			want:           map[string]any{"max_tokens": float64(4000)},
+		},
+		{
+			name:           "缺失字段使用预算",
+			providerFormat: "openai-responses",
+			body:           map[string]any{},
+			budget:         8000,
+			want:           map[string]any{"max_output_tokens": 8000},
+		},
+		{
+			name:           "缺失字段不抬高全局默认",
+			providerFormat: "anthropic",
+			body:           map[string]any{},
+			budget:         65536,
+			want:           map[string]any{"max_tokens": DefaultMaxTokens},
+		},
+		{
+			name:           "chat 只改 max_completion_tokens",
+			providerFormat: "openai",
+			body:           map[string]any{"max_completion_tokens": float64(64000)},
+			budget:         8000,
+			want:           map[string]any{"max_completion_tokens": 8000},
+		},
+		{
+			name:           "chat 默认使用 max_tokens",
+			providerFormat: "openai",
+			body:           map[string]any{},
+			budget:         8000,
+			want:           map[string]any{"max_tokens": 8000},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			LimitMaxTokens(tt.body, tt.providerFormat, tt.budget)
+			if !reflect.DeepEqual(tt.body, tt.want) {
+				t.Fatalf("LimitMaxTokens() = %#v，期望 %#v", tt.body, tt.want)
+			}
+		})
+	}
+	body := map[string]any{"max_tokens": 64000}
+	LimitMaxTokens(body, "anthropic", 0)
+	if !reflect.DeepEqual(body, map[string]any{"max_tokens": 64000}) {
+		t.Fatalf("budget=0 不应改写请求体: %#v", body)
+	}
 }

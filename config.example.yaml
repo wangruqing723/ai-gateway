@@ -18,6 +18,13 @@ directTimeoutNoStream: 60000      # 非流式整体超时，1000-300000
 directTimeoutStreamHeader: 60000  # 流式响应头超时，1000-300000
 directTimeoutStreamActive: 120000 # 流式活跃超时，5000-600000
 
+# ── 上下文窗口与动态输出预算（可选）────────────────────────────
+# contextWindow 可写在 Provider、路由、候选三层，优先级为候选 > 路由 > Provider。
+# 网关按「窗口 - 估算输入 - 安全余量」计算本次输出预算；它只会向下压 maxTokens，
+# 不会把 maxTokens 向上抬，也不会裁剪或摘要消息。三层都不写表示不启用窗口预算裁决。
+# 图片按每张固定 1500 token 估算，不按 base64 长度计；估算值只是安全近似值。
+contextSafetyMargin: 4096      # 估算误差补偿，默认 4096；允许写 0
+
 # ── 故障转移（failover，可选）─────────────────────────────────
 # 给路由配多个候选目标（见下方 routes 的 targets 写法）后，某个候选失败时
 # 自动换下一个候选重试。默认关闭；不写这个字段即为关闭，行为与单目标完全一致。
@@ -107,6 +114,7 @@ providers:
     #                     # 三层都不配时客户端传了什么用什么，客户端也没传才用 32768。
     #                     # 配得过小会让思考型模型烧光预算就被截断：工具调用参数被砍断后
     #                     # 客户端会丢弃整条响应重投，表现为「同一条命令反复执行」。
+    # contextWindow: 200000       # 可选：该 Provider 的上下文窗口；只向下压输出预算
 
   mimo_vision:
     baseUrl: "https://api.xiaomimimo.com"
@@ -170,12 +178,15 @@ routes:
   # maxTokens 可写在候选、路由、上游三处。
   # 完整优先级：候选 > 路由 > 上游 > 客户端传入值 > 全局默认 32768。
   # 同一路由下各上游输出上限不同时写在候选上；整条路由统一时写在路由级。
+  # contextWindow 也可写在候选、路由、上游三处，但它只向下压 maxTokens，不向上抬。
   # - match: "gpt-5*"
   #   maxTokens: 32768              # 路由级：本路由所有候选统一用它
+  #   contextWindow: 128000         # 路由级：本路由所有候选的默认窗口
   #   targets:
   #     - provider: mimo
   #       model: "mimo-v2.5-pro"
   #       maxTokens: 16384          # 候选级：只覆盖这一个候选，优先于路由级
+  #       contextWindow: 200000     # 候选级：只覆盖这一个候选，优先级最高
 
   - match: "*"
     provider: mimo

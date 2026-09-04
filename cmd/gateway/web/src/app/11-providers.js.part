@@ -12,6 +12,7 @@
                         maxPerSecond: 0,
                         maxQueueWait: 30000,
                         maxTokens: null,
+                        contextWindow: null,
                         userAgent: '',
                         proxy: '',
                         apiKeyConfigured: false,
@@ -34,6 +35,7 @@
                         maxPerSecond: p.maxPerSecond,
                         maxQueueWait: p.maxQueueWait,
                         maxTokens: p.maxTokens ?? null,
+                        contextWindow: p.contextWindow ?? null,
                         userAgent: p.userAgent || '',
                         proxy: p.proxy || '',
                         apiKeyConfigured: !!p.apiKeyConfigured,
@@ -63,6 +65,7 @@
                         maxPerSecond: p.maxPerSecond,
                         maxQueueWait: p.maxQueueWait,
                         maxTokens: p.maxTokens ?? null,
+                        contextWindow: p.contextWindow ?? null,
                         userAgent: p.userAgent || '',
                         // 副本名在磁盘上没有旧密码可供 sentinel 回查，认证代理必须重填。
                         proxy: (p.proxy || '').includes('__AI_GATEWAY_KEEP_PROXY_PASSWORD__') ? '' : (p.proxy || ''),
@@ -124,6 +127,8 @@
                         // numOrNull：空输入发 null（= 未配置，用全局默认 32768），
                         // 不能兜成 0——后端 validate 会拒 0。
                         maxTokens: this.numOrNull(this.providerForm.maxTokens),
+                        // 留空发送 null：contextWindow 为 nil 时完全不启用窗口预算裁决。
+                        contextWindow: this.numOrNull(this.providerForm.contextWindow),
                         userAgent: this.providerForm.userAgent || undefined,
                         proxy: this.providerForm.proxy || undefined
                     };

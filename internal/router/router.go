@@ -4,6 +4,7 @@ package router
 import (
 	"net/http"
 	"strings"
+	"unicode"
 
 	"ai-gateway/internal/config"
 )
@@ -16,6 +17,9 @@ type Candidate struct {
 	// MaxTokens 该候选的输出上限，nil 表示不覆盖客户端值。
 	// 优先级：target > route > provider，由 MatchRoute 合成。
 	MaxTokens *int
+	// ContextWindow 该候选的上下文窗口，nil 表示未配置（不启用预算裁决）。
+	// 优先级：target > route > provider，由 MatchRoute 合成。
+	ContextWindow *int
 }
 
 // Match 路由匹配结果。
@@ -32,8 +36,9 @@ type Match struct {
 
 // MatchRoute 根据模型名匹配路由规则，首条命中生效（对齐 minimatch nocase）。
 func MatchRoute(model string, cfg *config.Config) *Match {
+	upstreamModel, hasOneM := StripOneMSuffix(model)
 	for _, route := range cfg.Routes {
-		if !globMatch(strings.ToLower(route.Match), strings.ToLower(model)) {
+		if !globMatch(strings.ToLower(route.Match), strings.ToLower(upstreamModel)) {
 			continue
 		}
 		targets := route.TargetList()
@@ -48,12 +53,20 @@ func MatchRoute(model string, cfg *config.Config) *Match {
 			pCopy := *src
 			targetModel := target.Model
 			if targetModel == "" {
-				targetModel = model
+				targetModel = upstreamModel
+			}
+			contextWindow := resolveContextWindow(target, route, src)
+			if hasOneM {
+				// [1M] 是客户端声明的本地标记，优先级高于配置窗口，但不改变
+				// maxTokens：大上下文不等于允许更大的输出。
+				oneMWindow := OneMContextWindow
+				contextWindow = &oneMWindow
 			}
 			candidates = append(candidates, Candidate{
-				Provider:    &pCopy,
-				TargetModel: targetModel,
-				MaxTokens:   resolveMaxTokens(target, route, src),
+				Provider:      &pCopy,
+				TargetModel:   targetModel,
+				MaxTokens:     resolveMaxTokens(target, route, src),
+				ContextWindow: contextWindow,
 			})
 		}
 		if len(candidates) == 0 {
@@ -82,6 +95,35 @@ func resolveMaxTokens(target config.Target, route config.Route, provider *config
 		return route.MaxTokens
 	}
 	return provider.MaxTokens
+}
+
+// resolveContextWindow 按优先级 target > route > provider 合成该候选的上下文窗口。
+// 三层都未配置时返回 nil，由调用方跳过预算估算与裁决。
+func resolveContextWindow(target config.Target, route config.Route, provider *config.Provider) *int {
+	if target.ContextWindow != nil {
+		return target.ContextWindow
+	}
+	if route.ContextWindow != nil {
+		return route.ContextWindow
+	}
+	return provider.ContextWindow
+}
+
+// OneMContextMarker 是 Claude Code 声明 100 万上下文的本地标记。
+const OneMContextMarker = "[1m]"
+
+// OneMContextWindow 是带该标记时视为的窗口值。
+const OneMContextWindow = 1_000_000
+
+// StripOneMSuffix 剥离模型名尾部的 [1M] 标记（大小写不敏感，容忍标记前的空格）。
+// 返回 (剥离后的模型名, 是否带有该标记)。无标记时原样返回。
+func StripOneMSuffix(model string) (string, bool) {
+	if !strings.HasSuffix(strings.ToLower(model), OneMContextMarker) {
+		return model, false
+	}
+	stripped := model[:len(model)-len(OneMContextMarker)]
+	stripped = strings.TrimRightFunc(stripped, unicode.IsSpace)
+	return stripped, true
 }
 
 // ResolveAPIKey 优先用 provider.apiKey，否则从请求头提取（x-api-key 或 Bearer）。

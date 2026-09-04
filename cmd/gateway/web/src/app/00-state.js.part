@@ -64,6 +64,8 @@
                     directTimeoutNoStream: 60000,
                     directTimeoutStreamHeader: 60000,
                     directTimeoutStreamActive: 120000,
+                    // 留空由后端填默认安全余量；显式 0 也有意义，不能用 || 兜底。
+                    contextSafetyMargin: 4096,
                     providers: {},
                     routes: [],
                     // 必须给出初始形状：loadConfig() 返回前 x-model / x-show 就会求值
@@ -120,6 +122,7 @@
                     maxPerSecond: 0,
                     maxQueueWait: 30000,
                     maxTokens: null,
+                    contextWindow: null,
                     userAgent: '',
                     proxy: '',
                     apiKeyConfigured: false,
@@ -131,9 +134,11 @@
                     match: '',
                     // 目标候选列表，按顺序作为故障转移的尝试顺序；至少 1 个，最多 5 个
                     // models/modelsLoading 是查询远程模型列表的瞬态状态，初始占位保证响应式
-                    targets: [{ provider: '', model: '', models: [], modelsLoading: false }],
+                    targets: [{ provider: '', model: '', maxTokens: null, contextWindow: null, models: [], modelsLoading: false }],
                     // 候选选择策略，空等同 failover（按配置顺序）
                     strategy: '',
+                    maxTokens: null,
+                    contextWindow: null,
                     enableVision: false,
                     visionProvider: '',
                     visionModel: ''

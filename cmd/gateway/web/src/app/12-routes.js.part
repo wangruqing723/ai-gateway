@@ -1,6 +1,6 @@
                 routeTargets(route) {
                     if (Array.isArray(route?.targets) && route.targets.length) return route.targets;
-                    return [{ provider: route?.provider || '', model: route?.model || '', maxTokens: null }];
+                    return [{ provider: route?.provider || '', model: route?.model || '', maxTokens: null, contextWindow: null }];
                 },
 
                 addRoute() {
@@ -12,6 +12,7 @@
                         // 存真实枚举值而不是空字符串，保证下拉的 DOM 值总能匹配到一个 option
                         strategy: 'failover',
                         maxTokens: null,
+                        contextWindow: null,
                         enableVision: false,
                         visionProvider: providers[0] || '',
                         visionModel: ''
@@ -24,11 +25,12 @@
                     const route = this.config.routes[index];
                     this.routeForm = {
                         match: route.match,
-                        targets: this.routeTargets(route).map((t) => this.newRouteTarget(t.provider || '', t.model || '', t.maxTokens ?? null)),
+                        targets: this.routeTargets(route).map((t) => this.newRouteTarget(t.provider || '', t.model || '', t.maxTokens ?? null, t.contextWindow ?? null)),
                         // 配置里没写 strategy 就是默认 failover；这里补成真实枚举值，
                         // 留空会让下拉匹配不到 option、显示回落到第一项
                         strategy: route.strategy || 'failover',
                         maxTokens: route.maxTokens ?? null,
+                        contextWindow: route.contextWindow ?? null,
                         enableVision: !!route.vision,
                         visionProvider: route.vision?.provider || '',
                         visionModel: route.vision?.model || ''
@@ -46,9 +48,10 @@
                     this.editingRouteIndex = -1;
                     this.routeForm = {
                         match: route.match || '',
-                        targets: this.routeTargets(route).map((t) => this.newRouteTarget(t.provider || '', t.model || '', t.maxTokens ?? null)),
+                        targets: this.routeTargets(route).map((t) => this.newRouteTarget(t.provider || '', t.model || '', t.maxTokens ?? null, t.contextWindow ?? null)),
                         strategy: route.strategy || 'failover',
                         maxTokens: route.maxTokens ?? null,
+                        contextWindow: route.contextWindow ?? null,
                         enableVision: !!route.vision,
                         visionProvider: route.vision?.provider || '',
                         visionModel: route.vision?.model || ''
@@ -59,8 +62,8 @@
 
                 // 候选 target 的运行时形状：provider/model/maxTokens 是落盘字段，
                 // models/modelsLoading 是查询远程模型列表的瞬态状态，saveRoute 不读它们。
-                newRouteTarget(provider, model = '', maxTokens = null) {
-                    return { provider, model, maxTokens, models: [], modelsLoading: false };
+                newRouteTarget(provider, model = '', maxTokens = null, contextWindow = null) {
+                    return { provider, model, maxTokens, contextWindow, models: [], modelsLoading: false };
                 },
 
                 // 切换候选的 provider 后清掉已拉的模型列表：列表是上一个上游的，
@@ -168,6 +171,8 @@
                         // 后端解成 nil 虽无害，但预览和磁盘上多出一堆噪音。
                         const max = this.numOrNull(t.maxTokens);
                         if (max !== null) out.maxTokens = max;
+                        const contextWindow = this.numOrNull(t.contextWindow);
+                        if (contextWindow !== null) out.contextWindow = contextWindow;
                         return out;
                     });
                     if (!targets.length || targets.some((t) => !t.provider || !t.model)) {
@@ -208,6 +213,12 @@
                         ? targets[0].maxTokens
                         : this.numOrNull(this.routeForm.maxTokens);
                     if (routeMaxTokens !== null) route.maxTokens = routeMaxTokens;
+                    // 单候选没有 targets 数组，候选级窗口折进路由级后语义不变；多候选则保留
+                    // 各 target 的窗口覆盖，并另外保留路由级窗口作为中间层。
+                    const routeContextWindow = targets.length === 1 && targets[0].contextWindow != null
+                        ? targets[0].contextWindow
+                        : this.numOrNull(this.routeForm.contextWindow);
+                    if (routeContextWindow !== null) route.contextWindow = routeContextWindow;
                     if (this.routeForm.enableVision) {
                         route.vision = {
                             provider: this.routeForm.visionProvider,

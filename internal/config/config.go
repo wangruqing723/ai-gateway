@@ -32,6 +32,10 @@ const (
 
 	// maxRouteTargets 单条路由的候选上限，避免最坏耗时不可控。
 	maxRouteTargets = 5
+	// ContextWindowCeiling 是 contextWindow 配置项的上限，用于拦住手误多打几个 0。
+	ContextWindowCeiling = 10_000_000
+	// DefaultContextSafetyMargin 是 contextSafetyMargin 未配置时的估算误差补偿。
+	DefaultContextSafetyMargin = 4096
 	// MaxOutputTokensCeiling 是 maxTokens 配置项的上限。取值只为拦住手误多打几个 0：
 	// 真实上限由上游模型决定，网关无从得知，写超了由上游报错更准确。
 	MaxOutputTokensCeiling = 1_000_000
@@ -95,6 +99,8 @@ type Provider struct {
 	// 用 *int 而非 int：值类型分不清「写了 0」和「没写」，而 0 必须由 validate 报错，
 	// 不能被静默当成未配置。优先级 target > route > provider，见 router.Candidate。
 	MaxTokens *int `yaml:"maxTokens,omitempty" json:"maxTokens,omitempty"`
+	// ContextWindow 是该 provider 的上下文窗口，nil 表示不启用窗口预算裁决。
+	ContextWindow *int `yaml:"contextWindow,omitempty" json:"contextWindow,omitempty"`
 }
 
 // Vision 路由上的视觉子配置
@@ -110,6 +116,8 @@ type Target struct {
 	Model    string `yaml:"model" json:"model"`
 	// MaxTokens 覆盖该目标的输出上限，nil 表示不覆盖。优先级 target > route > provider。
 	MaxTokens *int `yaml:"maxTokens,omitempty" json:"maxTokens,omitempty"`
+	// ContextWindow 覆盖该目标的上下文窗口，nil 表示不覆盖。优先级 target > route > provider。
+	ContextWindow *int `yaml:"contextWindow,omitempty" json:"contextWindow,omitempty"`
 }
 
 // Route 路由规则，按顺序匹配，首条命中生效。
@@ -135,6 +143,8 @@ type Route struct {
 	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
 	// MaxTokens 覆盖该路由转发的输出上限，nil 表示不覆盖。优先级 target > route > provider。
 	MaxTokens *int `yaml:"maxTokens,omitempty" json:"maxTokens,omitempty"`
+	// ContextWindow 覆盖该路由的上下文窗口，nil 表示不覆盖。优先级 target > route > provider。
+	ContextWindow *int `yaml:"contextWindow,omitempty" json:"contextWindow,omitempty"`
 }
 
 // TargetList 返回统一形态的候选列表。
@@ -298,7 +308,9 @@ type Config struct {
 	Routes                []Route              `yaml:"routes" json:"routes"`
 	Failover              Failover             `yaml:"failover" json:"failover"`
 	Breaker               Breaker              `yaml:"breaker" json:"breaker"`
-	Path                  string               `yaml:"-" json:"path,omitempty"`
+	// ContextSafetyMargin 是估算输入 token 时预留的安全余量，nil 时使用默认值。
+	ContextSafetyMargin *int   `yaml:"contextSafetyMargin,omitempty" json:"contextSafetyMargin,omitempty"`
+	Path                string `yaml:"-" json:"path,omitempty"`
 
 	// ── 直通模式（direct mode）──────────────────────────────
 	// 开启后请求不进队列：跳过并发控制、限速与排队等待，直接转发到上游。
@@ -379,6 +391,9 @@ func applyDefaults(c *Config) {
 	if c.Metrics.WindowMinutes == 0 {
 		c.Metrics.WindowMinutes = defaultMetricsWindowMinutes
 	}
+	if c.ContextSafetyMargin == nil {
+		c.ContextSafetyMargin = intPtr(DefaultContextSafetyMargin)
+	}
 	for name, p := range c.Providers {
 		if p == nil {
 			continue
@@ -393,6 +408,14 @@ func applyDefaults(c *Config) {
 	}
 	applyFailoverDefaults(&c.Failover)
 	applyBreakerDefaults(&c.Breaker)
+}
+
+// SafetyMargin 返回上下文预算的安全余量；未配置时使用默认值。
+func (c *Config) SafetyMargin() int {
+	if c == nil || c.ContextSafetyMargin == nil {
+		return DefaultContextSafetyMargin
+	}
+	return *c.ContextSafetyMargin
 }
 
 // applyFailoverDefaults 只在字段未设置时填默认值。
@@ -854,6 +877,9 @@ func validate(c *Config) error {
 	if c.Metrics.WindowMinutes < 1 || c.Metrics.WindowMinutes > maxMetricsWindowMinutes {
 		return fmt.Errorf("metrics.windowMinutes 应在 1-%d 之间", maxMetricsWindowMinutes)
 	}
+	if c.ContextSafetyMargin != nil && *c.ContextSafetyMargin < 0 {
+		return fmt.Errorf("contextSafetyMargin 应大于等于 0")
+	}
 	for name, p := range c.Providers {
 		if err := validateProvider(name, p, true); err != nil {
 			return err
@@ -873,6 +899,9 @@ func validate(c *Config) error {
 			if *r.MaxTokens < 1 || *r.MaxTokens > MaxOutputTokensCeiling {
 				return fmt.Errorf("route %q.maxTokens 应在 1-%d 之间", r.Match, MaxOutputTokensCeiling)
 			}
+		}
+		if err := validateContextWindow(fmt.Sprintf("route %q.contextWindow", r.Match), r.ContextWindow); err != nil {
+			return err
 		}
 		if r.Vision != nil {
 			if strings.TrimSpace(r.Vision.Provider) == "" {
@@ -967,6 +996,9 @@ func validateProvider(name string, p *Provider, validateLimits bool) error {
 			return fmt.Errorf("providers.%s.maxTokens 应在 1-%d 之间", name, MaxOutputTokensCeiling)
 		}
 	}
+	if err := validateContextWindow(fmt.Sprintf("providers.%s.contextWindow", name), p.ContextWindow); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -1013,11 +1045,24 @@ func validateRouteTargets(c *Config, r *Route) error {
 		if t.MaxTokens != nil && (*t.MaxTokens < 1 || *t.MaxTokens > MaxOutputTokensCeiling) {
 			return fmt.Errorf("route %q.targets[%d].maxTokens 应在 1-%d 之间", r.Match, i, MaxOutputTokensCeiling)
 		}
+		if err := validateContextWindow(fmt.Sprintf("route %q.targets[%d].contextWindow", r.Match, i), t.ContextWindow); err != nil {
+			return err
+		}
 		key := targetKey{provider: t.Provider, model: t.Model}
 		if _, dup := seen[key]; dup {
 			return fmt.Errorf("route %q.targets 存在重复候选: %s/%s", r.Match, t.Provider, t.Model)
 		}
 		seen[key] = struct{}{}
+	}
+	return nil
+}
+
+func validateContextWindow(path string, window *int) error {
+	if window == nil {
+		return nil
+	}
+	if *window < 1 || *window > ContextWindowCeiling {
+		return fmt.Errorf("%s 应在 1-%d 之间", path, ContextWindowCeiling)
 	}
 	return nil
 }

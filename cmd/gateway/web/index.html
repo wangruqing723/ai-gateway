@@ -348,6 +348,11 @@
                                         <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">缓存最大记录数</span>
                                         <input autocomplete="off" type="number" x-model.number="config.cache.maxRecords" class="field">
                                     </label>
+                                    <label class="block md:col-span-2 xl:col-span-3">
+                                        <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">上下文安全余量 tokens</span>
+                                        <input autocomplete="off" type="number" min="0" x-model.number="config.contextSafetyMargin" placeholder="留空 = 默认 4096" class="field">
+                                        <span class="mt-1.5 block text-[11px] text-muted">从 contextWindow 中预留给估算误差的 token 数；允许填 0。它不启用或关闭窗口限制，是否启用由各 Provider / 路由 / 候选的 contextWindow 决定。</span>
+                                    </label>
                                 </div>
 
                                 <div class="mt-4 border-t border-line pt-4" :class="config.directMode ? 'opacity-70' : ''">
@@ -1420,6 +1425,11 @@
                     <span class="mt-1 block text-[11px] text-warn">配得过小会让思考型模型烧光预算就被截断，工具调用参数被砍断后客户端会重投，表现为「同一条命令反复执行」。</span>
                 </label>
                 <label class="block md:col-span-2">
+                    <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">上下文窗口 tokens</span>
+                    <input autocomplete="off" type="number" min="1" max="10000000" x-model.number="providerForm.contextWindow" placeholder="留空 = 不启用窗口预算裁决" class="field">
+                    <span class="mt-1 block text-[11px] text-muted">估算输入后从这里扣除输入和顶层安全余量，剩余值只会向下压低输出上限；不会裁剪或摘要上下文。</span>
+                </label>
+                <label class="block md:col-span-2">
                     <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">User-Agent</span>
                     <input autocomplete="off" type="text" x-model="providerForm.userAgent" placeholder="留空则转发客户端真实 UA" class="field">
                     <span class="mt-1 block text-[11px] text-muted">用于兼容按客户端类型准入的上游；显式设置会覆盖客户端请求头。</span>
@@ -1531,6 +1541,11 @@
                                     <input autocomplete="off" type="number" x-model.number="target.maxTokens"
                                            placeholder="留空 = 跟随路由/上游设置" class="field w-48 text-xs">
                                 </div>
+                                <div class="ml-8 flex items-center gap-2">
+                                    <span class="shrink-0 text-[11px] text-muted">上下文窗口 tokens</span>
+                                    <input autocomplete="off" type="number" min="1" max="10000000" x-model.number="target.contextWindow"
+                                           placeholder="留空 = 不启用窗口预算裁决" class="field w-48 text-xs">
+                                </div>
                             </div>
                         </template>
                     </div>
@@ -1561,6 +1576,11 @@
                     <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">最大输出 tokens（本路由）</span>
                     <input autocomplete="off" type="number" x-model.number="routeForm.maxTokens" placeholder="留空 = 跟随上游设置 / 客户端值 / 默认 32768" class="field">
                     <span class="mt-1 block text-[11px] text-muted">完整优先级：候选 &gt; 路由 &gt; 上游 &gt; 客户端传入值 &gt; 全局默认 32768。多候选且各自上限不同时，请改用上面每个候选自己的设置。</span>
+                </label>
+                <label class="block md:col-span-2">
+                    <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">上下文窗口 tokens（本路由）</span>
+                    <input autocomplete="off" type="number" min="1" max="10000000" x-model.number="routeForm.contextWindow" placeholder="留空 = 不启用窗口预算裁决" class="field">
+                    <span class="mt-1 block text-[11px] text-muted">作为本路由所有候选的默认窗口；候选级设置优先级更高。留空时继续查找 Provider 窗口。</span>
                 </label>
                 <div class="rounded-lg border border-cyan2/20 bg-cyan2/5 p-4 md:col-span-2">
                     <label class="mb-4 flex cursor-pointer items-center gap-3">
@@ -1698,6 +1718,8 @@
                     directTimeoutNoStream: 60000,
                     directTimeoutStreamHeader: 60000,
                     directTimeoutStreamActive: 120000,
+                    // 留空由后端填默认安全余量；显式 0 也有意义，不能用 || 兜底。
+                    contextSafetyMargin: 4096,
                     providers: {},
                     routes: [],
                     // 必须给出初始形状：loadConfig() 返回前 x-model / x-show 就会求值
@@ -1754,6 +1776,7 @@
                     maxPerSecond: 0,
                     maxQueueWait: 30000,
                     maxTokens: null,
+                    contextWindow: null,
                     userAgent: '',
                     proxy: '',
                     apiKeyConfigured: false,
@@ -1765,9 +1788,11 @@
                     match: '',
                     // 目标候选列表，按顺序作为故障转移的尝试顺序；至少 1 个，最多 5 个
                     // models/modelsLoading 是查询远程模型列表的瞬态状态，初始占位保证响应式
-                    targets: [{ provider: '', model: '', models: [], modelsLoading: false }],
+                    targets: [{ provider: '', model: '', maxTokens: null, contextWindow: null, models: [], modelsLoading: false }],
                     // 候选选择策略，空等同 failover（按配置顺序）
                     strategy: '',
+                    maxTokens: null,
+                    contextWindow: null,
                     enableVision: false,
                     visionProvider: '',
                     visionModel: ''
@@ -1854,6 +1879,8 @@
                             // maxTokens 是 *int，未配时后端 omitempty 不返回，这里取 null。
                             // 不能用 || 0：0 会被后端 validate 拒绝，存回去等于把「未配置」变成「非法值」。
                             maxTokens: pick(p, 'maxTokens', 'MaxTokens') ?? null,
+                            // contextWindow 同样是 *int：null 表示不启用窗口预算裁决。
+                            contextWindow: pick(p, 'contextWindow', 'ContextWindow') ?? null,
                             // userAgent 必须读出来，理由同下面 route.strategy 那条：
                             // 这里是每次加载配置（含 5 秒轮询）铺进 this.config 的地方，
                             // 漏读等于刚从服务端拿到的值立刻在内存里丢掉，下次保存就写不回去。
@@ -1877,6 +1904,9 @@
                         // route 级 maxTokens，同 provider 级：*int 未配时为 null，不用 || 兜底。
                         const routeMaxTokens = pick(r, 'maxTokens', 'MaxTokens') ?? null;
                         if (routeMaxTokens !== null) route.maxTokens = routeMaxTokens;
+                        // route 级 contextWindow 未配置时不挂字段，YAML 预览和保存都不制造 null 行。
+                        const routeContextWindow = pick(r, 'contextWindow', 'ContextWindow') ?? null;
+                        if (routeContextWindow !== null) route.contextWindow = routeContextWindow;
                         // 多目标写法：保留 targets 原样，后端两种写法互斥，不能同时下发
                         if (Array.isArray(rawTargets) && rawTargets.length) {
                             route.targets = rawTargets.map((t) => {
@@ -1886,6 +1916,8 @@
                                 };
                                 const tMax = pick(t, 'maxTokens', 'MaxTokens') ?? null;
                                 if (tMax !== null) tgt.maxTokens = tMax;
+                                const tContextWindow = pick(t, 'contextWindow', 'ContextWindow') ?? null;
+                                if (tContextWindow !== null) tgt.contextWindow = tContextWindow;
                                 return tgt;
                             });
                             route.provider = '';
@@ -1917,6 +1949,7 @@
                         directTimeoutNoStream: pick(data, 'directTimeoutNoStream', 'DirectTimeoutNoStream') || 60000,
                         directTimeoutStreamHeader: pick(data, 'directTimeoutStreamHeader', 'DirectTimeoutStreamHeader') || 60000,
                         directTimeoutStreamActive: pick(data, 'directTimeoutStreamActive', 'DirectTimeoutStreamActive') || 120000,
+                        contextSafetyMargin: pick(data, 'contextSafetyMargin', 'ContextSafetyMargin') ?? 4096,
                         // failover / breaker 必须读出来再回传：PUT /api/config 是全量替换、
                         // 不与旧配置合并，漏读会让任何一次表单保存把这两个块抹成零值。
                         // 后端这两个字段是值类型且无 omitempty，GET 恒返回完整块（已填默认值），
@@ -2388,6 +2421,7 @@
                             // 后端 *int 反序列化时 nil 与非 nil 都能正确识别）。显式 0 会被后端 validate 拒绝，
                             // 故表单存 0 时改发 null，由用户重新输入合法值。
                             maxTokens: provider.maxTokens ?? null,
+                            contextWindow: provider.contextWindow ?? null,
                             // userAgent 必须带上，理由同下面的 failover / breaker：PUT 是全量替换。
                             // 这里是构造请求体的地方，漏掉的话 saveProvider 写进 this.config 的值
                             // 到不了磁盘，而且**每次保存都会抹掉所有 provider 的该字段**，无任何报错。
@@ -2411,6 +2445,7 @@
                         directTimeoutNoStream: this.config.directTimeoutNoStream || 60000,
                         directTimeoutStreamHeader: this.config.directTimeoutStreamHeader || 60000,
                         directTimeoutStreamActive: this.config.directTimeoutStreamActive || 120000,
+                        contextSafetyMargin: this.numOrNull(this.config.contextSafetyMargin),
                         providers,
                         routes: JSON.parse(JSON.stringify(this.config.routes || [])),
                         // failover / breaker 必须带上：PUT 是全量替换，漏掉就等于把它们关掉
@@ -3066,6 +3101,7 @@
                         `directTimeoutNoStream: ${this.config.directTimeoutNoStream || 60000}`,
                         `directTimeoutStreamHeader: ${this.config.directTimeoutStreamHeader || 60000}`,
                         `directTimeoutStreamActive: ${this.config.directTimeoutStreamActive || 120000}`,
+                        `contextSafetyMargin: ${this.config.contextSafetyMargin ?? 4096}`,
                         this.failoverYaml(),
                         this.breakerYaml(),
                         'providers:',
@@ -3129,6 +3165,7 @@
                             `    maxQueueWait: ${p.maxQueueWait || 30000}`
                         );
                         if (p.maxTokens != null) lines.push(`    maxTokens: ${p.maxTokens}`);
+                        if (p.contextWindow != null) lines.push(`    contextWindow: ${p.contextWindow}`);
                         return lines.join('\n');
                     }).join('\n');
                 },
@@ -3142,6 +3179,7 @@
                                 base.push(`      - provider: ${t.provider || ''}`);
                                 base.push(`        model: "${t.model || ''}"`);
                                 if (t.maxTokens != null) base.push(`        maxTokens: ${t.maxTokens}`);
+                                if (t.contextWindow != null) base.push(`        contextWindow: ${t.contextWindow}`);
                             });
                         } else {
                             base.push(`    provider: ${r.provider || ''}`);
@@ -3153,6 +3191,7 @@
                             base.push(`    strategy: ${r.strategy}`);
                         }
                         if (r.maxTokens != null) base.push(`    maxTokens: ${r.maxTokens}`);
+                        if (r.contextWindow != null) base.push(`    contextWindow: ${r.contextWindow}`);
                         if (r.vision) {
                             base.push('    vision:');
                             base.push(`      provider: ${r.vision.provider || ''}`);
@@ -3184,6 +3223,7 @@
                         maxPerSecond: 0,
                         maxQueueWait: 30000,
                         maxTokens: null,
+                        contextWindow: null,
                         userAgent: '',
                         proxy: '',
                         apiKeyConfigured: false,
@@ -3206,6 +3246,7 @@
                         maxPerSecond: p.maxPerSecond,
                         maxQueueWait: p.maxQueueWait,
                         maxTokens: p.maxTokens ?? null,
+                        contextWindow: p.contextWindow ?? null,
                         userAgent: p.userAgent || '',
                         proxy: p.proxy || '',
                         apiKeyConfigured: !!p.apiKeyConfigured,
@@ -3235,6 +3276,7 @@
                         maxPerSecond: p.maxPerSecond,
                         maxQueueWait: p.maxQueueWait,
                         maxTokens: p.maxTokens ?? null,
+                        contextWindow: p.contextWindow ?? null,
                         userAgent: p.userAgent || '',
                         // 副本名在磁盘上没有旧密码可供 sentinel 回查，认证代理必须重填。
                         proxy: (p.proxy || '').includes('__AI_GATEWAY_KEEP_PROXY_PASSWORD__') ? '' : (p.proxy || ''),
@@ -3296,6 +3338,8 @@
                         // numOrNull：空输入发 null（= 未配置，用全局默认 32768），
                         // 不能兜成 0——后端 validate 会拒 0。
                         maxTokens: this.numOrNull(this.providerForm.maxTokens),
+                        // 留空发送 null：contextWindow 为 nil 时完全不启用窗口预算裁决。
+                        contextWindow: this.numOrNull(this.providerForm.contextWindow),
                         userAgent: this.providerForm.userAgent || undefined,
                         proxy: this.providerForm.proxy || undefined
                     };
@@ -3386,7 +3430,7 @@
                 // routeTargets 统一读取路由的候选列表：写了 targets 用 targets，否则退化成单目标
                 routeTargets(route) {
                     if (Array.isArray(route?.targets) && route.targets.length) return route.targets;
-                    return [{ provider: route?.provider || '', model: route?.model || '', maxTokens: null }];
+                    return [{ provider: route?.provider || '', model: route?.model || '', maxTokens: null, contextWindow: null }];
                 },
 
                 addRoute() {
@@ -3398,6 +3442,7 @@
                         // 存真实枚举值而不是空字符串，保证下拉的 DOM 值总能匹配到一个 option
                         strategy: 'failover',
                         maxTokens: null,
+                        contextWindow: null,
                         enableVision: false,
                         visionProvider: providers[0] || '',
                         visionModel: ''
@@ -3410,11 +3455,12 @@
                     const route = this.config.routes[index];
                     this.routeForm = {
                         match: route.match,
-                        targets: this.routeTargets(route).map((t) => this.newRouteTarget(t.provider || '', t.model || '', t.maxTokens ?? null)),
+                        targets: this.routeTargets(route).map((t) => this.newRouteTarget(t.provider || '', t.model || '', t.maxTokens ?? null, t.contextWindow ?? null)),
                         // 配置里没写 strategy 就是默认 failover；这里补成真实枚举值，
                         // 留空会让下拉匹配不到 option、显示回落到第一项
                         strategy: route.strategy || 'failover',
                         maxTokens: route.maxTokens ?? null,
+                        contextWindow: route.contextWindow ?? null,
                         enableVision: !!route.vision,
                         visionProvider: route.vision?.provider || '',
                         visionModel: route.vision?.model || ''
@@ -3432,9 +3478,10 @@
                     this.editingRouteIndex = -1;
                     this.routeForm = {
                         match: route.match || '',
-                        targets: this.routeTargets(route).map((t) => this.newRouteTarget(t.provider || '', t.model || '', t.maxTokens ?? null)),
+                        targets: this.routeTargets(route).map((t) => this.newRouteTarget(t.provider || '', t.model || '', t.maxTokens ?? null, t.contextWindow ?? null)),
                         strategy: route.strategy || 'failover',
                         maxTokens: route.maxTokens ?? null,
+                        contextWindow: route.contextWindow ?? null,
                         enableVision: !!route.vision,
                         visionProvider: route.vision?.provider || '',
                         visionModel: route.vision?.model || ''
@@ -3445,8 +3492,8 @@
 
                 // 候选 target 的运行时形状：provider/model/maxTokens 是落盘字段，
                 // models/modelsLoading 是查询远程模型列表的瞬态状态，saveRoute 不读它们。
-                newRouteTarget(provider, model = '', maxTokens = null) {
-                    return { provider, model, maxTokens, models: [], modelsLoading: false };
+                newRouteTarget(provider, model = '', maxTokens = null, contextWindow = null) {
+                    return { provider, model, maxTokens, contextWindow, models: [], modelsLoading: false };
                 },
 
                 // 切换候选的 provider 后清掉已拉的模型列表：列表是上一个上游的，
@@ -3554,6 +3601,8 @@
                         // 后端解成 nil 虽无害，但预览和磁盘上多出一堆噪音。
                         const max = this.numOrNull(t.maxTokens);
                         if (max !== null) out.maxTokens = max;
+                        const contextWindow = this.numOrNull(t.contextWindow);
+                        if (contextWindow !== null) out.contextWindow = contextWindow;
                         return out;
                     });
                     if (!targets.length || targets.some((t) => !t.provider || !t.model)) {
@@ -3594,6 +3643,12 @@
                         ? targets[0].maxTokens
                         : this.numOrNull(this.routeForm.maxTokens);
                     if (routeMaxTokens !== null) route.maxTokens = routeMaxTokens;
+                    // 单候选没有 targets 数组，候选级窗口折进路由级后语义不变；多候选则保留
+                    // 各 target 的窗口覆盖，并另外保留路由级窗口作为中间层。
+                    const routeContextWindow = targets.length === 1 && targets[0].contextWindow != null
+                        ? targets[0].contextWindow
+                        : this.numOrNull(this.routeForm.contextWindow);
+                    if (routeContextWindow !== null) route.contextWindow = routeContextWindow;
                     if (this.routeForm.enableVision) {
                         route.vision = {
                             provider: this.routeForm.visionProvider,

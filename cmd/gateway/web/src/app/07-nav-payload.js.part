@@ -40,6 +40,7 @@
                             // 后端 *int 反序列化时 nil 与非 nil 都能正确识别）。显式 0 会被后端 validate 拒绝，
                             // 故表单存 0 时改发 null，由用户重新输入合法值。
                             maxTokens: provider.maxTokens ?? null,
+                            contextWindow: provider.contextWindow ?? null,
                             // userAgent 必须带上，理由同下面的 failover / breaker：PUT 是全量替换。
                             // 这里是构造请求体的地方，漏掉的话 saveProvider 写进 this.config 的值
                             // 到不了磁盘，而且**每次保存都会抹掉所有 provider 的该字段**，无任何报错。
@@ -63,6 +64,7 @@
                         directTimeoutNoStream: this.config.directTimeoutNoStream || 60000,
                         directTimeoutStreamHeader: this.config.directTimeoutStreamHeader || 60000,
                         directTimeoutStreamActive: this.config.directTimeoutStreamActive || 120000,
+                        contextSafetyMargin: this.numOrNull(this.config.contextSafetyMargin),
                         providers,
                         routes: JSON.parse(JSON.stringify(this.config.routes || [])),
                         // failover / breaker 必须带上：PUT 是全量替换，漏掉就等于把它们关掉

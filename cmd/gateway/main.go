@@ -40,6 +40,7 @@ import (
 	"ai-gateway/internal/proxy"
 	"ai-gateway/internal/queue"
 	"ai-gateway/internal/router"
+	"ai-gateway/internal/tokenest"
 	"ai-gateway/internal/vision"
 	"ai-gateway/internal/webbuild"
 )
@@ -50,6 +51,9 @@ var webFS embed.FS
 var reqCounter uint64
 
 const healthStatsCacheTTL = 10 * time.Second
+
+// MinOutputBudget 是候选能够承载请求所需的最小输出预算。
+const MinOutputBudget = 1024
 
 func main() {
 	cfg, err := config.Load()
@@ -511,6 +515,17 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 			func(f string, a ...any) { logf(reqID, f, a...) })
 	}
 
+	// 所有候选收到的是同一份（已完成视觉翻译的）内部请求，因此只估算一次。
+	// 三层 contextWindow 都未配置时不估算，保持旧路径的性能与日志 JSON 形状。
+	estimatedInputTokens := 0
+	for _, candidate := range matched.Candidates {
+		if candidate.ContextWindow != nil {
+			estimatedInputTokens = tokenest.Estimate(internal.System, internal.Messages, internal.Tools)
+			reqLog.EstimatedInputTokens = estimatedInputTokens
+			break
+		}
+	}
+
 	// 候选尝试范围：failover 关闭时只试首个候选，行为与单目标时代一致。
 	// 注意这里不看 strategy：round-robin 关掉 failover 是合法组合，
 	// 表示「分流但不转移」——选中的那个失败就直接返回。
@@ -532,7 +547,9 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		lastAbandoned bool
 		breakerSkips  int
 		// freeSkips 因上游自报限流而放弃、且未消耗额度的次数
-		freeSkips          int
+		freeSkips int
+		// contextSkips 因输入装不进候选窗口而跳过的次数；与熔断跳过一样不消耗额度。
+		contextSkips       int
 		soonestRetry       time.Duration
 		nextHTTPAttemptNo  int
 		nextDetailSequence int
@@ -568,6 +585,30 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		contextBudget, fits := resolveContextBudget(candidate.ContextWindow, estimatedInputTokens, cfg.SafetyMargin())
+		if !fits {
+			contextSkips++
+			trail = append(trail, name+":context_exceeded")
+			nextDetailSequence++
+			skipStarted := time.Now()
+			reqLog.AttemptDetails = append(reqLog.AttemptDetails, metrics.AttemptDetail{
+				Sequence:       nextDetailSequence,
+				Kind:           "context_skip",
+				Provider:       name,
+				TargetModel:    candidate.TargetModel,
+				ProviderFormat: candidate.Provider.Format,
+				StartedAt:      skipStarted.In(beijingLoc).Format(time.RFC3339Nano),
+				DurationMs:     time.Since(skipStarted).Milliseconds(),
+				Outcome:        "skipped",
+				Reason:         "context_window_exceeded",
+			})
+			// 没有进入 forwardAttempt，也没有借出半开探针额度；因此这里不能
+			// 调 breaker.Report。buildErr 分支则相反：它已进入 forwardAttempt，
+			// 需要 Report(OutcomeIgnored) 归还已经借出的探针。
+			logf(reqID, "  候选 %s 装不下请求，跳过（估算输入 %d、可用预算 %d）", name, estimatedInputTokens, contextBudget)
+			continue
+		}
+
 		// 是否还有后续候选可试：额度未用尽且 order 里后面还有候选
 		hasNext := attempts+1 < attemptLimit && pos+1 < len(order)
 		nextDetailSequence++
@@ -590,6 +631,7 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 			rawBody:       body,
 			needVision:    needVision,
 			candidate:     candidate,
+			contextBudget: contextBudget,
 			allowRetry:    hasNext,
 			attemptNo:     attempts + 1,
 			httpAttemptNo: nextHTTPAttemptNo + 1,
@@ -664,6 +706,10 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		reqLog.AttemptTrail = strings.Join(trail, " → ")
 		reqLog.Error = "全部候选上游均在限流中"
 		writeJSONError(w, http.StatusTooManyRequests, "all_candidates_rate_limited", reqLog.Error)
+	case attempts == 0 && contextSkips > 0:
+		reqLog.AttemptTrail = strings.Join(trail, " → ")
+		reqLog.Error = contextWindowExceededMessage(matched.Candidates, estimatedInputTokens, cfg.SafetyMargin())
+		writeJSONError(w, http.StatusRequestEntityTooLarge, "context_window_exceeded", reqLog.Error)
 	case attempts == 0 && buildErr != "":
 		// 全部候选都构建失败：此时没有任何一次真实转发，需自行写终态
 		reqLog.Error = "上游请求协议转换失败: " + buildErr
@@ -680,6 +726,29 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		reqLog.Error = "全部候选上游均不可用"
 		writeJSONError(w, http.StatusBadGateway, "all_candidates_failed", reqLog.Error)
 	}
+}
+
+// resolveContextBudget 计算单个候选允许的输出预算。
+// nil 窗口表示该候选不启用本机制；低于 MinOutputBudget 则视为装不下。
+func resolveContextBudget(window *int, estimatedInput, safetyMargin int) (budget int, ok bool) {
+	if window == nil {
+		return 0, true
+	}
+	budget = *window - estimatedInput - safetyMargin
+	return budget, budget >= MinOutputBudget
+}
+
+func contextWindowExceededMessage(candidates []router.Candidate, estimatedInput, safetyMargin int) string {
+	windows := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		if candidate.ContextWindow == nil {
+			windows = append(windows, candidate.Provider.Name+"=未配置")
+			continue
+		}
+		budget, _ := resolveContextBudget(candidate.ContextWindow, estimatedInput, safetyMargin)
+		windows = append(windows, fmt.Sprintf("%s=%d/可用输出预算=%d", candidate.Provider.Name, *candidate.ContextWindow, budget))
+	}
+	return fmt.Sprintf("估算输入约 %d token，安全余量 %d；候选窗口：%s", estimatedInput, safetyMargin, strings.Join(windows, "，"))
 }
 
 // candidateOrder 计算候选的尝试顺序（返回下标序列），长度恒等于候选数，不丢候选。
@@ -740,6 +809,8 @@ type forwardAttemptInput struct {
 	rawBody       map[string]any
 	needVision    bool
 	candidate     router.Candidate
+	// contextBudget 本次允许的输出上限硬顶，0 表示不限制。
+	contextBudget int
 	attemptNo     int // 从 1 开始，用于 x-ai-gateway-attempts
 	// httpAttemptNo 只对实际调用 proxy 的请求递增；与保留兼容语义的 attemptNo 分开。
 	httpAttemptNo int
@@ -828,8 +899,18 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 	// 上游，而 Anthropic 该字段必填。跨格式路径的 ToXxxBody 已无条件写入，
 	// EnsureMaxTokens 在那里恒为空操作。
 	if in.candidate.MaxTokens != nil {
-		converter.OverrideMaxTokens(upstreamMap, p.Format, *in.candidate.MaxTokens)
+		effective := *in.candidate.MaxTokens
+		if in.contextBudget > 0 && effective > in.contextBudget {
+			effective = in.contextBudget
+		}
+		converter.OverrideMaxTokens(upstreamMap, p.Format, effective)
+	} else if in.contextBudget > 0 {
+		// 三层都未配置时，LimitMaxTokens 负责把「客户端值或默认值」向下压；
+		// 未超预算的客户端值保持原样，不能因为启用 contextWindow 就被重写。
+		converter.LimitMaxTokens(upstreamMap, p.Format, in.contextBudget)
 	} else {
+		// 无 contextBudget 时保留 EnsureMaxTokens：透传路径客户端未带必填字段时，
+		// 仍须补上现有的全局默认值，保证改动前逐字节兼容。
 		converter.EnsureMaxTokens(upstreamMap, p.Format)
 	}
 	upstreamBody, err := json.Marshal(upstreamMap)

@@ -150,7 +150,9 @@ type RequestLog struct {
 	AttemptTrail string `json:"attemptTrail,omitempty"`
 	// AttemptDetails 保留每一个候选的请求、跳过和转移明细；仍只生成一条顶层请求日志。
 	AttemptDetails []AttemptDetail `json:"attemptDetails,omitempty"`
-	Started        time.Time       `json:"-"`
+	// EstimatedInputTokens 是本次请求的估算输入 token 数；未启用 contextWindow 时为 0。
+	EstimatedInputTokens int       `json:"estimatedInputTokens,omitempty"`
+	Started              time.Time `json:"-"`
 }
 
 // AttemptDetail 是一次候选决策的结构化可观测性记录。Kind/Outcome/Reason 使用稳定

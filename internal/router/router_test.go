@@ -138,6 +138,112 @@ func TestMatchRouteEmptyTargetModelInheritsRequestModel(t *testing.T) {
 	}
 }
 
+func TestMatchRouteEmptyTargetModelStripsOneMSuffix(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Routes = []config.Route{{Match: "claude-sonnet-4-5", Provider: "alpha"}}
+
+	m := MatchRoute("claude-sonnet-4-5 [1M]", cfg)
+	if m == nil {
+		t.Fatal("带 [1M] 后缀的精确模型名应命中路由")
+	}
+	if got := m.Candidates[0].TargetModel; got != "claude-sonnet-4-5" {
+		t.Fatalf("TargetModel = %q，期望剥离 [1M] 后缀", got)
+	}
+	if got := m.Candidates[0].ContextWindow; got == nil || *got != OneMContextWindow {
+		t.Fatalf("ContextWindow = %#v，期望 %d", got, OneMContextWindow)
+	}
+}
+
+func TestStripOneMSuffix(t *testing.T) {
+	tests := []struct {
+		name   string
+		model  string
+		want   string
+		marked bool
+	}{
+		{name: "大写", model: "deepseek-v4-pro[1M]", want: "deepseek-v4-pro", marked: true},
+		{name: "带空格", model: "deepseek-v4-pro [1m]", want: "deepseek-v4-pro", marked: true},
+		{name: "无标记", model: "deepseek-v4-pro", want: "deepseek-v4-pro"},
+		{name: "标记不是尾部", model: "deepseek-v4-pro[1m]-x", want: "deepseek-v4-pro[1m]-x"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, marked := StripOneMSuffix(tt.model)
+			if got != tt.want || marked != tt.marked {
+				t.Fatalf("StripOneMSuffix(%q) = %q, %v，期望 %q, %v", tt.model, got, marked, tt.want, tt.marked)
+			}
+		})
+	}
+}
+
+func TestMatchRouteContextWindowPriority(t *testing.T) {
+	providerWindow := 100000
+	routeWindow := 200000
+	targetWindow := 300000
+	tests := []struct {
+		name     string
+		target   *int
+		route    *int
+		provider *int
+		want     *int
+	}{
+		{name: "target 覆盖 route", target: &targetWindow, route: &routeWindow, provider: &providerWindow, want: &targetWindow},
+		{name: "route 覆盖 provider", route: &routeWindow, provider: &providerWindow, want: &routeWindow},
+		{name: "仅 provider", provider: &providerWindow, want: &providerWindow},
+		{name: "全部未配置", want: nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := baseConfig()
+			cfg.Providers["alpha"].ContextWindow = tt.provider
+			cfg.Routes = []config.Route{{
+				Match: "*", Provider: "alpha", Model: "upstream",
+				ContextWindow: tt.route,
+				Targets:       nil,
+			}}
+			if tt.target != nil {
+				cfg.Routes[0].Targets = []config.Target{{Provider: "alpha", Model: "upstream", ContextWindow: tt.target}}
+				cfg.Routes[0].Provider = ""
+				cfg.Routes[0].Model = ""
+			}
+			m := MatchRoute("requested", cfg)
+			if m == nil {
+				t.Fatal("期望命中路由")
+			}
+			got := m.Candidates[0].ContextWindow
+			if tt.want == nil {
+				if got != nil {
+					t.Fatalf("ContextWindow = %d，期望 nil", *got)
+				}
+				return
+			}
+			if got == nil || *got != *tt.want {
+				t.Fatalf("ContextWindow = %#v，期望 %d", got, *tt.want)
+			}
+		})
+	}
+}
+
+func TestOneMSuffixOverridesContextWindowButNotMaxTokens(t *testing.T) {
+	window := 200000
+	maxTokens := 8192
+	cfg := baseConfig()
+	cfg.Providers["alpha"].ContextWindow = &window
+	cfg.Providers["alpha"].MaxTokens = &maxTokens
+	cfg.Routes = []config.Route{{Match: "model", Provider: "alpha", Model: "upstream"}}
+
+	m := MatchRoute("model[1m]", cfg)
+	if m == nil {
+		t.Fatal("带后缀的模型应命中精确路由")
+	}
+	if got := m.Candidates[0].ContextWindow; got == nil || *got != OneMContextWindow {
+		t.Fatalf("ContextWindow = %#v，期望 %d", got, OneMContextWindow)
+	}
+	if got := m.Candidates[0].MaxTokens; got == nil || *got != maxTokens {
+		t.Fatalf("MaxTokens = %#v，期望保持 %d", got, maxTokens)
+	}
+}
+
 func TestMatchRouteSkipsUndefinedProviderAndFallsThrough(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Routes = []config.Route{
