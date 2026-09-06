@@ -665,17 +665,22 @@
                          text-3xl 是 36px → h-9，text-xs 是 16px → h-4，外边距也照抄，
                          这样数据到位时只是内容替换，卡片高度不变、页面不跳。
                          两条静态副标题（成功率 / P95 说明）不做骨架：它们是固定说明文字，
-                         不等任何请求，盖掉只是让首屏更空。 -->
+                         不等任何请求，盖掉只是让首屏更空。
+                         四张卡各带一行动态第二行（速率/累计、失败条数、P50/P99、配置规模），
+                         这一行必须做骨架，而且四张卡都要有——只给一部分卡加，
+                         grid 会把最高的那张的高度摊给整行，其余卡底部空一大块。 -->
                     <div class="grid grid-cols-1 gap-4 md:grid-cols-2 2xl:grid-cols-4">
                         <article class="glass rounded-lg p-4">
                             <div class="mb-3 flex items-center justify-between">
-                                <span class="text-sm font-bold text-muted">请求速率</span>
+                                <span class="text-sm font-bold text-muted">请求量</span>
                                 <span class="material-symbols-outlined text-cyan">speed</span>
                             </div>
                             <div x-show="_firstLoadDone" class="text-3xl font-extrabold text-white" x-text="metricValue('windowRequests', '--')"></div>
                             <div x-show="!_firstLoadDone" class="gw-skeleton h-9 w-20"></div>
                             <div x-show="_firstLoadDone" class="mt-1 text-xs text-muted" x-text="'最近 ' + metricWindowLabel() + '请求数'"></div>
                             <div x-show="!_firstLoadDone" class="gw-skeleton mt-1 h-4 w-32"></div>
+                            <div x-show="_firstLoadDone" class="mt-1 font-mono text-xs text-muted" x-text="requestRateSubText()"></div>
+                            <div x-show="!_firstLoadDone" class="gw-skeleton mt-1 h-4 w-40"></div>
                         </article>
                         <article class="glass rounded-lg p-4">
                             <div class="mb-3 flex items-center justify-between">
@@ -685,6 +690,8 @@
                             <div x-show="_firstLoadDone" class="text-3xl font-extrabold text-white" x-text="metricPercent('successRate')"></div>
                             <div x-show="!_firstLoadDone" class="gw-skeleton h-9 w-24"></div>
                             <div class="mt-1 text-xs text-muted">最近窗口内的成功请求占比</div>
+                            <div x-show="_firstLoadDone" class="mt-1 font-mono text-xs text-muted" x-text="successSubText()"></div>
+                            <div x-show="!_firstLoadDone" class="gw-skeleton mt-1 h-4 w-36"></div>
                         </article>
                         <article class="glass rounded-lg p-4">
                             <div class="mb-3 flex items-center justify-between">
@@ -693,7 +700,9 @@
                             </div>
                             <div x-show="_firstLoadDone" class="text-3xl font-extrabold text-white" x-text="metricDuration('p95LatencyMs')"></div>
                             <div x-show="!_firstLoadDone" class="gw-skeleton h-9 w-28"></div>
-                            <div class="mt-1 text-xs text-muted">端到端转发耗时；按桶上界近似；样本不足时显示样本数</div>
+                            <div class="mt-1 text-xs text-muted">端到端转发耗时；分位数按桶上界近似</div>
+                            <div x-show="_firstLoadDone" class="mt-1 font-mono text-xs text-muted" x-text="latencySpreadText()"></div>
+                            <div x-show="!_firstLoadDone" class="gw-skeleton mt-1 h-4 w-44"></div>
                         </article>
                         <article class="glass rounded-lg p-4">
                             <div class="mb-3 flex items-center justify-between">
@@ -707,6 +716,8 @@
                             <div x-show="!_firstLoadDone" class="gw-skeleton h-9 w-20"></div>
                             <div x-show="_firstLoadDone" class="mt-1 truncate text-xs text-muted" x-text="(health?.listenAddress || '监听地址未知') + ' · ' + (config.directMode ? '直通模式' : '队列模式')"></div>
                             <div x-show="!_firstLoadDone" class="gw-skeleton mt-1 h-4 w-40"></div>
+                            <div x-show="_firstLoadDone" class="mt-1 font-mono text-xs text-muted" x-text="'配置 ' + providerCount() + ' 个 Provider · ' + routeCount() + ' 条路由'"></div>
+                            <div x-show="!_firstLoadDone" class="gw-skeleton mt-1 h-4 w-32"></div>
                         </article>
                     </div>
 
@@ -899,7 +910,10 @@
 
                         <aside class="space-y-5 xl:col-span-3">
                             <section class="glass rounded-lg p-4">
-                                <h2 class="mb-4 text-base font-extrabold text-white">系统资源</h2>
+                                <!-- 原标题「系统资源」：这块除了 Heap / Sys 还放着超时、粘性、转移率，
+                                     它们都不是「资源」。改叫运行时状态后语义对上，超时也留得住——
+                                     那是 effectiveTimeoutMs()，即直通/队列两套配置里当前真正生效的那个值。 -->
+                                <h2 class="mb-4 text-base font-extrabold text-white">运行时状态</h2>
                                 <div class="grid grid-cols-2 gap-3 text-xs">
                                     <div class="rounded-lg bg-ink p-3">
                                         <div class="text-muted">图片缓存</div>
@@ -917,6 +931,54 @@
                                         <div class="text-muted">超时</div>
                                         <div class="mt-1 font-mono text-text" x-text="seconds(effectiveTimeoutMs()) + 's'"></div>
                                     </div>
+                                    <!-- 粘性映射：/health 一直在返回 stickyMappings，此前没有任何展示位，
+                                         于是「粘性到底生效没有」只能靠猜。长期为 0 的含义见 stickyTip()。 -->
+                                    <div class="rounded-lg bg-ink p-3" :title="stickyTip()">
+                                        <div class="text-muted">粘性映射</div>
+                                        <div class="mt-1 font-mono text-text" x-text="stickyText()"></div>
+                                    </div>
+                                    <!-- 故障转移是可靠性的领先指标：成功率还挂着 100% 时它就先涨，
+                                         说明首选候选已经在掉，只是被转移兜住了。
+                                         它的口径和同格其他数不同（最近 100 条日志，不是统计窗口），
+                                         差异写在 tooltip 里，不混进主文案。 -->
+                                    <div class="rounded-lg bg-ink p-3" :title="failoverTip()">
+                                        <div class="text-muted">故障转移</div>
+                                        <div class="mt-1 font-mono" :class="failoverClass()" x-text="failoverText()"></div>
+                                    </div>
+                                </div>
+                            </section>
+
+                            <section class="glass rounded-lg p-4">
+                                <h2 class="text-base font-extrabold text-white">状态码分布</h2>
+                                <!-- 只有一个成功率百分比时，看不出掉的是 429 还是 500，而这两者的处置
+                                     完全不同：前者调限流或换候选，后者是上游自己坏了。
+                                     statusCodes 后端逐秒桶一直在累计，这里是第一次真正用上。 -->
+                                <div x-show="_firstLoadDone" class="mb-3 mt-1 text-xs text-muted"
+                                     x-text="'最近 ' + metricWindowLabel() + '共 ' + statusCodeTotal() + ' 条'"></div>
+                                <div x-show="!_firstLoadDone" class="gw-skeleton mb-3 mt-1 h-4 w-32"></div>
+                                <div x-show="_firstLoadDone && statusBuckets().length > 0">
+                                    <div class="flex h-2 w-full overflow-hidden rounded-full bg-white/[.06]">
+                                        <template x-for="bucket in statusBuckets()" :key="bucket.key">
+                                            <div class="h-full" :class="bucket.barClass" :style="'width:' + bucket.pct + '%'" :title="bucket.tip"></div>
+                                        </template>
+                                    </div>
+                                    <div class="mt-3 space-y-1.5">
+                                        <template x-for="bucket in statusBuckets()" :key="bucket.key">
+                                            <div class="flex items-center justify-between gap-2 text-xs" :title="bucket.tip">
+                                                <span class="flex min-w-0 items-center gap-2">
+                                                    <span class="h-2 w-2 shrink-0 rounded-full" :class="bucket.dotClass"></span>
+                                                    <span class="truncate text-muted" x-text="bucket.label"></span>
+                                                </span>
+                                                <span class="shrink-0 font-mono text-text" x-text="bucket.count + ' · ' + bucket.pctText"></span>
+                                            </div>
+                                        </template>
+                                    </div>
+                                </div>
+                                <div x-show="_firstLoadDone && statusBuckets().length === 0" class="py-2 text-center text-xs text-muted">窗口内暂无请求</div>
+                                <div x-show="!_firstLoadDone" class="space-y-3">
+                                    <div class="gw-skeleton h-2 w-full"></div>
+                                    <div class="gw-skeleton h-4 w-full"></div>
+                                    <div class="gw-skeleton h-4 w-4/5"></div>
                                 </div>
                             </section>
 
@@ -936,15 +998,20 @@
 
                     <div class="grid grid-cols-1 gap-5 xl:grid-cols-12">
                         <section class="glass rounded-lg xl:col-span-5">
-                            <div class="border-b border-line p-4 font-bold text-white">Provider 延迟排行</div>
+                            <div class="border-b border-line p-4">
+                                <div class="font-bold text-white">Provider 延迟排行</div>
+                                <!-- 排序口径必须写出来：样本不足的行被压到后面，否则
+                                     「那个 30s 的怎么不在第一行」会被当成 bug 来报。 -->
+                                <div class="mt-1 text-xs text-muted">按 P95 倒序；样本不足 20 的排在可信行之后</div>
+                            </div>
                             <div class="divide-y divide-line">
                                 <template x-for="row in latencyRows()" :key="row.name">
-                                    <div class="flex items-center justify-between gap-3 px-4 py-3">
+                                    <div class="flex items-center justify-between gap-3 px-4 py-3" :title="latencyRowTip(row)">
                                         <div class="min-w-0">
                                             <div class="truncate font-mono text-sm font-bold text-text" x-text="row.name"></div>
-                                            <div class="mt-1 text-xs text-muted" x-text="row.requests + ' 次请求'"></div>
+                                            <div class="mt-1 text-xs text-muted" x-text="latencyRowSub(row)"></div>
                                         </div>
-                                        <span class="font-mono text-sm text-cyan" x-text="row.p95 + ' ms'"></span>
+                                        <span class="shrink-0 font-mono text-sm" :class="latencyRowMainClass(row)" x-text="latencyRowMain(row)"></span>
                                     </div>
                                 </template>
                                 <!-- 骨架条数与行内结构照抄上面的真实行：左侧两行（名称 + 次数）、
@@ -1362,8 +1429,10 @@
              头尾 shrink-0。min-h-0 是关键——flex 子项默认 min-height:auto，
              不置 0 时它拒绝收缩到内容高度以下，overflow 永远不触发。
              限高值复用 toast 栈那个 calc(100vh-6rem)：vendor/tailwind.css 是构建期产物，
-             写一个没生成过的任意值（如 calc(100vh-2rem)）不会报错，只是静默无样式。 -->
-        <div class="glass flex max-h-[calc(100vh-6rem)] w-full max-w-2xl flex-col rounded-lg shadow-glow">
+             写一个没生成过的任意值（如 calc(100vh-2rem)）不会报错，只是静默无样式。
+             max-w-3xl（768px）而不是原先的 max-w-2xl（672px）：分区内两列各得约 330px，
+             模型名与长 URL 不再贴边。这个类原先不在 vendor/tailwind.css 里，须跑 make web-css。 -->
+        <div class="glass flex max-h-[calc(100vh-6rem)] w-full max-w-3xl flex-col rounded-lg shadow-glow">
             <div class="flex shrink-0 items-center justify-between border-b border-line p-5">
                 <h3 class="text-lg font-extrabold text-white" x-text="editingProvider ? '编辑 Provider' : '添加 Provider'"></h3>
                 <button @click="showProviderModal = false" class="btn btn-secondary px-2 py-2" aria-label="关闭 Provider 弹窗">
@@ -1373,73 +1442,100 @@
             <!-- 改任何字段就清掉上一次的检测结果：结果对应的是点检测那一刻的表单值，
                  用户改完 URL 后旧结论还挂着会造成误导（红着的其实已经不是当前配置了）。
                  挂在容器上靠事件冒泡覆盖全部输入，避免六个字段各写一遍。 -->
-            <div class="min-h-0 flex-1 overflow-y-auto">
-                <div class="grid grid-cols-1 gap-4 p-5 md:grid-cols-2"
-                     @input="providerProbeStatus = null" @change="providerProbeStatus = null">
-                <label class="block">
-                    <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">名称</span>
-                    <!-- maxlength 按 UTF-16 码元数截，和后端的 rune 计数在 BMP 内一致；
-                         emoji 等代理对会被前端多算，最终以后端校验为准。 -->
-                    <input autocomplete="off" type="text" :maxlength="maxProviderNameLen" x-model="providerForm.name" :disabled="editingProvider" class="field">
-                    <span class="mt-1 block text-[11px] text-muted" x-show="!editingProvider" x-cloak
-                          x-text="`最多 ${maxProviderNameLen} 个字符，已用 ${[...(providerForm.name || '')].length}`"></span>
-                </label>
-                <label class="block">
-                    <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">格式</span>
-                    <select autocomplete="off" x-model="providerForm.format" class="field">
-                        <option value="anthropic">Anthropic</option>
-                        <option value="openai">OpenAI Chat Completions</option>
-                        <option value="openai-responses">OpenAI Responses</option>
-                    </select>
-                </label>
-                <label class="block md:col-span-2">
-                    <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">Base URL</span>
-                    <input autocomplete="off" type="text" x-model="providerForm.baseUrl" placeholder="https://api.example.com" class="field">
-                </label>
-                <div class="block md:col-span-2">
-                    <label for="provider-api-key" class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">API Key</label>
-                    <input autocomplete="off" id="provider-api-key" type="password" x-model="providerForm.apiKey"
-                           :placeholder="providerForm.apiKeyConfigured ? '已配置，留空保持不变' : '留空则从客户端请求头提取'"
-                           class="field">
-                    <label for="provider-clear-api-key" x-show="providerForm.apiKeyConfigured" x-cloak class="mt-2 flex items-center gap-2 text-xs text-muted">
-                        <input autocomplete="off" id="provider-clear-api-key" type="checkbox" x-model="providerForm.clearApiKey" class="h-4 w-4 rounded border-line bg-panel text-cyan2 focus:ring-cyan2">
-                        清除已有密钥，改用客户端请求头
+            <!-- 分区化：原先 10 个字段平铺在一个两列栅格里，靠 md:col-span-2 手工控制跨列，
+                 读者要自己在脑子里给它们分组。现在收成「基本信息 / 并发与限流 / 模型上限 / 网络」
+                 四个分区，与路由弹窗同一套分组语言。字段集合、校验与落盘逻辑一字不改。 -->
+            <div class="min-h-0 flex-1 space-y-4 overflow-y-auto p-5"
+                 @input="providerProbeStatus = null" @change="providerProbeStatus = null">
+                <div class="rounded-lg border border-line bg-panel2/50 p-4">
+                    <!-- 分区标题与字段标签分层：14px 白色（弹窗主标题 18px、分区 14px、
+                         字段标签 12px 灰，三级阶梯），扫读时先落分区名再落字段名。 -->
+                    <div class="mb-3 text-sm font-bold tracking-wide text-white">基本信息</div>
+                    <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                        <label class="block">
+                            <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">名称</span>
+                            <!-- maxlength 按 UTF-16 码元数截，和后端的 rune 计数在 BMP 内一致；
+                                 emoji 等代理对会被前端多算，最终以后端校验为准。 -->
+                            <input autocomplete="off" type="text" :maxlength="maxProviderNameLen" x-model="providerForm.name" :disabled="editingProvider" class="field">
+                            <span class="mt-1 block text-xs text-muted" x-show="!editingProvider" x-cloak
+                                  x-text="`最多 ${maxProviderNameLen} 个字符，已用 ${[...(providerForm.name || '')].length}`"></span>
+                        </label>
+                        <label class="block">
+                            <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">格式</span>
+                            <select autocomplete="off" x-model="providerForm.format" class="field">
+                                <option value="anthropic">Anthropic</option>
+                                <option value="openai">OpenAI Chat Completions</option>
+                                <option value="openai-responses">OpenAI Responses</option>
+                            </select>
+                        </label>
+                    </div>
+                    <label class="mt-4 block">
+                        <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">Base URL</span>
+                        <input autocomplete="off" type="text" x-model="providerForm.baseUrl" placeholder="https://api.example.com" class="field">
+                    </label>
+                    <div class="mt-4 block">
+                        <label for="provider-api-key" class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">API Key</label>
+                        <input autocomplete="off" id="provider-api-key" type="password" x-model="providerForm.apiKey"
+                               :placeholder="providerForm.apiKeyConfigured ? '已配置，留空保持不变' : '留空则从客户端请求头提取'"
+                               class="field">
+                        <label for="provider-clear-api-key" x-show="providerForm.apiKeyConfigured" x-cloak class="mt-2 flex items-center gap-2 text-xs text-muted">
+                            <input autocomplete="off" id="provider-clear-api-key" type="checkbox" x-model="providerForm.clearApiKey" class="h-4 w-4 rounded border-line bg-panel text-cyan2 focus:ring-cyan2">
+                            清除已有密钥，改用客户端请求头
+                        </label>
+                    </div>
+                </div>
+                <div class="rounded-lg border border-line bg-panel2/50 p-4">
+                    <div class="mb-3 flex flex-wrap items-baseline justify-between gap-3">
+                        <span class="text-sm font-bold tracking-wide text-white">并发与限流</span>
+                        <span class="text-xs text-muted">超出并发时排队，等待超时按失败处理</span>
+                    </div>
+                    <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                        <label class="block">
+                            <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">最大并发</span>
+                            <input autocomplete="off" type="number" x-model.number="providerForm.maxConcurrent" class="field">
+                        </label>
+                        <label class="block">
+                            <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">每秒请求数</span>
+                            <input autocomplete="off" type="number" x-model.number="providerForm.maxPerSecond" placeholder="0 = 不限" class="field">
+                        </label>
+                    </div>
+                    <label class="mt-4 block">
+                        <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">队列最大等待 ms</span>
+                        <input autocomplete="off" type="number" x-model.number="providerForm.maxQueueWait" class="field">
                     </label>
                 </div>
-                <label class="block">
-                    <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">最大并发</span>
-                    <input autocomplete="off" type="number" x-model.number="providerForm.maxConcurrent" class="field">
-                </label>
-                <label class="block">
-                    <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">每秒请求数</span>
-                    <input autocomplete="off" type="number" x-model.number="providerForm.maxPerSecond" placeholder="0 = 不限" class="field">
-                </label>
-                <label class="block md:col-span-2">
-                    <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">队列最大等待 ms</span>
-                    <input autocomplete="off" type="number" x-model.number="providerForm.maxQueueWait" class="field">
-                </label>
-                <label class="block md:col-span-2">
-                    <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">最大输出 tokens</span>
-                    <input autocomplete="off" type="number" x-model.number="providerForm.maxTokens" placeholder="留空 = 用客户端传入值，客户端也没传则 32768" class="field">
-                    <span class="mt-1 block text-[11px] text-muted">覆盖转发给该上游的 max_tokens / max_output_tokens，配了就硬覆盖客户端传入值。完整优先级：候选 &gt; 路由 &gt; 上游 &gt; 客户端传入值 &gt; 全局默认 32768。</span>
-                    <span class="mt-1 block text-[11px] text-warn">配得过小会让思考型模型烧光预算就被截断，工具调用参数被砍断后客户端会重投，表现为「同一条命令反复执行」。</span>
-                </label>
-                <label class="block md:col-span-2">
-                    <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">上下文窗口 tokens</span>
-                    <input autocomplete="off" type="number" min="1" max="10000000" x-model.number="providerForm.contextWindow" placeholder="留空 = 不启用窗口预算裁决" class="field">
-                    <span class="mt-1 block text-[11px] text-muted">估算输入后从这里扣除输入和顶层安全余量，剩余值只会向下压低输出上限；不会裁剪或摘要上下文。</span>
-                </label>
-                <label class="block md:col-span-2">
-                    <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">User-Agent</span>
-                    <input autocomplete="off" type="text" x-model="providerForm.userAgent" placeholder="留空则转发客户端真实 UA" class="field">
-                    <span class="mt-1 block text-[11px] text-muted">用于兼容按客户端类型准入的上游；显式设置会覆盖客户端请求头。</span>
-                </label>
-                <label class="block md:col-span-2">
-                    <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">Provider 代理</span>
-                    <input autocomplete="off" type="text" x-model="providerForm.proxy" placeholder="http://proxy.example.com:7890" class="field">
-                    <span class="mt-1 block text-[11px] text-muted">留空则使用全局 HTTPS_PROXY/HTTP_PROXY；全局也没有则直连。仅支持 http/https/socks5/socks5h。</span>
-                    <span class="mt-1 block text-[11px] text-warn">密码位显示占位符表示沿用已存密码；要改密码请重新填写完整代理 URL。</span>
-                </label>
+                <!-- 优先级链提到分区头讲一次，字段自己的说明不再重复它。
+                     同一句话原先在这个弹窗和路由弹窗里各写两遍，共四处。 -->
+                <div class="rounded-lg border border-line bg-panel2/50 p-4">
+                    <div class="mb-3 flex flex-wrap items-baseline justify-between gap-3">
+                        <span class="text-sm font-bold tracking-wide text-white">模型上限</span>
+                        <span class="whitespace-nowrap text-xs text-muted">优先级：候选 &gt; 路由 &gt; 上游 &gt; 客户端 &gt; 默认 32768</span>
+                    </div>
+                    <label class="block">
+                        <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">最大输出 tokens</span>
+                        <input autocomplete="off" type="number" x-model.number="providerForm.maxTokens" placeholder="留空 = 用客户端传入值，客户端也没传则 32768" class="field">
+                        <span class="mt-1 block text-xs text-muted">覆盖转发给该上游的 max_tokens / max_output_tokens，配了就硬覆盖客户端传入值。</span>
+                        <span class="mt-1 block text-xs text-warn">配得过小会让思考型模型烧光预算就被截断，工具调用参数被砍断后客户端会重投，表现为「同一条命令反复执行」。</span>
+                    </label>
+                    <label class="mt-4 block">
+                        <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">上下文窗口 tokens</span>
+                        <input autocomplete="off" type="number" min="1" max="10000000" x-model.number="providerForm.contextWindow" placeholder="留空 = 不启用窗口预算裁决" class="field">
+                        <span class="mt-1 block text-xs text-muted">估算输入后从这里扣除输入和顶层安全余量，剩余值只会向下压低输出上限；不会裁剪或摘要上下文。</span>
+                    </label>
+                </div>
+                <div class="rounded-lg border border-line bg-panel2/50 p-4">
+                    <div class="mb-3 text-sm font-bold tracking-wide text-white">网络</div>
+                    <label class="block">
+                        <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">User-Agent</span>
+                        <input autocomplete="off" type="text" x-model="providerForm.userAgent" placeholder="留空则转发客户端真实 UA" class="field">
+                        <span class="mt-1 block text-xs text-muted">用于兼容按客户端类型准入的上游；显式设置会覆盖客户端请求头。</span>
+                    </label>
+                    <label class="mt-4 block">
+                        <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">Provider 代理</span>
+                        <input autocomplete="off" type="text" x-model="providerForm.proxy" placeholder="http://proxy.example.com:7890" class="field">
+                        <span class="mt-1 block text-xs text-muted">留空则使用全局 HTTPS_PROXY/HTTP_PROXY；全局也没有则直连。仅支持 http/https/socks5/socks5h。</span>
+                        <span class="mt-1 block text-xs text-warn">密码位显示占位符表示沿用已存密码；要改密码请重新填写完整代理 URL。</span>
+                    </label>
                 </div>
             </div>
             <!-- 检测结果留在滚动区外：它是点底部「检测」按钮的即时反馈，
@@ -1470,81 +1566,122 @@
     <div x-show="showRouteModal" x-transition.opacity x-cloak
          @keydown.escape.window="escapeRouteModal()"
          class="fixed inset-0 z-50 grid place-items-center bg-black/70 p-4">
-        <!-- 限高与只滚表单区，理由同 Provider 弹窗 -->
-        <div class="glass flex max-h-[calc(100vh-6rem)] w-full max-w-2xl flex-col rounded-lg shadow-glow">
+        <!-- 限高与只滚表单区、max-w-3xl 的理由同 Provider 弹窗 -->
+        <div class="glass flex max-h-[calc(100vh-6rem)] w-full max-w-3xl flex-col rounded-lg shadow-glow">
             <div class="flex shrink-0 items-center justify-between border-b border-line p-5">
                 <h3 class="text-lg font-extrabold text-white" x-text="editingRouteIndex >= 0 ? '编辑路由' : '添加路由'"></h3>
                 <button @click="showRouteModal = false" class="btn btn-secondary px-2 py-2" aria-label="关闭路由弹窗">
                     <span class="material-symbols-outlined">close</span>
                 </button>
             </div>
-            <div class="min-h-0 flex-1 overflow-y-auto">
-                <div class="grid grid-cols-1 gap-4 p-5 md:grid-cols-2">
+            <!-- 分层简化：首屏只留「匹配 → 用哪个模型」这两件必填的事。
+                 候选级上限由每个候选行自己的开关就地展开（见下方），候选策略 /
+                 路由级默认值 / 视觉伴随仍是低频配置，收进下方默认折叠的高级设置区。 -->
+            <div class="min-h-0 flex-1 space-y-4 overflow-y-auto p-5">
                 <label class="block">
                     <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">匹配模式</span>
                     <input autocomplete="off" type="text" x-model="routeForm.match" placeholder="例如: claude-* 或 gpt-4" class="field font-mono">
                 </label>
-                <div class="md:col-span-2">
-                    <div class="mb-1.5 flex items-center justify-between">
-                        <span class="text-xs font-bold uppercase tracking-wide text-muted">目标候选</span>
+                <div class="rounded-lg border border-line bg-panel2/50 p-4">
+                    <!-- 同 Provider 弹窗：分区标题 14px 白，与 12px 灰的字段标签分层 -->
+                    <div class="mb-2 flex flex-wrap items-baseline justify-between gap-2">
+                        <span class="text-sm font-bold tracking-wide text-white">目标候选</span>
                         <span class="text-xs text-muted">按顺序尝试，第一个为主目标</span>
                     </div>
-                    <div class="space-y-2">
+                    <!-- 候选列表 = 表格式紧凑列表，与路由/Provider 主列表同一族语言：
+                         一行表头 + divide-y 分隔的数据行，行本身不再套「卡中卡」的
+                         边框盒子（上一版分区盒>行卡盒>内栅格三层嵌套，视觉噪且
+                         每卡吃掉大量内边距）。行高由 field 控件高度决定 ≈ 44px，
+                         5 个候选全展开也不到 250px。 -->
+                    <div class="divide-y divide-line">
+                        <!-- 表头：text-[11px] 一行，列宽与数据行 flex 结构对位 -->
+                        <div class="flex items-center gap-2 pb-1.5 text-[11px] font-bold uppercase tracking-wide text-muted">
+                            <span class="w-6 shrink-0"></span>
+                            <span class="w-36 shrink-0">Provider</span>
+                            <span class="min-w-0 flex-1">模型</span>
+                            <span class="shrink-0 pr-0.5">操作</span>
+                        </div>
                         <template x-for="(target, ti) in routeForm.targets" :key="ti">
-                            <div class="flex flex-col gap-1">
-                                <div class="flex items-center gap-2">
-                                    <span class="w-6 shrink-0 font-mono text-xs text-muted" x-text="'#' + (ti + 1)"></span>
-                                    <!-- :selected 不能省：弹窗是 x-show、DOM 常驻，外层 x-for 为新增候选
-                                         建好 <select> 并让 x-model 写 select.value 时，内层 x-for 的 <option>
-                                         还没渲染出来，赋值落空、浏览器回落到第一项（看起来就是「每行都是同一个
-                                         provider」），options 补齐后 x-model 也不会再回写一次。让每个 option
-                                         自己认领选中态，才与 model 无条件一致。 -->
-                                    <select autocomplete="off" x-model="target.provider" @change="onRouteTargetProviderChange(ti)" class="field w-1/3">
-                                        <template x-for="(provider, name) in config.providers" :key="name">
-                                            <option :value="name" :selected="name === target.provider" x-text="name"></option>
-                                        </template>
-                                    </select>
-                                    <div class="relative flex flex-1">
-                                        <input autocomplete="off" type="text" x-model="target.model" placeholder="上游实际使用的模型名" class="field flex-1 font-mono pr-9">
-                                        <button type="button" @click="fetchProviderModels(ti)"
-                                                :disabled="!target.provider || target.modelsLoading"
-                                                :title="target.provider ? '查询该 Provider 的上游模型列表' : '请先选择 Provider'"
-                                                :aria-label="target.provider ? '查询该 Provider 的上游模型列表' : '请先选择 Provider'"
-                                                class="absolute right-1 top-1/2 -translate-y-1/2 rounded p-1 text-muted hover:text-cyan disabled:opacity-40">
-                                            <span class="material-symbols-outlined text-[18px]" x-show="!target.modelsLoading">search</span>
-                                            <span class="material-symbols-outlined gw-spin text-[18px]" x-show="target.modelsLoading" x-cloak>progress_activity</span>
-                                        </button>
-                                    </div>
-                                    <button @click="moveRouteTarget(ti, -1)" :disabled="ti === 0" class="btn btn-secondary px-2 py-2" title="上移" aria-label="上移">
-                                        <span class="material-symbols-outlined text-[18px]">keyboard_arrow_up</span>
-                                    </button>
-                                    <button @click="moveRouteTarget(ti, 1)" :disabled="ti === routeForm.targets.length - 1" class="btn btn-secondary px-2 py-2" title="下移" aria-label="下移">
-                                        <span class="material-symbols-outlined text-[18px]">keyboard_arrow_down</span>
-                                    </button>
-                                    <button @click="removeRouteTarget(ti)" :disabled="routeForm.targets.length <= 1" class="btn btn-secondary px-2 py-2" title="删除该候选" aria-label="删除该候选">
-                                        <span class="material-symbols-outlined text-[18px]">delete</span>
-                                    </button>
-                                </div>
-                                <!-- 上游模型列表：查询成功后展开，点选填入；列表为空时收起 -->
-                                <ul x-show="target.models && target.models.length" x-cloak x-transition
-                                    @click.away="target.models = []"
-                                    class="ml-8 max-h-44 overflow-y-auto rounded border border-line bg-panel3 py-1 text-xs">
-                                    <template x-for="m in target.models" :key="m">
-                                        <li @click="target.model = m; target.models = []"
-                                            class="cursor-pointer px-3 py-1.5 font-mono hover:bg-cyan2/10"
-                                            x-text="m"></li>
+                            <!-- 数据行：单行 flex（序号 | Provider 下拉 | 模型输入 | 操作按钮组），
+                                 无盒子、无卡片头、无每行重复的标签列。悬停行高亮沿用
+                                 Provider 列表的 bg-panel/35 + hover:bg-white/[.04]。
+                                 <sm 改两行堆叠（select+输入换行，按钮组随第二行右对齐），
+                                 375px 也不横向滚动。 -->
+                            <div class="flex flex-wrap items-center gap-2 py-1.5 transition hover:bg-white/[.04]">
+                                <!-- 序号列：第 1 个是主目标小徽标（文本「主」+cyan，不止靠颜色），
+                                     其余是数字。完整语义在分区头「按顺序尝试，第一个为主目标」。 -->
+                                <span x-show="ti === 0" x-cloak class="flex w-6 shrink-0 items-center justify-center">
+                                    <span class="flex h-5 w-5 items-center justify-center rounded border border-cyan2/40 bg-cyan2/10 text-[10px] font-bold leading-none text-cyan" title="主目标" aria-label="候选 1，主目标">主</span>
+                                </span>
+                                <span x-show="ti > 0" x-cloak class="flex w-6 shrink-0 items-center justify-center font-mono text-xs leading-none text-muted" :aria-label="'候选 ' + (ti + 1)" x-text="ti + 1"></span>
+                                <!-- :selected 不能省：弹窗是 x-show、DOM 常驻，外层 x-for 为新增候选
+                                     建好 <select> 并让 x-model 写 select.value 时，内层 x-for 的 <option>
+                                     还没渲染出来，赋值落空、浏览器回落到第一项（看起来就是「每行都是同一个
+                                     provider」），options 补齐后 x-model 也不会再回写一次。让每个 option
+                                     自己认领选中态，才与 model 无条件一致。 -->
+                                <select autocomplete="off" :id="'route-target-provider-' + ti" x-model="target.provider" @change="onRouteTargetProviderChange(ti)" :aria-label="'候选 ' + (ti + 1) + ' Provider'" class="field w-36 shrink-0 text-sm sm:w-40">
+                                    <template x-for="(provider, name) in config.providers" :key="name">
+                                        <option :value="name" :selected="name === target.provider" x-text="name"></option>
                                     </template>
-                                </ul>
-                                <!-- 候选级 maxTokens：优先级最高，用于同路由下不同上游输出上限不一致 -->
-                                <div class="ml-8 flex items-center gap-2">
-                                    <span class="shrink-0 text-[11px] text-muted">最大输出 tokens</span>
-                                    <input autocomplete="off" type="number" x-model.number="target.maxTokens"
-                                           placeholder="留空 = 跟随路由/上游设置" class="field w-48 text-xs">
+                                </select>
+                                <!-- relative 是模型列表浮层的定位上下文，浮层是它的子元素 -->
+                                <div class="relative min-w-0 flex-1 basis-40">
+                                    <input autocomplete="off" :id="'route-target-model-' + ti" type="text" x-model="target.model" :aria-label="'候选 ' + (ti + 1) + ' 模型'" placeholder="上游模型名" class="field pr-9 font-mono text-sm">
+                                    <button type="button" @click="fetchProviderModels(ti)"
+                                            :disabled="!target.provider || target.modelsLoading"
+                                            :title="target.provider ? '查询该 Provider 的上游模型列表' : '请先选择 Provider'"
+                                            :aria-label="target.provider ? '查询该 Provider 的上游模型列表' : '请先选择 Provider'"
+                                            class="absolute right-1 top-1/2 -translate-y-1/2 rounded p-1 text-muted hover:text-cyan disabled:opacity-40">
+                                        <span class="material-symbols-outlined text-[16px]" x-show="!target.modelsLoading">search</span>
+                                        <span class="material-symbols-outlined gw-spin text-[16px]" x-show="target.modelsLoading" x-cloak>progress_activity</span>
+                                    </button>
+                                    <!-- 上游模型列表：绝对定位浮层覆盖在输入框下方，展开时
+                                         不把后面的候选推下去。z-30 只需高于同行内容。 -->
+                                    <ul x-show="target.models && target.models.length" x-cloak x-transition
+                                        @click.away="target.models = []"
+                                        class="absolute left-0 right-0 top-[calc(100%+4px)] z-30 max-h-44 overflow-y-auto rounded-lg border border-line bg-panel3 py-1 text-xs shadow-glow">
+                                        <template x-for="m in target.models" :key="m">
+                                            <li @click="target.model = m; target.models = []"
+                                                class="cursor-pointer px-3 py-1.5 font-mono hover:bg-cyan2/10"
+                                                x-text="m"></li>
+                                        </template>
+                                    </ul>
                                 </div>
-                                <div class="ml-8 flex items-center gap-2">
-                                    <span class="shrink-0 text-[11px] text-muted">上下文窗口 tokens</span>
-                                    <input autocomplete="off" type="number" min="1" max="10000000" x-model.number="target.contextWindow"
-                                           placeholder="留空 = 不启用窗口预算裁决" class="field w-48 text-xs">
+                                <!-- 操作列：上限开关（tune + 已配置计数徽标，与底部高级设置
+                                     同一套交互语言）+ 上移 / 下移 / 删除。列表行同款紧凑档
+                                     px-2 py-1.5，不再用弹窗底的 py-2 大按钮。 -->
+                                <div class="flex shrink-0 items-center gap-1">
+                                    <button type="button" @click="target.limitsOpen = !target.limitsOpen"
+                                            :aria-expanded="String(target.limitsOpen)" :aria-controls="'route-target-limits-' + ti"
+                                            :title="targetLimitCount(ti) ? '输出 / 窗口上限（已设 ' + targetLimitCount(ti) + ' 项）' : '输出 / 窗口上限'"
+                                            :aria-label="'候选 ' + (ti + 1) + ' 上限设置'"
+                                            class="btn btn-secondary px-2 py-1.5"
+                                            :class="target.limitsOpen || targetLimitCount(ti) ? 'border-cyan2/50 bg-cyan2/10 text-cyan' : ''">
+                                        <span class="material-symbols-outlined text-[16px]">tune</span>
+                                        <span x-show="targetLimitCount(ti)" x-cloak class="chip bg-cyan2/15 px-1.5 py-0 text-[10px] leading-none text-cyan" x-text="targetLimitCount(ti)"></span>
+                                    </button>
+                                    <button @click="moveRouteTarget(ti, -1)" :disabled="ti === 0" class="btn btn-secondary px-2 py-1.5" title="上移" :aria-label="'候选 ' + (ti + 1) + ' 上移'">
+                                        <span class="material-symbols-outlined text-[16px]">keyboard_arrow_up</span>
+                                    </button>
+                                    <button @click="moveRouteTarget(ti, 1)" :disabled="ti === routeForm.targets.length - 1" class="btn btn-secondary px-2 py-1.5" title="下移" :aria-label="'候选 ' + (ti + 1) + ' 下移'">
+                                        <span class="material-symbols-outlined text-[16px]">keyboard_arrow_down</span>
+                                    </button>
+                                    <button @click="removeRouteTarget(ti)" :disabled="routeForm.targets.length <= 1" class="btn btn-secondary px-2 py-1.5" title="删除该候选" :aria-label="'删除候选 ' + (ti + 1)">
+                                        <span class="material-symbols-outlined text-[16px]">delete</span>
+                                    </button>
+                                </div>
+                                <!-- 候选级上限：就地展开在该行正下方，占满整行宽度（序号列右侧起），
+                                     由该候选自己的 limitsOpen 控制。两个数字框 + 行内小标签，
+                                     不再各自带整行大标签——表头和分区头已经交代了上下文。 -->
+                                <div x-show="target.limitsOpen" x-transition x-cloak :id="'route-target-limits-' + ti"
+                                     class="flex w-full flex-wrap items-center gap-2 pb-1 pl-8 text-xs text-muted">
+                                    <label :for="'route-target-max-tokens-' + ti" class="shrink-0">最大输出</label>
+                                    <input autocomplete="off" :id="'route-target-max-tokens-' + ti" type="number" x-model.number="target.maxTokens"
+                                           placeholder="跟随路由/上游" class="field w-32 py-1 text-sm">
+                                    <label :for="'route-target-context-window-' + ti" class="shrink-0">上下文窗口</label>
+                                    <input autocomplete="off" :id="'route-target-context-window-' + ti" type="number" min="1" max="10000000" x-model.number="target.contextWindow"
+                                           placeholder="不启用预算" class="field w-32 py-1 text-sm">
+                                    <span class="shrink-0 text-[11px]">tokens，留空用默认</span>
                                 </div>
                             </div>
                         </template>
@@ -1557,9 +1694,27 @@
                         多候选需在「基础设置」开启 failover 才会真正转移，否则只用第一个候选。
                     </p>
                 </div>
-                <div x-show="routeForm.targets.length > 1" x-transition x-cloak class="md:col-span-2">
-                    <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">候选选择策略</span>
-                    <select autocomplete="off" x-model="routeForm.strategy" class="field">
+                <!-- 高级设置：默认折叠。路由级低频配置（策略 / 路由默认值 / 视觉）
+                     收在这里，首屏只剩必填项；候选级上限不在此列，由每个候选行
+                     自己的开关就地展开（见上方目标候选）。
+                     折叠条复用请求日志「高级诊断」的交互语言（tune 图标 + 已配置
+                     计数 chip + aria-expanded/aria-controls + 过渡）。编辑一条已带
+                     高级配置的路由时自动展开：值已经在了，藏起来反而危险。 -->
+                <div>
+                    <button type="button" @click="routeForm.routeAdvancedOpen = !routeForm.routeAdvancedOpen"
+                            :aria-expanded="String(routeForm.routeAdvancedOpen)" aria-controls="route-advanced"
+                            class="btn btn-secondary w-full px-3" :class="routeAdvancedCount() ? 'border-cyan2/50 bg-cyan2/10 text-cyan' : ''">
+                        <span class="material-symbols-outlined text-[18px]">tune</span>
+                        <span class="flex-1 text-left">高级设置</span>
+                        <span x-show="routeAdvancedCount()" x-cloak class="chip ml-0.5 bg-cyan2/15 px-1.5 py-0 text-[10px] text-cyan" x-text="routeAdvancedCount()"></span>
+                        <span class="material-symbols-outlined text-[18px]" x-text="routeForm.routeAdvancedOpen ? 'keyboard_arrow_up' : 'keyboard_arrow_down'"></span>
+                    </button>
+                    <div id="route-advanced" x-show="routeForm.routeAdvancedOpen" x-transition x-cloak class="mt-3 space-y-4">
+                <div x-show="routeForm.targets.length > 1" x-transition x-cloak class="rounded-lg border border-line bg-panel2/50 p-4">
+                    <!-- 分区内只有一个字段时不再加一行分区标题：那个分区本来就靠
+                         「高级设置」折叠条命名，再加标题反而多一层。标签保持字段级样式。 -->
+                    <label for="route-strategy" class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">候选选择策略</label>
+                    <select autocomplete="off" id="route-strategy" x-model="routeForm.strategy" class="field">
                         <template x-for="option in routeStrategies" :key="option.value">
                             <option :value="option.value" :selected="option.value === routeForm.strategy" x-text="option.label"></option>
                         </template>
@@ -1572,36 +1727,71 @@
                         直通模式下没有队列，在途量恒为 0，least-queue 会退化成 round-robin。
                     </p>
                 </div>
-                <label class="block md:col-span-2">
-                    <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">最大输出 tokens（本路由）</span>
-                    <input autocomplete="off" type="number" x-model.number="routeForm.maxTokens" placeholder="留空 = 跟随上游设置 / 客户端值 / 默认 32768" class="field">
-                    <span class="mt-1 block text-[11px] text-muted">完整优先级：候选 &gt; 路由 &gt; 上游 &gt; 客户端传入值 &gt; 全局默认 32768。多候选且各自上限不同时，请改用上面每个候选自己的设置。</span>
-                </label>
-                <label class="block md:col-span-2">
-                    <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">上下文窗口 tokens（本路由）</span>
-                    <input autocomplete="off" type="number" min="1" max="10000000" x-model.number="routeForm.contextWindow" placeholder="留空 = 不启用窗口预算裁决" class="field">
-                    <span class="mt-1 block text-[11px] text-muted">作为本路由所有候选的默认窗口；候选级设置优先级更高。留空时继续查找 Provider 窗口。</span>
-                </label>
-                <div class="rounded-lg border border-cyan2/20 bg-cyan2/5 p-4 md:col-span-2">
+                <!-- 路由级默认值成组。原先这两个字段各占一整行、各带一段长说明，
+                     与候选行里的同名字段形态接近，靠文案区分；优先级链也在这里重复
+                     一次。现在优先级链提到分区头讲一次，两字段并排。 -->
+                <div class="rounded-lg border border-line bg-panel2/50 p-4">
+                    <div class="mb-3 flex flex-wrap items-baseline justify-between gap-3">
+                        <span class="text-sm font-bold tracking-wide text-white">本路由默认值</span>
+                        <span class="whitespace-nowrap text-xs text-muted">优先级：候选 &gt; 路由 &gt; 上游 &gt; 客户端 &gt; 默认 32768</span>
+                    </div>
+                    <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                        <label class="block">
+                            <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">最大输出 tokens</span>
+                            <input autocomplete="off" type="number" x-model.number="routeForm.maxTokens" placeholder="留空 = 跟随上游设置 / 客户端值 / 默认 32768" class="field">
+                            <span class="mt-1 block text-xs text-muted">多候选且各自上限不同时，请改用上面每个候选自己的设置。</span>
+                        </label>
+                        <label class="block">
+                            <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">上下文窗口 tokens</span>
+                            <input autocomplete="off" type="number" min="1" max="10000000" x-model.number="routeForm.contextWindow" placeholder="留空 = 不启用窗口预算裁决" class="field">
+                            <span class="mt-1 block text-xs text-muted">作为本路由所有候选的默认窗口；候选级设置优先级更高。留空时继续查找 Provider 窗口。</span>
+                        </label>
+                    </div>
+                </div>
+                <!-- 保留 cyan 色调把它与其他分区区分开（它是可选功能开关，不是必填项），
+                     但分区形态与其他分区统一。 -->
+                <div class="rounded-lg border border-cyan2/20 bg-cyan2/5 p-4">
                     <label class="mb-4 flex cursor-pointer items-center gap-3">
-                        <input autocomplete="off" type="checkbox" x-model="routeForm.enableVision" class="h-4 w-4 rounded border-line bg-panel text-cyan2 focus:ring-cyan2">
+                        <input autocomplete="off" type="checkbox" x-model="routeForm.enableVision" @change="onRouteEnableVisionChange()" class="h-4 w-4 rounded border-line bg-panel text-cyan2 focus:ring-cyan2">
                         <span class="text-sm font-bold text-cyan">启用视觉伴随模型</span>
                     </label>
-                    <div x-show="routeForm.enableVision" x-transition x-cloak class="grid grid-cols-1 gap-4 md:grid-cols-2">
-                        <label class="block">
-                            <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">视觉 Provider</span>
-                            <select autocomplete="off" x-model="routeForm.visionProvider" class="field">
+                    <div x-show="routeForm.enableVision" x-transition x-cloak class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                        <div>
+                            <label for="route-vision-provider" class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">视觉 Provider</label>
+                            <select autocomplete="off" id="route-vision-provider" x-model="routeForm.visionProvider" @change="onRouteVisionProviderChange()" class="field">
                                 <template x-for="(provider, name) in config.providers" :key="name">
                                     <option :value="name" :selected="name === routeForm.visionProvider" x-text="name"></option>
                                 </template>
                             </select>
-                        </label>
-                        <label class="block">
-                            <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">视觉模型</span>
-                            <input autocomplete="off" type="text" x-model="routeForm.visionModel" placeholder="例如: gpt-4o-mini" class="field font-mono">
-                        </label>
+                        </div>
+                        <div>
+                            <label for="route-vision-model" class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">视觉模型</label>
+                            <!-- 与候选行同一套结构：relative 锚点 + 内嵌查询按钮 + 绝对定位浮层。
+                                 查的是当前选中的视觉 Provider 的上游模型列表。 -->
+                            <div class="relative">
+                                <input autocomplete="off" id="route-vision-model" type="text" x-model="routeForm.visionModel" placeholder="例如: gpt-4o-mini" class="field pr-9 font-mono">
+                                <button type="button" @click="fetchVisionModels()"
+                                        :disabled="!routeForm.visionProvider || routeForm.visionModelsLoading"
+                                        :title="routeForm.visionProvider ? '查询该 Provider 的上游模型列表' : '请先选择 Provider'"
+                                        :aria-label="routeForm.visionProvider ? '查询该 Provider 的上游模型列表' : '请先选择 Provider'"
+                                        class="absolute right-1 top-1/2 -translate-y-1/2 rounded p-1 text-muted hover:text-cyan disabled:opacity-40">
+                                    <span class="material-symbols-outlined text-[18px]" x-show="!routeForm.visionModelsLoading">search</span>
+                                    <span class="material-symbols-outlined gw-spin text-[18px]" x-show="routeForm.visionModelsLoading" x-cloak>progress_activity</span>
+                                </button>
+                                <ul x-show="routeForm.visionModels && routeForm.visionModels.length" x-cloak x-transition
+                                    @click.away="routeForm.visionModels = []"
+                                    class="absolute left-0 right-0 top-[calc(100%+4px)] z-30 max-h-44 overflow-y-auto rounded-lg border border-line bg-panel3 py-1 text-xs shadow-glow">
+                                    <template x-for="m in routeForm.visionModels" :key="m">
+                                        <li @click="routeForm.visionModel = m; routeForm.visionModels = []"
+                                            class="cursor-pointer px-3 py-1.5 font-mono hover:bg-cyan2/10"
+                                            x-text="m"></li>
+                                    </template>
+                                </ul>
+                            </div>
+                        </div>
                     </div>
                 </div>
+                    </div>
                 </div>
             </div>
             <div class="flex shrink-0 justify-end gap-3 border-t border-line p-5">
@@ -1747,6 +1937,11 @@
                 health: null,
                 metrics: null,
                 requestLogs: [],
+                // monitorLogs 是监控页专用的「不带筛选」日志快照。不复用 requestLogs：
+                // 那一份要跟着日志页的筛选器走，而仪表盘的最近错误与故障转移率必须看全量。
+                // 混用会得出「在日志页筛过某个 provider，监控页就显示暂无错误记录」这种假象——
+                // 筛选器是日志页的视图状态，不该顺带改掉仪表盘的统计口径。
+                monitorLogs: [],
                 expandedLogId: null,
                 // 高级诊断筛选默认折叠：正常排查优先看请求最终结果；仅在定位
                 // failover / 上游失败时再展开 attempt 维度，避免和最终 Provider、状态混在一起。
@@ -1787,15 +1982,23 @@
                 routeForm: {
                     match: '',
                     // 目标候选列表，按顺序作为故障转移的尝试顺序；至少 1 个，最多 5 个
-                    // models/modelsLoading 是查询远程模型列表的瞬态状态，初始占位保证响应式
-                    targets: [{ provider: '', model: '', maxTokens: null, contextWindow: null, models: [], modelsLoading: false }],
+                    // models/modelsLoading（查询远程模型列表）与 limitsOpen（行内上限
+                    // 展开区）都是瞬态状态，初始占位保证响应式，saveRoute 不读它们
+                    targets: [{ provider: '', model: '', maxTokens: null, contextWindow: null, models: [], modelsLoading: false, limitsOpen: false }],
                     // 候选选择策略，空等同 failover（按配置顺序）
                     strategy: '',
                     maxTokens: null,
                     contextWindow: null,
                     enableVision: false,
                     visionProvider: '',
-                    visionModel: ''
+                    visionModel: '',
+                    // 与候选的 models/modelsLoading 同性质：查询视觉上游模型列表的瞬态状态，
+                    // saveRoute 不读它们，落盘的 vision 仍只有 provider + model
+                    visionModels: [],
+                    visionModelsLoading: false,
+                    // 高级设置区的展开状态：同样是瞬态，不落盘。
+                    // 打开弹窗时按「这条路由是否已带高级配置」决定初始值（见 routeAdvancedOpenFor）。
+                    routeAdvancedOpen: false
                 },
                 maxRouteTargets: 5,
                 // 与后端 balancer 的取值表对应。
@@ -2071,7 +2274,7 @@
                             await Promise.all([
                                 this.loadHealth(showErrors),
                                 this.loadMetrics(),
-                                this.loadRequestLogs()
+                                this.loadMonitorLogs()
                             ]);
                         }
                     } finally {
@@ -2208,6 +2411,15 @@
                     }
                 },
 
+                // loadMonitorLogs 给监控页取最近日志，且刻意不带 logFilters。
+                // 仪表盘上的「最近错误」和「故障转移」是全局口径，日志页的筛选器只是那一页的
+                // 视图状态；共用一个数组会让「在日志页筛了 provider=A」顺带把仪表盘的错误列表
+                // 也缩到 A，看起来像故障消失了。两页各持一份，切页时 $watch 会各自重取。
+                async loadMonitorLogs() {
+                    const data = await this.loadOptionalJSON('/api/logs?limit=100');
+                    this.monitorLogs = Array.isArray(data?.data) ? data.data : [];
+                },
+
                 logKey(log) {
                     return log?.id || (log?.time || '') + (log?.model || '');
                 },
@@ -2315,12 +2527,16 @@
                     this.showProviderModal = false;
                 },
 
-                // 路由弹窗多一层：候选的上游模型下拉展开时，ESC 先收下拉，再按才关弹窗。
+                // 路由弹窗多一层：上游模型下拉展开时，ESC 先收下拉，再按才关弹窗。
+                // 候选行与视觉字段的下拉一起算——只收候选那批的话，视觉下拉开着按 ESC
+                // 会直接关掉整个弹窗，填了一半的表单跟着丢。
                 escapeRouteModal() {
                     if (this.confirmDialog.open) return;
                     const open = (this.routeForm.targets || []).filter((t) => t.models && t.models.length);
-                    if (open.length) {
+                    const visionOpen = (this.routeForm.visionModels || []).length > 0;
+                    if (open.length || visionOpen) {
                         open.forEach((t) => { t.models = []; });
+                        if (visionOpen) this.routeForm.visionModels = [];
                         return;
                     }
                     this.showRouteModal = false;
@@ -2834,9 +3050,7 @@
                     if (key === 'p95LatencyMs') {
                         // rank 算法在小样本下会让 P95 退化为最大值，20 是避免把
                         // 这种低可信度的桶上界近似误当成稳定延迟的展示阈值。
-                        const rawSamples = this.metricValue('latencySamples', null);
-                        const samples = Number(rawSamples === null ? this.metricValue('windowRequests', 0) : rawSamples);
-                        const count = Number.isFinite(samples) ? Math.max(0, Math.floor(samples)) : 0;
+                        const count = this.latencySampleCount();
                         if (count < 20) return count === 0 ? '--' : `${count} 个样本`;
                     }
                     const value = this.metricValue(key, null);
@@ -2849,6 +3063,66 @@
                     const m = Number(this.metricValue('windowMinutes', 1)) || 1;
                     if (m >= 60 && m % 60 === 0) return `${m / 60} 小时`;
                     return `${m} 分钟`;
+                },
+
+                // latencySampleCount 抽出来给 metricDuration 和 latencySpreadText 共用，
+                // 免得两处各写一份「样本数怎么取」的表达式，回头必然分叉。
+                latencySampleCount() {
+                    const raw = this.metricValue('latencySamples', null);
+                    const samples = Number(raw === null ? this.metricValue('windowRequests', 0) : raw);
+                    return Number.isFinite(samples) ? Math.max(0, Math.floor(samples)) : 0;
+                },
+
+                // requestRateSubText 「请求量」卡的第二行。这张卡原来标题写「请求速率」，
+                // 而数值是窗口内的请求「计数」，名不副实；标题已改成「请求量」，
+                // 真正的速率挪到这里，用后端给的 windowMinutes 换算。
+                // 累计值取 Summary.TotalRequests——后端一直在返回，前端此前一个字没用。
+                requestRateSubText() {
+                    const windowRequests = Number(this.metricValue('windowRequests', 0)) || 0;
+                    const minutes = Number(this.metricValue('windowMinutes', 1)) || 1;
+                    const perMin = windowRequests / minutes;
+                    const parts = [`≈ ${perMin > 0 && perMin < 1 ? perMin.toFixed(2) : perMin.toFixed(1)} 次/分`];
+                    const total = this.metricValue('totalRequests', null);
+                    if (total !== null) parts.push(`累计 ${total}`);
+                    return parts.join(' · ');
+                },
+
+                // successSubText 成功率卡的第二行，写出失败的绝对条数。
+                // 成功率是比率：3/1000 和 3/4 都可能显示成一个「看着还行」的百分比，
+                // 而决定要不要现在去查的是失败了几条。
+                // 失败数用 windowRequests 减成功数反推（successRate 就是成功数/窗口数，
+                // 乘回去取整必然还原成整数），不去加 4xx+5xx——两者之和会小于失败数：
+                // 流式响应头写出后才失败的请求状态码停在 200，后端 isSuccess 仍判它失败
+                // （本文件 statusClass 用的是同一套口径）。
+                successSubText() {
+                    const windowRequests = Number(this.metricValue('windowRequests', 0)) || 0;
+                    if (windowRequests === 0) return '窗口内暂无请求';
+                    const rate = Number(this.metricValue('successRate', 0)) || 0;
+                    const failed = Math.max(0, windowRequests - Math.round(windowRequests * rate));
+                    if (failed === 0) return '窗口内无失败请求';
+                    const parts = [`失败 ${failed} 次`];
+                    const buckets = this.statusBuckets();
+                    const pick = (key) => buckets.find((b) => b.key === key)?.count || 0;
+                    if (pick('4xx') > 0) parts.push(`4xx ${pick('4xx')}`);
+                    if (pick('5xx') > 0) parts.push(`5xx ${pick('5xx')}`);
+                    // 状态码为 0 的那批是连上游都没连上、或者客户端提前断开——
+                    // 严重程度高于 4xx，不能因为它没有状态码就在这一行里消失。
+                    if (pick('other') > 0) parts.push(`无状态码 ${pick('other')}`);
+                    return parts.join(' · ');
+                },
+
+                // latencySpreadText 延迟卡的第二行：P50 / P99 / 样本数。
+                // 后端三档分位数都算好了（Summary.P50/P95/P99），之前只显示 P95——
+                // 只看 P95 区分不了「整体都慢」和「长尾拖尾」：前者 P50 也高，
+                // 后者 P50 正常而 P99 炸开，两种问题的处理方式完全不同。
+                // 样本守卫沿用 P95 卡的 20 个阈值，不另立一套可信度口径。
+                latencySpreadText() {
+                    const count = this.latencySampleCount();
+                    if (count === 0) return '窗口内暂无延迟样本';
+                    if (count < 20) return `仅 ${count} 个样本，分位数暂不可信`;
+                    const p50 = this.durationText(this.metricValue('p50LatencyMs', 0));
+                    const p99 = this.durationText(this.metricValue('p99LatencyMs', 0));
+                    return `P50 ${p50} · P99 ${p99} · 样本 ${count}`;
                 },
 
                 providerStatusRows() {
@@ -3003,35 +3277,177 @@
                     return issues;
                 },
 
+                // statusBuckets 把 /api/metrics 的 statusCodes 聚成 2xx/3xx/4xx/5xx/其他。
+                // 后端逐秒桶一直在累计这份分布，前端此前完全没读：只有一个成功率百分比时，
+                // 「掉的这些到底是 429 还是 500」得翻日志才知道，而这两者的处置完全不同——
+                // 前者调限流/换候选，后者是上游自己坏了。
+                // key "0" 是没拿到上游状态码就结束的请求（连不上、客户端断开），
+                // 归入「其他」而不是丢掉——那类失败恰恰最该被看见。
+                statusBuckets() {
+                    const groups = [
+                        { key: '2xx', label: '2xx 成功', barClass: 'bg-good/70', dotClass: 'bg-good' },
+                        { key: '3xx', label: '3xx 重定向', barClass: 'bg-cyan2/70', dotClass: 'bg-cyan2' },
+                        { key: '4xx', label: '4xx 客户端 / 限流', barClass: 'bg-warn/70', dotClass: 'bg-warn' },
+                        { key: '5xx', label: '5xx 上游', barClass: 'bg-danger/70', dotClass: 'bg-danger' },
+                        { key: 'other', label: '其他 / 无状态码', barClass: 'bg-white/25', dotClass: 'bg-white/40' }
+                    ];
+                    const detail = {};
+                    let total = 0;
+                    Object.entries(this.metrics?.statusCodes || {}).forEach(([code, value]) => {
+                        const count = Number(value) || 0;
+                        if (count <= 0) return;
+                        const num = Number(code);
+                        let key = 'other';
+                        if (num >= 200 && num < 300) key = '2xx';
+                        else if (num >= 300 && num < 400) key = '3xx';
+                        else if (num >= 400 && num < 500) key = '4xx';
+                        else if (num >= 500 && num < 600) key = '5xx';
+                        detail[key] = detail[key] || {};
+                        detail[key][code] = (detail[key][code] || 0) + count;
+                        total += count;
+                    });
+                    if (total === 0) return [];
+                    return groups
+                        .map((group) => {
+                            const codes = detail[group.key] || {};
+                            const count = Object.values(codes).reduce((sum, n) => sum + n, 0);
+                            const pct = (count / total) * 100;
+                            const list = Object.entries(codes)
+                                .sort((a, b) => b[1] - a[1])
+                                .map(([code, n]) => `${code === '0' ? '无状态码' : code} × ${n}`)
+                                .join('、');
+                            return {
+                                ...group,
+                                count,
+                                pct,
+                                pctText: pct >= 10 ? `${Math.round(pct)}%` : `${pct.toFixed(1)}%`,
+                                tip: list ? `${group.label}：${list}` : group.label
+                            };
+                        })
+                        .filter((group) => group.count > 0);
+                },
+
+                statusCodeTotal() {
+                    return this.statusBuckets().reduce((sum, group) => sum + group.count, 0);
+                },
+
+                // failoverStats 故障转移占比。/api/metrics 里没有这个聚合，只能从日志环里数，
+                // 所以口径是「最近 N 条请求」而不是上面那个统计窗口——展示处必须写清楚，
+                // 别和 15 分钟的指标混成一个口径。
+                // 判据用 attempts > 1，与日志页「尝试」列的 attemptTrailText 完全一致，
+                // 不新造一套：同一现象两套判据，迟早对不上。
+                failoverStats() {
+                    const logs = this.monitorLogs || [];
+                    const total = logs.length;
+                    const count = logs.filter((log) => Number(log?.attempts || 0) > 1).length;
+                    return { total, count, pct: total > 0 ? (count / total) * 100 : 0 };
+                },
+
+                failoverText() {
+                    const stats = this.failoverStats();
+                    if (stats.total === 0) return '--';
+                    return stats.count === 0 ? '0' : `${stats.count} · ${Math.round(stats.pct)}%`;
+                },
+
+                failoverTip() {
+                    const stats = this.failoverStats();
+                    if (stats.total === 0) return '最近日志为空，暂时统计不出转移率';
+                    return `最近 ${stats.total} 条请求里有 ${stats.count} 条发生过候选转移（判据 attempts > 1，与日志页「尝试」列同一口径）`;
+                },
+
+                // 一成以上的请求要靠转移才成功，说明首选候选已经不可靠，值得立刻去看
+                failoverClass() {
+                    const stats = this.failoverStats();
+                    if (stats.count === 0) return 'text-text';
+                    return stats.pct >= 10 ? 'text-warn' : 'text-text';
+                },
+
+                // stickyText prompt cache 粘性映射数。/health 早就返回这个字段，前端从没展示，
+                // 于是「粘性到底有没有生效」只能靠猜。
+                stickyText() {
+                    const n = this.health?.stickyMappings;
+                    return n === undefined || n === null ? '--' : String(n);
+                },
+
+                stickyTip() {
+                    const n = Number(this.health?.stickyMappings || 0);
+                    if (n > 0) return `当前有 ${n} 条会话被粘在固定候选上，prompt cache 复用在生效`;
+                    return '当前没有任何粘性映射：长期为 0 说明请求前缀太短，或候选策略不是粘性';
+                },
+
+                // latencyRows 延迟排行。三处判据都改过，都不是可选的：
+                //
+                // 1. 过滤条件用 requests > 0，不能用 p95 > 0。latencyBounds[0] === 0，
+                //    percentile 返回的是桶上界，所以亚毫秒请求、以及「连上游都没连上就失败」
+                //    的请求算出来的 p95 就是 0，拿 p95 > 0 过滤会让这些 provider 整行
+                //    从排行里消失——瞬间失败的上游恰恰是最该被看见的那种。
+                // 2. 按样本数分档排序。ProviderStats.Requests 就是进了延迟直方图的样本数
+                //    （后端 bucket.latency.add 无条件执行），样本 < 20 的行一律排在可信行之后：
+                //    否则一次 30s 超时就能让只跑过 1 个请求的 provider 永远霸榜第一。
+                // 3. 与顶部 P95 卡共用同一个 20 样本阈值，不再一处有守卫、一处没有。
                 latencyRows() {
                     const providers = this.metrics?.providers || this.metrics?.providerStats || [];
                     const rows = Array.isArray(providers)
                         ? providers
                         : Object.entries(providers).map(([name, value]) => ({ name, ...value }));
                     return rows
-                        .map((row) => ({
-                            name: row.name || row.provider || '--',
-                            p95: Math.round(Number(row.p95LatencyMs ?? row.p95 ?? row.latencyP95Ms ?? 0)),
-                            requests: Number(row.requests ?? row.count ?? row.total ?? 0)
-                        }))
-                        .filter((row) => row.name !== '--' && row.p95 > 0)
-                        .sort((a, b) => b.p95 - a.p95)
+                        .map((row) => {
+                            const requests = Number(row.requests ?? row.count ?? row.total ?? 0);
+                            return {
+                                name: row.name || row.provider || '--',
+                                p50: Math.round(Number(row.p50LatencyMs ?? 0)),
+                                p95: Math.round(Number(row.p95LatencyMs ?? row.p95 ?? row.latencyP95Ms ?? 0)),
+                                p99: Math.round(Number(row.p99LatencyMs ?? 0)),
+                                requests,
+                                errors: Number(row.errors ?? 0),
+                                thin: requests < 20
+                            };
+                        })
+                        .filter((row) => row.name !== '--' && row.requests > 0)
+                        .sort((a, b) => (a.thin === b.thin ? b.p95 - a.p95 : (a.thin ? 1 : -1)))
                         .slice(0, 6);
+                },
+
+                // 样本不足时主数值写样本数而不是写一个不可信的毫秒数，与 P95 卡一致
+                latencyRowMain(row) {
+                    return row.thin ? `${row.requests} 个样本` : this.durationText(row.p95);
+                },
+
+                latencyRowMainClass(row) {
+                    return row.thin ? 'text-muted' : 'text-cyan';
+                },
+
+                // 次要行给出请求数与失败数：光有 P95 分不清「这个上游慢」和「这个上游只被打过一次」
+                latencyRowSub(row) {
+                    const parts = [`${row.requests} 次请求`];
+                    if (row.errors > 0) parts.push(`失败 ${row.errors}`);
+                    if (!row.thin) parts.push(`P50 ${this.durationText(row.p50)}`);
+                    return parts.join(' · ');
+                },
+
+                latencyRowTip(row) {
+                    if (row.thin) {
+                        return `${row.name}：窗口内只有 ${row.requests} 个样本，分位数不可信（阈值 20），已排在可信行之后`;
+                    }
+                    return `${row.name}：P50 ${this.durationText(row.p50)} · P95 ${this.durationText(row.p95)} · P99 ${this.durationText(row.p99)}（分位数取桶上界近似）`;
                 },
 
                 // errorKey 是错误条目的身份。x-for 的 :key 和 recentErrays 的去重都用它，
                 // 两处各写一份表达式必然分叉（曾经模板用 err.message、去重用 err.error）。
                 errorKey(err) {
-                    return err.id || (err.time || '') + ' ' + (err.message || err.error || '');
+                    return err.id || (err.time || '') + ' ' + (err.message || err.error || '');
                 },
 
-                // recentErrors 合并两个来源：/api/metrics 的 recentErrors 和 /api/logs 里的错误行。
+                // recentErrors 合并两个来源：/api/metrics 的 recentErrors 和监控页日志里的错误行。
                 // 同一条请求会同时出现在两边，必须去重——x-for 的 :key 撞车会让 Alpine
                 // 在内部 diff 时抛 "Cannot read properties of undefined (reading 'after')"，
                 // 每次轮询刷一次错，同时列表里还会重复显示同一条错误。
+                //
+                // 日志侧读 monitorLogs 而不是 requestLogs：后者带日志页的筛选器，
+                // 在那边筛过 provider / 状态之后，这块会跟着缩水成「暂无错误记录」。
                 recentErrors() {
                     const metricErrors = this.metrics?.recentErrors || this.metrics?.errors || [];
-                    const logErrors = this.requestLogs.filter((log) => Number(log.status || 0) >= 400 || log.error);
+                    const logErrors = (this.monitorLogs || []).filter((log) => Number(log.status || 0) >= 400 || log.error);
                     const seen = new Set();
                     const out = [];
                     for (const err of [...metricErrors, ...logErrors]) {
@@ -3445,7 +3861,10 @@
                         contextWindow: null,
                         enableVision: false,
                         visionProvider: providers[0] || '',
-                        visionModel: ''
+                        visionModel: '',
+                        ...this.newVisionModelState(),
+                        // 新建路由没有任何高级配置，收起
+                        routeAdvancedOpen: false
                     };
                     this.showRouteModal = true;
                 },
@@ -3463,8 +3882,12 @@
                         contextWindow: route.contextWindow ?? null,
                         enableVision: !!route.vision,
                         visionProvider: route.vision?.provider || '',
-                        visionModel: route.vision?.model || ''
+                        visionModel: route.vision?.model || '',
+                        ...this.newVisionModelState(),
+                        routeAdvancedOpen: false
                     };
+                    // routeAdvancedOpenFor 读的是 this.routeForm，必须在赋值之后调用
+                    this.routeForm.routeAdvancedOpen = this.routeAdvancedOpenFor();
                     this.showRouteModal = true;
                 },
 
@@ -3484,22 +3907,79 @@
                         contextWindow: route.contextWindow ?? null,
                         enableVision: !!route.vision,
                         visionProvider: route.vision?.provider || '',
-                        visionModel: route.vision?.model || ''
+                        visionModel: route.vision?.model || '',
+                        ...this.newVisionModelState(),
+                        routeAdvancedOpen: false
                     };
+                    this.routeForm.routeAdvancedOpen = this.routeAdvancedOpenFor();
                     this.showRouteModal = true;
                     this.showStatus(`已按「${route.match || '(空)'}」预填，记得改匹配模式`, 'success');
                 },
 
-                // 候选 target 的运行时形状：provider/model/maxTokens 是落盘字段，
-                // models/modelsLoading 是查询远程模型列表的瞬态状态，saveRoute 不读它们。
+                // 候选 target 的运行时形状：provider/model/maxTokens/contextWindow 是落盘字段，
+                // models/modelsLoading（查询远程模型列表）与 limitsOpen（行内上限展开区）
+                // 是瞬态状态，saveRoute 不读它们。
+                // limitsOpen 初值跟着参数走：已配上限的候选打开弹窗时默认展开——
+                // 值已经在了，藏起来反而危险（用户看不到已有的覆盖，容易存出非预期的配置）。
                 newRouteTarget(provider, model = '', maxTokens = null, contextWindow = null) {
-                    return { provider, model, maxTokens, contextWindow, models: [], modelsLoading: false };
+                    return { provider, model, maxTokens, contextWindow, models: [], modelsLoading: false, limitsOpen: maxTokens != null || contextWindow != null };
+                },
+
+                // 视觉字段的瞬态查询状态。三处 routeForm 重建（addRoute / editRoute /
+                // duplicateRoute）都要带上，漏一处那处的浮层就不响应式。
+                newVisionModelState() {
+                    return { visionModels: [], visionModelsLoading: false };
+                },
+
+                // 高级设置区已配置项计数，给折叠条上的徽标用（同请求日志的高级诊断）。
+                // 「已配置」按 saveRoute 的落盘口径数：落什么数什么——strategy 要非默认值
+                // （failover 不落盘）、*int 要非 null、vision 要整体启用。
+                // 候选级上限不在内：它有自己的行内展开区和徽标（targetLimitCount），
+                // 不归这个全局开关管。
+                routeAdvancedCount() {
+                    const f = this.routeForm;
+                    if (!f) return 0;
+                    let n = 0;
+                    if ((f.targets || []).length > 1 && f.strategy && f.strategy !== 'failover') n++;
+                    if (this.numOrNull(f.maxTokens) !== null) n++;
+                    if (this.numOrNull(f.contextWindow) !== null) n++;
+                    if (f.enableVision) n++;
+                    return n;
+                },
+
+                // 候选行内「上限」开关的已配置计数徽标，口径同 routeAdvancedCount：
+                // *int 非空才算（numOrNull 把 ''/undefined 归一成 null）。
+                targetLimitCount(ti) {
+                    const t = this.routeForm?.targets?.[ti];
+                    if (!t) return 0;
+                    let n = 0;
+                    if (this.numOrNull(t.maxTokens) !== null) n++;
+                    if (this.numOrNull(t.contextWindow) !== null) n++;
+                    return n;
+                },
+
+                // 打开弹窗时高级区的初始展开状态：添加默认收起（保持首屏干净），
+                // 编辑 / 复制时只要任一高级字段已配置就展开——值已经在了，藏起来
+                // 反而危险（用户看不到已有的覆盖，容易存出非预期的配置）。
+                routeAdvancedOpenFor() {
+                    return this.routeAdvancedCount() > 0;
                 },
 
                 // 切换候选的 provider 后清掉已拉的模型列表：列表是上一个上游的，
                 // 留着只会让人选错模型。已填的 model 不清——那是用户意图。
                 onRouteTargetProviderChange(ti) {
                     this.routeForm.targets[ti].models = [];
+                },
+
+                // 同 onRouteTargetProviderChange 的理由，作用于视觉字段。
+                onRouteVisionProviderChange() {
+                    this.routeForm.visionModels = [];
+                },
+
+                // 关掉视觉时一并收起浮层：整块被 x-show 隐藏后列表还挂在状态里，
+                // 下次勾开会闪一下上一次的结果。
+                onRouteEnableVisionChange() {
+                    if (!this.routeForm.enableVision) this.routeForm.visionModels = [];
                 },
 
                 addRouteTarget() {
@@ -3516,35 +3996,62 @@
                 // 用已落盘 provider 配置里的 apiKey 拉上游 /v1/models。
                 // 结果按 provider 的 baseUrl+format 做指纹缓存到 localStorage，TTL 1 天：
                 // 同一上游反复查不重复打上游；改了 baseUrl/format 自动换 key 失效。
-                async fetchProviderModels(ti) {
-                    const target = this.routeForm.targets[ti];
-                    if (!target || !target.provider) return;
-                    const provider = this.config.providers?.[target.provider];
-                    if (!provider) return;
+                //
+                // 只负责「按 provider 名拿模型列表」，loading 态与结果落点交给调用方——
+                // 候选行和视觉字段两处共用它，缓存与错误处理因此只有一份，
+                // 各写一遍迟早漂移（一边改了 TTL 另一边没改这类）。
+                // 返回 null 表示失败或 provider 不存在，调用方据此不动已有列表。
+                async fetchModelsFor(providerName) {
+                    const provider = this.config.providers?.[providerName];
+                    if (!provider) return null;
 
-                    const cacheKey = 'gw.models|' + [target.provider, provider.baseUrl, provider.format].join('|');
+                    const cacheKey = 'gw.models|' + [providerName, provider.baseUrl, provider.format].join('|');
                     const cached = this.readModelCache(cacheKey);
-                    if (cached) {
-                        target.models = cached;
-                        return;
-                    }
+                    if (cached) return cached;
 
-                    target.modelsLoading = true;
-                    target.models = [];
                     try {
-                        const res = await fetch(`/api/providers/models?provider=${encodeURIComponent(target.provider)}`);
+                        const res = await fetch(`/api/providers/models?provider=${encodeURIComponent(providerName)}`);
                         if (!res.ok) throw new Error(await this.errorText(res, '上游查询失败'));
                         const data = await res.json();
                         const models = Array.isArray(data.models) ? data.models : [];
                         this.writeModelCache(cacheKey, models);
-                        target.models = models;
                         if (!models.length) {
                             this.showStatus('上游返回了空的模型列表', 'error');
                         }
+                        return models;
                     } catch (err) {
                         this.showStatus('查询模型列表失败: ' + err.message, 'error');
+                        return null;
+                    }
+                },
+
+                async fetchProviderModels(ti) {
+                    const target = this.routeForm.targets[ti];
+                    if (!target || !target.provider) return;
+
+                    target.modelsLoading = true;
+                    target.models = [];
+                    try {
+                        const models = await this.fetchModelsFor(target.provider);
+                        if (models) target.models = models;
                     } finally {
                         target.modelsLoading = false;
+                    }
+                },
+
+                // 视觉字段的查询，与 fetchProviderModels 同一套行为，
+                // 查的 provider 换成 visionProvider。
+                async fetchVisionModels() {
+                    const form = this.routeForm;
+                    if (!form.visionProvider) return;
+
+                    form.visionModelsLoading = true;
+                    form.visionModels = [];
+                    try {
+                        const models = await this.fetchModelsFor(form.visionProvider);
+                        if (models) form.visionModels = models;
+                    } finally {
+                        form.visionModelsLoading = false;
                     }
                 },
 

@@ -15,7 +15,10 @@
                         contextWindow: null,
                         enableVision: false,
                         visionProvider: providers[0] || '',
-                        visionModel: ''
+                        visionModel: '',
+                        ...this.newVisionModelState(),
+                        // 新建路由没有任何高级配置，收起
+                        routeAdvancedOpen: false
                     };
                     this.showRouteModal = true;
                 },
@@ -33,8 +36,12 @@
                         contextWindow: route.contextWindow ?? null,
                         enableVision: !!route.vision,
                         visionProvider: route.vision?.provider || '',
-                        visionModel: route.vision?.model || ''
+                        visionModel: route.vision?.model || '',
+                        ...this.newVisionModelState(),
+                        routeAdvancedOpen: false
                     };
+                    // routeAdvancedOpenFor 读的是 this.routeForm，必须在赋值之后调用
+                    this.routeForm.routeAdvancedOpen = this.routeAdvancedOpenFor();
                     this.showRouteModal = true;
                 },
 
@@ -54,22 +61,79 @@
                         contextWindow: route.contextWindow ?? null,
                         enableVision: !!route.vision,
                         visionProvider: route.vision?.provider || '',
-                        visionModel: route.vision?.model || ''
+                        visionModel: route.vision?.model || '',
+                        ...this.newVisionModelState(),
+                        routeAdvancedOpen: false
                     };
+                    this.routeForm.routeAdvancedOpen = this.routeAdvancedOpenFor();
                     this.showRouteModal = true;
                     this.showStatus(`已按「${route.match || '(空)'}」预填，记得改匹配模式`, 'success');
                 },
 
-                // 候选 target 的运行时形状：provider/model/maxTokens 是落盘字段，
-                // models/modelsLoading 是查询远程模型列表的瞬态状态，saveRoute 不读它们。
+                // 候选 target 的运行时形状：provider/model/maxTokens/contextWindow 是落盘字段，
+                // models/modelsLoading（查询远程模型列表）与 limitsOpen（行内上限展开区）
+                // 是瞬态状态，saveRoute 不读它们。
+                // limitsOpen 初值跟着参数走：已配上限的候选打开弹窗时默认展开——
+                // 值已经在了，藏起来反而危险（用户看不到已有的覆盖，容易存出非预期的配置）。
                 newRouteTarget(provider, model = '', maxTokens = null, contextWindow = null) {
-                    return { provider, model, maxTokens, contextWindow, models: [], modelsLoading: false };
+                    return { provider, model, maxTokens, contextWindow, models: [], modelsLoading: false, limitsOpen: maxTokens != null || contextWindow != null };
+                },
+
+                // 视觉字段的瞬态查询状态。三处 routeForm 重建（addRoute / editRoute /
+                // duplicateRoute）都要带上，漏一处那处的浮层就不响应式。
+                newVisionModelState() {
+                    return { visionModels: [], visionModelsLoading: false };
+                },
+
+                // 高级设置区已配置项计数，给折叠条上的徽标用（同请求日志的高级诊断）。
+                // 「已配置」按 saveRoute 的落盘口径数：落什么数什么——strategy 要非默认值
+                // （failover 不落盘）、*int 要非 null、vision 要整体启用。
+                // 候选级上限不在内：它有自己的行内展开区和徽标（targetLimitCount），
+                // 不归这个全局开关管。
+                routeAdvancedCount() {
+                    const f = this.routeForm;
+                    if (!f) return 0;
+                    let n = 0;
+                    if ((f.targets || []).length > 1 && f.strategy && f.strategy !== 'failover') n++;
+                    if (this.numOrNull(f.maxTokens) !== null) n++;
+                    if (this.numOrNull(f.contextWindow) !== null) n++;
+                    if (f.enableVision) n++;
+                    return n;
+                },
+
+                // 候选行内「上限」开关的已配置计数徽标，口径同 routeAdvancedCount：
+                // *int 非空才算（numOrNull 把 ''/undefined 归一成 null）。
+                targetLimitCount(ti) {
+                    const t = this.routeForm?.targets?.[ti];
+                    if (!t) return 0;
+                    let n = 0;
+                    if (this.numOrNull(t.maxTokens) !== null) n++;
+                    if (this.numOrNull(t.contextWindow) !== null) n++;
+                    return n;
+                },
+
+                // 打开弹窗时高级区的初始展开状态：添加默认收起（保持首屏干净），
+                // 编辑 / 复制时只要任一高级字段已配置就展开——值已经在了，藏起来
+                // 反而危险（用户看不到已有的覆盖，容易存出非预期的配置）。
+                routeAdvancedOpenFor() {
+                    return this.routeAdvancedCount() > 0;
                 },
 
                 // 切换候选的 provider 后清掉已拉的模型列表：列表是上一个上游的，
                 // 留着只会让人选错模型。已填的 model 不清——那是用户意图。
                 onRouteTargetProviderChange(ti) {
                     this.routeForm.targets[ti].models = [];
+                },
+
+                // 同 onRouteTargetProviderChange 的理由，作用于视觉字段。
+                onRouteVisionProviderChange() {
+                    this.routeForm.visionModels = [];
+                },
+
+                // 关掉视觉时一并收起浮层：整块被 x-show 隐藏后列表还挂在状态里，
+                // 下次勾开会闪一下上一次的结果。
+                onRouteEnableVisionChange() {
+                    if (!this.routeForm.enableVision) this.routeForm.visionModels = [];
                 },
 
                 addRouteTarget() {
@@ -86,35 +150,62 @@
                 // 用已落盘 provider 配置里的 apiKey 拉上游 /v1/models。
                 // 结果按 provider 的 baseUrl+format 做指纹缓存到 localStorage，TTL 1 天：
                 // 同一上游反复查不重复打上游；改了 baseUrl/format 自动换 key 失效。
-                async fetchProviderModels(ti) {
-                    const target = this.routeForm.targets[ti];
-                    if (!target || !target.provider) return;
-                    const provider = this.config.providers?.[target.provider];
-                    if (!provider) return;
+                //
+                // 只负责「按 provider 名拿模型列表」，loading 态与结果落点交给调用方——
+                // 候选行和视觉字段两处共用它，缓存与错误处理因此只有一份，
+                // 各写一遍迟早漂移（一边改了 TTL 另一边没改这类）。
+                // 返回 null 表示失败或 provider 不存在，调用方据此不动已有列表。
+                async fetchModelsFor(providerName) {
+                    const provider = this.config.providers?.[providerName];
+                    if (!provider) return null;
 
-                    const cacheKey = 'gw.models|' + [target.provider, provider.baseUrl, provider.format].join('|');
+                    const cacheKey = 'gw.models|' + [providerName, provider.baseUrl, provider.format].join('|');
                     const cached = this.readModelCache(cacheKey);
-                    if (cached) {
-                        target.models = cached;
-                        return;
-                    }
+                    if (cached) return cached;
 
-                    target.modelsLoading = true;
-                    target.models = [];
                     try {
-                        const res = await fetch(`/api/providers/models?provider=${encodeURIComponent(target.provider)}`);
+                        const res = await fetch(`/api/providers/models?provider=${encodeURIComponent(providerName)}`);
                         if (!res.ok) throw new Error(await this.errorText(res, '上游查询失败'));
                         const data = await res.json();
                         const models = Array.isArray(data.models) ? data.models : [];
                         this.writeModelCache(cacheKey, models);
-                        target.models = models;
                         if (!models.length) {
                             this.showStatus('上游返回了空的模型列表', 'error');
                         }
+                        return models;
                     } catch (err) {
                         this.showStatus('查询模型列表失败: ' + err.message, 'error');
+                        return null;
+                    }
+                },
+
+                async fetchProviderModels(ti) {
+                    const target = this.routeForm.targets[ti];
+                    if (!target || !target.provider) return;
+
+                    target.modelsLoading = true;
+                    target.models = [];
+                    try {
+                        const models = await this.fetchModelsFor(target.provider);
+                        if (models) target.models = models;
                     } finally {
                         target.modelsLoading = false;
+                    }
+                },
+
+                // 视觉字段的查询，与 fetchProviderModels 同一套行为，
+                // 查的 provider 换成 visionProvider。
+                async fetchVisionModels() {
+                    const form = this.routeForm;
+                    if (!form.visionProvider) return;
+
+                    form.visionModelsLoading = true;
+                    form.visionModels = [];
+                    try {
+                        const models = await this.fetchModelsFor(form.visionProvider);
+                        if (models) form.visionModels = models;
+                    } finally {
+                        form.visionModelsLoading = false;
                     }
                 },
 

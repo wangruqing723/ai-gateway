@@ -93,6 +93,11 @@
                 health: null,
                 metrics: null,
                 requestLogs: [],
+                // monitorLogs 是监控页专用的「不带筛选」日志快照。不复用 requestLogs：
+                // 那一份要跟着日志页的筛选器走，而仪表盘的最近错误与故障转移率必须看全量。
+                // 混用会得出「在日志页筛过某个 provider，监控页就显示暂无错误记录」这种假象——
+                // 筛选器是日志页的视图状态，不该顺带改掉仪表盘的统计口径。
+                monitorLogs: [],
                 expandedLogId: null,
                 // 高级诊断筛选默认折叠：正常排查优先看请求最终结果；仅在定位
                 // failover / 上游失败时再展开 attempt 维度，避免和最终 Provider、状态混在一起。
@@ -133,15 +138,23 @@
                 routeForm: {
                     match: '',
                     // 目标候选列表，按顺序作为故障转移的尝试顺序；至少 1 个，最多 5 个
-                    // models/modelsLoading 是查询远程模型列表的瞬态状态，初始占位保证响应式
-                    targets: [{ provider: '', model: '', maxTokens: null, contextWindow: null, models: [], modelsLoading: false }],
+                    // models/modelsLoading（查询远程模型列表）与 limitsOpen（行内上限
+                    // 展开区）都是瞬态状态，初始占位保证响应式，saveRoute 不读它们
+                    targets: [{ provider: '', model: '', maxTokens: null, contextWindow: null, models: [], modelsLoading: false, limitsOpen: false }],
                     // 候选选择策略，空等同 failover（按配置顺序）
                     strategy: '',
                     maxTokens: null,
                     contextWindow: null,
                     enableVision: false,
                     visionProvider: '',
-                    visionModel: ''
+                    visionModel: '',
+                    // 与候选的 models/modelsLoading 同性质：查询视觉上游模型列表的瞬态状态，
+                    // saveRoute 不读它们，落盘的 vision 仍只有 provider + model
+                    visionModels: [],
+                    visionModelsLoading: false,
+                    // 高级设置区的展开状态：同样是瞬态，不落盘。
+                    // 打开弹窗时按「这条路由是否已带高级配置」决定初始值（见 routeAdvancedOpenFor）。
+                    routeAdvancedOpen: false
                 },
                 maxRouteTargets: 5,
                 // 与后端 balancer 的取值表对应。

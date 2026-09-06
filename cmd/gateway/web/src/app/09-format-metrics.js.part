@@ -144,9 +144,7 @@
                     if (key === 'p95LatencyMs') {
                         // rank 算法在小样本下会让 P95 退化为最大值，20 是避免把
                         // 这种低可信度的桶上界近似误当成稳定延迟的展示阈值。
-                        const rawSamples = this.metricValue('latencySamples', null);
-                        const samples = Number(rawSamples === null ? this.metricValue('windowRequests', 0) : rawSamples);
-                        const count = Number.isFinite(samples) ? Math.max(0, Math.floor(samples)) : 0;
+                        const count = this.latencySampleCount();
                         if (count < 20) return count === 0 ? '--' : `${count} 个样本`;
                     }
                     const value = this.metricValue(key, null);
@@ -159,6 +157,66 @@
                     const m = Number(this.metricValue('windowMinutes', 1)) || 1;
                     if (m >= 60 && m % 60 === 0) return `${m / 60} 小时`;
                     return `${m} 分钟`;
+                },
+
+                // latencySampleCount 抽出来给 metricDuration 和 latencySpreadText 共用，
+                // 免得两处各写一份「样本数怎么取」的表达式，回头必然分叉。
+                latencySampleCount() {
+                    const raw = this.metricValue('latencySamples', null);
+                    const samples = Number(raw === null ? this.metricValue('windowRequests', 0) : raw);
+                    return Number.isFinite(samples) ? Math.max(0, Math.floor(samples)) : 0;
+                },
+
+                // requestRateSubText 「请求量」卡的第二行。这张卡原来标题写「请求速率」，
+                // 而数值是窗口内的请求「计数」，名不副实；标题已改成「请求量」，
+                // 真正的速率挪到这里，用后端给的 windowMinutes 换算。
+                // 累计值取 Summary.TotalRequests——后端一直在返回，前端此前一个字没用。
+                requestRateSubText() {
+                    const windowRequests = Number(this.metricValue('windowRequests', 0)) || 0;
+                    const minutes = Number(this.metricValue('windowMinutes', 1)) || 1;
+                    const perMin = windowRequests / minutes;
+                    const parts = [`≈ ${perMin > 0 && perMin < 1 ? perMin.toFixed(2) : perMin.toFixed(1)} 次/分`];
+                    const total = this.metricValue('totalRequests', null);
+                    if (total !== null) parts.push(`累计 ${total}`);
+                    return parts.join(' · ');
+                },
+
+                // successSubText 成功率卡的第二行，写出失败的绝对条数。
+                // 成功率是比率：3/1000 和 3/4 都可能显示成一个「看着还行」的百分比，
+                // 而决定要不要现在去查的是失败了几条。
+                // 失败数用 windowRequests 减成功数反推（successRate 就是成功数/窗口数，
+                // 乘回去取整必然还原成整数），不去加 4xx+5xx——两者之和会小于失败数：
+                // 流式响应头写出后才失败的请求状态码停在 200，后端 isSuccess 仍判它失败
+                // （本文件 statusClass 用的是同一套口径）。
+                successSubText() {
+                    const windowRequests = Number(this.metricValue('windowRequests', 0)) || 0;
+                    if (windowRequests === 0) return '窗口内暂无请求';
+                    const rate = Number(this.metricValue('successRate', 0)) || 0;
+                    const failed = Math.max(0, windowRequests - Math.round(windowRequests * rate));
+                    if (failed === 0) return '窗口内无失败请求';
+                    const parts = [`失败 ${failed} 次`];
+                    const buckets = this.statusBuckets();
+                    const pick = (key) => buckets.find((b) => b.key === key)?.count || 0;
+                    if (pick('4xx') > 0) parts.push(`4xx ${pick('4xx')}`);
+                    if (pick('5xx') > 0) parts.push(`5xx ${pick('5xx')}`);
+                    // 状态码为 0 的那批是连上游都没连上、或者客户端提前断开——
+                    // 严重程度高于 4xx，不能因为它没有状态码就在这一行里消失。
+                    if (pick('other') > 0) parts.push(`无状态码 ${pick('other')}`);
+                    return parts.join(' · ');
+                },
+
+                // latencySpreadText 延迟卡的第二行：P50 / P99 / 样本数。
+                // 后端三档分位数都算好了（Summary.P50/P95/P99），之前只显示 P95——
+                // 只看 P95 区分不了「整体都慢」和「长尾拖尾」：前者 P50 也高，
+                // 后者 P50 正常而 P99 炸开，两种问题的处理方式完全不同。
+                // 样本守卫沿用 P95 卡的 20 个阈值，不另立一套可信度口径。
+                latencySpreadText() {
+                    const count = this.latencySampleCount();
+                    if (count === 0) return '窗口内暂无延迟样本';
+                    if (count < 20) return `仅 ${count} 个样本，分位数暂不可信`;
+                    const p50 = this.durationText(this.metricValue('p50LatencyMs', 0));
+                    const p99 = this.durationText(this.metricValue('p99LatencyMs', 0));
+                    return `P50 ${p50} · P99 ${p99} · 样本 ${count}`;
                 },
 
                 providerStatusRows() {
@@ -313,35 +371,177 @@
                     return issues;
                 },
 
+                // statusBuckets 把 /api/metrics 的 statusCodes 聚成 2xx/3xx/4xx/5xx/其他。
+                // 后端逐秒桶一直在累计这份分布，前端此前完全没读：只有一个成功率百分比时，
+                // 「掉的这些到底是 429 还是 500」得翻日志才知道，而这两者的处置完全不同——
+                // 前者调限流/换候选，后者是上游自己坏了。
+                // key "0" 是没拿到上游状态码就结束的请求（连不上、客户端断开），
+                // 归入「其他」而不是丢掉——那类失败恰恰最该被看见。
+                statusBuckets() {
+                    const groups = [
+                        { key: '2xx', label: '2xx 成功', barClass: 'bg-good/70', dotClass: 'bg-good' },
+                        { key: '3xx', label: '3xx 重定向', barClass: 'bg-cyan2/70', dotClass: 'bg-cyan2' },
+                        { key: '4xx', label: '4xx 客户端 / 限流', barClass: 'bg-warn/70', dotClass: 'bg-warn' },
+                        { key: '5xx', label: '5xx 上游', barClass: 'bg-danger/70', dotClass: 'bg-danger' },
+                        { key: 'other', label: '其他 / 无状态码', barClass: 'bg-white/25', dotClass: 'bg-white/40' }
+                    ];
+                    const detail = {};
+                    let total = 0;
+                    Object.entries(this.metrics?.statusCodes || {}).forEach(([code, value]) => {
+                        const count = Number(value) || 0;
+                        if (count <= 0) return;
+                        const num = Number(code);
+                        let key = 'other';
+                        if (num >= 200 && num < 300) key = '2xx';
+                        else if (num >= 300 && num < 400) key = '3xx';
+                        else if (num >= 400 && num < 500) key = '4xx';
+                        else if (num >= 500 && num < 600) key = '5xx';
+                        detail[key] = detail[key] || {};
+                        detail[key][code] = (detail[key][code] || 0) + count;
+                        total += count;
+                    });
+                    if (total === 0) return [];
+                    return groups
+                        .map((group) => {
+                            const codes = detail[group.key] || {};
+                            const count = Object.values(codes).reduce((sum, n) => sum + n, 0);
+                            const pct = (count / total) * 100;
+                            const list = Object.entries(codes)
+                                .sort((a, b) => b[1] - a[1])
+                                .map(([code, n]) => `${code === '0' ? '无状态码' : code} × ${n}`)
+                                .join('、');
+                            return {
+                                ...group,
+                                count,
+                                pct,
+                                pctText: pct >= 10 ? `${Math.round(pct)}%` : `${pct.toFixed(1)}%`,
+                                tip: list ? `${group.label}：${list}` : group.label
+                            };
+                        })
+                        .filter((group) => group.count > 0);
+                },
+
+                statusCodeTotal() {
+                    return this.statusBuckets().reduce((sum, group) => sum + group.count, 0);
+                },
+
+                // failoverStats 故障转移占比。/api/metrics 里没有这个聚合，只能从日志环里数，
+                // 所以口径是「最近 N 条请求」而不是上面那个统计窗口——展示处必须写清楚，
+                // 别和 15 分钟的指标混成一个口径。
+                // 判据用 attempts > 1，与日志页「尝试」列的 attemptTrailText 完全一致，
+                // 不新造一套：同一现象两套判据，迟早对不上。
+                failoverStats() {
+                    const logs = this.monitorLogs || [];
+                    const total = logs.length;
+                    const count = logs.filter((log) => Number(log?.attempts || 0) > 1).length;
+                    return { total, count, pct: total > 0 ? (count / total) * 100 : 0 };
+                },
+
+                failoverText() {
+                    const stats = this.failoverStats();
+                    if (stats.total === 0) return '--';
+                    return stats.count === 0 ? '0' : `${stats.count} · ${Math.round(stats.pct)}%`;
+                },
+
+                failoverTip() {
+                    const stats = this.failoverStats();
+                    if (stats.total === 0) return '最近日志为空，暂时统计不出转移率';
+                    return `最近 ${stats.total} 条请求里有 ${stats.count} 条发生过候选转移（判据 attempts > 1，与日志页「尝试」列同一口径）`;
+                },
+
+                // 一成以上的请求要靠转移才成功，说明首选候选已经不可靠，值得立刻去看
+                failoverClass() {
+                    const stats = this.failoverStats();
+                    if (stats.count === 0) return 'text-text';
+                    return stats.pct >= 10 ? 'text-warn' : 'text-text';
+                },
+
+                // stickyText prompt cache 粘性映射数。/health 早就返回这个字段，前端从没展示，
+                // 于是「粘性到底有没有生效」只能靠猜。
+                stickyText() {
+                    const n = this.health?.stickyMappings;
+                    return n === undefined || n === null ? '--' : String(n);
+                },
+
+                stickyTip() {
+                    const n = Number(this.health?.stickyMappings || 0);
+                    if (n > 0) return `当前有 ${n} 条会话被粘在固定候选上，prompt cache 复用在生效`;
+                    return '当前没有任何粘性映射：长期为 0 说明请求前缀太短，或候选策略不是粘性';
+                },
+
+                // latencyRows 延迟排行。三处判据都改过，都不是可选的：
+                //
+                // 1. 过滤条件用 requests > 0，不能用 p95 > 0。latencyBounds[0] === 0，
+                //    percentile 返回的是桶上界，所以亚毫秒请求、以及「连上游都没连上就失败」
+                //    的请求算出来的 p95 就是 0，拿 p95 > 0 过滤会让这些 provider 整行
+                //    从排行里消失——瞬间失败的上游恰恰是最该被看见的那种。
+                // 2. 按样本数分档排序。ProviderStats.Requests 就是进了延迟直方图的样本数
+                //    （后端 bucket.latency.add 无条件执行），样本 < 20 的行一律排在可信行之后：
+                //    否则一次 30s 超时就能让只跑过 1 个请求的 provider 永远霸榜第一。
+                // 3. 与顶部 P95 卡共用同一个 20 样本阈值，不再一处有守卫、一处没有。
                 latencyRows() {
                     const providers = this.metrics?.providers || this.metrics?.providerStats || [];
                     const rows = Array.isArray(providers)
                         ? providers
                         : Object.entries(providers).map(([name, value]) => ({ name, ...value }));
                     return rows
-                        .map((row) => ({
-                            name: row.name || row.provider || '--',
-                            p95: Math.round(Number(row.p95LatencyMs ?? row.p95 ?? row.latencyP95Ms ?? 0)),
-                            requests: Number(row.requests ?? row.count ?? row.total ?? 0)
-                        }))
-                        .filter((row) => row.name !== '--' && row.p95 > 0)
-                        .sort((a, b) => b.p95 - a.p95)
+                        .map((row) => {
+                            const requests = Number(row.requests ?? row.count ?? row.total ?? 0);
+                            return {
+                                name: row.name || row.provider || '--',
+                                p50: Math.round(Number(row.p50LatencyMs ?? 0)),
+                                p95: Math.round(Number(row.p95LatencyMs ?? row.p95 ?? row.latencyP95Ms ?? 0)),
+                                p99: Math.round(Number(row.p99LatencyMs ?? 0)),
+                                requests,
+                                errors: Number(row.errors ?? 0),
+                                thin: requests < 20
+                            };
+                        })
+                        .filter((row) => row.name !== '--' && row.requests > 0)
+                        .sort((a, b) => (a.thin === b.thin ? b.p95 - a.p95 : (a.thin ? 1 : -1)))
                         .slice(0, 6);
+                },
+
+                // 样本不足时主数值写样本数而不是写一个不可信的毫秒数，与 P95 卡一致
+                latencyRowMain(row) {
+                    return row.thin ? `${row.requests} 个样本` : this.durationText(row.p95);
+                },
+
+                latencyRowMainClass(row) {
+                    return row.thin ? 'text-muted' : 'text-cyan';
+                },
+
+                // 次要行给出请求数与失败数：光有 P95 分不清「这个上游慢」和「这个上游只被打过一次」
+                latencyRowSub(row) {
+                    const parts = [`${row.requests} 次请求`];
+                    if (row.errors > 0) parts.push(`失败 ${row.errors}`);
+                    if (!row.thin) parts.push(`P50 ${this.durationText(row.p50)}`);
+                    return parts.join(' · ');
+                },
+
+                latencyRowTip(row) {
+                    if (row.thin) {
+                        return `${row.name}：窗口内只有 ${row.requests} 个样本，分位数不可信（阈值 20），已排在可信行之后`;
+                    }
+                    return `${row.name}：P50 ${this.durationText(row.p50)} · P95 ${this.durationText(row.p95)} · P99 ${this.durationText(row.p99)}（分位数取桶上界近似）`;
                 },
 
                 // errorKey 是错误条目的身份。x-for 的 :key 和 recentErrays 的去重都用它，
                 // 两处各写一份表达式必然分叉（曾经模板用 err.message、去重用 err.error）。
                 errorKey(err) {
-                    return err.id || (err.time || '') + ' ' + (err.message || err.error || '');
+                    return err.id || (err.time || '') + ' ' + (err.message || err.error || '');
                 },
 
-                // recentErrors 合并两个来源：/api/metrics 的 recentErrors 和 /api/logs 里的错误行。
+                // recentErrors 合并两个来源：/api/metrics 的 recentErrors 和监控页日志里的错误行。
                 // 同一条请求会同时出现在两边，必须去重——x-for 的 :key 撞车会让 Alpine
                 // 在内部 diff 时抛 "Cannot read properties of undefined (reading 'after')"，
                 // 每次轮询刷一次错，同时列表里还会重复显示同一条错误。
+                //
+                // 日志侧读 monitorLogs 而不是 requestLogs：后者带日志页的筛选器，
+                // 在那边筛过 provider / 状态之后，这块会跟着缩水成「暂无错误记录」。
                 recentErrors() {
                     const metricErrors = this.metrics?.recentErrors || this.metrics?.errors || [];
-                    const logErrors = this.requestLogs.filter((log) => Number(log.status || 0) >= 400 || log.error);
+                    const logErrors = (this.monitorLogs || []).filter((log) => Number(log.status || 0) >= 400 || log.error);
                     const seen = new Set();
                     const out = [];
                     for (const err of [...metricErrors, ...logErrors]) {

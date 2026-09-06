@@ -75,12 +75,16 @@
                     this.showProviderModal = false;
                 },
 
-                // 路由弹窗多一层：候选的上游模型下拉展开时，ESC 先收下拉，再按才关弹窗。
+                // 路由弹窗多一层：上游模型下拉展开时，ESC 先收下拉，再按才关弹窗。
+                // 候选行与视觉字段的下拉一起算——只收候选那批的话，视觉下拉开着按 ESC
+                // 会直接关掉整个弹窗，填了一半的表单跟着丢。
                 escapeRouteModal() {
                     if (this.confirmDialog.open) return;
                     const open = (this.routeForm.targets || []).filter((t) => t.models && t.models.length);
-                    if (open.length) {
+                    const visionOpen = (this.routeForm.visionModels || []).length > 0;
+                    if (open.length || visionOpen) {
                         open.forEach((t) => { t.models = []; });
+                        if (visionOpen) this.routeForm.visionModels = [];
                         return;
                     }
                     this.showRouteModal = false;

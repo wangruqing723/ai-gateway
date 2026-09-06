@@ -12,7 +12,7 @@
                             await Promise.all([
                                 this.loadHealth(showErrors),
                                 this.loadMetrics(),
-                                this.loadRequestLogs()
+                                this.loadMonitorLogs()
                             ]);
                         }
                     } finally {
@@ -147,5 +147,14 @@
                     if (this.expandedLogId && !logs.some((log) => this.logKey(log) === this.expandedLogId)) {
                         this.expandedLogId = null;
                     }
+                },
+
+                // loadMonitorLogs 给监控页取最近日志，且刻意不带 logFilters。
+                // 仪表盘上的「最近错误」和「故障转移」是全局口径，日志页的筛选器只是那一页的
+                // 视图状态；共用一个数组会让「在日志页筛了 provider=A」顺带把仪表盘的错误列表
+                // 也缩到 A，看起来像故障消失了。两页各持一份，切页时 $watch 会各自重取。
+                async loadMonitorLogs() {
+                    const data = await this.loadOptionalJSON('/api/logs?limit=100');
+                    this.monitorLogs = Array.isArray(data?.data) ? data.data : [];
                 },
 
