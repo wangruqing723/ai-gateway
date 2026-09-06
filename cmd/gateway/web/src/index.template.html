@@ -723,10 +723,55 @@
 
                     <div class="grid grid-cols-1 gap-5 xl:grid-cols-12">
                         <section class="glass rounded-lg xl:col-span-9">
-                            <div class="flex items-center justify-between border-b border-line p-4">
-                                <div class="flex items-center gap-2 font-bold text-white">
-                                    <span class="material-symbols-outlined text-cyan">dns</span>
-                                    Provider 运行状态
+                            <div class="flex flex-wrap items-center justify-between gap-3 border-b border-line p-4">
+                                <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
+                                    <div class="flex items-center gap-2 font-bold text-white">
+                                        <span class="material-symbols-outlined text-cyan">dns</span>
+                                        Provider 运行状态
+                                    </div>
+                                    <!-- 三档汇总徽章。正常/异常来自健康检测，熔断来自运行时熔断器，
+                                         两套机制独立，故一个 provider 可能同时出现在「异常」和「熔断」里。
+                                         正常与异常恒显示（含 0），让「检测过且全绿」和「从没检测」可区分：
+                                         前者未检测为 0，后者未检测徽章会亮起来。 -->
+                                    <div x-show="_firstLoadDone && providerStateCounts().total > 0" x-cloak
+                                         class="flex flex-wrap items-center gap-1.5">
+                                        <span class="chip border-good/35 bg-good/10 px-1.5 text-[11px] text-emerald-100"
+                                              @mouseenter="showTip('健康检测结果为「健康」或「可达」的 Provider 数', $event)"
+                                              @mouseleave="hideTip()"
+                                              @focus="showTip('健康检测结果为「健康」或「可达」的 Provider 数', $event)"
+                                              @blur="hideTip()"
+                                              tabindex="0" aria-describedby="immediate-tooltip"
+                                              x-text="'正常 ' + providerStateCounts().ok"></span>
+                                        <span class="chip border-danger/35 bg-danger/10 px-1.5 text-[11px] text-rose-100"
+                                              @mouseenter="showTip('健康检测结果为「异常」的 Provider 数', $event)"
+                                              @mouseleave="hideTip()"
+                                              @focus="showTip('健康检测结果为「异常」的 Provider 数', $event)"
+                                              @blur="hideTip()"
+                                              tabindex="0" aria-describedby="immediate-tooltip"
+                                              x-text="'异常 ' + providerStateCounts().error"></span>
+                                        <!-- 熔断未启用时不显示 0：那会让人以为机制在跑且一切正常 -->
+                                        <span x-show="providerStateCounts().breakerEnabled"
+                                              class="chip px-1.5 text-[11px]"
+                                              :class="providerStateCounts().tripped > 0
+                                                  ? 'border-warn/35 bg-warn/10 text-amber-100'
+                                                  : 'bg-white/[.05] text-muted'"
+                                              @mouseenter="showTip('熔断器处于已熔断或半开探测的 Provider 数', $event)"
+                                              @mouseleave="hideTip()"
+                                              @focus="showTip('熔断器处于已熔断或半开探测的 Provider 数', $event)"
+                                              @blur="hideTip()"
+                                              tabindex="0" aria-describedby="immediate-tooltip"
+                                              x-text="'熔断 ' + providerStateCounts().tripped"></span>
+                                        <!-- 未检测只在存在时出现：全部检测过之后这个徽章消失，
+                                             不必长期占位。 -->
+                                        <span x-show="providerStateCounts().unchecked > 0"
+                                              class="chip bg-white/[.05] px-1.5 text-[11px] text-muted"
+                                              @mouseenter="showTip('尚未做过健康检测的 Provider 数，点右侧检测按钮更新', $event)"
+                                              @mouseleave="hideTip()"
+                                              @focus="showTip('尚未做过健康检测的 Provider 数，点右侧检测按钮更新', $event)"
+                                              @blur="hideTip()"
+                                              tabindex="0" aria-describedby="immediate-tooltip"
+                                              x-text="'未检测 ' + providerStateCounts().unchecked"></span>
+                                    </div>
                                 </div>
                                 <div class="flex gap-2">
                                     <!-- 检测要逐个探上游、每个 5 秒超时，整体可能跑十几秒。

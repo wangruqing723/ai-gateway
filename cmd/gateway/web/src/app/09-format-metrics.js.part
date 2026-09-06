@@ -266,6 +266,33 @@
                     });
                 },
 
+                // providerStateCounts 卡片标题旁的三档汇总。
+                //
+                // 口径刻意分两个维度取值，因为它们本就是两套独立机制：
+                // - 熔断（breakers）是运行时自动维护的，open / half_open 都算「熔断」——
+                //   半开虽然放探针，但此刻仍在受限状态，混进正常会掩盖故障。
+                // - 正常 / 异常取健康检测（providerHealth），它要手动触发，
+                //   所以 unchecked 既不算正常也不算异常，单独一档，否则「从没检测过」
+                //   会被误报成全部健康。
+                // 三档之和不等于 provider 总数是预期的：一个 provider 可以同时熔断
+                // 且健康检测为 error，两边都会计一次。
+                providerStateCounts() {
+                    const health = this.health?.providerHealth || {};
+                    // null 表示熔断未启用，与「全部闭合」是两种语义，往下传给模板区分展示。
+                    const breakers = this.health?.breakers || null;
+                    const names = Object.keys(this.config.providers || {});
+                    let ok = 0, error = 0, unchecked = 0, tripped = 0;
+                    for (const name of names) {
+                        const status = health[name]?.status;
+                        if (status === 'ok' || status === 'warn') ok++;
+                        else if (status === 'error') error++;
+                        else unchecked++;
+                        const state = breakers ? breakers[name]?.state : null;
+                        if (state === 'open' || state === 'half_open') tripped++;
+                    }
+                    return { total: names.length, ok, error, unchecked, tripped, breakerEnabled: !!breakers };
+                },
+
                 providerHealthLabel(health) {
                     if (health.status === 'ok') return '健康';
                     if (health.status === 'warn') return '可达';
