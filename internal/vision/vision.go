@@ -342,6 +342,12 @@ func (t *Translator) doRecognize(ctx context.Context, imageBlock map[string]any,
 	}
 	req.Header.Set("content-type", "application/json")
 	req.Header.Set("authorization", "Bearer "+vision.APIKey)
+	// 视觉识别也是网关自己发起的上游请求，同样受 UA 门禁型 provider 影响
+	// （实测 agentrouter.org 系上游对 Go 默认 UA 返回 401 unauthorized client）。
+	// 与 providerhealth / fetchUpstreamModels 同语义：配了就用，没配不设头。
+	if vision.UserAgent != "" {
+		req.Header.Set("User-Agent", vision.UserAgent)
+	}
 
 	if t.resolve == nil {
 		return "", fmt.Errorf("HTTP client 解析器未初始化")

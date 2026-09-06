@@ -36,6 +36,46 @@ func TestDoRecognizeRejectsOversizedResponse(t *testing.T) {
 	}
 }
 
+// 视觉识别请求必须带上 provider 配置的 userAgent（UA 门禁型上游对 Go 默认 UA 返回 401），
+// 未配置时则不设头、保持默认行为。
+func TestDoRecognizeSendsConfiguredUserAgent(t *testing.T) {
+	tests := []struct {
+		name       string
+		userAgent  string
+		wantHeader string // 期望收到的 User-Agent；空串表示期望未显式设置
+	}{
+		{name: "配置了 userAgent 则使用配置值", userAgent: "claude-cli/2.1.161 (external, cli)", wantHeader: "claude-cli/2.1.161 (external, cli)"},
+		{name: "未配置 userAgent 则不设置该头", userAgent: "", wantHeader: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotUA string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotUA = r.Header.Get("User-Agent")
+				writeVisionResponse(t, w, "ok")
+			}))
+			defer server.Close()
+
+			client := server.Client()
+			translator := &Translator{resolve: func(string) (*http.Client, error) { return client, nil }}
+			provider := &config.Provider{BaseURL: server.URL, APIKey: "test-key", Format: "openai", UserAgent: tt.userAgent}
+
+			if _, err := translator.doRecognize(context.Background(), imageBlock("ua-check"), provider, "vision-model"); err != nil {
+				t.Fatalf("doRecognize() error = %v", err)
+			}
+			switch {
+			case tt.wantHeader != "":
+				if gotUA != tt.wantHeader {
+					t.Fatalf("User-Agent = %q, want %q", gotUA, tt.wantHeader)
+				}
+			case gotUA == "":
+				// 未配置时不得 Set 空 UA（那会让该头彻底消失），应留给 Go 默认值 Go-http-client/1.1。
+				t.Fatal("未配置 userAgent 时 User-Agent 头消失，服务端收不到任何 UA")
+			}
+		})
+	}
+}
+
 func TestHasImagesMatchesOneLevelToolResultGate(t *testing.T) {
 	tests := []struct {
 		name     string
