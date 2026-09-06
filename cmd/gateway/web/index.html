@@ -722,8 +722,17 @@
                     </div>
 
                     <div class="grid grid-cols-1 gap-5 xl:grid-cols-12">
-                        <section class="glass rounded-lg xl:col-span-9">
-                            <div class="flex flex-wrap items-center justify-between gap-3 border-b border-line p-4">
+                        <!-- 让本列高度 = 右列 aside（运行时状态 + 状态码分布）之和。
+                             CSS grid 的行高取两列里更高者的内容高度：若让本列表格按全部 provider
+                             自然铺开，行高就由本列决定、把整行顶得很长（provider 一多尤其明显）。
+                             所以 xl 下用「绝对定位脱流」让本列内容不再向 grid 贡献高度——行高改由
+                             右列决定，本列被拉伸到该高度后，内层表格区在其中滚动。
+                             xl:absolute inset-0 让内层铺满 section；section 自身在 xl 下无内容高度，
+                             靠 grid stretch 撑到右列高度。xl 以下（单列堆叠）回退到普通文档流 +
+                             max-h-[451px] 定高。 -->
+                        <section class="glass relative rounded-lg xl:col-span-9">
+                          <div class="flex flex-col xl:absolute xl:inset-0">
+                            <div class="flex flex-wrap items-center justify-between gap-3 border-b border-line p-4 shrink-0">
                                 <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
                                     <div class="flex items-center gap-2 font-bold text-white">
                                         <span class="material-symbols-outlined text-cyan">dns</span>
@@ -803,11 +812,14 @@
                                     </button>
                                 </div>
                             </div>
-                            <!-- 默认高度按 10 条数据算：表头 41px + 10 行 × 41px ≈ 451px。
-                                 超过 10 个 provider 时内部滚动，不再把整页顶长——这块下面还有
-                                 系统资源和路由排行，provider 一多就要滚很久才能看到它们。
+                            <!-- flex-1 min-h-0：在 xl:absolute 撑满的高度里填掉标题栏之外的剩余
+                                 空间，provider 多则内部滚动、少则撑满，本列因此恰好等于右列两块之和。
+                                 min-h-0 必须有，否则 flex 子项默认 min-height:auto 会被表格内容
+                                 撑破、overflow 失效。
+                                 xl 以下（单列堆叠）没有「右列」可对齐，回退到按 10 行估算的
+                                 max-h-[451px] 定高，避免表格把整页顶长。
                                  表头 sticky 吸顶，滚动时列名不丢。 -->
-                            <div class="overflow-auto lg:max-h-[451px]">
+                            <div class="overflow-auto max-h-[451px] min-h-0 flex-1 xl:max-h-none">
                                 <!-- 历史布局用 min-w 保持 660：后七列不可压缩部分实测合计 565px，
                                      名称列带 max-w-0 truncate 可以继续缩，所以加了「检测」列
                                      也不必放宽 min-w（放到 720 会在 1440 宽度下多出 9px 横向滚动）。
@@ -951,6 +963,7 @@
                                     </tbody>
                                 </table>
                             </div>
+                          </div>
                         </section>
 
                         <aside class="space-y-5 xl:col-span-3">
@@ -1026,18 +1039,6 @@
                                     <div class="gw-skeleton h-4 w-4/5"></div>
                                 </div>
                             </section>
-
-                            <section class="glass rounded-lg p-4">
-                                <h2 class="mb-4 text-base font-extrabold text-white">配置健康</h2>
-                                <div class="space-y-2">
-                                    <template x-for="issue in configIssues()" :key="issue">
-                                        <div class="rounded-lg border border-warn/30 bg-warn/10 px-3 py-2 text-sm text-amber-100" x-text="issue"></div>
-                                    </template>
-                                    <div x-show="configIssues().length === 0" class="rounded-lg border border-good/30 bg-good/10 px-3 py-2 text-sm text-emerald-100">
-                                        配置引用关系正常
-                                    </div>
-                                </div>
-                            </section>
                         </aside>
                     </div>
 
@@ -1096,6 +1097,21 @@
                             </div>
                         </section>
                     </div>
+
+                    <!-- 配置健康从右侧 aside 移到这里独占一行：它高度随告警条数变化，
+                         留在 aside 里会把右列顶得比左列 Provider 表高，两列不等高就在
+                         矮的那列留出一片空白。独占整行后不再和任何列绑高度。 -->
+                    <section class="glass rounded-lg p-4">
+                        <h2 class="mb-4 text-base font-extrabold text-white">配置健康</h2>
+                        <div class="space-y-2">
+                            <template x-for="issue in configIssues()" :key="issue">
+                                <div class="rounded-lg border border-warn/30 bg-warn/10 px-3 py-2 text-sm text-amber-100" x-text="issue"></div>
+                            </template>
+                            <div x-show="configIssues().length === 0" class="rounded-lg border border-good/30 bg-good/10 px-3 py-2 text-sm text-emerald-100">
+                                配置引用关系正常
+                            </div>
+                        </div>
+                    </section>
 
                 </section>
 
