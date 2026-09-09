@@ -143,6 +143,73 @@ func TestTranslateStopsBeforeNextImageWhenContextCanceled(t *testing.T) {
 	}
 }
 
+func TestClassifyFailureUsesStableCategories(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{name: "canceled", err: context.Canceled, want: "timeout_or_cancel"},
+		{name: "deadline", err: context.DeadlineExceeded, want: "timeout_or_cancel"},
+		{name: "network", err: errors.New("视觉 API 网络请求失败: dial tcp: connection refused"), want: "network"},
+		{name: "upstream http", err: errors.New("视觉 API 响应异常 (HTTP 401): unauthorized"), want: "upstream_http"},
+		{name: "response parse", err: errors.New("解析视觉响应失败: invalid character"), want: "response_parse"},
+		{name: "image format", err: errors.New("不支持的图片 source 类型: file"), want: "image_format"},
+		{name: "queue", err: queue.ErrQueueTimeout, want: "queue"},
+		{name: "other", err: errors.New("未知视觉错误"), want: "other"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ClassifyFailure(tt.err); got != tt.want {
+				t.Fatalf("ClassifyFailure(%v) = %q, want %q", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestTranslateReturnsStructuredFailureResult(t *testing.T) {
+	tests := []struct {
+		name     string
+		status   int
+		body     string
+		badImage bool
+		want     string
+	}{
+		{name: "upstream http", status: http.StatusUnauthorized, body: "unauthorized", want: "upstream_http"},
+		{name: "response parse", status: http.StatusOK, body: "not-json", want: "response_parse"},
+		{name: "bad source", status: http.StatusOK, body: "unused", badImage: true, want: "image_format"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tt.status)
+				_, _ = io.WriteString(w, tt.body)
+			}))
+			defer server.Close()
+
+			translator, provider := newTestTranslator(t, server, true)
+			image := imageBlock(tt.name)
+			if tt.badImage {
+				image["source"] = map[string]any{"type": "file"}
+			}
+			messages := []any{map[string]any{
+				"role":    "user",
+				"content": []any{image},
+			}}
+			translated, result := translator.Translate(context.Background(), messages, provider, "vision-model", discardLog)
+			if len(translated) != 1 || result.Total != 1 || result.Failed != 1 || result.Cached != 0 || result.Recognized != 0 {
+				t.Fatalf("Translate() result = %#v, translated = %#v", result, translated)
+			}
+			if result.FirstFailure == nil || result.FirstFailure.Category != tt.want {
+				t.Fatalf("FirstFailure = %#v, want category %q", result.FirstFailure, tt.want)
+			}
+			if len([]rune(result.FirstFailure.Message)) > maxFailureMessageRunes {
+				t.Fatalf("failure message length = %d, want <= %d", len([]rune(result.FirstFailure.Message)), maxFailureMessageRunes)
+			}
+		})
+	}
+}
+
 func TestCallVisionCanceledWaiterDoesNotCancelSharedRecognition(t *testing.T) {
 	started := make(chan struct{})
 	upstreamCanceled := make(chan struct{})

@@ -28,3 +28,10 @@
                     this.logAdvancedFiltersOpen = false;
                     this.loadRequestLogs();
                 },
+
+                logFilterQuery(key, value) {
+                    if (key === 'status' && value === 'visionFailed') {
+                        return ['visionFailed', 'yes'];
+                    }
+                    return [key, value];
+                },

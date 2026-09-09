@@ -118,10 +118,13 @@ func blocksHaveImage(blocks []any) bool {
 	return false
 }
 
-type stats struct{ cached, recognized, failed, skipped int }
+type stats struct {
+	cached, recognized, failed, skipped int
+	firstFailure                        *Failure
+}
 
 // Translate 遍历消息，将图片块替换为文字描述，对齐 Node 版 translateImages。
-func (t *Translator) Translate(ctx context.Context, messages []any, vision *config.Provider, visionModel string, log LogFunc) []any {
+func (t *Translator) Translate(ctx context.Context, messages []any, vision *config.Provider, visionModel string, log LogFunc) ([]any, Result) {
 	idx := 0
 	st := &stats{}
 	out := make([]any, 0, len(messages))
@@ -163,7 +166,17 @@ func (t *Translator) Translate(ctx context.Context, messages []any, vision *conf
 		}
 		log("  图片: %s [%s]", strings.Join(parts, ", "), visionModel)
 	}
-	return out
+	result := Result{
+		Total:      st.cached + st.recognized + st.failed,
+		Cached:     st.cached,
+		Recognized: st.recognized,
+		Failed:     st.failed,
+	}
+	if st.firstFailure != nil {
+		failure := *st.firstFailure
+		result.FirstFailure = &failure
+	}
+	return out, result
 }
 
 // processBlocks 递归处理 content 数组，替换 image 块为文字描述。
@@ -185,6 +198,12 @@ func (t *Translator) processBlocks(ctx context.Context, blocks []any, vision *co
 			text, fromCache, err := t.callVision(ctx, block, vision, visionModel)
 			if err != nil {
 				st.failed++
+				if st.firstFailure == nil {
+					st.firstFailure = &Failure{
+						Category: ClassifyFailure(err),
+						Message:  truncateFailureMessage(err.Error()),
+					}
+				}
 				log("  图片 #%d 识别失败: %s", n, err.Error())
 				out = append(out, map[string]any{"type": "text", "text": fmt.Sprintf("[图片 #%d 识别失败: %s]", n, err.Error())})
 				continue
@@ -338,7 +357,7 @@ func (t *Translator) doRecognize(ctx context.Context, imageBlock map[string]any,
 	// 超时由共享识别 context 控制，无需在 HTTP 层重复叠加。
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(reqBody))
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("视觉 API 网络请求失败: %w", err)
 	}
 	req.Header.Set("content-type", "application/json")
 	req.Header.Set("authorization", "Bearer "+vision.APIKey)
@@ -358,7 +377,7 @@ func (t *Translator) doRecognize(ctx context.Context, imageBlock map[string]any,
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("视觉 API 网络请求失败: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -371,6 +390,13 @@ func (t *Translator) doRecognize(ctx context.Context, imageBlock map[string]any,
 	}
 	if len(raw) > maxVisionResponseBodyBytes {
 		return "", fmt.Errorf("视觉 API 响应超过大小限制 (%d bytes)", maxVisionResponseBodyBytes)
+	}
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		snippet := string(raw)
+		if len(snippet) > 200 {
+			snippet = snippet[:200]
+		}
+		return "", fmt.Errorf("视觉 API 响应异常 (HTTP %d): %s", resp.StatusCode, snippet)
 	}
 	var response map[string]any
 	if err := json.Unmarshal(raw, &response); err != nil {

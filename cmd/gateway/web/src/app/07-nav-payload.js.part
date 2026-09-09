@@ -67,9 +67,10 @@
                         contextSafetyMargin: this.numOrNull(this.config.contextSafetyMargin),
                         providers,
                         routes: JSON.parse(JSON.stringify(this.config.routes || [])),
-                        // failover / breaker 必须带上：PUT 是全量替换，漏掉就等于把它们关掉
+                        // failover / breaker / providerHealth 必须带上：PUT 是全量替换，漏掉就会静默丢配置
                         failover: this.failoverPayload(),
-                        breaker: this.breakerPayload()
+                        breaker: this.breakerPayload(),
+                        providerHealth: this.providerHealthPayload()
                     };
                 },
 
@@ -106,6 +107,13 @@
                         consecutiveFailures: this.numOrNull(b.consecutiveFailures),
                         openMs: this.numOrNull(b.openMs),
                         halfOpenProbes: this.numOrNull(b.halfOpenProbes)
+                    };
+                },
+
+                providerHealthPayload() {
+                    const value = Number(this.config.providerHealth?.checkIntervalSeconds);
+                    return {
+                        checkIntervalSeconds: Number.isFinite(value) ? Math.trunc(value) : 0
                     };
                 },
 

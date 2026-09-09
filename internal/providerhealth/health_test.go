@@ -45,6 +45,90 @@ func TestCheckAllMapsStatuses(t *testing.T) {
 	}
 }
 
+func TestStateChangeCallbackOnlyReportsNormalAbnormalBoundaries(t *testing.T) {
+	var code atomic.Int32
+	code.Store(http.StatusOK)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(int(code.Load()))
+	}))
+	defer server.Close()
+
+	cfg := &config.Config{Providers: map[string]*config.Provider{
+		"p": {Name: "p", BaseURL: server.URL, APIKey: "key", Format: "openai"},
+	}}
+	checker := NewChecker()
+	type change struct {
+		from string
+		to   string
+	}
+	changes := make([]change, 0, 8)
+	checker.OnStateChange = func(provider, from, to string, status Status) {
+		if provider != "p" {
+			t.Errorf("callback provider = %q, want p", provider)
+		}
+		// Snapshot must be callable here; callback is required to run outside c.mu.
+		_ = checker.Snapshot(cfg)
+		changes = append(changes, change{from: from, to: to})
+		if status.Status != to {
+			t.Errorf("callback status = %#v, want %q", status, to)
+		}
+	}
+
+	check := func() {
+		t.Helper()
+		if _, ok := checker.CheckProvider(context.Background(), cfg, testResolver(server.Client()), "p"); !ok {
+			t.Fatal("CheckProvider() did not complete")
+		}
+	}
+	check() // unchecked -> ok 不发事件
+	code.Store(http.StatusInternalServerError)
+	check() // ok -> error
+	check() // 同一异常状态不重复
+	code.Store(http.StatusUnauthorized)
+	check() // error -> error 不发
+	code.Store(http.StatusOK)
+	check() // error -> ok
+	code.Store(http.StatusNotFound)
+	check() // ok -> warn
+	code.Store(http.StatusInternalServerError)
+	check() // warn -> error 不发
+	code.Store(http.StatusOK)
+	check() // error -> ok
+
+	want := []change{{from: "ok", to: "error"}, {from: "error", to: "ok"}, {from: "ok", to: "warn"}, {from: "error", to: "ok"}}
+	if len(changes) != len(want) {
+		t.Fatalf("health callbacks = %#v, want %#v", changes, want)
+	}
+	for i := range want {
+		if changes[i] != want[i] {
+			t.Errorf("change[%d] = %#v, want %#v", i, changes[i], want[i])
+		}
+	}
+}
+
+func TestCheckAllReportsUncheckedAbnormalOnce(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer server.Close()
+	cfg := &config.Config{Providers: map[string]*config.Provider{
+		"p": {Name: "p", BaseURL: server.URL, Format: "openai"},
+	}}
+	checker := NewChecker()
+	callbacks := 0
+	checker.OnStateChange = func(provider, from, to string, status Status) {
+		callbacks++
+		if provider != "p" || from != "unchecked" || to != "error" || status.Status != "error" {
+			t.Errorf("unexpected first health callback: %q %q %q %#v", provider, from, to, status)
+		}
+	}
+	checker.CheckAll(context.Background(), cfg, testResolver(server.Client()))
+	checker.CheckAll(context.Background(), cfg, testResolver(server.Client()))
+	if callbacks != 1 {
+		t.Fatalf("CheckAll callbacks = %d, want 1", callbacks)
+	}
+}
+
 // 健康检测探测 /v1/models，而部分上游按 User-Agent 做准入（实测 agentrouter.org
 // 在 Go 默认 UA 下返回 401）。不带配置的 UA 会把这类 provider 永久判成不健康，
 // 而它的转发路径其实是好的——那是误判，不是真故障。

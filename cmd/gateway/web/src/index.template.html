@@ -353,6 +353,11 @@
                                         <input autocomplete="off" type="number" min="0" x-model.number="config.contextSafetyMargin" placeholder="留空 = 默认 4096" class="field">
                                         <span class="mt-1.5 block text-[11px] text-muted">从 contextWindow 中预留给估算误差的 token 数；允许填 0。它不启用或关闭窗口限制，是否启用由各 Provider / 路由 / 候选的 contextWindow 决定。</span>
                                     </label>
+                                    <label class="block md:col-span-2 xl:col-span-3">
+                                        <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">Provider 周期健康检测（秒）</span>
+                                        <input autocomplete="off" type="number" min="0" max="86400" x-model.number="config.providerHealth.checkIntervalSeconds" placeholder="0 = 关闭" class="field">
+                                        <span class="mt-1.5 block text-[11px] text-muted">每 N 秒自动探测全部 Provider；填 0 关闭。范围 0-86400，手动检测始终可用。</span>
+                                    </label>
                                 </div>
 
                                 <div class="mt-4 border-t border-line pt-4" :class="config.directMode ? 'opacity-70' : ''">
@@ -1098,6 +1103,60 @@
                         </section>
                     </div>
 
+                    <section class="glass rounded-lg p-4">
+                        <div class="mb-4 flex flex-wrap items-center justify-between gap-2">
+                            <h2 class="text-base font-extrabold text-white">运行异常</h2>
+                            <span x-show="_firstLoadDone && runEventRows().length > 0" class="text-xs text-muted"
+                                  x-text="runEventRows().length + ' 条状态事件' + (runEvents.length > 20 ? ' · 最新 20 条' : '')"></span>
+                        </div>
+                        <div x-show="!_firstLoadDone" class="space-y-3">
+                            <div class="gw-skeleton h-5 w-64"></div>
+                            <div class="gw-skeleton h-4 w-full max-w-2xl"></div>
+                            <div class="gw-skeleton h-4 w-full max-w-xl"></div>
+                        </div>
+                        <div x-show="_firstLoadDone" class="space-y-4">
+                            <div class="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-line bg-panel2/40 px-3 py-2.5">
+                                <span class="text-sm font-bold text-muted">图片识别</span>
+                                <span class="font-mono text-sm" :class="visionSummaryClass()" x-text="visionSummaryText()"></span>
+                            </div>
+
+                            <div x-show="visionFailureRows().length > 0" class="overflow-x-auto rounded-lg border border-danger/20 bg-danger/5">
+                                <div class="border-b border-danger/20 px-3 py-2 text-xs font-bold text-rose-100">最近图片识别失败</div>
+                                <div class="divide-y divide-line">
+                                    <template x-for="failure in visionFailureRows()" :key="failure.id + '-' + failure.time">
+                                        <div class="grid min-w-[760px] grid-cols-[9rem_6rem_6rem_8rem_minmax(0,1fr)] items-center gap-2 px-3 py-2.5 text-xs">
+                                            <span class="font-mono text-muted" x-text="failure.time || '--'"></span>
+                                            <span class="font-mono text-text" x-text="failure.id || '--'"></span>
+                                            <span class="font-mono text-danger" x-text="(failure.failed || 0) + '/' + (failure.total || 0) + ' 失败'"></span>
+                                            <span class="chip w-fit border-danger/30 bg-danger/10 px-1.5 text-[11px] text-rose-100" x-text="visionCategoryLabel(failure.category)"></span>
+                                            <span class="truncate text-text" :title="failure.message || ''" x-text="failure.message || '未知错误'"></span>
+                                        </div>
+                                    </template>
+                                </div>
+                            </div>
+
+                            <div x-show="runEventRows().length > 0" class="overflow-hidden rounded-lg border border-line bg-panel2/30">
+                                <div class="border-b border-line px-3 py-2 text-xs font-bold text-muted">状态事件</div>
+                                <div class="max-h-80 overflow-y-auto divide-y divide-line">
+                                    <template x-for="event in runEventRows()" :key="event.id">
+                                        <div class="grid min-w-[620px] grid-cols-[9rem_8rem_9rem_minmax(0,1fr)] items-center gap-2 px-3 py-2.5 text-xs">
+                                            <span class="font-mono text-muted" x-text="event.time || '--'"></span>
+                                            <span class="chip w-fit px-1.5 text-[11px]" :class="runEventClass(event)"
+                                                  :title="runEventTip(event)" x-text="runEventLabel(event)"></span>
+                                            <span class="truncate font-mono text-text" x-text="event.provider || '--'"></span>
+                                            <span class="truncate text-muted" :title="event.detail || ''" x-text="event.detail || '--'"></span>
+                                        </div>
+                                    </template>
+                                </div>
+                            </div>
+
+                            <div x-show="visionFailureRows().length === 0 && runEventRows().length === 0"
+                                 class="rounded-lg border border-good/30 bg-good/5 px-3 py-2 text-sm text-emerald-100">
+                                暂无运行异常
+                            </div>
+                        </div>
+                    </section>
+
                     <!-- 配置健康从右侧 aside 移到这里独占一行：它高度随告警条数变化，
                          留在 aside 里会把右列顶得比左列 Provider 表高，两列不等高就在
                          矮的那列留出一片空白。独占整行后不再和任何列绑高度。 -->
@@ -1132,6 +1191,7 @@
                                 <option value="error">错误</option>
                                 <option value="4xx">4xx</option>
                                 <option value="5xx">5xx</option>
+                                <option value="visionFailed">图片识别失败</option>
                             </select>
                             <select autocomplete="off" x-model="logFilters.provider" @change="loadRequestLogs()" class="field text-sm">
                                 <option value="">全部 Provider</option>
@@ -1283,6 +1343,11 @@
                                             @blur="hideTip()" tabindex="0">
                                             <span class="block truncate font-mono text-xs text-cyan" x-text="modelTrail(log)"></span>
                                             <span class="block truncate text-[10px] text-muted" x-text="formatTrail(log)"></span>
+                                            <span x-show="Number(log.visionFailed || 0) > 0"
+                                                  class="chip mt-1 w-fit border-danger/35 bg-danger/10 px-1.5 text-[10px] text-rose-100"
+                                                  x-text="'视觉 ' + (log.visionFailed || 0) + '/' + (log.visionImages || 0) + ' 失败'"></span>
+                                            <span x-show="log.vision && Number(log.visionFailed || 0) === 0"
+                                                  class="chip mt-1 w-fit border-cyan2/35 bg-cyan2/10 px-1.5 text-[10px] text-cyan">视觉</span>
                                         </td>
                                         <!-- Provider 列只留 provider 名：上游目标模型已并入模型列的 modelTrail，
                                              避免把同一次映射拆到两列去拼。该 provider 把请求打到了 modelTrail
@@ -1374,9 +1439,12 @@
                                                     <dt class="text-muted">响应大小</dt>
                                                     <dd class="mt-1 font-mono text-text" x-text="formatBytes(log.responseBytes)"></dd>
                                                 </div>
-                                                <div x-show="log.vision === true">
+                                                <div x-show="log.vision === true || Number(log.visionImages || 0) > 0">
                                                     <dt class="text-muted">视觉翻译</dt>
-                                                    <dd class="mt-1 text-cyan" x-text="'已启用'"></dd>
+                                                    <dd x-show="Number(log.visionFailed || 0) > 0" class="mt-1 text-danger"
+                                                        x-text="'失败 ' + (log.visionFailed || 0) + '/' + (log.visionImages || 0) + (log.visionFailCategory ? ' · ' + visionCategoryLabel(log.visionFailCategory) : '')"></dd>
+                                                    <dd x-show="Number(log.visionFailed || 0) === 0" class="mt-1 text-cyan" x-text="'已启用'"></dd>
+                                                    <div x-show="log.visionFailMessage" class="mt-1 whitespace-pre-wrap break-words text-xs text-muted" x-text="log.visionFailMessage"></div>
                                                 </div>
                                                 <div x-show="hasLogValue(log.clientIp)">
                                                     <dt class="text-muted">客户端 IP</dt>

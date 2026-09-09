@@ -158,6 +158,96 @@ func TestHandleMethodGuards(t *testing.T) {
 	}
 }
 
+func TestMetricsAndLogsExposeVisionFailuresAndEvents(t *testing.T) {
+	srv := newBoundaryTestServer()
+	srv.eventLog = metrics.NewEventLog()
+	now := time.Now().Add(-time.Second)
+	srv.metrics.Add(metrics.RequestLog{
+		ID: "vision-request", Started: now, Status: http.StatusOK, Provider: "p",
+		Vision: true, VisionImages: 2, VisionFailed: 1,
+		VisionFailCategory: "network", VisionFailMessage: "连接失败",
+	})
+	srv.eventLog.Add("health_down", "p", "HTTP 503")
+
+	metricsRecorder := httptest.NewRecorder()
+	srv.handle(metricsRecorder, httptest.NewRequest(http.MethodGet, "http://127.0.0.1:7789/api/metrics", nil))
+	if metricsRecorder.Code != http.StatusOK {
+		t.Fatalf("metrics status = %d, body=%s", metricsRecorder.Code, metricsRecorder.Body.String())
+	}
+	var response metrics.Response
+	if err := json.Unmarshal(metricsRecorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode metrics response: %v", err)
+	}
+	if response.Vision.WindowImages != 2 || response.Vision.WindowFailed != 1 {
+		t.Fatalf("metrics vision = %#v", response.Vision)
+	}
+	if len(response.Events) != 1 || response.Events[0].Kind != "health_down" {
+		t.Fatalf("metrics events = %#v", response.Events)
+	}
+
+	logsRecorder := httptest.NewRecorder()
+	srv.handle(logsRecorder, httptest.NewRequest(http.MethodGet, "http://127.0.0.1:7789/api/logs?visionFailed=yes", nil))
+	if logsRecorder.Code != http.StatusOK {
+		t.Fatalf("logs status = %d, body=%s", logsRecorder.Code, logsRecorder.Body.String())
+	}
+	var logs struct {
+		Data []metrics.RequestLog `json:"data"`
+	}
+	if err := json.Unmarshal(logsRecorder.Body.Bytes(), &logs); err != nil {
+		t.Fatalf("decode logs response: %v", err)
+	}
+	if len(logs.Data) != 1 || logs.Data[0].ID != "vision-request" {
+		t.Fatalf("vision failure logs = %#v", logs.Data)
+	}
+}
+
+func TestHandleStoresVisionResultWithoutChangingRequestSuccess(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"chatcmpl-test","model":"upstream","choices":[{"message":{"role":"assistant","content":"ok"}}]}`)
+	}))
+	defer upstream.Close()
+
+	primary := &config.Provider{Name: "primary", BaseURL: upstream.URL, Format: "openai", MaxConcurrent: 1, MaxQueueWait: 1000}
+	visual := &config.Provider{Name: "visual", BaseURL: upstream.URL, Format: "openai", MaxConcurrent: 1, MaxQueueWait: 1000}
+	spy := &runtimeVisionSpy{result: vision.Result{
+		Total: 2, Failed: 2,
+		FirstFailure: &vision.Failure{Category: "upstream_http", Message: "视觉 API 响应异常 (HTTP 401)"},
+	}}
+	srv := &server{
+		cfg: &config.Config{
+			Host: "127.0.0.1", Port: 7789,
+			Timeout: 500, StreamActivityTimeout: 500,
+			DirectMode: true, DirectTimeoutNoStream: 500, DirectTimeoutStreamHeader: 500, DirectTimeoutStreamActive: 500,
+			Providers: map[string]*config.Provider{"primary": primary, "visual": visual},
+			Routes:    []config.Route{{Match: "*", Provider: "primary", Model: "upstream", Vision: &config.Vision{Provider: "visual", Model: "vision-model"}}},
+		},
+		qm:                queue.NewManager(),
+		resolveHTTPClient: testClientResolver(upstream.Client()),
+		metrics:           metrics.NewCollector(10),
+		providerHealth:    providerhealth.NewChecker(),
+		translator:        spy,
+	}
+	recorder := httptest.NewRecorder()
+	body := `{"model":"client-model","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"https://images.example/test.png"}}]}]}`
+	request := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:7789/v1/chat/completions", strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	srv.handle(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("request status/body = %d/%s", recorder.Code, recorder.Body.String())
+	}
+	logs := srv.metrics.Logs(metrics.LogFilter{Limit: 1})
+	if len(logs) != 1 {
+		t.Fatalf("request logs = %#v", logs)
+	}
+	if logs[0].Status != http.StatusOK || logs[0].VisionImages != 2 || logs[0].VisionFailed != 2 {
+		t.Fatalf("vision result/request success = %#v", logs[0])
+	}
+	if logs[0].VisionFailCategory != "upstream_http" || logs[0].VisionFailMessage == "" {
+		t.Fatalf("vision failure detail = %#v", logs[0])
+	}
+}
+
 func TestHealthHeadUsesGetRepresentationHeadersWithoutBody(t *testing.T) {
 	srv := newBoundaryTestServer()
 	getRecorder := httptest.NewRecorder()
@@ -2440,11 +2530,12 @@ func (s *healthStatsCacheSpy) Cleanup(int, int) (cache.CleanupResult, error) {
 }
 
 type runtimeVisionSpy struct {
-	modes []bool
+	modes  []bool
+	result vision.Result
 }
 
-func (s *runtimeVisionSpy) Translate(_ context.Context, messages []any, _ *config.Provider, _ string, _ vision.LogFunc) []any {
-	return messages
+func (s *runtimeVisionSpy) Translate(_ context.Context, messages []any, _ *config.Provider, _ string, _ vision.LogFunc) ([]any, vision.Result) {
+	return messages, s.result
 }
 func (s *runtimeVisionSpy) SetDirectMode(enabled bool) { s.modes = append(s.modes, enabled) }
 

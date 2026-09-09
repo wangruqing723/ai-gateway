@@ -140,6 +140,64 @@
                     return `${(n <= 1 ? n * 100 : n).toFixed(1)}%`;
                 },
 
+                visionCategoryLabel(slug) {
+                    return {
+                        timeout_or_cancel: '超时/取消',
+                        network: '网络/代理',
+                        upstream_http: '上游 HTTP',
+                        response_parse: '响应解析',
+                        image_format: '图片格式',
+                        queue: '队列',
+                        other: '其他'
+                    }[slug] || '其他';
+                },
+
+                visionFailureRows() {
+                    return Array.isArray(this.visionSummary?.recentFailed)
+                        ? this.visionSummary.recentFailed.slice(0, 8)
+                        : [];
+                },
+
+                visionSummaryText() {
+                    const summary = this.visionSummary || {};
+                    const total = Number(summary.windowImages) || 0;
+                    const failed = Number(summary.windowFailed) || 0;
+                    if (total <= 0) return '暂无图片请求';
+                    const rate = Number(summary.failureRate);
+                    const percent = Number.isFinite(rate) ? (rate * 100).toFixed(1) : '0.0';
+                    return `图片识别：${failed} 失败 / ${total} 张（失败率 ${percent}%）`;
+                },
+
+                visionSummaryClass() {
+                    if (Number(this.visionSummary?.windowImages || 0) <= 0) return 'text-muted';
+                    return Number(this.visionSummary?.windowFailed || 0) > 0
+                        ? 'text-warn'
+                        : 'text-good';
+                },
+
+                runEventRows() {
+                    return Array.isArray(this.runEvents) ? this.runEvents.slice(0, 20) : [];
+                },
+
+                runEventLabel(event) {
+                    return {
+                        breaker_open: '熔断打开',
+                        breaker_recovered: '熔断已恢复',
+                        health_down: '健康异常',
+                        health_recovered: '健康已恢复'
+                    }[event?.kind] || '状态变化';
+                },
+
+                runEventClass(event) {
+                    if (event?.recovered) return 'border-good/20 bg-good/5 text-emerald-200/80';
+                    if (event?.kind === 'health_down') return 'border-danger/35 bg-danger/10 text-rose-100';
+                    return 'border-warn/35 bg-warn/10 text-amber-100';
+                },
+
+                runEventTip(event) {
+                    return [event?.time, event?.provider, event?.detail].filter(Boolean).join(' · ') || '状态变化';
+                },
+
                 metricDuration(key) {
                     if (key === 'p95LatencyMs') {
                         // rank 算法在小样本下会让 P95 退化为最大值，20 是避免把
@@ -604,4 +662,3 @@
                     }
                     return log?.error || `HTTP ${code || '--'}`;
                 },
-

@@ -201,6 +201,87 @@ func TestCollectorMetrics(t *testing.T) {
 	}
 }
 
+func TestCollectorMetricsAggregatesVisionAndKeepsRequestSuccessIndependent(t *testing.T) {
+	c := NewCollectorWithWindow(20, 1)
+	now := time.Date(2026, 6, 27, 10, 1, 0, 0, time.UTC)
+	for i := 9; i >= 0; i-- {
+		c.Add(RequestLog{
+			ID:                 "vision-" + strconv.Itoa(i),
+			Started:            now.Add(-time.Duration(i+1) * time.Second),
+			Status:             200,
+			Provider:           "p",
+			DurationMs:         10,
+			VisionImages:       3,
+			VisionFailed:       1,
+			VisionFailCategory: "network",
+			VisionFailMessage:  "连接失败",
+		})
+	}
+
+	got := c.Metrics(now)
+	if got.Summary.SuccessRate != 1 || got.Summary.ErrorRate != 0 {
+		t.Fatalf("vision failure changed request success: summary = %#v", got.Summary)
+	}
+	if got.Vision.WindowImages != 30 || got.Vision.WindowFailed != 10 || got.Vision.FailureRate != 1.0/3.0 {
+		t.Fatalf("vision summary = %#v", got.Vision)
+	}
+	if len(got.Vision.RecentFailed) != 8 {
+		t.Fatalf("recent vision failures = %d, want 8", len(got.Vision.RecentFailed))
+	}
+	if got.Vision.RecentFailed[0].ID != "vision-0" || got.Vision.RecentFailed[7].ID != "vision-7" {
+		t.Fatalf("recent vision failure order/truncation = %#v", got.Vision.RecentFailed)
+	}
+}
+
+func TestCollectorRecentVisionFailuresUsesLogRingBeyondMetricWindow(t *testing.T) {
+	c := NewCollectorWithWindow(10, 1)
+	now := time.Date(2026, 6, 27, 10, 1, 0, 0, time.UTC)
+	c.Add(RequestLog{
+		ID: "old-vision-failure", Started: now.Add(-2 * time.Minute), Status: 200, Provider: "p",
+		VisionImages: 1, VisionFailed: 1, VisionFailCategory: "network",
+	})
+
+	got := c.Metrics(now)
+	if len(got.Vision.RecentFailed) != 1 || got.Vision.RecentFailed[0].ID != "old-vision-failure" {
+		t.Fatalf("recent vision failures = %#v, want log-ring entry", got.Vision.RecentFailed)
+	}
+	if got.Vision.WindowImages != 0 || got.Vision.WindowFailed != 0 {
+		t.Fatalf("out-of-window vision was included in window summary: %#v", got.Vision)
+	}
+}
+
+func TestCollectorMetricsVisionFallbackScansLogRing(t *testing.T) {
+	c := NewCollectorWithWindow(10, 1)
+	now := time.Date(2026, 6, 27, 10, 1, 0, 0, time.UTC)
+	c.Add(RequestLog{
+		ID: "fallback", Started: now.Add(-time.Second), Status: 200, Provider: "p",
+		VisionImages: 2, VisionFailed: 1, VisionFailCategory: "response_parse",
+	})
+
+	// 模拟窗口桶暂时没有该记录；日志环仍是设计要求的兜底来源。
+	c.mu.Lock()
+	for i := range c.buckets {
+		c.buckets[i] = metricBucket{}
+	}
+	c.mu.Unlock()
+
+	got := c.Metrics(now)
+	if got.Vision.WindowImages != 2 || got.Vision.WindowFailed != 1 {
+		t.Fatalf("vision fallback = %#v", got.Vision)
+	}
+}
+
+func TestCollectorLogsFiltersByVisionFailure(t *testing.T) {
+	c := NewCollector(10)
+	c.Add(RequestLog{ID: "failed", Status: 200, Provider: "p", VisionImages: 2, VisionFailed: 1})
+	c.Add(RequestLog{ID: "ok", Status: 200, Provider: "p", VisionImages: 2})
+
+	got := c.Logs(LogFilter{VisionFailed: "yes", Limit: 10})
+	if len(got) != 1 || got[0].ID != "failed" {
+		t.Fatalf("vision failure filter = %#v", got)
+	}
+}
+
 func TestCollectorMetricsKeepsSummaryRecent(t *testing.T) {
 	// 显式取 1 分钟窗口：这个测试验的是「超出窗口的桶不进汇总」，
 	// 跟着默认窗口走会让断言依赖那个默认值（现为 15 分钟），改默认就误报。

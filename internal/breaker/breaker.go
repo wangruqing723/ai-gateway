@@ -61,6 +61,9 @@ type Settings struct {
 	ConsecutiveFailures int
 	OpenMs              int
 	HalfOpenProbes      int
+	// OnStateChange 在显式状态转变后调用。回调始终发生在熔断器解锁之后；
+	// Allow 内部的 open -> half_open lazy 转移不会触发它。
+	OnStateChange func(provider, fromState, toState string)
 }
 
 func normalize(s Settings) Settings {
@@ -151,8 +154,8 @@ func (b *Breaker) Allow(provider string) (bool, time.Duration) {
 // Report 汇报一次尝试的结果。必须与返回 true 的 Allow 一一对应。
 func (b *Breaker) Report(provider string, outcome Outcome) {
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	if !b.settings.Enabled {
+		b.mu.Unlock()
 		return
 	}
 	st := b.states[provider]
@@ -165,9 +168,12 @@ func (b *Breaker) Report(provider string, outcome Outcome) {
 		st.probesInFlight--
 	}
 
+	fromState := st.state
+	toState := fromState
 	switch outcome {
 	case OutcomeIgnored:
 		// 不改判据，也不清零：半开状态保持，等下一个探针给结论
+		b.mu.Unlock()
 		return
 	case OutcomeSuccess:
 		st.state = StateClosed
@@ -191,36 +197,62 @@ func (b *Breaker) Report(provider string, outcome Outcome) {
 			}
 		}
 	}
+	toState = st.state
+	callback := b.settings.OnStateChange
+	b.mu.Unlock()
+	if callback != nil && fromState != toState {
+		callback(provider, fromState, toState)
+	}
 }
 
 // Reset 手动闭合单个 provider 的熔断器。返回是否命中已有状态。
 func (b *Breaker) Reset(provider string) bool {
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	st, ok := b.states[provider]
 	if !ok {
+		b.mu.Unlock()
 		return false
 	}
+	fromState := st.state
+	changed := st.state != StateClosed
 	st.state = StateClosed
 	st.failures = 0
 	st.probesInFlight = 0
 	st.openedAt = time.Time{}
+	callback := b.settings.OnStateChange
+	b.mu.Unlock()
+	if changed && callback != nil {
+		callback(provider, fromState, StateClosed)
+	}
 	return true
 }
 
 // ResetAll 手动闭合全部熔断器，返回被重置的 provider 数量。
 func (b *Breaker) ResetAll() int {
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	n := 0
-	for _, st := range b.states {
+	type transition struct {
+		provider  string
+		fromState string
+		toState   string
+	}
+	transitions := make([]transition, 0)
+	for provider, st := range b.states {
 		if st.state != StateClosed || st.failures > 0 {
 			n++
+			transitions = append(transitions, transition{provider: provider, fromState: st.state, toState: StateClosed})
 		}
 		st.state = StateClosed
 		st.failures = 0
 		st.probesInFlight = 0
 		st.openedAt = time.Time{}
+	}
+	callback := b.settings.OnStateChange
+	b.mu.Unlock()
+	if callback != nil {
+		for _, change := range transitions {
+			callback(change.provider, change.fromState, change.toState)
+		}
 	}
 	return n
 }

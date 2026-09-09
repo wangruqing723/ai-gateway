@@ -39,6 +39,8 @@
                 async loadMetrics() {
                     const data = await this.loadOptionalJSON('/api/metrics');
                     this.metrics = data || null;
+                    this.visionSummary = data?.vision || null;
+                    this.runEvents = Array.isArray(data?.events) ? data.events : [];
                 },
 
                 async checkProviderHealth() {
@@ -138,7 +140,9 @@
                 async loadRequestLogs() {
                     const params = new URLSearchParams({ limit: '100' });
                     Object.entries(this.logFilters).forEach(([key, value]) => {
-                        if (value !== '') params.set(key, value);
+                        if (value === '') return;
+                        const [queryKey, queryValue] = this.logFilterQuery(key, value);
+                        params.set(queryKey, queryValue);
                     });
                     const data = await this.loadOptionalJSON('/api/logs?' + params.toString());
                     const logs = Array.isArray(data?.data) ? data.data : [];
@@ -157,4 +161,3 @@
                     const data = await this.loadOptionalJSON('/api/logs?limit=100');
                     this.monitorLogs = Array.isArray(data?.data) ? data.data : [];
                 },
-

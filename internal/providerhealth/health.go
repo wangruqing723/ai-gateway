@@ -41,6 +41,8 @@ type Checker struct {
 	mu       sync.RWMutex
 	statuses map[string]cachedStatus
 	sem      chan struct{}
+	// OnStateChange 在正常与异常边界变化后调用，回调发生在状态锁释放之后。
+	OnStateChange func(provider, fromStatus, toStatus string, status Status)
 
 	runMu           sync.Mutex
 	inflight        *checkRun
@@ -198,12 +200,32 @@ func (c *Checker) checkAll(ctx context.Context, cfg *config.Config, resolve Clie
 	close(results)
 
 	c.mu.Lock()
+	changes := make([]healthStateChange, 0, len(cfg.Providers))
+	var callback func(provider, fromStatus, toStatus string, status Status)
 	if c.generation.Load() == generation {
 		for res := range results {
+			fromStatus := "unchecked"
+			if cached, ok := c.statuses[res.name]; ok && cached.fingerprint == res.fingerprint {
+				fromStatus = cached.status.Status
+			}
 			c.statuses[res.name] = cachedStatus{status: res.status, fingerprint: res.fingerprint}
+			if healthStateTransition(fromStatus, res.status.Status) {
+				changes = append(changes, healthStateChange{
+					provider: res.name,
+					from:     fromStatus,
+					to:       res.status.Status,
+					status:   res.status,
+				})
+			}
 		}
 	}
+	callback = c.OnStateChange
 	c.mu.Unlock()
+	if callback != nil {
+		for _, change := range changes {
+			callback(change.provider, change.from, change.to, change.status)
+		}
+	}
 }
 
 // CheckProvider 只检测一个 provider，返回它的检测结果。
@@ -277,11 +299,42 @@ func (c *Checker) ProbeAdHoc(ctx context.Context, p *config.Provider, resolve Cl
 // storeStatus 在 generation 未变时写入检测结果。
 func (c *Checker) storeStatus(name string, status Status, fingerprint string, generation uint64) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.generation.Load() != generation {
+		c.mu.Unlock()
 		return
 	}
+	fromStatus := "unchecked"
+	if cached, ok := c.statuses[name]; ok && cached.fingerprint == fingerprint {
+		fromStatus = cached.status.Status
+	}
 	c.statuses[name] = cachedStatus{status: status, fingerprint: fingerprint}
+	callback := c.OnStateChange
+	c.mu.Unlock()
+	if callback != nil && healthStateTransition(fromStatus, status.Status) {
+		callback(name, fromStatus, status.Status, status)
+	}
+}
+
+type healthStateChange struct {
+	provider string
+	from     string
+	to       string
+	status   Status
+}
+
+// healthStateTransition 只关注正常(ok)与异常(warn/error)的边界。
+// unchecked -> ok 是首次成功探测，不作为事件；warn 与 error 之间互转也不产生事件。
+func healthStateTransition(from, to string) bool {
+	if from == "" {
+		from = "unchecked"
+	}
+	if from == "ok" {
+		return to == "warn" || to == "error"
+	}
+	if from == "warn" || from == "error" {
+		return to == "ok"
+	}
+	return from == "unchecked" && (to == "warn" || to == "error")
 }
 
 // InvalidateChanged 清理被删除或身份字段发生变化的 provider 健康状态。

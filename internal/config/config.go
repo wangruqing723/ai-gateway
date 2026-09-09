@@ -296,6 +296,12 @@ type Metrics struct {
 	WindowMinutes int `yaml:"windowMinutes" json:"windowMinutes"`
 }
 
+// ProviderHealthConfig 配置 Provider 健康检测的后台周期。
+// 0 表示关闭周期检测，手动检测接口仍然可用。
+type ProviderHealthConfig struct {
+	CheckIntervalSeconds int `yaml:"checkIntervalSeconds" json:"checkIntervalSeconds"`
+}
+
 // Config 顶层配置
 type Config struct {
 	Port                  int                  `yaml:"port" json:"port"`
@@ -308,6 +314,7 @@ type Config struct {
 	Routes                []Route              `yaml:"routes" json:"routes"`
 	Failover              Failover             `yaml:"failover" json:"failover"`
 	Breaker               Breaker              `yaml:"breaker" json:"breaker"`
+	ProviderHealth        ProviderHealthConfig `yaml:"providerHealth" json:"providerHealth"`
 	// ContextSafetyMargin 是估算输入 token 时预留的安全余量，nil 时使用默认值。
 	ContextSafetyMargin *int   `yaml:"contextSafetyMargin,omitempty" json:"contextSafetyMargin,omitempty"`
 	Path                string `yaml:"-" json:"path,omitempty"`
@@ -876,6 +883,9 @@ func validate(c *Config) error {
 	}
 	if c.Metrics.WindowMinutes < 1 || c.Metrics.WindowMinutes > maxMetricsWindowMinutes {
 		return fmt.Errorf("metrics.windowMinutes 应在 1-%d 之间", maxMetricsWindowMinutes)
+	}
+	if c.ProviderHealth.CheckIntervalSeconds < 0 || c.ProviderHealth.CheckIntervalSeconds > 86400 {
+		return fmt.Errorf("providerHealth.checkIntervalSeconds 应在 0-86400 之间")
 	}
 	if c.ContextSafetyMargin != nil && *c.ContextSafetyMargin < 0 {
 		return fmt.Errorf("contextSafetyMargin 应大于等于 0")

@@ -353,6 +353,11 @@
                                         <input autocomplete="off" type="number" min="0" x-model.number="config.contextSafetyMargin" placeholder="留空 = 默认 4096" class="field">
                                         <span class="mt-1.5 block text-[11px] text-muted">从 contextWindow 中预留给估算误差的 token 数；允许填 0。它不启用或关闭窗口限制，是否启用由各 Provider / 路由 / 候选的 contextWindow 决定。</span>
                                     </label>
+                                    <label class="block md:col-span-2 xl:col-span-3">
+                                        <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">Provider 周期健康检测（秒）</span>
+                                        <input autocomplete="off" type="number" min="0" max="86400" x-model.number="config.providerHealth.checkIntervalSeconds" placeholder="0 = 关闭" class="field">
+                                        <span class="mt-1.5 block text-[11px] text-muted">每 N 秒自动探测全部 Provider；填 0 关闭。范围 0-86400，手动检测始终可用。</span>
+                                    </label>
                                 </div>
 
                                 <div class="mt-4 border-t border-line pt-4" :class="config.directMode ? 'opacity-70' : ''">
@@ -1098,6 +1103,60 @@
                         </section>
                     </div>
 
+                    <section class="glass rounded-lg p-4">
+                        <div class="mb-4 flex flex-wrap items-center justify-between gap-2">
+                            <h2 class="text-base font-extrabold text-white">运行异常</h2>
+                            <span x-show="_firstLoadDone && runEventRows().length > 0" class="text-xs text-muted"
+                                  x-text="runEventRows().length + ' 条状态事件' + (runEvents.length > 20 ? ' · 最新 20 条' : '')"></span>
+                        </div>
+                        <div x-show="!_firstLoadDone" class="space-y-3">
+                            <div class="gw-skeleton h-5 w-64"></div>
+                            <div class="gw-skeleton h-4 w-full max-w-2xl"></div>
+                            <div class="gw-skeleton h-4 w-full max-w-xl"></div>
+                        </div>
+                        <div x-show="_firstLoadDone" class="space-y-4">
+                            <div class="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-line bg-panel2/40 px-3 py-2.5">
+                                <span class="text-sm font-bold text-muted">图片识别</span>
+                                <span class="font-mono text-sm" :class="visionSummaryClass()" x-text="visionSummaryText()"></span>
+                            </div>
+
+                            <div x-show="visionFailureRows().length > 0" class="overflow-x-auto rounded-lg border border-danger/20 bg-danger/5">
+                                <div class="border-b border-danger/20 px-3 py-2 text-xs font-bold text-rose-100">最近图片识别失败</div>
+                                <div class="divide-y divide-line">
+                                    <template x-for="failure in visionFailureRows()" :key="failure.id + '-' + failure.time">
+                                        <div class="grid min-w-[760px] grid-cols-[9rem_6rem_6rem_8rem_minmax(0,1fr)] items-center gap-2 px-3 py-2.5 text-xs">
+                                            <span class="font-mono text-muted" x-text="failure.time || '--'"></span>
+                                            <span class="font-mono text-text" x-text="failure.id || '--'"></span>
+                                            <span class="font-mono text-danger" x-text="(failure.failed || 0) + '/' + (failure.total || 0) + ' 失败'"></span>
+                                            <span class="chip w-fit border-danger/30 bg-danger/10 px-1.5 text-[11px] text-rose-100" x-text="visionCategoryLabel(failure.category)"></span>
+                                            <span class="truncate text-text" :title="failure.message || ''" x-text="failure.message || '未知错误'"></span>
+                                        </div>
+                                    </template>
+                                </div>
+                            </div>
+
+                            <div x-show="runEventRows().length > 0" class="overflow-hidden rounded-lg border border-line bg-panel2/30">
+                                <div class="border-b border-line px-3 py-2 text-xs font-bold text-muted">状态事件</div>
+                                <div class="max-h-80 overflow-y-auto divide-y divide-line">
+                                    <template x-for="event in runEventRows()" :key="event.id">
+                                        <div class="grid min-w-[620px] grid-cols-[9rem_8rem_9rem_minmax(0,1fr)] items-center gap-2 px-3 py-2.5 text-xs">
+                                            <span class="font-mono text-muted" x-text="event.time || '--'"></span>
+                                            <span class="chip w-fit px-1.5 text-[11px]" :class="runEventClass(event)"
+                                                  :title="runEventTip(event)" x-text="runEventLabel(event)"></span>
+                                            <span class="truncate font-mono text-text" x-text="event.provider || '--'"></span>
+                                            <span class="truncate text-muted" :title="event.detail || ''" x-text="event.detail || '--'"></span>
+                                        </div>
+                                    </template>
+                                </div>
+                            </div>
+
+                            <div x-show="visionFailureRows().length === 0 && runEventRows().length === 0"
+                                 class="rounded-lg border border-good/30 bg-good/5 px-3 py-2 text-sm text-emerald-100">
+                                暂无运行异常
+                            </div>
+                        </div>
+                    </section>
+
                     <!-- 配置健康从右侧 aside 移到这里独占一行：它高度随告警条数变化，
                          留在 aside 里会把右列顶得比左列 Provider 表高，两列不等高就在
                          矮的那列留出一片空白。独占整行后不再和任何列绑高度。 -->
@@ -1132,6 +1191,7 @@
                                 <option value="error">错误</option>
                                 <option value="4xx">4xx</option>
                                 <option value="5xx">5xx</option>
+                                <option value="visionFailed">图片识别失败</option>
                             </select>
                             <select autocomplete="off" x-model="logFilters.provider" @change="loadRequestLogs()" class="field text-sm">
                                 <option value="">全部 Provider</option>
@@ -1283,6 +1343,11 @@
                                             @blur="hideTip()" tabindex="0">
                                             <span class="block truncate font-mono text-xs text-cyan" x-text="modelTrail(log)"></span>
                                             <span class="block truncate text-[10px] text-muted" x-text="formatTrail(log)"></span>
+                                            <span x-show="Number(log.visionFailed || 0) > 0"
+                                                  class="chip mt-1 w-fit border-danger/35 bg-danger/10 px-1.5 text-[10px] text-rose-100"
+                                                  x-text="'视觉 ' + (log.visionFailed || 0) + '/' + (log.visionImages || 0) + ' 失败'"></span>
+                                            <span x-show="log.vision && Number(log.visionFailed || 0) === 0"
+                                                  class="chip mt-1 w-fit border-cyan2/35 bg-cyan2/10 px-1.5 text-[10px] text-cyan">视觉</span>
                                         </td>
                                         <!-- Provider 列只留 provider 名：上游目标模型已并入模型列的 modelTrail，
                                              避免把同一次映射拆到两列去拼。该 provider 把请求打到了 modelTrail
@@ -1374,9 +1439,12 @@
                                                     <dt class="text-muted">响应大小</dt>
                                                     <dd class="mt-1 font-mono text-text" x-text="formatBytes(log.responseBytes)"></dd>
                                                 </div>
-                                                <div x-show="log.vision === true">
+                                                <div x-show="log.vision === true || Number(log.visionImages || 0) > 0">
                                                     <dt class="text-muted">视觉翻译</dt>
-                                                    <dd class="mt-1 text-cyan" x-text="'已启用'"></dd>
+                                                    <dd x-show="Number(log.visionFailed || 0) > 0" class="mt-1 text-danger"
+                                                        x-text="'失败 ' + (log.visionFailed || 0) + '/' + (log.visionImages || 0) + (log.visionFailCategory ? ' · ' + visionCategoryLabel(log.visionFailCategory) : '')"></dd>
+                                                    <dd x-show="Number(log.visionFailed || 0) === 0" class="mt-1 text-cyan" x-text="'已启用'"></dd>
+                                                    <div x-show="log.visionFailMessage" class="mt-1 whitespace-pre-wrap break-words text-xs text-muted" x-text="log.visionFailMessage"></div>
                                                 </div>
                                                 <div x-show="hasLogValue(log.clientIp)">
                                                     <dt class="text-muted">客户端 IP</dt>
@@ -1993,10 +2061,15 @@
                         consecutiveFailures: null,
                         openMs: null,
                         halfOpenProbes: null
+                    },
+                    providerHealth: {
+                        checkIntervalSeconds: 0
                     }
                 },
                 health: null,
                 metrics: null,
+                visionSummary: null,
+                runEvents: [],
                 requestLogs: [],
                 // monitorLogs 是监控页专用的「不带筛选」日志快照。不复用 requestLogs：
                 // 那一份要跟着日志页的筛选器走，而仪表盘的最近错误与故障转移率必须看全量。
@@ -2197,6 +2270,7 @@
                     });
 
                     const cache = pick(data, 'cache', 'Cache') || {};
+                    const providerHealth = pick(data, 'providerHealth', 'ProviderHealth') || {};
                     return {
                         port: pick(data, 'port', 'Port') || 7789,
                         host: pick(data, 'host', 'Host') || '127.0.0.1',
@@ -2219,7 +2293,10 @@
                         // 后端这两个字段是值类型且无 omitempty，GET 恒返回完整块（已填默认值），
                         // 所以这里总能拿到可绑定的形状。
                         failover: this.normalizeFailover(pick(data, 'failover', 'Failover')),
-                        breaker: this.normalizeBreaker(pick(data, 'breaker', 'Breaker'))
+                        breaker: this.normalizeBreaker(pick(data, 'breaker', 'Breaker')),
+                        providerHealth: {
+                            checkIntervalSeconds: pick(providerHealth, 'checkIntervalSeconds', 'CheckIntervalSeconds') ?? 0
+                        }
                     };
                 },
 
@@ -2264,6 +2341,8 @@
                     // 兜底成可绑定形状：加载失败或旧响应缺块时，x-model 不能落在 undefined 上
                     this.config.failover = this.config.failover || this.normalizeFailover(null);
                     this.config.breaker = this.config.breaker || this.normalizeBreaker(null);
+                    this.config.providerHealth = this.config.providerHealth || { checkIntervalSeconds: 0 };
+                    if (this.config.providerHealth.checkIntervalSeconds == null) this.config.providerHealth.checkIntervalSeconds = 0;
                     this.config.directTimeoutNoStream = this.config.directTimeoutNoStream || 60000;
                     this.config.directTimeoutStreamHeader = this.config.directTimeoutStreamHeader || 60000;
                     this.config.directTimeoutStreamActive = this.config.directTimeoutStreamActive || 120000;
@@ -2362,6 +2441,8 @@
                 async loadMetrics() {
                     const data = await this.loadOptionalJSON('/api/metrics');
                     this.metrics = data || null;
+                    this.visionSummary = data?.vision || null;
+                    this.runEvents = Array.isArray(data?.events) ? data.events : [];
                 },
 
                 async checkProviderHealth() {
@@ -2461,7 +2542,9 @@
                 async loadRequestLogs() {
                     const params = new URLSearchParams({ limit: '100' });
                     Object.entries(this.logFilters).forEach(([key, value]) => {
-                        if (value !== '') params.set(key, value);
+                        if (value === '') return;
+                        const [queryKey, queryValue] = this.logFilterQuery(key, value);
+                        params.set(queryKey, queryValue);
                     });
                     const data = await this.loadOptionalJSON('/api/logs?' + params.toString());
                     const logs = Array.isArray(data?.data) ? data.data : [];
@@ -2480,7 +2563,6 @@
                     const data = await this.loadOptionalJSON('/api/logs?limit=100');
                     this.monitorLogs = Array.isArray(data?.data) ? data.data : [];
                 },
-
                 logKey(log) {
                     return log?.id || (log?.time || '') + (log?.model || '');
                 },
@@ -2510,6 +2592,13 @@
                     };
                     this.logAdvancedFiltersOpen = false;
                     this.loadRequestLogs();
+                },
+
+                logFilterQuery(key, value) {
+                    if (key === 'status' && value === 'visionFailed') {
+                        return ['visionFailed', 'yes'];
+                    }
+                    return [key, value];
                 },
                 async loadOptionalJSON(path) {
                     try {
@@ -2725,9 +2814,10 @@
                         contextSafetyMargin: this.numOrNull(this.config.contextSafetyMargin),
                         providers,
                         routes: JSON.parse(JSON.stringify(this.config.routes || [])),
-                        // failover / breaker 必须带上：PUT 是全量替换，漏掉就等于把它们关掉
+                        // failover / breaker / providerHealth 必须带上：PUT 是全量替换，漏掉就会静默丢配置
                         failover: this.failoverPayload(),
-                        breaker: this.breakerPayload()
+                        breaker: this.breakerPayload(),
+                        providerHealth: this.providerHealthPayload()
                     };
                 },
 
@@ -2764,6 +2854,13 @@
                         consecutiveFailures: this.numOrNull(b.consecutiveFailures),
                         openMs: this.numOrNull(b.openMs),
                         halfOpenProbes: this.numOrNull(b.halfOpenProbes)
+                    };
+                },
+
+                providerHealthPayload() {
+                    const value = Number(this.config.providerHealth?.checkIntervalSeconds);
+                    return {
+                        checkIntervalSeconds: Number.isFinite(value) ? Math.trunc(value) : 0
                     };
                 },
 
@@ -3105,6 +3202,64 @@
                     const n = Number(value);
                     if (!Number.isFinite(n)) return '--';
                     return `${(n <= 1 ? n * 100 : n).toFixed(1)}%`;
+                },
+
+                visionCategoryLabel(slug) {
+                    return {
+                        timeout_or_cancel: '超时/取消',
+                        network: '网络/代理',
+                        upstream_http: '上游 HTTP',
+                        response_parse: '响应解析',
+                        image_format: '图片格式',
+                        queue: '队列',
+                        other: '其他'
+                    }[slug] || '其他';
+                },
+
+                visionFailureRows() {
+                    return Array.isArray(this.visionSummary?.recentFailed)
+                        ? this.visionSummary.recentFailed.slice(0, 8)
+                        : [];
+                },
+
+                visionSummaryText() {
+                    const summary = this.visionSummary || {};
+                    const total = Number(summary.windowImages) || 0;
+                    const failed = Number(summary.windowFailed) || 0;
+                    if (total <= 0) return '暂无图片请求';
+                    const rate = Number(summary.failureRate);
+                    const percent = Number.isFinite(rate) ? (rate * 100).toFixed(1) : '0.0';
+                    return `图片识别：${failed} 失败 / ${total} 张（失败率 ${percent}%）`;
+                },
+
+                visionSummaryClass() {
+                    if (Number(this.visionSummary?.windowImages || 0) <= 0) return 'text-muted';
+                    return Number(this.visionSummary?.windowFailed || 0) > 0
+                        ? 'text-warn'
+                        : 'text-good';
+                },
+
+                runEventRows() {
+                    return Array.isArray(this.runEvents) ? this.runEvents.slice(0, 20) : [];
+                },
+
+                runEventLabel(event) {
+                    return {
+                        breaker_open: '熔断打开',
+                        breaker_recovered: '熔断已恢复',
+                        health_down: '健康异常',
+                        health_recovered: '健康已恢复'
+                    }[event?.kind] || '状态变化';
+                },
+
+                runEventClass(event) {
+                    if (event?.recovered) return 'border-good/20 bg-good/5 text-emerald-200/80';
+                    if (event?.kind === 'health_down') return 'border-danger/35 bg-danger/10 text-rose-100';
+                    return 'border-warn/35 bg-warn/10 text-amber-100';
+                },
+
+                runEventTip(event) {
+                    return [event?.time, event?.provider, event?.detail].filter(Boolean).join(' · ') || '状态变化';
                 },
 
                 metricDuration(key) {
@@ -3571,7 +3726,6 @@
                     }
                     return log?.error || `HTTP ${code || '--'}`;
                 },
-
                 configPreview() {
                     if (this.activeTab === 'providers') return this.providersPreview();
                     if (this.activeTab === 'routes') return this.routesPreview();
@@ -3608,6 +3762,7 @@
                         `contextSafetyMargin: ${this.config.contextSafetyMargin ?? 4096}`,
                         this.failoverYaml(),
                         this.breakerYaml(),
+                        this.providerHealthYaml(),
                         'providers:',
                         this.providersYaml() || '  {}',
                         'routes:',
@@ -3649,6 +3804,12 @@
                         if (n !== null) lines.push(`  ${key}: ${n}`);
                     });
                     return lines.join('\n');
+                },
+
+                providerHealthYaml() {
+                    const value = Number(this.config.providerHealth?.checkIntervalSeconds);
+                    const interval = Number.isFinite(value) ? Math.trunc(value) : 0;
+                    return ['providerHealth:', `  checkIntervalSeconds: ${interval}`].join('\n');
                 },
 
                 providersYaml() {

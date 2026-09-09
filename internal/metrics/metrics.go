@@ -77,12 +77,14 @@ type providerBucket struct {
 }
 
 type metricBucket struct {
-	second      int64
-	requests    int
-	successes   int
-	statusCodes map[string]int
-	latency     latencyHistogram
-	providers   map[string]*providerBucket
+	second       int64
+	requests     int
+	successes    int
+	visionImages int
+	visionFailed int
+	statusCodes  map[string]int
+	latency      latencyHistogram
+	providers    map[string]*providerBucket
 }
 
 // logProviderStats 是 provider 统计兜底分支所需的最小记录集合。
@@ -97,6 +99,8 @@ func (b *metricBucket) reset(second int64) {
 	b.second = second
 	b.requests = 0
 	b.successes = 0
+	b.visionImages = 0
+	b.visionFailed = 0
 	b.statusCodes = make(map[string]int)
 	b.latency = latencyHistogram{}
 	b.providers = make(map[string]*providerBucket)
@@ -151,8 +155,13 @@ type RequestLog struct {
 	// AttemptDetails 保留每一个候选的请求、跳过和转移明细；仍只生成一条顶层请求日志。
 	AttemptDetails []AttemptDetail `json:"attemptDetails,omitempty"`
 	// EstimatedInputTokens 是本次请求的估算输入 token 数；未启用 contextWindow 时为 0。
-	EstimatedInputTokens int       `json:"estimatedInputTokens,omitempty"`
-	Started              time.Time `json:"-"`
+	EstimatedInputTokens int `json:"estimatedInputTokens,omitempty"`
+	// VisionImages / VisionFailed 是图片块级别的独立统计，不参与 isSuccess 判定。
+	VisionImages       int       `json:"visionImages,omitempty"`
+	VisionFailed       int       `json:"visionFailed,omitempty"`
+	VisionFailCategory string    `json:"visionFailCategory,omitempty"`
+	VisionFailMessage  string    `json:"visionFailMessage,omitempty"`
+	Started            time.Time `json:"-"`
 }
 
 // AttemptDetail 是一次候选决策的结构化可观测性记录。Kind/Outcome/Reason 使用稳定
@@ -205,12 +214,32 @@ type ProviderStats struct {
 	P99LatencyMs int64   `json:"p99LatencyMs"`
 }
 
+// VisionSummary 是统计窗口内图片识别质量的独立汇总。
+type VisionSummary struct {
+	WindowImages int                  `json:"windowImages"`
+	WindowFailed int                  `json:"windowFailed"`
+	FailureRate  float64              `json:"failureRate"`
+	RecentFailed []VisionFailureEntry `json:"recentFailed"`
+}
+
+// VisionFailureEntry 是按请求聚合的最近图片识别失败摘要。
+type VisionFailureEntry struct {
+	Time     string `json:"time"`
+	ID       string `json:"id"`
+	Failed   int    `json:"failed"`
+	Total    int    `json:"total"`
+	Category string `json:"category"`
+	Message  string `json:"message"`
+}
+
 // Response 是 /api/metrics 的响应结构。
 type Response struct {
 	Summary      Summary         `json:"summary"`
 	Providers    []ProviderStats `json:"providers"`
 	StatusCodes  map[string]int  `json:"statusCodes"`
 	RecentErrors []RequestLog    `json:"recentErrors"`
+	Vision       VisionSummary   `json:"vision,omitempty"`
+	Events       []Event         `json:"events,omitempty"`
 }
 
 // NewCollector 创建固定容量的内存采集器，统计窗口取默认值。
@@ -338,6 +367,8 @@ func (c *Collector) addMetricLocked(record RequestLog, observedAt time.Time) {
 	if isSuccess(record) {
 		bucket.successes++
 	}
+	bucket.visionImages += record.VisionImages
+	bucket.visionFailed += record.VisionFailed
 	bucket.statusCodes[strconv.Itoa(record.Status)]++
 	bucket.latency.add(record.DurationMs)
 
@@ -399,6 +430,8 @@ func (c *Collector) Metrics(now time.Time) Response {
 	nowSecond := now.Unix()
 	var latency latencyHistogram
 	successes := 0
+	visionImages := 0
+	visionFailed := 0
 	providerTotals := make(map[string]*providerBucket)
 	for i := range c.buckets {
 		bucket := &c.buckets[i]
@@ -407,6 +440,8 @@ func (c *Collector) Metrics(now time.Time) Response {
 		}
 		resp.Summary.WindowRequests += bucket.requests
 		successes += bucket.successes
+		visionImages += bucket.visionImages
+		visionFailed += bucket.visionFailed
 		latency.merge(bucket.latency)
 		for status, count := range bucket.statusCodes {
 			resp.StatusCodes[status] += count
@@ -445,7 +480,20 @@ func (c *Collector) Metrics(now time.Time) Response {
 			return true
 		})
 	}
+	// 秒桶是窗口指标的主来源。只有当前窗口没有任何 vision 记录时才从
+	// 日志环兜底，并且仍按窗口过滤，避免把历史图片请求带回当前汇总。
+	if visionImages == 0 {
+		c.forEachRecordOldestLocked(func(record RequestLog) bool {
+			if record.Started.Unix() < cutoffSecond || record.Started.Unix() > nowSecond {
+				return true
+			}
+			visionImages += record.VisionImages
+			visionFailed += record.VisionFailed
+			return true
+		})
+	}
 	recent := c.recentErrorsLocked(8)
+	recentVisionFailures := c.recentVisionFailuresLocked(8)
 	c.mu.RUnlock()
 
 	resp.Summary.SuccessRate = ratio(successes, resp.Summary.WindowRequests)
@@ -478,18 +526,25 @@ func (c *Collector) Metrics(now time.Time) Response {
 	})
 
 	resp.RecentErrors = recent
+	resp.Vision = VisionSummary{
+		WindowImages: visionImages,
+		WindowFailed: visionFailed,
+		FailureRate:  ratio(visionFailed, visionImages),
+		RecentFailed: recentVisionFailures,
+	}
 	return resp
 }
 
 // LogFilter 是 /api/logs 的查询参数。
 type LogFilter struct {
-	Limit    int
-	Offset   int
-	Provider string
-	Model    string
-	Status   string
-	Stream   string
-	Query    string
+	Limit        int
+	Offset       int
+	Provider     string
+	Model        string
+	Status       string
+	VisionFailed string
+	Stream       string
+	Query        string
 	// Attempt* 过滤器按任意一条 attempt detail 匹配；顶层 status/provider 语义不变。
 	AttemptProvider string
 	AttemptStatus   string
@@ -544,6 +599,28 @@ func (c *Collector) recentErrorsLocked(limit int) []RequestLog {
 	return out
 }
 
+func (c *Collector) recentVisionFailuresLocked(limit int) []VisionFailureEntry {
+	out := make([]VisionFailureEntry, 0, limit)
+	if limit <= 0 {
+		return out
+	}
+	c.forEachRecordNewestLocked(func(record RequestLog) bool {
+		if record.VisionFailed <= 0 {
+			return true
+		}
+		out = append(out, VisionFailureEntry{
+			Time:     record.Time,
+			ID:       record.ID,
+			Failed:   record.VisionFailed,
+			Total:    record.VisionImages,
+			Category: record.VisionFailCategory,
+			Message:  record.VisionFailMessage,
+		})
+		return len(out) < limit
+	})
+	return out
+}
+
 func match(r RequestLog, f LogFilter) bool {
 	if f.Provider != "" && r.Provider != f.Provider {
 		return false
@@ -589,6 +666,9 @@ func match(r RequestLog, f LogFilter) bool {
 				return false
 			}
 		}
+	}
+	if f.VisionFailed == "yes" && r.VisionFailed <= 0 {
+		return false
 	}
 	if f.AttemptProvider != "" && !matchesAttemptProvider(r.AttemptDetails, f.AttemptProvider) {
 		return false

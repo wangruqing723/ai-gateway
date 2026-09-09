@@ -69,6 +69,7 @@
                     });
 
                     const cache = pick(data, 'cache', 'Cache') || {};
+                    const providerHealth = pick(data, 'providerHealth', 'ProviderHealth') || {};
                     return {
                         port: pick(data, 'port', 'Port') || 7789,
                         host: pick(data, 'host', 'Host') || '127.0.0.1',
@@ -91,7 +92,10 @@
                         // 后端这两个字段是值类型且无 omitempty，GET 恒返回完整块（已填默认值），
                         // 所以这里总能拿到可绑定的形状。
                         failover: this.normalizeFailover(pick(data, 'failover', 'Failover')),
-                        breaker: this.normalizeBreaker(pick(data, 'breaker', 'Breaker'))
+                        breaker: this.normalizeBreaker(pick(data, 'breaker', 'Breaker')),
+                        providerHealth: {
+                            checkIntervalSeconds: pick(providerHealth, 'checkIntervalSeconds', 'CheckIntervalSeconds') ?? 0
+                        }
                     };
                 },
 
@@ -136,6 +140,8 @@
                     // 兜底成可绑定形状：加载失败或旧响应缺块时，x-model 不能落在 undefined 上
                     this.config.failover = this.config.failover || this.normalizeFailover(null);
                     this.config.breaker = this.config.breaker || this.normalizeBreaker(null);
+                    this.config.providerHealth = this.config.providerHealth || { checkIntervalSeconds: 0 };
+                    if (this.config.providerHealth.checkIntervalSeconds == null) this.config.providerHealth.checkIntervalSeconds = 0;
                     this.config.directTimeoutNoStream = this.config.directTimeoutNoStream || 60000;
                     this.config.directTimeoutStreamHeader = this.config.directTimeoutStreamHeader || 60000;
                     this.config.directTimeoutStreamActive = this.config.directTimeoutStreamActive || 120000;

@@ -87,6 +87,8 @@ func main() {
 	}
 
 	translator := vision.New(imgCache, qm, httpPool.For, cfg.DirectMode)
+	eventLog := metrics.NewEventLog()
+	healthChecker := providerhealth.NewChecker()
 	revision, err := newConfigRevision()
 	if err != nil {
 		_ = imgCache.Close()
@@ -105,11 +107,14 @@ func main() {
 		cache:             imgCache,
 		translator:        translator,
 		metrics:           metrics.NewCollectorWithWindow(1000, cfg.Metrics.WindowMinutes),
-		providerHealth:    providerhealth.NewChecker(),
+		providerHealth:    healthChecker,
 		breaker:           breaker.New(breakerSettings(cfg)),
+		eventLog:          eventLog,
 		selector:          balancer.New(),
 		webDevDir:         os.Getenv("AI_GATEWAY_WEB_DIR"),
 	}
+	healthChecker.OnStateChange = srv.onProviderHealthStateChange
+	srv.breaker.SetSettings(breakerSettingsWithCallback(cfg, srv.onBreakerStateChange))
 	initialLimits := make(map[string]queue.Limits, len(cfg.Providers))
 	for name, provider := range cfg.Providers {
 		initialLimits[name] = queue.Limits{MaxConcurrent: provider.MaxConcurrent, MaxPerSecond: provider.MaxPerSecond}
@@ -123,11 +128,13 @@ func main() {
 	printBanner(cfg, imgCache)
 
 	httpServer := newGatewayHTTPServer(addr, mux)
+	srv.startProviderHealthLoop(context.Background())
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	shutdownDone := make(chan struct{})
 	go func() {
 		<-stop
+		srv.stopProviderHealthLoop()
 		logSystem("收到退出信号，正在关闭...")
 		if err := shutdownThenClose(httpServer, 30*time.Second, imgCache.Close); err != nil {
 			logSystem("优雅关闭异常: %s", err)
@@ -136,6 +143,7 @@ func main() {
 	}()
 
 	if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		srv.stopProviderHealthLoop()
 		signal.Stop(stop)
 		_ = imgCache.Close()
 		logSystem("服务器错误: %s", err)
@@ -154,7 +162,7 @@ type cacheRuntime interface {
 }
 
 type visionRuntime interface {
-	Translate(context.Context, []any, *config.Provider, string, vision.LogFunc) []any
+	Translate(context.Context, []any, *config.Provider, string, vision.LogFunc) ([]any, vision.Result)
 	SetDirectMode(bool)
 }
 
@@ -206,10 +214,123 @@ type server struct {
 	metrics           *metrics.Collector
 	providerHealth    providerHealthRuntime
 	breaker           *breaker.Breaker
+	eventLog          *metrics.EventLog
+	healthLoopMu      sync.Mutex
+	healthLoopParent  context.Context
+	healthLoopCancel  context.CancelFunc
 	// selector 持有跨请求的候选选择状态（per-route 轮转计数器 + prompt cache 粘性映射）。
 	// router 是无状态纯函数，这些状态只能由 server 持有并显式传入。
 	selector  *balancer.Selector
 	webDevDir string
+}
+
+func (s *server) startProviderHealthLoop(parent context.Context) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	s.healthLoopMu.Lock()
+	s.healthLoopParent = parent
+	s.healthLoopMu.Unlock()
+	s.restartProviderHealthLoop(s.providerHealthInterval())
+}
+
+func (s *server) stopProviderHealthLoop() {
+	s.healthLoopMu.Lock()
+	cancel := s.healthLoopCancel
+	s.healthLoopCancel = nil
+	s.healthLoopParent = nil
+	s.healthLoopMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+func (s *server) restartProviderHealthLoop(interval int) {
+	s.healthLoopMu.Lock()
+	if s.healthLoopCancel != nil {
+		s.healthLoopCancel()
+		s.healthLoopCancel = nil
+	}
+	parent := s.healthLoopParent
+	if parent == nil || interval <= 0 || s.providerHealth == nil {
+		s.healthLoopMu.Unlock()
+		return
+	}
+	ctx, cancel := context.WithCancel(parent)
+	s.healthLoopCancel = cancel
+	s.healthLoopMu.Unlock()
+	go s.providerHealthLoop(ctx, interval)
+}
+
+func (s *server) providerHealthInterval() int {
+	s.cfgMu.RLock()
+	defer s.cfgMu.RUnlock()
+	if s.cfg == nil {
+		return 0
+	}
+	return s.cfg.ProviderHealth.CheckIntervalSeconds
+}
+
+func (s *server) providerHealthLoop(ctx context.Context, interval int) {
+	ticker := time.NewTicker(time.Duration(interval) * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.cfgMu.RLock()
+			cfg := s.cfg
+			s.cfgMu.RUnlock()
+			if cfg != nil && s.providerHealth != nil {
+				s.providerHealth.CheckAll(ctx, cfg, s.resolveClient)
+			}
+		}
+	}
+}
+
+func (s *server) onBreakerStateChange(provider, fromState, toState string) {
+	if s.eventLog == nil {
+		return
+	}
+	if toState == breaker.StateOpen {
+		detail := "连续失败达到阈值后打开"
+		if s.breaker != nil {
+			if state, ok := s.breaker.Snapshot()[provider]; ok && state.ConsecutiveFailures > 0 {
+				detail = fmt.Sprintf("连续失败 %d 次后打开", state.ConsecutiveFailures)
+			}
+		}
+		s.eventLog.Add("breaker_open", provider, detail)
+		return
+	}
+	if toState == breaker.StateClosed {
+		detail := "手动复位"
+		if fromState == breaker.StateHalfOpen {
+			detail = "探针成功，熔断恢复"
+		}
+		s.eventLog.Add("breaker_recovered", provider, detail)
+	}
+}
+
+func (s *server) onProviderHealthStateChange(provider, fromStatus, toStatus string, status providerhealth.Status) {
+	if s.eventLog == nil {
+		return
+	}
+	detail := status.Message
+	if status.HTTPCode > 0 {
+		detail = fmt.Sprintf("HTTP %d", status.HTTPCode)
+		if status.Message != "" {
+			detail += ": " + status.Message
+		}
+	}
+	if detail == "" {
+		detail = toStatus
+	}
+	if toStatus == "ok" {
+		s.eventLog.Add("health_recovered", provider, detail)
+		return
+	}
+	s.eventLog.Add("health_down", provider, detail)
 }
 
 func (s *server) resolveClient(proxyURL string) (*http.Client, error) {
@@ -511,8 +632,15 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 	if needVision {
 		vp := matched.VisionProvider
 		vp.APIKey = router.ResolveAPIKey(vp, r.Header)
-		internal.Messages = s.translator.Translate(r.Context(), internal.Messages, vp, matched.VisionModel,
+		var visionResult vision.Result
+		internal.Messages, visionResult = s.translator.Translate(r.Context(), internal.Messages, vp, matched.VisionModel,
 			func(f string, a ...any) { logf(reqID, f, a...) })
+		reqLog.VisionImages = visionResult.Total
+		reqLog.VisionFailed = visionResult.Failed
+		if visionResult.FirstFailure != nil {
+			reqLog.VisionFailCategory = visionResult.FirstFailure.Category
+			reqLog.VisionFailMessage = visionResult.FirstFailure.Message
+		}
 	}
 
 	// 所有候选收到的是同一份（已完成视觉翻译的）内部请求，因此只估算一次。
@@ -1889,7 +2017,11 @@ func modelsEndpoint(baseURL string) string {
 }
 
 func (s *server) handleMetrics(w http.ResponseWriter, r *http.Request) {
-	out, _ := json.Marshal(s.metrics.Metrics(time.Now()))
+	response := s.metrics.Metrics(time.Now())
+	if s.eventLog != nil {
+		response.Events = s.eventLog.Events()
+	}
+	out, _ := json.Marshal(response)
 	w.Header().Set("content-type", "application/json")
 	w.Header().Set("content-length", fmt.Sprintf("%d", len(out)))
 	w.WriteHeader(http.StatusOK)
@@ -1902,6 +2034,7 @@ func (s *server) handleLogs(w http.ResponseWriter, r *http.Request) {
 		Provider:        q.Get("provider"),
 		Model:           q.Get("model"),
 		Status:          q.Get("status"),
+		VisionFailed:    q.Get("visionFailed"),
 		Stream:          q.Get("stream"),
 		Query:           q.Get("q"),
 		AttemptProvider: q.Get("attemptProvider"),
@@ -2421,6 +2554,7 @@ func (s *server) applyRuntimeConfig(newCfg *config.Config, revision string) []st
 
 	s.cfgMu.Lock()
 	oldCfg := s.cfg
+	oldHealthInterval := oldCfg.ProviderHealth.CheckIntervalSeconds
 	if s.listenHost == "" {
 		s.listenHost = oldCfg.Host
 	}
@@ -2441,7 +2575,7 @@ func (s *server) applyRuntimeConfig(newCfg *config.Config, revision string) []st
 		s.translator.SetDirectMode(newCfg.DirectMode)
 	}
 	if s.breaker != nil {
-		s.breaker.SetSettings(breakerSettings(newCfg))
+		s.breaker.SetSettings(breakerSettingsWithCallback(newCfg, s.onBreakerStateChange))
 		active := make(map[string]struct{}, len(newCfg.Providers))
 		for name := range newCfg.Providers {
 			active[name] = struct{}{}
@@ -2464,6 +2598,9 @@ func (s *server) applyRuntimeConfig(newCfg *config.Config, revision string) []st
 	s.cfg = newCfg
 	s.revision = revision
 	s.cfgMu.Unlock()
+	if oldHealthInterval != newCfg.ProviderHealth.CheckIntervalSeconds {
+		s.restartProviderHealthLoop(newCfg.ProviderHealth.CheckIntervalSeconds)
+	}
 
 	if s.cache != nil {
 		if _, err := s.cache.Cleanup(newCfg.Cache.MaxAgeDays, newCfg.Cache.MaxRecords); err != nil {
@@ -2481,6 +2618,12 @@ func breakerSettings(cfg *config.Config) breaker.Settings {
 		OpenMs:              cfg.Breaker.CooldownMs(),
 		HalfOpenProbes:      cfg.Breaker.ProbeLimit(),
 	}
+}
+
+func breakerSettingsWithCallback(cfg *config.Config, callback func(provider, fromState, toState string)) breaker.Settings {
+	settings := breakerSettings(cfg)
+	settings.OnStateChange = callback
+	return settings
 }
 
 func restartRequiredFields(cfg *config.Config, listenHost string, listenPort int) []string {

@@ -88,10 +88,15 @@
                         consecutiveFailures: null,
                         openMs: null,
                         halfOpenProbes: null
+                    },
+                    providerHealth: {
+                        checkIntervalSeconds: 0
                     }
                 },
                 health: null,
                 metrics: null,
+                visionSummary: null,
+                runEvents: [],
                 requestLogs: [],
                 // monitorLogs 是监控页专用的「不带筛选」日志快照。不复用 requestLogs：
                 // 那一份要跟着日志页的筛选器走，而仪表盘的最近错误与故障转移率必须看全量。

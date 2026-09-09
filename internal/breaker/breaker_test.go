@@ -248,6 +248,63 @@ func TestResetAndResetAll(t *testing.T) {
 	}
 }
 
+func TestStateChangeCallbackIsOutsideBreakerLockAndSkipsLazyHalfOpen(t *testing.T) {
+	var b *Breaker
+	changes := make([]string, 0, 4)
+	b, advance := newTestBreaker(Settings{
+		Enabled:             true,
+		ConsecutiveFailures: 1,
+		OpenMs:              1_000,
+		HalfOpenProbes:      1,
+		OnStateChange: func(provider, fromState, toState string) {
+			// Snapshot 会重新获取熔断器锁；如果回调仍在锁内，这个测试会死锁。
+			_ = b.Snapshot()
+			changes = append(changes, provider+":"+fromState+">"+toState)
+		},
+	})
+
+	b.Report("p", OutcomeFailure)
+	if got := changes; len(got) != 1 || got[0] != "p:closed>open" {
+		t.Fatalf("open callback = %#v", got)
+	}
+	advance(2 * time.Second)
+	if allowed, _ := b.Allow("p"); !allowed {
+		t.Fatal("cooldown 后应放行半开探针")
+	}
+	if len(changes) != 1 {
+		t.Fatalf("Allow 的 lazy half-open 转移触发了回调: %#v", changes)
+	}
+	b.Report("p", OutcomeSuccess)
+	if got := changes; len(got) != 2 || got[1] != "p:half_open>closed" {
+		t.Fatalf("recovery callback = %#v", got)
+	}
+}
+
+func TestResetCallbackOnlyReportsExplicitStateTransition(t *testing.T) {
+	changes := 0
+	b := New(Settings{
+		Enabled:             true,
+		ConsecutiveFailures: 3,
+		OnStateChange:       func(string, string, string) { changes++ },
+	})
+	b.Report("p", OutcomeFailure)
+	if !b.Reset("p") {
+		t.Fatal("Reset 应命中已有状态")
+	}
+	if changes != 0 {
+		t.Fatalf("closed 状态清零失败计数不应产生状态事件: %d", changes)
+	}
+	for i := 0; i < 3; i++ {
+		b.Report("p", OutcomeFailure)
+	}
+	if !b.Reset("p") {
+		t.Fatal("open 状态 Reset 应命中")
+	}
+	if changes != 2 {
+		t.Fatalf("open/reset callbacks = %d, want 2", changes)
+	}
+}
+
 func TestSetSettingsDisableClearsState(t *testing.T) {
 	b, _ := newTestBreaker(defaultTestSettings())
 	for i := 0; i < 3; i++ {

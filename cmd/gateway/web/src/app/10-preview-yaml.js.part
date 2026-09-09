@@ -34,6 +34,7 @@
                         `contextSafetyMargin: ${this.config.contextSafetyMargin ?? 4096}`,
                         this.failoverYaml(),
                         this.breakerYaml(),
+                        this.providerHealthYaml(),
                         'providers:',
                         this.providersYaml() || '  {}',
                         'routes:',
@@ -75,6 +76,12 @@
                         if (n !== null) lines.push(`  ${key}: ${n}`);
                     });
                     return lines.join('\n');
+                },
+
+                providerHealthYaml() {
+                    const value = Number(this.config.providerHealth?.checkIntervalSeconds);
+                    const interval = Number.isFinite(value) ? Math.trunc(value) : 0;
+                    return ['providerHealth:', `  checkIntervalSeconds: ${interval}`].join('\n');
                 },
 
                 providersYaml() {

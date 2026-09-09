@@ -145,6 +145,38 @@ func TestDecodeAndValidateNumericBounds(t *testing.T) {
 	}
 }
 
+func TestDecodeAndValidateProviderHealthInterval(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   int
+		wantErr bool
+	}{
+		{name: "default", value: 0},
+		{name: "minimum", value: 0},
+		{name: "maximum", value: 86400},
+		{name: "negative", value: -1, wantErr: true},
+		{name: "above maximum", value: 86401, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			raw := validConfigYAML() + fmt.Sprintf("\nproviderHealth:\n  checkIntervalSeconds: %d\n", tt.value)
+			cfg, err := DecodeAndValidate([]byte(raw))
+			if tt.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "providerHealth.checkIntervalSeconds") {
+					t.Fatalf("DecodeAndValidate() error = %v, want interval validation error", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("DecodeAndValidate() error = %v", err)
+			}
+			if cfg.ProviderHealth.CheckIntervalSeconds != tt.value {
+				t.Fatalf("interval = %d, want %d", cfg.ProviderHealth.CheckIntervalSeconds, tt.value)
+			}
+		})
+	}
+}
+
 func TestDecodeAndValidateAcceptsExactNumericBounds(t *testing.T) {
 	tests := []struct {
 		name string
