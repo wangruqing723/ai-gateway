@@ -176,6 +176,7 @@
                 },
 
                 runEventRows() {
+                    // 展示层截断为最近 20 条；标题徽章显示全量计数，让「还有更多」可感知。
                     return Array.isArray(this.runEvents) ? this.runEvents.slice(0, 20) : [];
                 },
 

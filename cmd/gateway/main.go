@@ -632,6 +632,7 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 	if needVision {
 		vp := matched.VisionProvider
 		vp.APIKey = router.ResolveAPIKey(vp, r.Header)
+		reqLog.VisionModel = matched.VisionModel
 		var visionResult vision.Result
 		internal.Messages, visionResult = s.translator.Translate(r.Context(), internal.Messages, vp, matched.VisionModel,
 			func(f string, a ...any) { logf(reqID, f, a...) })

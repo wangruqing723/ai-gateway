@@ -145,6 +145,9 @@ type RequestLog struct {
 	QueueWaitMs    int64  `json:"queueWaitMs,omitempty"`
 	Error          string `json:"error,omitempty"`
 	Vision         bool   `json:"vision,omitempty"`
+	// VisionModel 是视觉翻译实际使用的模型名（vision 启用时才有值），
+	// 便于区分「这次图片是谁认的」——TargetModel 是下游对话模型，两者无关。
+	VisionModel    string `json:"visionModel,omitempty"`
 	ResponseBytes  int64  `json:"responseBytes,omitempty"`
 	UpstreamStatus int    `json:"upstreamStatus,omitempty"`
 	// Attempts 保留既有的故障转移额度计数语义；超长 Retry-After 的 free attempt
