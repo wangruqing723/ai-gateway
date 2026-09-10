@@ -103,6 +103,13 @@
                         );
                         if (p.maxTokens != null) lines.push(`    maxTokens: ${p.maxTokens}`);
                         if (p.contextWindow != null) lines.push(`    contextWindow: ${p.contextWindow}`);
+                        // oneMContext / extraHeaders 按后端 omitempty：仅在配了时输出，否则预览与落盘不一致。
+                        if (p.oneMContext) lines.push(`    oneMContext: ${p.oneMContext}`);
+                        if (p.extraHeaders && Object.keys(p.extraHeaders).length) {
+                            lines.push('    extraHeaders:');
+                            // 逐键渲染成嵌套 YAML，键排序保证预览稳定；空 map 不输出。
+                            Object.keys(p.extraHeaders).sort().forEach((k) => lines.push(`      ${k}: "${p.extraHeaders[k]}"`));
+                        }
                         return lines.join('\n');
                     }).join('\n');
                 },

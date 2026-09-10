@@ -48,7 +48,12 @@
                             // 避免给没配的 provider 都落一行 userAgent: ""。
                             userAgent: provider.userAgent || undefined,
                             // 空值继承 HTTPS_PROXY/HTTP_PROXY（或直连）；不物化成空字符串。
-                            proxy: provider.proxy || undefined
+                            proxy: provider.proxy || undefined,
+                            // oneMContext / extraHeaders 同 userAgent：PUT 是全量替换，漏掉会静默丢配置
+                            // 且每次保存都抹掉所有 provider 的该字段。空值发 undefined，与后端 omitempty
+                            // 对齐（oneMContext 空等同 strip）；extraHeaders 在 this.config 里已是 map。
+                            oneMContext: provider.oneMContext || undefined,
+                            extraHeaders: provider.extraHeaders || undefined
                         };
                     });
                     return {

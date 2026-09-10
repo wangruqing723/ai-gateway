@@ -135,6 +135,10 @@
                     contextWindow: null,
                     userAgent: '',
                     proxy: '',
+                    // oneMContext / extraHeaders 与 addProvider 的空表单保持同一形态：
+                    // 该初始状态也是 provider 重建点之一，漏字段会让绑定在保存时被静默丢弃。
+                    oneMContext: '',
+                    extraHeaders: [],
                     apiKeyConfigured: false,
                     clearApiKey: false
                 },
