@@ -252,6 +252,129 @@ func TestDecodeAndValidateProviderAndRouteFields(t *testing.T) {
 	}
 }
 
+func TestOneMContextValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   string
+		wantErr string
+	}{
+		{name: "strip 合法", value: "strip"},
+		{name: "preserve 合法", value: "preserve"},
+		{name: "拼错的值必须报错", value: "preserved", wantErr: "providers.primary.oneMContext"},
+		{name: "大写不接受", value: "Preserve", wantErr: "providers.primary.oneMContext"},
+		{name: "无关值报错", value: "yes", wantErr: "providers.primary.oneMContext"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			raw := strings.Replace(validConfigYAML(), "    format: openai",
+				"    format: openai\n    oneMContext: "+tt.value, 1)
+			_, err := DecodeAndValidate([]byte(raw))
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("oneMContext=%q 应合法，实际报错 %v", tt.value, err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("oneMContext=%q 校验错误 = %v，期望含 %q", tt.value, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// TestOneMContextOmitEmptyYAML 锁住零值语义：未配置的 oneMContext 不能被
+// applyDefaults 物化成 "strip" 写回配置文件。
+func TestOneMContextOmitEmptyYAML(t *testing.T) {
+	cfg, err := DecodeAndValidate([]byte(validConfigYAML()))
+	if err != nil {
+		t.Fatalf("DecodeAndValidate 失败: %v", err)
+	}
+	if got := cfg.Providers["primary"].OneMContext; got != "" {
+		t.Fatalf("未配置的 oneMContext 被物化成 %q", got)
+	}
+	out, err := yaml.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("yaml.Marshal 失败: %v", err)
+	}
+	if strings.Contains(string(out), "oneMContext") {
+		t.Fatalf("未配置 oneMContext 却出现在 YAML 中:\n%s", out)
+	}
+	if strings.Contains(string(out), "extraHeaders") {
+		t.Fatalf("未配置 extraHeaders 却出现在 YAML 中:\n%s", out)
+	}
+}
+
+func TestExtraHeadersValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		block   string
+		wantErr string
+	}{
+		{name: "普通自定义头合法", block: "    extraHeaders:\n      anthropic-beta: context-1m-2025-08-07"},
+		{name: "允许覆盖 anthropic-version", block: "    extraHeaders:\n      anthropic-version: \"2023-06-01\""},
+		{name: "允许覆盖 accept", block: "    extraHeaders:\n      accept: application/json"},
+		{name: "空值合法", block: "    extraHeaders:\n      x-trace: \"\""},
+		{name: "禁止 x-api-key", block: "    extraHeaders:\n      x-api-key: leak", wantErr: "不能设置 x-api-key"},
+		{name: "禁止 authorization 大写变体", block: "    extraHeaders:\n      Authorization: leak", wantErr: "不能设置 Authorization"},
+		{name: "禁止 content-type", block: "    extraHeaders:\n      Content-Type: text/plain", wantErr: "不能设置 Content-Type"},
+		{name: "禁止 User-Agent", block: "    extraHeaders:\n      User-Agent: ua", wantErr: "不能设置 User-Agent"},
+		{name: "头名非法字符", block: "    extraHeaders:\n      \"bad header\": v", wantErr: "含非法字符"},
+		{name: "值含控制字符", block: "    extraHeaders:\n      x-trace: \"a\\nb\"", wantErr: "不能包含 ASCII 控制字符"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			raw := strings.Replace(validConfigYAML(), "    format: openai", "    format: openai\n"+tt.block, 1)
+			_, err := DecodeAndValidate([]byte(raw))
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("应合法，实际报错 %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("校验错误 = %v，期望含 %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestExtraHeadersLimits(t *testing.T) {
+	var many strings.Builder
+	many.WriteString("    extraHeaders:\n")
+	for i := 0; i < maxExtraHeaderEntries+1; i++ {
+		fmt.Fprintf(&many, "      x-h%d: v\n", i)
+	}
+	raw := strings.Replace(validConfigYAML(), "    format: openai", "    format: openai\n"+many.String(), 1)
+	if _, err := DecodeAndValidate([]byte(raw)); err == nil || !strings.Contains(err.Error(), "最多") {
+		t.Fatalf("超量 extraHeaders 校验错误 = %v，期望含「最多」", err)
+	}
+
+	long := strings.Repeat("v", maxExtraHeaderValueRunes+1)
+	raw = strings.Replace(validConfigYAML(), "    format: openai",
+		"    format: openai\n    extraHeaders:\n      x-long: \""+long+"\"", 1)
+	if _, err := DecodeAndValidate([]byte(raw)); err == nil || !strings.Contains(err.Error(), "取值长度") {
+		t.Fatalf("超长取值校验错误 = %v，期望含「取值长度」", err)
+	}
+}
+
+func TestExtraHeaderBlocked(t *testing.T) {
+	blocked := []string{"x-api-key", "X-API-Key", "authorization", "AUTHORIZATION", "content-type", "user-agent", "User-Agent", "  user-agent  "}
+	for _, name := range blocked {
+		if !ExtraHeaderBlocked(name) {
+			t.Errorf("ExtraHeaderBlocked(%q) = false，期望 true", name)
+		}
+	}
+	allowed := []string{"anthropic-beta", "anthropic-version", "accept", "x-trace", ""}
+	for _, name := range allowed {
+		if name == "" {
+			continue
+		}
+		if ExtraHeaderBlocked(name) {
+			t.Errorf("ExtraHeaderBlocked(%q) = true，期望 false", name)
+		}
+	}
+}
+
 func TestContextWindowValidationAndDefaults(t *testing.T) {
 	tests := []struct {
 		name string

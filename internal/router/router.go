@@ -36,7 +36,7 @@ type Match struct {
 
 // MatchRoute 根据模型名匹配路由规则，首条命中生效（对齐 minimatch nocase）。
 func MatchRoute(model string, cfg *config.Config) *Match {
-	upstreamModel, hasOneM := StripOneMSuffix(model)
+	upstreamModel, oneMMarker, hasOneM := SplitOneMSuffix(model)
 	for _, route := range cfg.Routes {
 		if !globMatch(strings.ToLower(route.Match), strings.ToLower(upstreamModel)) {
 			continue
@@ -61,6 +61,13 @@ func MatchRoute(model string, cfg *config.Config) *Match {
 				// maxTokens：大上下文不等于允许更大的输出。
 				oneMWindow := OneMContextWindow
 				contextWindow = &oneMWindow
+				// 上游侧识别与本地预算裁决是两件独立的事：窗口覆盖对两档都生效
+				// （网关得按 1M 算预算），而标记只在 preserve 档拼回 model 名。
+				// TargetModel 是发给上游 model 字段的唯一出口（透传路径与三条
+				// 跨格式转换都取它），在这里拼好，下游无需再感知该标记。
+				if pCopy.OneMContext == config.OneMContextPreserve {
+					targetModel += oneMMarker
+				}
 			}
 			candidates = append(candidates, Candidate{
 				Provider:      &pCopy,
@@ -118,12 +125,24 @@ const OneMContextWindow = 1_000_000
 // StripOneMSuffix 剥离模型名尾部的 [1M] 标记（大小写不敏感，容忍标记前的空格）。
 // 返回 (剥离后的模型名, 是否带有该标记)。无标记时原样返回。
 func StripOneMSuffix(model string) (string, bool) {
+	stripped, _, has := SplitOneMSuffix(model)
+	return stripped, has
+}
+
+// SplitOneMSuffix 在 StripOneMSuffix 之外额外返回客户端原样书写的标记文本。
+//
+// 需要原始文本而非固定常量：转发给 preserve 型上游时要把标记拼回 model 名，
+// 而中转站的识别逻辑不可知，客户端写 [1M] 就还它 [1M]、写 [1m] 就还 [1m]，
+// 不做大小写归一化，最大保真。标记前的空格不保留——那只是容错，不是语义。
+// 无标记时 marker 为空字符串。
+func SplitOneMSuffix(model string) (stripped, marker string, has bool) {
 	if !strings.HasSuffix(strings.ToLower(model), OneMContextMarker) {
-		return model, false
+		return model, "", false
 	}
-	stripped := model[:len(model)-len(OneMContextMarker)]
-	stripped = strings.TrimRightFunc(stripped, unicode.IsSpace)
-	return stripped, true
+	cut := len(model) - len(OneMContextMarker)
+	marker = model[cut:]
+	stripped = strings.TrimRightFunc(model[:cut], unicode.IsSpace)
+	return stripped, marker, true
 }
 
 // ResolveAPIKey 优先用 provider.apiKey，否则从请求头提取（x-api-key 或 Bearer）。

@@ -120,6 +120,19 @@ providers:
     #                     # 配得过小会让思考型模型烧光预算就被截断：工具调用参数被砍断后
     #                     # 客户端会丢弃整条响应重投，表现为「同一条命令反复执行」。
     # contextWindow: 200000       # 可选：该 Provider 的上下文窗口；只向下压输出预算
+    # oneMContext: preserve # 可选：客户端模型名尾部 [1m] 标记是否转发给该上游。
+    #                       # strip（默认，留空同义）= 剥掉后再转发；preserve = 原样拼回上游 model 名。
+    #                       # 部分第三方中转靠这个后缀识别 1M 上下文，收不到就报
+    #                       # 「1m 上下文已经全量可用，请启用 1m 上下文后重试」，此时改成 preserve。
+    #                       # Anthropic 官方 API 不认字面后缀（带上直接 404），官方上游必须保持 strip。
+    #                       # 两档都不改 contextWindow：带标记时窗口一律按 1000000 算本地输出预算。
+    # extraHeaders:         # 可选：转发给该上游时附加的自定义请求头（最多 20 条，值最长 1024 字符）
+    #   anthropic-beta: "context-1m-2025-08-07"   # 例：个别中转仍要求显式声明 beta 特性
+    #                       # 在网关自设的头之后写入，可覆盖 anthropic-version / accept。
+    #                       # 转发、/v1/models 查询、健康检测三条出网路径都会带上（理由同 userAgent）。
+    #                       # x-api-key / authorization / content-type / User-Agent 被禁止：
+    #                       # 前三个由网关按 format 维护，UA 请用上面的 userAgent 字段。
+    #                       # 不要在这里放密钥：/api/config 不对该字段脱敏，会明文返回。
 
   mimo_vision:
     baseUrl: "https://api.xiaomimimo.com"

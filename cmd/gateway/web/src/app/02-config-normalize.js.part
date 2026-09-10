@@ -22,7 +22,13 @@
                             // 漏读等于刚从服务端拿到的值立刻在内存里丢掉，下次保存就写不回去。
                             // 后端 omitempty 未配时不返回该字段，故用 || '' 兜成空串。
                             userAgent: pick(p, 'userAgent', 'UserAgent') || '',
-                            proxy: pick(p, 'proxy', 'Proxy') || ''
+                            proxy: pick(p, 'proxy', 'Proxy') || '',
+                            // oneMContext 空串等同 strip，兜成空串即可，理由同 userAgent：
+                            // 漏读会让手写的 preserve 在下次保存时被静默抹掉。
+                            oneMContext: pick(p, 'oneMContext', 'OneMContext') || '',
+                            // extraHeaders 保留 map 原样，未配置时留 undefined 而不是 {}：
+                            // 兜成空对象会让每次保存都往 YAML 里写一行空 extraHeaders。
+                            extraHeaders: pick(p, 'extraHeaders', 'ExtraHeaders') || undefined
                         };
                     });
 

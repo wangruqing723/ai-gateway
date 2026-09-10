@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"ai-gateway/internal/config"
+	"ai-gateway/internal/proxy"
 )
 
 const (
@@ -433,6 +434,8 @@ func checkOne(parent context.Context, p *config.Provider, client *http.Client) S
 			req.Header.Set("authorization", "Bearer "+p.APIKey)
 		}
 	}
+	// 理由同上面的 UA：探测请求缺了转发路径带的自定义头，同样会把好 provider 判成坏的。
+	proxy.ApplyExtraHeaders(req.Header, p.ExtraHeaders)
 
 	start := time.Now()
 	resp, err := client.Do(req)

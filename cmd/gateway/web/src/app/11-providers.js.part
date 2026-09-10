@@ -15,6 +15,8 @@
                         contextWindow: null,
                         userAgent: '',
                         proxy: '',
+                        oneMContext: '',
+                        extraHeaders: [],
                         apiKeyConfigured: false,
                         clearApiKey: false
                     };
@@ -38,6 +40,8 @@
                         contextWindow: p.contextWindow ?? null,
                         userAgent: p.userAgent || '',
                         proxy: p.proxy || '',
+                        oneMContext: p.oneMContext || '',
+                        extraHeaders: this.headersToRows(p.extraHeaders),
                         apiKeyConfigured: !!p.apiKeyConfigured,
                         clearApiKey: false
                     };
@@ -69,6 +73,8 @@
                         userAgent: p.userAgent || '',
                         // 副本名在磁盘上没有旧密码可供 sentinel 回查，认证代理必须重填。
                         proxy: (p.proxy || '').includes('__AI_GATEWAY_KEEP_PROXY_PASSWORD__') ? '' : (p.proxy || ''),
+                        oneMContext: p.oneMContext || '',
+                        extraHeaders: this.headersToRows(p.extraHeaders),
                         apiKeyConfigured: false,
                         clearApiKey: false
                     };
@@ -130,7 +136,12 @@
                         // 留空发送 null：contextWindow 为 nil 时完全不启用窗口预算裁决。
                         contextWindow: this.numOrNull(this.providerForm.contextWindow),
                         userAgent: this.providerForm.userAgent || undefined,
-                        proxy: this.providerForm.proxy || undefined
+                        proxy: this.providerForm.proxy || undefined,
+                        // 留空发 undefined：oneMContext 为空等同 strip，不写进配置文件。
+                        oneMContext: this.providerForm.oneMContext || undefined,
+                        // 空表格发 undefined 而不是 {}：后端 omitempty 只认 nil/空 map，
+                        // 但发 {} 会让 YAML 里多出一行空 extraHeaders，配置越存越脏。
+                        extraHeaders: this.rowsToHeaders(this.providerForm.extraHeaders)
                     };
                     // 弹窗保存直接落盘：点这个按钮已经是一次明确确认，再要求点顶部保存
                     // 等于同一件事确认两遍，实际结果是用户忘记第二步。
@@ -140,6 +151,43 @@
                     } else {
                         this.restoreConfig(snapshot);
                     }
+                },
+
+                // extraHeaders 在配置里是 map，在表单里是有序行数组：map 没有稳定顺序，
+                // 直接绑 map 会让用户每次编辑时行序跳动，也没法表达「刚加的空行」。
+                headersToRows(headers) {
+                    if (!headers || typeof headers !== 'object') return [];
+                    return Object.keys(headers).sort().map((key) => ({ key, value: headers[key] ?? '' }));
+                },
+
+                // rowsToHeaders 把表单行折回 map。key 去空白后为空的行整行丢弃
+                // （用户加了空行没填就保存是常态，不该因此撞后端校验）。
+                // 同名 key 后写覆盖先写，与 map 语义一致。
+                rowsToHeaders(rows) {
+                    if (!Array.isArray(rows)) return undefined;
+                    const out = {};
+                    for (const row of rows) {
+                        const key = (row?.key || '').trim();
+                        if (!key) continue;
+                        out[key] = row?.value ?? '';
+                    }
+                    return Object.keys(out).length ? out : undefined;
+                },
+
+                addExtraHeaderRow() {
+                    if (!Array.isArray(this.providerForm.extraHeaders)) this.providerForm.extraHeaders = [];
+                    this.providerForm.extraHeaders.push({ key: '', value: '' });
+                },
+
+                removeExtraHeaderRow(index) {
+                    this.providerForm.extraHeaders.splice(index, 1);
+                },
+
+                // extraHeaderBlocked 与后端 config.extraHeaderBlocklist 同名单，
+                // 用于在表单里即时标红，避免用户填完保存才被后端拒。
+                extraHeaderBlocked(key) {
+                    const name = (key || '').trim().toLowerCase();
+                    return ['x-api-key', 'authorization', 'content-type', 'user-agent'].includes(name);
                 },
 
                 proxyHost(proxy) {

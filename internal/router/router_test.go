@@ -154,6 +154,94 @@ func TestMatchRouteEmptyTargetModelStripsOneMSuffix(t *testing.T) {
 	}
 }
 
+func TestSplitOneMSuffixReturnsOriginalMarker(t *testing.T) {
+	tests := []struct {
+		name       string
+		model      string
+		want       string
+		wantMarker string
+		marked     bool
+	}{
+		{name: "大写原样返回", model: "claude-sonnet-4-6[1M]", want: "claude-sonnet-4-6", wantMarker: "[1M]", marked: true},
+		{name: "小写原样返回", model: "claude-sonnet-4-6[1m]", want: "claude-sonnet-4-6", wantMarker: "[1m]", marked: true},
+		{name: "混合大小写原样返回", model: "claude-sonnet-4-6[1M]", want: "claude-sonnet-4-6", wantMarker: "[1M]", marked: true},
+		{name: "带空格时空格不入 marker", model: "claude-sonnet-4-6 [1m]", want: "claude-sonnet-4-6", wantMarker: "[1m]", marked: true},
+		{name: "无标记 marker 为空", model: "claude-sonnet-4-6", want: "claude-sonnet-4-6", wantMarker: "", marked: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, marker, marked := SplitOneMSuffix(tt.model)
+			if got != tt.want || marker != tt.wantMarker || marked != tt.marked {
+				t.Errorf("SplitOneMSuffix(%q) = (%q, %q, %v)，期望 (%q, %q, %v)",
+					tt.model, got, marker, marked, tt.want, tt.wantMarker, tt.marked)
+			}
+		})
+	}
+}
+
+// TestMatchRouteOneMContextPreserve 覆盖决策：preserve 档一律把客户端原始标记
+// 拼到上游 model 名尾部，无论 target.model 是空（透传剥后名）还是显式配置。
+func TestMatchRouteOneMContextPreserve(t *testing.T) {
+	tests := []struct {
+		name        string
+		oneMContext string
+		targetModel string
+		request     string
+		want        string
+	}{
+		{name: "preserve + target 空 → 剥后名拼回原始大写", oneMContext: config.OneMContextPreserve,
+			targetModel: "", request: "claude-sonnet-4-6[1M]", want: "claude-sonnet-4-6[1M]"},
+		{name: "preserve + target 空 → 剥后名拼回原始小写", oneMContext: config.OneMContextPreserve,
+			targetModel: "", request: "claude-sonnet-4-6[1m]", want: "claude-sonnet-4-6[1m]"},
+		{name: "preserve + target 显式配置 → 配置名拼回", oneMContext: config.OneMContextPreserve,
+			targetModel: "upstream-model", request: "claude-sonnet-4-6[1M]", want: "upstream-model[1M]"},
+		{name: "preserve + 带空格请求 → 拼回时不带空格", oneMContext: config.OneMContextPreserve,
+			targetModel: "", request: "claude-sonnet-4-6 [1m]", want: "claude-sonnet-4-6[1m]"},
+		{name: "strip 显式 → 不拼", oneMContext: config.OneMContextStrip,
+			targetModel: "upstream-model", request: "claude-sonnet-4-6[1M]", want: "upstream-model"},
+		{name: "空值默认 → 不拼（向后兼容）", oneMContext: "",
+			targetModel: "upstream-model", request: "claude-sonnet-4-6[1M]", want: "upstream-model"},
+		{name: "preserve 但请求无标记 → 不拼", oneMContext: config.OneMContextPreserve,
+			targetModel: "upstream-model", request: "claude-sonnet-4-6", want: "upstream-model"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := baseConfig()
+			cfg.Providers["alpha"].OneMContext = tt.oneMContext
+			cfg.Routes = []config.Route{{Match: "claude-sonnet-4-6", Provider: "alpha", Model: tt.targetModel}}
+
+			m := MatchRoute(tt.request, cfg)
+			if m == nil {
+				t.Fatal("期望命中路由，实际为 nil")
+			}
+			if got := m.Candidates[0].TargetModel; got != tt.want {
+				t.Errorf("TargetModel = %q，期望 %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestOneMContextPreserveStillOverridesWindow 锁住决策：窗口覆盖与 preserve 解耦——
+// 本地预算按 1M 算，与后缀是否转发上游无关。
+func TestOneMContextPreserveStillOverridesWindow(t *testing.T) {
+	for _, mode := range []string{"", config.OneMContextStrip, config.OneMContextPreserve} {
+		cfg := baseConfig()
+		cfg.Providers["alpha"].OneMContext = mode
+		window := 200000
+		cfg.Providers["alpha"].ContextWindow = &window
+		cfg.Routes = []config.Route{{Match: "claude-*", Provider: "alpha", Model: "upstream-model"}}
+
+		m := MatchRoute("claude-sonnet-4-6[1m]", cfg)
+		if m == nil {
+			t.Fatalf("oneMContext=%q: 期望命中路由", mode)
+		}
+		got := m.Candidates[0].ContextWindow
+		if got == nil || *got != OneMContextWindow {
+			t.Errorf("oneMContext=%q: ContextWindow = %#v，期望 %d", mode, got, OneMContextWindow)
+		}
+	}
+}
+
 func TestStripOneMSuffix(t *testing.T) {
 	tests := []struct {
 		name   string

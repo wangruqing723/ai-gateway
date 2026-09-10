@@ -1966,6 +1966,9 @@ func fetchUpstreamModels(parent context.Context, p *config.Provider, client *htt
 			req.Header.Set("authorization", "Bearer "+p.APIKey)
 		}
 	}
+	// 与 UA 同源的理由：上游对 /v1/models 的准入可能也看自定义头，
+	// 转发路径带了这里不带的话，配置能转发却查不到模型列表。
+	proxy.ApplyExtraHeaders(req.Header, p.ExtraHeaders)
 
 	resp, err := client.Do(req)
 	if err != nil {

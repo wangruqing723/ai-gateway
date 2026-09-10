@@ -68,6 +68,20 @@ const (
 	// maxProviderProxyRunes 代理 URL 长度上限，按字符（rune）而非字节计。
 	maxProviderProxyRunes = 256
 
+	// OneMContextStrip 剥掉客户端模型名尾部的 [1m] 标记后再转发（历史行为）。
+	// 空字符串与本值等价，applyDefaults 不物化它，避免写回配置文件。
+	OneMContextStrip = "strip"
+	// OneMContextPreserve 把客户端原样书写的 [1m] 标记拼回上游 model 名。
+	OneMContextPreserve = "preserve"
+
+	// maxExtraHeaderEntries 单个 provider 的 extraHeaders 条目上限。
+	maxExtraHeaderEntries = 20
+	// maxExtraHeaderValueRunes extraHeaders 单个值的长度上限，按字符（rune）计，
+	// 理由同 userAgent：允许非 ASCII 值时按字节计会不必要地缩短可用长度。
+	maxExtraHeaderValueRunes = 1024
+	// maxExtraHeaderNameRunes extraHeaders 单个头名称的长度上限。
+	maxExtraHeaderNameRunes = 128
+
 	// 默认值集中在此，供 applyDefaults 与各 accessor 共用一处来源。
 	defaultFailoverAttempts      = 2
 	defaultMaxRetryAfterMs       = 5000
@@ -81,6 +95,26 @@ var (
 	createConfigTemp = os.CreateTemp
 	renameConfigFile = os.Rename
 )
+
+// extraHeaderBlocklist 是 extraHeaders 禁止设置的头（键为小写形式）。
+//
+// 鉴权（x-api-key / authorization）与正文类型（content-type）由网关按 provider
+// format 决定，配置覆盖它们只会把请求改坏；User-Agent 已有专门的 userAgent 字段，
+// 两处都能写会让优先级无从判断，故一并挡在这里。
+var extraHeaderBlocklist = map[string]struct{}{
+	"x-api-key":     {},
+	"authorization": {},
+	"content-type":  {},
+	"user-agent":    {},
+}
+
+// ExtraHeaderBlocked 判断该头名是否禁止由 extraHeaders 设置（大小写不敏感）。
+// 导出给 proxy 侧在真正写头前做二次拦截：配置校验只在加载时跑，运行时再挡一遍，
+// 热重载或未来新增的配置入口漏了校验也不会把鉴权头送出去。
+func ExtraHeaderBlocked(name string) bool {
+	_, blocked := extraHeaderBlocklist[strings.ToLower(strings.TrimSpace(name))]
+	return blocked
+}
 
 // Provider 上游 provider 定义
 type Provider struct {
@@ -101,6 +135,20 @@ type Provider struct {
 	MaxTokens *int `yaml:"maxTokens,omitempty" json:"maxTokens,omitempty"`
 	// ContextWindow 是该 provider 的上下文窗口，nil 表示不启用窗口预算裁决。
 	ContextWindow *int `yaml:"contextWindow,omitempty" json:"contextWindow,omitempty"`
+	// OneMContext 决定客户端模型名尾部的 [1m] 标记是否随请求转发给该上游。
+	//
+	// 空值与 OneMContextStrip 等价（剥掉后缀，保持历史行为）；OneMContextPreserve
+	// 会把客户端原样书写的标记拼回上游 model 名。两档不能合成一档：Anthropic 官方
+	// API 不认字面 [1m] 后缀（带上会 404），而部分第三方中转恰恰靠这个后缀识别
+	// 1M 上下文，收不到就报错。故只能按 provider 声明，不存在全局正确的默认值。
+	OneMContext string `yaml:"oneMContext,omitempty" json:"oneMContext,omitempty"`
+	// ExtraHeaders 是转发给该上游时附加的自定义请求头，nil 表示不附加。
+	//
+	// 在网关自己设置的头之后写入，可覆盖 anthropic-version / accept 这类协议头，
+	// 但鉴权与正文类型头由 extraHeaderBlocklist 挡住，避免配置把鉴权改坏。
+	// 三条出网路径（转发、模型列表查询、健康检测）共用，理由同 userAgent：
+	// 上游的准入判断不区分请求是谁发起的。
+	ExtraHeaders map[string]string `yaml:"extraHeaders,omitempty" json:"extraHeaders,omitempty"`
 }
 
 // Vision 路由上的视觉子配置
@@ -1009,7 +1057,76 @@ func validateProvider(name string, p *Provider, validateLimits bool) error {
 	if err := validateContextWindow(fmt.Sprintf("providers.%s.contextWindow", name), p.ContextWindow); err != nil {
 		return err
 	}
+	if err := validateOneMContext(name, p.OneMContext); err != nil {
+		return err
+	}
+	if err := validateExtraHeaders(name, p.ExtraHeaders); err != nil {
+		return err
+	}
 	return nil
+}
+
+// validateOneMContext 校验 oneMContext 取值。空值合法（等同 strip），
+// 其余只接受两个枚举值——写错的值必须报错而不是静默退回默认，否则
+// 用户把 "preserved" 拼错成不生效的值时毫无提示。
+func validateOneMContext(name, value string) error {
+	switch value {
+	case "", OneMContextStrip, OneMContextPreserve:
+		return nil
+	default:
+		return fmt.Errorf("providers.%s.oneMContext 只能是 %q 或 %q（留空等同 %q）", name, OneMContextStrip, OneMContextPreserve, OneMContextStrip)
+	}
+}
+
+// validateExtraHeaders 校验自定义请求头的数量、名称与取值。
+func validateExtraHeaders(name string, headers map[string]string) error {
+	if len(headers) == 0 {
+		return nil
+	}
+	if len(headers) > maxExtraHeaderEntries {
+		return fmt.Errorf("providers.%s.extraHeaders 最多 %d 个条目（当前 %d）", name, maxExtraHeaderEntries, len(headers))
+	}
+	// 遍历顺序随机，报错信息里带上头名即可定位，不依赖顺序稳定。
+	for key, value := range headers {
+		trimmed := strings.TrimSpace(key)
+		if trimmed == "" {
+			return fmt.Errorf("providers.%s.extraHeaders 的头名称不能为空", name)
+		}
+		if n := utf8.RuneCountInString(trimmed); n > maxExtraHeaderNameRunes {
+			return fmt.Errorf("providers.%s.extraHeaders[%s] 头名称长度应不超过 %d 个字符（当前 %d）", name, trimmed, maxExtraHeaderNameRunes, n)
+		}
+		// HTTP 头名称只允许 RFC 7230 的 token 字符：放宽会让 http.Header.Set
+		// 之后产出不合法的请求，错误现场跑到上游侧才暴露。
+		if !isHTTPHeaderToken(trimmed) {
+			return fmt.Errorf("providers.%s.extraHeaders[%s] 头名称含非法字符（只允许字母、数字与 !#$%%&'*+-.^_`|~）", name, trimmed)
+		}
+		if ExtraHeaderBlocked(trimmed) {
+			return fmt.Errorf("providers.%s.extraHeaders 不能设置 %s（鉴权与正文类型头由网关维护，User-Agent 请用 userAgent 字段）", name, trimmed)
+		}
+		if n := utf8.RuneCountInString(value); n > maxExtraHeaderValueRunes {
+			return fmt.Errorf("providers.%s.extraHeaders[%s] 取值长度应不超过 %d 个字符（当前 %d）", name, trimmed, maxExtraHeaderValueRunes, n)
+		}
+		for _, r := range value {
+			// 头值里的换行会被上游解析成新的头，属于请求头注入，必须拒绝。
+			if (r < 0x20 && r != '\t') || r == 0x7F {
+				return fmt.Errorf("providers.%s.extraHeaders[%s] 取值不能包含 ASCII 控制字符", name, trimmed)
+			}
+		}
+	}
+	return nil
+}
+
+// isHTTPHeaderToken 判断是否为合法的 HTTP 头名称（RFC 7230 token）。
+func isHTTPHeaderToken(name string) bool {
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case strings.ContainsRune("!#$%&'*+-.^_`|~", r):
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // validateRouteTargets 校验单条路由的目标写法：单目标（provider/model）与多目标（targets）互斥。

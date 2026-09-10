@@ -37,6 +37,74 @@ func TestResponsesProviderUsesBearerAuthentication(t *testing.T) {
 	}
 }
 
+func TestSetUpstreamHeadersAppliesExtraHeaders(t *testing.T) {
+	req := httptest.NewRequest("POST", "http://gateway.invalid", nil)
+	setUpstreamHeaders(req, &config.Provider{
+		Format: "anthropic",
+		APIKey: "real-key",
+		ExtraHeaders: map[string]string{
+			"anthropic-beta": "context-1m-2025-08-07",
+			"x-trace":        "abc",
+			// 覆盖协议头是允许的
+			"anthropic-version": "2099-01-01",
+		},
+	}, "")
+
+	if got := req.Header.Get("anthropic-beta"); got != "context-1m-2025-08-07" {
+		t.Errorf("anthropic-beta = %q，期望自定义头被写入", got)
+	}
+	if got := req.Header.Get("x-trace"); got != "abc" {
+		t.Errorf("x-trace = %q", got)
+	}
+	if got := req.Header.Get("anthropic-version"); got != "2099-01-01" {
+		t.Errorf("anthropic-version = %q，期望允许被 extraHeaders 覆盖", got)
+	}
+}
+
+// TestSetUpstreamHeadersExtraHeadersCannotBreakAuth 锁住运行时兜底：
+// 即使配置校验被绕过（热重载、未来新入口），鉴权与 UA 也绝不能被覆盖。
+func TestSetUpstreamHeadersExtraHeadersCannotBreakAuth(t *testing.T) {
+	req := httptest.NewRequest("POST", "http://gateway.invalid", nil)
+	setUpstreamHeaders(req, &config.Provider{
+		Format:    "anthropic",
+		APIKey:    "real-key",
+		UserAgent: "provider-agent/1.0",
+		ExtraHeaders: map[string]string{
+			"x-api-key":     "hijacked",
+			"Authorization": "Bearer hijacked",
+			"content-type":  "text/plain",
+			"User-Agent":    "hijacked-agent",
+			"":              "empty-name",
+			"   ":           "blank-name",
+		},
+	}, "")
+
+	if got := req.Header.Get("x-api-key"); got != "real-key" {
+		t.Errorf("x-api-key = %q，期望保持 real-key", got)
+	}
+	if got := req.Header.Get("authorization"); got != "" {
+		t.Errorf("authorization = %q，anthropic 格式不应出现该头", got)
+	}
+	if got := req.Header.Get("content-type"); got != "application/json" {
+		t.Errorf("content-type = %q，期望保持 application/json", got)
+	}
+	if got := req.Header.Get("User-Agent"); got != "provider-agent/1.0" {
+		t.Errorf("User-Agent = %q，期望保持 provider 配置值", got)
+	}
+}
+
+func TestApplyExtraHeadersNilAndEmpty(t *testing.T) {
+	// nil 与空 map 都必须是空操作：逐字节兼容未配置该字段的既有行为。
+	for _, extra := range []map[string]string{nil, {}} {
+		req := httptest.NewRequest("POST", "http://gateway.invalid", nil)
+		before := len(req.Header)
+		ApplyExtraHeaders(req.Header, extra)
+		if len(req.Header) != before {
+			t.Fatalf("extra=%#v 改变了头数量：%d → %d", extra, before, len(req.Header))
+		}
+	}
+}
+
 func TestSetUpstreamHeadersUserAgentPriority(t *testing.T) {
 	tests := []struct {
 		name            string
