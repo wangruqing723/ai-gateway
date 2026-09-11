@@ -164,6 +164,51 @@ func TestCheckSendsConfiguredUserAgent(t *testing.T) {
 	}
 }
 
+// anthropic 格式的健康检测必须同时带 x-api-key 和 Authorization。/v1/models 不是
+// Anthropic 协议端点，new-api / one-api 系中转（anyrouter、agentrouter）只认
+// Authorization——实测 anyrouter.top 用 x-api-key 返回 401、用 Bearer 返回 200。
+// 只发 x-api-key 会把这类 provider 永久判成「鉴权失败」，而它的转发路径其实是好的。
+func TestCheckAnthropicSendsBothAuthHeaders(t *testing.T) {
+	var mu sync.Mutex
+	var gotAPIKey, gotAuth, gotVersion string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		gotAPIKey = r.Header.Get("x-api-key")
+		gotAuth = r.Header.Get("authorization")
+		gotVersion = r.Header.Get("anthropic-version")
+		mu.Unlock()
+		// 中转只认 Authorization：缺了就 401，与实测一致。
+		if r.Header.Get("authorization") != "Bearer relay-key" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	cfg := &config.Config{Providers: map[string]*config.Provider{
+		"relay": {Name: "relay", BaseURL: server.URL, APIKey: "relay-key", Format: "anthropic"},
+	}}
+
+	statuses := NewChecker().CheckAll(context.Background(), cfg, testResolver(server.Client()))
+	if statuses["relay"].Status != "ok" {
+		t.Fatalf("只认 Bearer 的中转被判成 %#v，期望 ok", statuses["relay"])
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if gotAuth != "Bearer relay-key" {
+		t.Fatalf("authorization = %q，期望 Bearer 头被带上", gotAuth)
+	}
+	// x-api-key 与 anthropic-version 仍要保留：Anthropic 官方只读这两个头。
+	if gotAPIKey != "relay-key" {
+		t.Fatalf("x-api-key = %q，期望仍带上官方鉴权头", gotAPIKey)
+	}
+	if gotVersion != "2023-06-01" {
+		t.Fatalf("anthropic-version = %q，期望 2023-06-01", gotVersion)
+	}
+}
+
 // CheckProvider 只探被点的那一个，且结果要进缓存（Snapshot 能读到），
 // 其余 provider 保持未检测——整表检测在 provider 多时太慢，这是单点检测存在的理由。
 func TestCheckProviderChecksOnlyRequestedProvider(t *testing.T) {

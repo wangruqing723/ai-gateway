@@ -60,3 +60,27 @@ func ApplyExtraHeaders(h http.Header, extra map[string]string) {
 		h.Set(name, value)
 	}
 }
+
+// SetModelsAuthHeaders 为 /v1/models 探测请求设置鉴权头（模型列表查询与健康检测共用）。
+//
+// 与转发路径 setUpstreamHeaders 的关键差异：anthropic 格式下这里把 x-api-key 和
+// Authorization 两个头都带上，而转发路径只带 x-api-key。
+//
+// 原因：/v1/models 不是 Anthropic 协议端点，是 OpenAI 风味的元数据端点。Anthropic
+// 官方只读 x-api-key、忽略多余的 Authorization；但 new-api / one-api 系的第三方中转
+// （anyrouter、agentrouter 等）用同一套路由暴露 /v1/models，只认 Authorization。
+// 实测 anyrouter.top：x-api-key 返回 401，Authorization: Bearer 返回 200。
+//
+// 只带 x-api-key 的话，这类中转的转发路径好好的、模型列表却永远查不出来，健康检测
+// 还会把它误判成「鉴权失败」。转发路径不受影响也不该跟着改：/v1/messages 是真正的
+// Anthropic 端点，两个头都带可能被部分上游判为冲突。
+func SetModelsAuthHeaders(h http.Header, format, apiKey string) {
+	// accept 与 anthropic-version 按格式设：官方 Anthropic 要求 anthropic-version，
+	// 缺了会 400；OpenAI 风味端点带上无害，故 anthropic 格式下一并设置。
+	if format == "anthropic" {
+		h.Set("x-api-key", apiKey)
+		h.Set("anthropic-version", "2023-06-01")
+	}
+	// 所有格式都带 Authorization：OpenAI 风味端点（含各类中转）认这个头。
+	h.Set("authorization", "Bearer "+apiKey)
+}

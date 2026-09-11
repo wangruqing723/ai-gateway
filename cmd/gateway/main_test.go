@@ -2708,6 +2708,43 @@ func TestHandleProviderModels(t *testing.T) {
 		}
 	})
 
+	// 复现 anyrouter / agentrouter 这类 new-api 系中转的真实行为：/v1/models 是
+	// OpenAI 风味的元数据端点，只认 Authorization，不认 x-api-key。实测 anyrouter.top
+	// 用 x-api-key 返回 401、用 Authorization: Bearer 返回 200。
+	// 只发 x-api-key 的话，这类 provider 转发路径好好的、模型列表却永远查不出来。
+	t.Run("anthropic relay that only accepts bearer still resolves models", func(t *testing.T) {
+		var gotAPIKey, gotAuth string
+		up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			gotAPIKey = r.Header.Get("x-api-key")
+			gotAuth = r.Header.Get("authorization")
+			// 中转只认 Authorization：缺了就 401，与实测一致。
+			if gotAuth != "Bearer anthropic-secret" {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			w.Header().Set("content-type", "application/json")
+			_, _ = w.Write([]byte(`{"data":[{"id":"claude-sonnet-4-6"}]}`))
+		}))
+		defer up.Close()
+
+		raw := strings.Replace(testConfigYAML("127.0.0.1", 7789, up.URL, "anthropic-secret", 5), "format: openai", "format: anthropic", 1)
+		srv := newConfigTestServer(t, raw)
+		rec := callProviderModels(t, srv, "primary")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), "claude-sonnet-4-6") {
+			t.Fatalf("模型列表未返回上游模型: %s", rec.Body.String())
+		}
+		if gotAuth != "Bearer anthropic-secret" {
+			t.Fatalf("authorization = %q，期望 Bearer 头被带上", gotAuth)
+		}
+		// x-api-key 仍要保留：Anthropic 官方只读这个头，两个都带才能同时兼容。
+		if gotAPIKey != "anthropic-secret" {
+			t.Fatalf("x-api-key = %q，期望仍带上官方鉴权头", gotAPIKey)
+		}
+	})
+
 	t.Run("upstream unsupported endpoint surfaces 502", func(t *testing.T) {
 		up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusNotFound)
