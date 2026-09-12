@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"net/http"
 	"net/http/httptest"
 	"testing"
 
@@ -82,8 +83,10 @@ func TestSetUpstreamHeadersExtraHeadersCannotBreakAuth(t *testing.T) {
 	if got := req.Header.Get("x-api-key"); got != "real-key" {
 		t.Errorf("x-api-key = %q，期望保持 real-key", got)
 	}
-	if got := req.Header.Get("authorization"); got != "" {
-		t.Errorf("authorization = %q，anthropic 格式不应出现该头", got)
+	// 转发路径 anthropic 格式现在也发 Authorization，这条断言的分量因此更重：
+	// 该头已成为部分中转唯一认的鉴权头，被 extraHeaders 劫持等于把请求打到别人的账上。
+	if got := req.Header.Get("authorization"); got != "Bearer real-key" {
+		t.Errorf("authorization = %q，期望保持 Bearer real-key（不可被 extraHeaders 劫持）", got)
 	}
 	if got := req.Header.Get("content-type"); got != "application/json" {
 		t.Errorf("content-type = %q，期望保持 application/json", got)
@@ -105,44 +108,69 @@ func TestApplyExtraHeadersNilAndEmpty(t *testing.T) {
 	}
 }
 
-// TestSetModelsAuthHeadersSendsBothForAnthropic 锁住 /v1/models 探测路径与转发路径的
-// 有意分裂：anthropic 格式下探测请求必须同时带 x-api-key 和 Authorization。
-//
-// 判据来自实测 anyrouter.top：只带 x-api-key 返回 401，带 Authorization 返回 200。
-// new-api / one-api 系中转把 /v1/models 暴露在 OpenAI 风味路由上，只认 Authorization；
-// 少了它，这类 provider 转发正常却查不出模型列表，健康检测还会误判成「鉴权失败」。
-func TestSetModelsAuthHeadersSendsBothForAnthropic(t *testing.T) {
-	h := make(map[string][]string)
+// blankHeader 返回一个不带任何默认头的 http.Header，便于断言「某个头不存在」。
+func blankHeader(t *testing.T) http.Header {
+	t.Helper()
 	header := httptest.NewRequest("GET", "http://gateway.invalid", nil).Header
 	for k := range header {
 		delete(header, k)
 	}
-	_ = h
+	return header
+}
 
-	SetModelsAuthHeaders(header, "anthropic", "real-key")
+// TestSetUpstreamAuthHeadersSendsBothForAnthropic 锁住核心契约：anthropic 格式下
+// x-api-key 与 Authorization 两个头都要带，三条出网路径（转发、模型列表、健康检测）一致。
+//
+// 判据来自实测：new-api / one-api 系中转（anyrouter、agentrouter）主要按 Authorization
+// 取令牌——Claude Code 对接它们的官方说明让用户设 ANTHROPIC_AUTH_TOKEN 而非
+// ANTHROPIC_API_KEY，前者发的就是 Authorization: Bearer。只发 x-api-key 时
+// anyrouter.top 的 /v1/models 返回 401、带 Authorization 返回 200。
+func TestSetUpstreamAuthHeadersSendsBothForAnthropic(t *testing.T) {
+	header := blankHeader(t)
+
+	SetUpstreamAuthHeaders(header, "anthropic", "real-key")
 
 	if got := header.Get("x-api-key"); got != "real-key" {
 		t.Errorf("x-api-key = %q，期望 real-key（Anthropic 官方只读这个头）", got)
 	}
 	if got := header.Get("authorization"); got != "Bearer real-key" {
-		t.Errorf("authorization = %q，期望 Bearer real-key（中转只认这个头）", got)
+		t.Errorf("authorization = %q，期望 Bearer real-key（中转主要认这个头）", got)
 	}
 	if got := header.Get("anthropic-version"); got != "2023-06-01" {
 		t.Errorf("anthropic-version = %q，期望 2023-06-01（官方缺了会 400）", got)
 	}
 }
 
-// TestSetModelsAuthHeadersOpenAIFormatsUnchanged 锁住非 anthropic 格式不受本次改动影响：
-// 只发 Authorization，不得多出 x-api-key / anthropic-version。
-func TestSetModelsAuthHeadersOpenAIFormatsUnchanged(t *testing.T) {
+// TestSetUpstreamAuthHeadersAnthropicEmptyKeyOmitsBearer 锁住空 key 的边界：
+// 不补空 Authorization。空 key 是可达状态（provider.apiKey 留空且客户端未带鉴权头，
+// ResolveAPIKeyWithSource 返回 ""/none，转发不阻断），典型是本地不校验鉴权的兼容服务；
+// 给它发 "Bearer "（空令牌）可能被解析成非法 Authorization 而 400，比不发更糟。
+func TestSetUpstreamAuthHeadersAnthropicEmptyKeyOmitsBearer(t *testing.T) {
+	header := blankHeader(t)
+
+	SetUpstreamAuthHeaders(header, "anthropic", "")
+
+	if got := header.Get("authorization"); got != "" {
+		t.Errorf("authorization = %q，空 key 时不应补该头", got)
+	}
+	if _, present := header["Authorization"]; present {
+		t.Error("Authorization 键不应存在（设空字符串与不设是两种语义）")
+	}
+	// x-api-key 与 anthropic-version 仍按原行为写入，逐字节保持改造前语义。
+	if got := header.Get("anthropic-version"); got != "2023-06-01" {
+		t.Errorf("anthropic-version = %q，期望仍写入", got)
+	}
+}
+
+// TestSetUpstreamAuthHeadersOpenAIFormatsUnchanged 锁住非 anthropic 格式不受影响：
+// 只发 Authorization，不得多出 x-api-key / anthropic-version；空 key 仍写空 Bearer，
+// 与改造前逐字节一致（openai 系原本就无条件写这个头）。
+func TestSetUpstreamAuthHeadersOpenAIFormatsUnchanged(t *testing.T) {
 	for _, format := range []string{"openai", "openai-responses"} {
 		t.Run(format, func(t *testing.T) {
-			header := httptest.NewRequest("GET", "http://gateway.invalid", nil).Header
-			for k := range header {
-				delete(header, k)
-			}
+			header := blankHeader(t)
 
-			SetModelsAuthHeaders(header, format, "test-key")
+			SetUpstreamAuthHeaders(header, format, "test-key")
 
 			if got := header.Get("authorization"); got != "Bearer test-key" {
 				t.Errorf("authorization = %q", got)
@@ -153,22 +181,48 @@ func TestSetModelsAuthHeadersOpenAIFormatsUnchanged(t *testing.T) {
 			if got := header.Get("anthropic-version"); got != "" {
 				t.Errorf("anthropic-version = %q，非 anthropic 格式不应出现该头", got)
 			}
+
+			empty := blankHeader(t)
+			SetUpstreamAuthHeaders(empty, format, "")
+			if got := empty.Get("authorization"); got != "Bearer " {
+				t.Errorf("空 key 时 authorization = %q，期望 %q（保持改造前行为）", got, "Bearer ")
+			}
 		})
 	}
 }
 
-// TestForwardPathKeepsAnthropicAuthOnly 与上面两条配对，把「转发路径不跟着改」写死。
-// /v1/messages 是真正的 Anthropic 协议端点，两个鉴权头都带可能被部分上游判为冲突；
-// 而用户实测转发路径本来就是通的，没有理由冒这个风险。
-func TestForwardPathKeepsAnthropicAuthOnly(t *testing.T) {
+// TestForwardPathSendsBothAuthHeadersForAnthropic 把转发路径 /v1/messages 的新契约写死：
+// 与探测路径共用 SetUpstreamAuthHeaders，anthropic 格式下两个鉴权头都带。
+//
+// 此前这里断言的是「转发路径不应带 authorization」，理由是「两个头都带可能被部分上游
+// 判为冲突」。那是保守推断，已被三个真实端点实测证伪（均用假 key，只看头组合的反应）：
+//
+//	api.anthropic.com  只带 x-api-key → 401 authentication_error；两个都带 → 同一错误
+//	anyrouter.top      只带 x-api-key / 只带 Bearer / 两个都带 → 均 401「无效的令牌」
+//	agentrouter.org    三种组合 → 均 401 unauthorized_client_error
+func TestForwardPathSendsBothAuthHeadersForAnthropic(t *testing.T) {
 	req := httptest.NewRequest("POST", "http://gateway.invalid", nil)
 	setUpstreamHeaders(req, &config.Provider{Format: "anthropic", APIKey: "real-key"}, "")
 
 	if got := req.Header.Get("x-api-key"); got != "real-key" {
 		t.Errorf("x-api-key = %q", got)
 	}
-	if got := req.Header.Get("authorization"); got != "" {
-		t.Errorf("authorization = %q，转发路径不应带该头（与 /v1/models 探测路径有意不同）", got)
+	if got := req.Header.Get("authorization"); got != "Bearer real-key" {
+		t.Errorf("authorization = %q，转发路径也要带该头（中转主要按它取令牌）", got)
+	}
+	if got := req.Header.Get("anthropic-version"); got != "2023-06-01" {
+		t.Errorf("anthropic-version = %q", got)
+	}
+}
+
+// TestForwardPathAnthropicEmptyKeyOmitsBearer 转发路径的空 key 边界，理由同
+// TestSetUpstreamAuthHeadersAnthropicEmptyKeyOmitsBearer。
+func TestForwardPathAnthropicEmptyKeyOmitsBearer(t *testing.T) {
+	req := httptest.NewRequest("POST", "http://gateway.invalid", nil)
+	setUpstreamHeaders(req, &config.Provider{Format: "anthropic"}, "")
+
+	if _, present := req.Header["Authorization"]; present {
+		t.Errorf("Authorization = %q，空 key 时不应补该头", req.Header.Get("authorization"))
 	}
 }
 
