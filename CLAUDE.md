@@ -70,7 +70,7 @@ This file provides guidance to AI coding assistants (Claude Code, Codex, and oth
 
 仓库当前以 Go 实现为主：
 
-- **Go 版（当前主版本）**：根目录是 Go module（Go 1.23），所有新功能与修复优先在这里完成。
+- **Go 版（当前主版本）**：根目录是 Go module，工具链与 CI 用 Go 1.27，`go.mod` 的 `go 1.23` 是语言版本下限（不是工具链选择器，故不随镜像升级上抬）。所有新功能与修复优先在这里完成。
 - **Node.js 版（历史参考）**：最后版本已固化为 Git tag `v1.0.0-node`。修改 converter、router、proxy、vision、cache 时可用该 tag 核对兼容语义；Go 版的严格配置校验、动态 FIFO、三协议转换和运行时 hardening 属于有意演进，不要求逐函数照搬历史实现。
 
 Go 源码注释、日志、README 主要使用中文；新增说明请保持这一约定。
@@ -96,21 +96,21 @@ Go 源码注释、日志、README 主要使用中文；新增说明请保持这�
 
 ## Build, Test, and Development Commands
 
-本项目 Go 开发验证必须优先在 Docker 容器内执行；不要因为宿主机缺少 `go`/`gofmt` 就判定无法验证。验证容器名固定使用 `ai-gateway-dev-verify`，避免与正式服务容器混淆。运行服务镜像是 distroless，不含 Go 工具链；格式化、测试和 vet 应使用 `golang:1.23-alpine` 临时容器运行，例如：
+本项目 Go 开发验证必须优先在 Docker 容器内执行；不要因为宿主机缺少 `go`/`gofmt` 就判定无法验证。验证容器名固定使用 `ai-gateway-dev-verify`，避免与正式服务容器混淆。运行服务镜像是 distroless，不含 Go 工具链；格式化、测试和 vet 应使用 `golang:1.27-alpine` 临时容器运行，例如：
 
 ```bash
-docker run --pull never --rm --name ai-gateway-dev-verify -v "$PWD":/work -w /work golang:1.23-alpine go test ./...
-docker run --pull never --rm --name ai-gateway-dev-verify -v "$PWD":/work -w /work golang:1.23-alpine gofmt -w ./cmd ./internal
-docker run --pull never --rm --name ai-gateway-dev-verify -v "$PWD":/work -w /work golang:1.23-alpine go vet ./...
+docker run --pull never --rm --name ai-gateway-dev-verify -v "$PWD":/work -w /work golang:1.27-alpine go test ./...
+docker run --pull never --rm --name ai-gateway-dev-verify -v "$PWD":/work -w /work golang:1.27-alpine gofmt -w ./cmd ./internal
+docker run --pull never --rm --name ai-gateway-dev-verify -v "$PWD":/work -w /work golang:1.27-alpine go vet ./...
 ```
 
 race 检测需使用 Debian 版镜像（预装 gcc）：
 
 ```bash
-docker run --pull never --rm --name ai-gateway-dev-verify -v "$PWD":/work -w /work golang:1.23 go test -race ./...
+docker run --pull never --rm --name ai-gateway-dev-verify -v "$PWD":/work -w /work golang:1.27 go test -race ./...
 ```
 
-`golang:1.23-alpine` 没有 gcc；临时从 alpine 源安装 `gcc`/`musl-dev` 曾两次分别卡住
+`golang:1.27-alpine` 没有 gcc；临时从 alpine 源安装 `gcc`/`musl-dev` 曾两次分别卡住
 18 分钟和 17 分钟。其余检查继续使用 Alpine 镜像，以保持镜像体积小、启动快。
 
 ```bash

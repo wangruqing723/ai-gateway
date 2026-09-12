@@ -2,7 +2,7 @@
 
 轻量本地 API Gateway，统一接入 Claude Code、Claude Desktop 和 Codex CLI，并在 Anthropic、OpenAI Chat、OpenAI Responses 三种客户端格式和不同上游 provider 之间路由、转换与转发。
 
-**当前主版本**：Go 1.23。Node.js 最后版本已固化为 Git tag `v1.0.0-node`。
+**当前主版本**：Go 1.27（工具链镜像与 CI 均为 1.27；`go.mod` 语言下限保持 1.23）。Node.js 最后版本已固化为 Git tag `v1.0.0-node`。
 
 ## 特性
 
@@ -114,7 +114,7 @@ go test ./...
 
 ### Docker 内验证
 
-本项目 Go 开发验证优先在 Docker 容器中执行。运行镜像是 distroless，不含 Go 工具链；格式化、测试、vet 使用 `golang:1.23-alpine` 临时容器，容器名固定为 `ai-gateway-dev-verify`：
+本项目 Go 开发验证优先在 Docker 容器中执行。运行镜像是 distroless，不含 Go 工具链；格式化、测试、vet 使用 `golang:1.27-alpine` 临时容器，容器名固定为 `ai-gateway-dev-verify`：
 
 ```bash
 docker run --pull never --rm --name ai-gateway-dev-verify \
@@ -123,12 +123,12 @@ docker run --pull never --rm --name ai-gateway-dev-verify \
   -v "$PWD":/work \
   -v /tmp/ai-gateway-gomodcache:/gomodcache \
   -w /work \
-  golang:1.23-alpine go test ./...
+  golang:1.27-alpine go test ./...
 
 docker run --pull never --rm --name ai-gateway-dev-verify \
   -v "$PWD":/work \
   -w /work \
-  golang:1.23-alpine gofmt -w ./cmd ./internal
+  golang:1.27-alpine gofmt -w ./cmd ./internal
 ```
 
 ## 管理页面
