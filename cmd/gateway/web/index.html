@@ -238,10 +238,24 @@
                                                 <th scope="col" class="whitespace-nowrap px-3 py-3 text-right font-bold">操作</th>
                                             </tr>
                                         </thead>
-                                        <tbody class="divide-y divide-line">
+                                        <tbody class="divide-y divide-line" x-ref="routeRows" :class="isDragging('route') ? 'gw-dragging' : ''">
                                             <template x-for="(route, index) in config.routes" :key="index">
-                                                <tr class="group bg-panel/35 transition hover:bg-white/[.04]">
-                                                    <td class="w-px whitespace-nowrap px-3 py-2.5 align-top font-mono text-xs text-muted" x-text="index + 1"></td>
+                                                <!-- data-drag-row 是 dropIndexAt 找行的锚点，不依赖 tbody>tr 结构假设。
+                                                     落点指示线画在 tr 上（规则同时覆盖 > td，见 tailwind.css 的说明）。 -->
+                                                <tr data-drag-row class="group bg-panel/35 transition hover:bg-white/[.04]"
+                                                    :class="[isRowDragSource('route', index) ? 'gw-drag-source' : '', rowDropClass('route', index, config.routes.length)]">
+                                                    <!-- 序号列兼作拖拽把手：序号本身就是「第几条」的视觉锚点，
+                                                         把手贴着它最不占宽度。只有 2 条以上才可拖（1 条没有顺序可言）。 -->
+                                                    <td class="w-px whitespace-nowrap px-3 py-2.5 align-top">
+                                                        <div class="flex items-center gap-1"
+                                                             :class="config.routes.length > 1 ? 'gw-drag-handle' : ''"
+                                                             @pointerdown="config.routes.length > 1 && startRowDrag('route', index, $event)">
+                                                            <span x-show="config.routes.length > 1" x-cloak
+                                                                  class="material-symbols-outlined text-[16px] text-muted/50 transition group-hover:text-muted"
+                                                                  title="按住拖动可调整顺序" aria-hidden="true">drag_indicator</span>
+                                                            <span class="font-mono text-xs text-muted" x-text="index + 1"></span>
+                                                        </div>
+                                                    </td>
                                                     <td class="w-px px-3 py-2.5 align-top">
                                                         <span class="whitespace-nowrap font-mono text-sm font-bold text-cyan" x-text="route.match"></span>
                                                         <!-- 策略只在多候选时有意义，单候选写非 failover 后端会直接报错 -->
@@ -1761,21 +1775,35 @@
                          边框盒子（上一版分区盒>行卡盒>内栅格三层嵌套，视觉噪且
                          每卡吃掉大量内边距）。行高由 field 控件高度决定 ≈ 44px，
                          5 个候选全展开也不到 250px。 -->
-                    <div class="divide-y divide-line">
-                        <!-- 表头：text-[11px] 一行，列宽与数据行 flex 结构对位 -->
+                    <div class="divide-y divide-line" x-ref="targetRows" :class="isDragging('target') ? 'gw-dragging' : ''">
+                        <!-- 表头：text-[11px] 一行，列宽与数据行 flex 结构对位。
+                             表头不带 data-drag-row，所以 dropIndexAt 不会把它算成一行。 -->
                         <div class="flex items-center gap-2 pb-1.5 text-[11px] font-bold uppercase tracking-wide text-muted">
-                            <span class="w-6 shrink-0"></span>
+                            <span class="w-10 shrink-0"></span>
                             <span class="w-36 shrink-0">Provider</span>
                             <span class="min-w-0 flex-1">模型</span>
                             <span class="shrink-0 pr-0.5">操作</span>
                         </div>
-                        <template x-for="(target, ti) in routeForm.targets" :key="ti">
+                        <!-- :key 用 target._id 而不是下标 ti：拖拽换位后下标指向的是另一条
+                             数据，Alpine 会保留原位 DOM 只改绑定，而行内 <select> 的选中态
+                             在 options 已渲染时不会被重新认领（同下方 :selected 那段注释的
+                             成因），表现是拖完两行 provider 串了。_id 跟着数据走，
+                             Alpine 于是移动节点而不是复用错行。 -->
+                        <template x-for="(target, ti) in routeForm.targets" :key="target._id">
                             <!-- 数据行：单行 flex（序号 | Provider 下拉 | 模型输入 | 操作按钮组），
                                  无盒子、无卡片头、无每行重复的标签列。悬停行高亮沿用
                                  Provider 列表的 bg-panel/35 + hover:bg-white/[.04]。
                                  <sm 改两行堆叠（select+输入换行，按钮组随第二行右对齐），
                                  375px 也不横向滚动。 -->
-                            <div class="flex flex-wrap items-center gap-2 py-1.5 transition hover:bg-white/[.04]">
+                            <div data-drag-row class="flex flex-wrap items-center gap-2 py-1.5 transition hover:bg-white/[.04]"
+                                 :class="[isRowDragSource('target', ti) ? 'gw-drag-source' : '', rowDropClass('target', ti, routeForm.targets.length)]">
+                                <!-- 把手在序号左侧、与序号同属一个 flex 盒：序号列只有 w-6，
+                                     再塞图标会把「主」徽标挤变形，所以把手单独占一格。
+                                     只有 2 个以上候选才可拖（1 个没有顺序可言）。 -->
+                                <span x-show="routeForm.targets.length > 1" x-cloak
+                                      class="material-symbols-outlined shrink-0 text-[16px] text-muted/50 transition hover:text-muted gw-drag-handle"
+                                      @pointerdown="startRowDrag('target', ti, $event)"
+                                      title="按住拖动可调整尝试顺序" aria-hidden="true">drag_indicator</span>
                                 <!-- 序号列：第 1 个是主目标小徽标（文本「主」+cyan，不止靠颜色），
                                      其余是数字。完整语义在分区头「按顺序尝试，第一个为主目标」。 -->
                                 <span x-show="ti === 0" x-cloak class="flex w-6 shrink-0 items-center justify-center">
@@ -2048,6 +2076,15 @@
                 // 未保存浮层的拖拽状态。dirtyToastPos 为 null 表示没拖过，用默认右下角。
                 draggingDirty: false,
                 dirtyToastPos: null,
+                // 列表拖拽排序的进行中状态，路由列表与弹窗内候选列表共用。
+                // null = 没在拖；拖拽中为 { kind, from, to }：kind 区分两处列表，
+                // from 是拖起的下标，to 是插入点（0..length，落在两行之间）。
+                // 只在 pointerup 时才真正换位，所以这里存的是「预览落点」而非既成事实。
+                rowDrag: null,
+                // 候选行的稳定 key 序号，见 newRouteTarget 的 _id。
+                // 候选行带 select / input，用下标当 x-for key 时拖动换位会让 Alpine
+                // 复用错行的 DOM、把值串到别的候选上，所以每行需要一个跟着数据走的身份。
+                _routeTargetSeq: 0,
                 tip: { show: false, text: '', x: 0, y: 0 },
                 // _confirmResolve 存 Promise 的 resolve，让 confirm 从阻塞调用变成 await
                 confirmDialog: { open: false, title: '', message: '', confirmText: '删除' },
@@ -2161,7 +2198,10 @@
                     // 目标候选列表，按顺序作为故障转移的尝试顺序；至少 1 个，最多 5 个
                     // models/modelsLoading（查询远程模型列表）与 limitsOpen（行内上限
                     // 展开区）都是瞬态状态，初始占位保证响应式，saveRoute 不读它们
-                    targets: [{ provider: '', model: '', maxTokens: null, contextWindow: null, models: [], modelsLoading: false, limitsOpen: false }],
+                    // _id 是 x-for 的稳定 key（见 _routeTargetSeq）；这份初始占位在
+                    // 真正打开弹窗前就会被 addRoute / editRoute 整体替换掉，给 0 只为
+                    // 让首次渲染也有 key，不与 newRouteTarget 的自增值（从 1 起）撞车。
+                    targets: [{ _id: 0, provider: '', model: '', maxTokens: null, contextWindow: null, models: [], modelsLoading: false, limitsOpen: false }],
                     // 候选选择策略，空等同 failover（按配置顺序）
                     strategy: '',
                     maxTokens: null,
@@ -4280,8 +4320,13 @@
                 // 是瞬态状态，saveRoute 不读它们。
                 // limitsOpen 初值跟着参数走：已配上限的候选打开弹窗时默认展开——
                 // 值已经在了，藏起来反而危险（用户看不到已有的覆盖，容易存出非预期的配置）。
+                // _id 是这一行的稳定身份，给 x-for 的 :key 用，同样不落盘。
+                // 不能继续用下标当 key：拖拽换位后下标 1 指向的是另一条数据，Alpine 会
+                // 把原来那行的 DOM 留在原位只改绑定值，而行内 <select> 的选中态在
+                // options 已渲染的情况下不会被重新认领（见模板里 :selected 那段注释的
+                // 同源问题），表现就是拖完两行的 provider 串了。
                 newRouteTarget(provider, model = '', maxTokens = null, contextWindow = null) {
-                    return { provider, model, maxTokens, contextWindow, models: [], modelsLoading: false, limitsOpen: maxTokens != null || contextWindow != null };
+                    return { _id: ++this._routeTargetSeq, provider, model, maxTokens, contextWindow, models: [], modelsLoading: false, limitsOpen: maxTokens != null || contextWindow != null };
                 },
 
                 // 视觉字段的瞬态查询状态。三处 routeForm 重建（addRoute / editRoute /
@@ -4551,6 +4596,152 @@
                     const temp = this.config.routes[index];
                     this.config.routes[index] = this.config.routes[newIndex];
                     this.config.routes[newIndex] = temp;
+                },
+
+                // ── 列表拖拽排序 ────────────────────────────────────
+                // 路由列表与弹窗内的候选列表共用这一套。两处的顺序都有语义
+                // （路由按顺序匹配首条命中；候选按顺序尝试、第一个是主目标），
+                // 用上下按钮把一条规则从第 8 位挪到第 1 位要点 7 次，拖拽是这里的正解。
+                //
+                // 上下按钮保留不动：键盘用户与「就差一格」的微调都还需要它，
+                // 而拖拽对指针设备友好但没有键盘等价物。两条路径都只改内存数组，
+                // 落盘仍由顶部保存按钮统一负责（与原 moveRoute 语义一致）。
+                //
+                // 不用 HTML5 draggable / dragover：那套在 <tr> 上的落点计算依赖
+                // dragover 的节流频率，且 Firefox 对 table row 的 drag image 处理
+                // 与 Chrome 不一致。改用 pointer 事件，与既有的 startDragDirty 同一套
+                // 范式（pointermove/pointerup/pointercancel 三件套挂 window）。
+
+                // rowDrag.kind 区分两处列表，from 是拖起的下标，
+                // to 是插入点，取值 0..length —— 落在「第 to 项之前」。
+                // 这个口径让「拖到最后」能表达成 to === length，不需要额外的边界标志。
+                startRowDrag(kind, index, event) {
+                    // 只响应主键/单指，理由同 startDragDirty：右键菜单和多指手势不该起拖
+                    if (event.button !== undefined && event.button !== 0) return;
+                    const list = this.dragList(kind);
+                    if (!list || list.length < 2) return;
+
+                    // 把手上有 touch-action: none，触屏纵滑不会被浏览器抢成滚动手势。
+                    // setPointerCapture 让后续 move/up 全部锁定在把手上，
+                    // 光标掠过 <select> 或 <input> 时不会被它们截走。
+                    if (event.pointerId !== undefined && event.currentTarget?.setPointerCapture) {
+                        try {
+                            event.currentTarget.setPointerCapture(event.pointerId);
+                        } catch {
+                            // 个别浏览器在元素刚重渲染时会抛 NotFoundError：
+                            // 捕获不到就退回 window 监听，拖拽照常可用
+                        }
+                    }
+
+                    this.rowDrag = { kind, from: index, to: index };
+
+                    const onMove = (e) => {
+                        const to = this.dropIndexAt(kind, e.clientY);
+                        if (to !== null && this.rowDrag) this.rowDrag.to = to;
+                    };
+                    const onUp = () => {
+                        const drag = this.rowDrag;
+                        this.rowDrag = null;
+                        window.removeEventListener('pointermove', onMove);
+                        window.removeEventListener('pointerup', onUp);
+                        window.removeEventListener('pointercancel', onUp);
+                        if (drag) this.applyRowDrag(drag);
+                    };
+                    window.addEventListener('pointermove', onMove);
+                    window.addEventListener('pointerup', onUp);
+                    // 指针被系统取消（切窗口、手势中断）也要收尾，否则监听器泄漏、
+                    // 且 rowDrag 会一直留着让某行卡在半透明状态
+                    window.addEventListener('pointercancel', onUp);
+                },
+
+                // dragList 把 kind 映射到真实数组，读写都走它，
+                // 免得每个方法各写一遍 kind === 'route' ? ... : ... 的三元。
+                dragList(kind) {
+                    if (kind === 'route') return this.config.routes;
+                    if (kind === 'target') return this.routeForm.targets;
+                    return null;
+                },
+
+                // dropIndexAt 按指针的 clientY 算插入点。
+                // 逐行取 getBoundingClientRect 而不是用 pointermove 的 target：
+                // 指针捕获期间 target 恒为把手，拿不到当前悬停的行；而且行内还有
+                // 展开的上限区，靠 DOM 归属反查行的写法在那里会算错。
+                //
+                // 判据是「指针落在该行的上半还是下半」：上半插到它前面，下半插到它后面。
+                // 用中线而不是行边界，才能在整行范围内都给出一个明确落点，
+                // 不留死区（行边界写法在行内 40px 高的区域里没有任何反馈）。
+                dropIndexAt(kind, clientY) {
+                    const rows = this.dragRowElements(kind);
+                    if (!rows.length) return null;
+
+                    // 指针在首行上方 / 末行下方时直接吸附到两端，
+                    // 不然快速拖到列表外会因为找不到匹配行而 return null、指示线卡住
+                    const firstRect = rows[0].getBoundingClientRect();
+                    if (clientY < firstRect.top) return 0;
+                    const lastRect = rows[rows.length - 1].getBoundingClientRect();
+                    if (clientY > lastRect.bottom) return rows.length;
+
+                    for (let i = 0; i < rows.length; i++) {
+                        const rect = rows[i].getBoundingClientRect();
+                        if (clientY >= rect.top && clientY <= rect.bottom) {
+                            return clientY < rect.top + rect.height / 2 ? i : i + 1;
+                        }
+                    }
+                    return null;
+                },
+
+                // 行元素按 data-drag-row 属性查，不依赖 tbody > tr 之类的结构假设：
+                // 候选列表是 div、路由列表是 tr，而且两者外层容器都还有别的兄弟节点
+                // （表头行、空状态行）。属性选择器让模板结构以后怎么调都不影响这里。
+                dragRowElements(kind) {
+                    const root = kind === 'route' ? this.$refs.routeRows : this.$refs.targetRows;
+                    if (!root) return [];
+                    return Array.from(root.querySelectorAll('[data-drag-row]'));
+                },
+
+                // applyRowDrag 把预览落点变成真正的数组换位。
+                // splice 出再 splice 入，而不是像 moveRoute 那样两两交换：
+                // 交换只对相邻一格成立，跨多行拖动必须整体搬移，
+                // 中间那些行要顺序上移/下移一格而不是跟着乱换。
+                applyRowDrag({ kind, from, to }) {
+                    const list = this.dragList(kind);
+                    if (!list) return;
+                    if (!Number.isInteger(from) || !Number.isInteger(to)) return;
+                    // to 是「插入到第 to 项之前」的口径，所以 from 和 from+1 都表示原位。
+                    // 不提前挡住的话，原地松手会走一遍 splice 往返，白白让 Alpine
+                    // 重渲染整张列表（弹窗里还会连带重建 select，闪一下）。
+                    if (to === from || to === from + 1) return;
+
+                    const [moved] = list.splice(from, 1);
+                    // 取出后数组左移了一格：落点在 from 之后时下标要减 1。
+                    const target = to > from ? to - 1 : to;
+                    list.splice(target, 0, moved);
+                },
+
+                // ── 模板绑定用的小查询 ──────────────────────────────
+
+                // 正在拖这一行（压暗它自己）。
+                isRowDragSource(kind, index) {
+                    return !!this.rowDrag && this.rowDrag.kind === kind && this.rowDrag.from === index;
+                },
+
+                // 落点指示线该画在哪：返回类名，供 :class 直接用。
+                // 只在第 to 项上画上缘线；to === length 时列表末尾没有第 to 项可挂，
+                // 改成在最后一行画下缘线，所以需要 before/after 两个类。
+                // 原位（to === from 或 from+1）不画：那两个位置松手什么都不会变，
+                // 画一条线反而在暗示「会插到这里」。
+                rowDropClass(kind, index, length) {
+                    const drag = this.rowDrag;
+                    if (!drag || drag.kind !== kind) return '';
+                    if (drag.to === drag.from || drag.to === drag.from + 1) return '';
+                    if (drag.to === index) return 'gw-drop-before';
+                    if (drag.to === length && index === length - 1) return 'gw-drop-after';
+                    return '';
+                },
+
+                // 拖拽进行中给列表容器挂 grabbing 光标 + 禁选区。
+                isDragging(kind) {
+                    return !!this.rowDrag && this.rowDrag.kind === kind;
                 }
             };
         }

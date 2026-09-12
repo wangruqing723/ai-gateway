@@ -36,6 +36,15 @@
                 // 未保存浮层的拖拽状态。dirtyToastPos 为 null 表示没拖过，用默认右下角。
                 draggingDirty: false,
                 dirtyToastPos: null,
+                // 列表拖拽排序的进行中状态，路由列表与弹窗内候选列表共用。
+                // null = 没在拖；拖拽中为 { kind, from, to }：kind 区分两处列表，
+                // from 是拖起的下标，to 是插入点（0..length，落在两行之间）。
+                // 只在 pointerup 时才真正换位，所以这里存的是「预览落点」而非既成事实。
+                rowDrag: null,
+                // 候选行的稳定 key 序号，见 newRouteTarget 的 _id。
+                // 候选行带 select / input，用下标当 x-for key 时拖动换位会让 Alpine
+                // 复用错行的 DOM、把值串到别的候选上，所以每行需要一个跟着数据走的身份。
+                _routeTargetSeq: 0,
                 tip: { show: false, text: '', x: 0, y: 0 },
                 // _confirmResolve 存 Promise 的 resolve，让 confirm 从阻塞调用变成 await
                 confirmDialog: { open: false, title: '', message: '', confirmText: '删除' },
@@ -149,7 +158,10 @@
                     // 目标候选列表，按顺序作为故障转移的尝试顺序；至少 1 个，最多 5 个
                     // models/modelsLoading（查询远程模型列表）与 limitsOpen（行内上限
                     // 展开区）都是瞬态状态，初始占位保证响应式，saveRoute 不读它们
-                    targets: [{ provider: '', model: '', maxTokens: null, contextWindow: null, models: [], modelsLoading: false, limitsOpen: false }],
+                    // _id 是 x-for 的稳定 key（见 _routeTargetSeq）；这份初始占位在
+                    // 真正打开弹窗前就会被 addRoute / editRoute 整体替换掉，给 0 只为
+                    // 让首次渲染也有 key，不与 newRouteTarget 的自增值（从 1 起）撞车。
+                    targets: [{ _id: 0, provider: '', model: '', maxTokens: null, contextWindow: null, models: [], modelsLoading: false, limitsOpen: false }],
                     // 候选选择策略，空等同 failover（按配置顺序）
                     strategy: '',
                     maxTokens: null,

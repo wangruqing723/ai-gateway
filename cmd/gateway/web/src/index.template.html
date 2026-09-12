@@ -238,10 +238,24 @@
                                                 <th scope="col" class="whitespace-nowrap px-3 py-3 text-right font-bold">操作</th>
                                             </tr>
                                         </thead>
-                                        <tbody class="divide-y divide-line">
+                                        <tbody class="divide-y divide-line" x-ref="routeRows" :class="isDragging('route') ? 'gw-dragging' : ''">
                                             <template x-for="(route, index) in config.routes" :key="index">
-                                                <tr class="group bg-panel/35 transition hover:bg-white/[.04]">
-                                                    <td class="w-px whitespace-nowrap px-3 py-2.5 align-top font-mono text-xs text-muted" x-text="index + 1"></td>
+                                                <!-- data-drag-row 是 dropIndexAt 找行的锚点，不依赖 tbody>tr 结构假设。
+                                                     落点指示线画在 tr 上（规则同时覆盖 > td，见 tailwind.css 的说明）。 -->
+                                                <tr data-drag-row class="group bg-panel/35 transition hover:bg-white/[.04]"
+                                                    :class="[isRowDragSource('route', index) ? 'gw-drag-source' : '', rowDropClass('route', index, config.routes.length)]">
+                                                    <!-- 序号列兼作拖拽把手：序号本身就是「第几条」的视觉锚点，
+                                                         把手贴着它最不占宽度。只有 2 条以上才可拖（1 条没有顺序可言）。 -->
+                                                    <td class="w-px whitespace-nowrap px-3 py-2.5 align-top">
+                                                        <div class="flex items-center gap-1"
+                                                             :class="config.routes.length > 1 ? 'gw-drag-handle' : ''"
+                                                             @pointerdown="config.routes.length > 1 && startRowDrag('route', index, $event)">
+                                                            <span x-show="config.routes.length > 1" x-cloak
+                                                                  class="material-symbols-outlined text-[16px] text-muted/50 transition group-hover:text-muted"
+                                                                  title="按住拖动可调整顺序" aria-hidden="true">drag_indicator</span>
+                                                            <span class="font-mono text-xs text-muted" x-text="index + 1"></span>
+                                                        </div>
+                                                    </td>
                                                     <td class="w-px px-3 py-2.5 align-top">
                                                         <span class="whitespace-nowrap font-mono text-sm font-bold text-cyan" x-text="route.match"></span>
                                                         <!-- 策略只在多候选时有意义，单候选写非 failover 后端会直接报错 -->
@@ -1761,21 +1775,35 @@
                          边框盒子（上一版分区盒>行卡盒>内栅格三层嵌套，视觉噪且
                          每卡吃掉大量内边距）。行高由 field 控件高度决定 ≈ 44px，
                          5 个候选全展开也不到 250px。 -->
-                    <div class="divide-y divide-line">
-                        <!-- 表头：text-[11px] 一行，列宽与数据行 flex 结构对位 -->
+                    <div class="divide-y divide-line" x-ref="targetRows" :class="isDragging('target') ? 'gw-dragging' : ''">
+                        <!-- 表头：text-[11px] 一行，列宽与数据行 flex 结构对位。
+                             表头不带 data-drag-row，所以 dropIndexAt 不会把它算成一行。 -->
                         <div class="flex items-center gap-2 pb-1.5 text-[11px] font-bold uppercase tracking-wide text-muted">
-                            <span class="w-6 shrink-0"></span>
+                            <span class="w-10 shrink-0"></span>
                             <span class="w-36 shrink-0">Provider</span>
                             <span class="min-w-0 flex-1">模型</span>
                             <span class="shrink-0 pr-0.5">操作</span>
                         </div>
-                        <template x-for="(target, ti) in routeForm.targets" :key="ti">
+                        <!-- :key 用 target._id 而不是下标 ti：拖拽换位后下标指向的是另一条
+                             数据，Alpine 会保留原位 DOM 只改绑定，而行内 <select> 的选中态
+                             在 options 已渲染时不会被重新认领（同下方 :selected 那段注释的
+                             成因），表现是拖完两行 provider 串了。_id 跟着数据走，
+                             Alpine 于是移动节点而不是复用错行。 -->
+                        <template x-for="(target, ti) in routeForm.targets" :key="target._id">
                             <!-- 数据行：单行 flex（序号 | Provider 下拉 | 模型输入 | 操作按钮组），
                                  无盒子、无卡片头、无每行重复的标签列。悬停行高亮沿用
                                  Provider 列表的 bg-panel/35 + hover:bg-white/[.04]。
                                  <sm 改两行堆叠（select+输入换行，按钮组随第二行右对齐），
                                  375px 也不横向滚动。 -->
-                            <div class="flex flex-wrap items-center gap-2 py-1.5 transition hover:bg-white/[.04]">
+                            <div data-drag-row class="flex flex-wrap items-center gap-2 py-1.5 transition hover:bg-white/[.04]"
+                                 :class="[isRowDragSource('target', ti) ? 'gw-drag-source' : '', rowDropClass('target', ti, routeForm.targets.length)]">
+                                <!-- 把手在序号左侧、与序号同属一个 flex 盒：序号列只有 w-6，
+                                     再塞图标会把「主」徽标挤变形，所以把手单独占一格。
+                                     只有 2 个以上候选才可拖（1 个没有顺序可言）。 -->
+                                <span x-show="routeForm.targets.length > 1" x-cloak
+                                      class="material-symbols-outlined shrink-0 text-[16px] text-muted/50 transition hover:text-muted gw-drag-handle"
+                                      @pointerdown="startRowDrag('target', ti, $event)"
+                                      title="按住拖动可调整尝试顺序" aria-hidden="true">drag_indicator</span>
                                 <!-- 序号列：第 1 个是主目标小徽标（文本「主」+cyan，不止靠颜色），
                                      其余是数字。完整语义在分区头「按顺序尝试，第一个为主目标」。 -->
                                 <span x-show="ti === 0" x-cloak class="flex w-6 shrink-0 items-center justify-center">

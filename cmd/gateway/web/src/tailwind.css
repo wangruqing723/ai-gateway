@@ -207,3 +207,27 @@
 @media (prefers-reduced-motion: reduce) {
     .gw-skeleton::after { animation: none; }
 }
+
+/* 列表拖拽排序（路由列表 + 路由弹窗内的候选列表）。同上面几个类的理由放在层外：
+   全部只从 Alpine :class 表达式引用，换成工具类就得靠 safelist 兜住。
+
+   touch-action: none 是把手能在触屏上用的关键：默认按住把手纵向滑是滚页面，
+   pointermove 会在浏览器接管手势时直接断成 pointercancel。用它而不是在
+   pointerdown 里 preventDefault——后者会连 <button> 的聚焦一起吃掉。 */
+.gw-drag-handle { cursor: grab; touch-action: none; }
+
+/* 拖拽进行中挂在列表容器上：光标离开把手后仍是 grabbing，
+   并且顺手禁掉选区（拖动时划中一片文字很难看）。 */
+.gw-dragging { cursor: grabbing; user-select: none; }
+
+/* 拖起的那一行本身：留在原位但压暗，作为「这行正被搬动」的信号。
+   不做跟手浮层——那需要克隆节点并脱离文档流，表格行克隆后列宽会塌。 */
+.gw-drag-source { opacity: .45; }
+
+/* 落点指示线。tr 上的 box-shadow 在 border-collapse 下各浏览器渲染不一致，
+   所以对表格改画在每个 td 上：逐格的 inset 线首尾相接，视觉上就是横跨整行的一条。
+   候选行是普通 div，直接画在行上。两种规则并存，各自只命中自己那类节点。 */
+.gw-drop-before { box-shadow: inset 0 2px 0 0 #00d2ff; }
+.gw-drop-after { box-shadow: inset 0 -2px 0 0 #00d2ff; }
+.gw-drop-before > td { box-shadow: inset 0 2px 0 0 #00d2ff; }
+.gw-drop-after > td { box-shadow: inset 0 -2px 0 0 #00d2ff; }
