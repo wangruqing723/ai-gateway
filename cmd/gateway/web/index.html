@@ -276,11 +276,71 @@
                                                     <td class="w-full max-w-0 px-3 py-2.5 align-top">
                                                         <div class="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1.5">
                                                             <template x-for="(target, ti) in routeTargets(route)" :key="ti">
-                                                                <div class="flex items-center gap-1.5 whitespace-nowrap">
+                                                                <div class="flex items-center gap-1.5 whitespace-nowrap" :data-inline-anchor="index + ':' + ti">
                                                                     <span class="font-mono text-[11px] text-muted" x-text="(ti + 1) + '.'"></span>
                                                                     <span class="chip bg-white/[.05] text-text" x-text="target.provider"></span>
                                                                     <span class="text-[11px] text-muted">→</span>
-                                                                    <span class="font-mono text-xs text-emerald-200" x-text="target.model || '(沿用请求模型)'"></span>
+                                                                    <!-- 模型名可就地改：只读态是文本，点一下才换成输入框。
+                                                                         provider 不给就地改——换 provider 连带 apiKey / 格式 / 上限覆盖
+                                                                         整套都变了，属结构性改动，仍走编辑弹窗。
+                                                                         role=button + tabindex 让键盘也能进入编辑（Enter 触发）。 -->
+                                                                    <template x-if="!isInlineModel(index, ti)">
+                                                                        <span class="rounded px-1 py-0.5 font-mono text-xs text-emerald-200 transition hover:bg-cyan2/10 hover:text-cyan"
+                                                                              :class="target.model ? 'cursor-pointer' : 'cursor-pointer text-muted'"
+                                                                              role="button" tabindex="0"
+                                                                              @click="startInlineModel(index, ti)"
+                                                                              @keydown.enter.prevent="startInlineModel(index, ti)"
+                                                                              @keydown.space.prevent="startInlineModel(index, ti)"
+                                                                              :title="'点击修改模型名（当前: ' + (target.model || '沿用请求模型') + '）'"
+                                                                              :aria-label="'修改候选 ' + (ti + 1) + ' 的模型名'"
+                                                                              x-text="target.model || '(沿用请求模型)'"></span>
+                                                                    </template>
+                                                                    <!-- 编辑态用 x-if 而不是 x-show：输入框带固定 id 供聚焦，
+                                                                         x-show 会让每一行都渲染一个同 id 的输入框。
+
+                                                                         控件量级刻意压到与只读态相当：这是表格行内的就地编辑，
+                                                                         不是弹窗表单。查询按钮内嵌进输入框（同弹窗候选行的写法），
+                                                                         确认 / 取消不套 .btn —— .btn 的 .625rem 纵向 padding
+                                                                         加边框是给独立操作按钮的量级，三个并排会把整行顶高一截。 -->
+                                                                    <template x-if="isInlineModel(index, ti)">
+                                                                        <span class="inline-flex items-center gap-0.5">
+                                                                            <!-- relative 是内嵌查询按钮的定位上下文。
+                                                                                 inline-flex 而不是 inline-block：inline-block 会让内部
+                                                                                 输入框参与行盒基线对齐，下方多出一截 descender 空间，
+                                                                                 与旁边的裸图标按钮就对不齐了。 -->
+                                                                            <span class="relative inline-flex items-center">
+                                                                                <!-- Enter 提交、Esc 取消；不做 blur 提交：提交会立刻写盘并
+                                                                                     热重载，误触失焦就落一次盘代价太大，改用显式按钮。 -->
+                                                                                <input id="inline-model-input" type="text" autocomplete="off" spellcheck="false"
+                                                                                       x-model="inlineModel.value"
+                                                                                       @keydown.enter.prevent="commitInlineModel()"
+                                                                                       @keydown.escape.prevent.stop="cancelInlineModel()"
+                                                                                       :aria-label="'候选 ' + (ti + 1) + ' 模型名'"
+                                                                                       placeholder="上游模型名"
+                                                                                       class="field w-44 py-0.5 pl-2 pr-7 font-mono text-xs">
+                                                                                <button type="button" @click="fetchInlineModels()"
+                                                                                        :disabled="inlineModel.modelsLoading"
+                                                                                        class="absolute right-1 top-1/2 -translate-y-1/2 rounded text-muted transition hover:text-cyan disabled:opacity-40"
+                                                                                        title="查询该 Provider 的上游模型列表" aria-label="查询上游模型列表">
+                                                                                    <span class="material-symbols-outlined text-[15px]" x-show="!inlineModel.modelsLoading">search</span>
+                                                                                    <span class="material-symbols-outlined gw-spin text-[15px]" x-show="inlineModel.modelsLoading" x-cloak>progress_activity</span>
+                                                                                </button>
+                                                                            </span>
+                                                                            <!-- 图标名必须在 vendor 的字体子集内，否则连字字体会把名字
+                                                                                 原样渲染成英文单词（见 vendor/README.md）。
+                                                                                 子集里没有 check，用同为对勾语义的 task_alt。 -->
+                                                                            <button type="button" @click="commitInlineModel()" :disabled="loading"
+                                                                                    class="inline-flex items-center rounded p-0.5 text-cyan transition hover:bg-cyan2/15 disabled:opacity-40"
+                                                                                    title="保存（Enter）" aria-label="保存模型名">
+                                                                                <span class="material-symbols-outlined text-[17px] leading-none">task_alt</span>
+                                                                            </button>
+                                                                            <button type="button" @click="cancelInlineModel()"
+                                                                                    class="inline-flex items-center rounded p-0.5 text-muted transition hover:bg-white/10 hover:text-text"
+                                                                                    title="取消（Esc）" aria-label="取消编辑">
+                                                                                <span class="material-symbols-outlined text-[17px] leading-none">close</span>
+                                                                            </button>
+                                                                        </span>
+                                                                    </template>
                                                                 </div>
                                                             </template>
                                                         </div>
@@ -2000,6 +2060,29 @@
         </div>
     </div>
 
+    <!-- 路由列表行内编辑的上游模型列表浮层。
+         fixed 定位、且挂在表格外面：路由表外层是 overflow-x-auto，absolute
+         浮层会被滚动容器裁掉（同下面 immediate-tooltip 的成因）。位置由
+         positionInlineList 按锚点实时算，滚动 / 改窗口大小时重算。
+         z-[60] 在 tooltip（70）之下、弹窗（50）之上。
+
+         :style 必须用对象形式，不能用字符串模板：字符串形式 Alpine 走
+         setAttribute('style', …) 整体替换内联样式，会把 x-show 写上的
+         display:none 一起抹掉。而 startInlineModel 一开编辑就调
+         positionInlineList，listPos 变化触发 :style 重算，于是模型列表还空着
+         浮层就露出一条空壳（就是「输入框下面多一个空白下拉框」）。
+         对象形式逐条写 style property，不碰 display。 -->
+    <div x-show="inlineModel.routeIndex >= 0 && inlineModel.models.length > 0" x-cloak x-transition
+         @click.outside="inlineModel.models = []"
+         :style="{ left: (inlineModel.listPos?.left ?? 0) + 'px', top: (inlineModel.listPos?.top ?? 0) + 'px', width: (inlineModel.listPos?.width ?? 220) + 'px' }"
+         class="fixed z-[60] max-h-52 overflow-y-auto rounded-lg border border-line bg-panel3 py-1 text-xs shadow-glow">
+        <template x-for="m in inlineModel.models" :key="m">
+            <div @click="inlineModel.value = m; inlineModel.models = []"
+                 class="cursor-pointer px-3 py-1.5 font-mono hover:bg-cyan2/10"
+                 x-text="m"></div>
+        </template>
+    </div>
+
     <!-- 自定义 tooltip：fixed 定位而不是 CSS ::after，因为徽章所在表格外层是
          overflow-x-auto，绝对定位的气泡会被滚动容器裁掉。z-[70] 在错误提示之上。
 
@@ -2085,6 +2168,14 @@
                 // 候选行带 select / input，用下标当 x-for key 时拖动换位会让 Alpine
                 // 复用错行的 DOM、把值串到别的候选上，所以每行需要一个跟着数据走的身份。
                 _routeTargetSeq: 0,
+                // 路由列表里「点击模型名就地改」的编辑态。
+                // routeIndex < 0 表示没在编辑——用哨兵值而不是 null：输入框的
+                // x-model 指向 inlineModel.value，而 x-if 移除 DOM 与子 effect 求值
+                // 的先后在 Alpine 里没有保证，置 null 会偶发读到 null.value。
+                // token 每次打开自增，供异步查询回来时判断是否已经换行/已关闭。
+                inlineModel: { routeIndex: -1, targetIndex: -1, value: '', models: [], modelsLoading: false, listPos: null, token: 0 },
+                // 行内编辑期间挂在 window 上的滚动监听，关闭时要摘掉，见 startInlineModel。
+                _inlineScrollHandler: null,
                 tip: { show: false, text: '', x: 0, y: 0 },
                 // _confirmResolve 存 Promise 的 resolve，让 confirm 从阻塞调用变成 await
                 confirmDialog: { open: false, title: '', message: '', confirmText: '删除' },
@@ -4596,6 +4687,180 @@
                     const temp = this.config.routes[index];
                     this.config.routes[index] = this.config.routes[newIndex];
                     this.config.routes[newIndex] = temp;
+                },
+
+                // ── 路由列表内的模型名就地编辑 ──────────────────────
+                // 换上游模型是这份配置里改得最频繁的一件事，走弹窗要「点编辑 → 在候选
+                // 列表里找到那一行 → 改 → 保存路由」四步，而真正变的只有一个字符串。
+                //
+                // 只放开模型名，provider 仍旧只能在弹窗里改：换 provider 意味着 apiKey、
+                // 上游格式、上限覆盖整套都换了，那是结构性改动；模型名是同一上游内部的
+                // 平移，单独改语义自洽，也不会让这条路由的其他字段失去意义。
+                //
+                // 输入框不常驻：路由列表是「看配置」的地方，11 行 × 每行最多 5 个候选
+                // 全摆成输入框，只读浏览会变成一整片表单。点击才展开，读的时候仍是文本。
+
+                // 当前是否正在编辑这一格，模板用它切换只读态 / 编辑态。
+                isInlineModel(routeIndex, targetIndex) {
+                    return this.inlineModel.routeIndex === routeIndex && this.inlineModel.targetIndex === targetIndex;
+                },
+
+                startInlineModel(routeIndex, targetIndex) {
+                    const route = this.config.routes?.[routeIndex];
+                    const target = route ? this.routeTargets(route)[targetIndex] : null;
+                    if (!target) return;
+                    this.inlineModel = {
+                        routeIndex,
+                        targetIndex,
+                        value: target.model || '',
+                        models: [],
+                        modelsLoading: false,
+                        listPos: null,
+                        // token 自增即「上一次编辑作废」，在飞的模型查询回来时据此丢弃结果
+                        token: this.inlineModel.token + 1
+                    };
+                    this.positionInlineList();
+                    // 模型列表浮层是 fixed 定位——路由表外层是 overflow-x-auto，
+                    // absolute 浮层会被滚动容器裁掉（同 immediate-tooltip 的成因）。
+                    // 代价是滚动和改窗口大小时得自己跟着重算位置。
+                    if (!this._inlineScrollHandler) {
+                        this._inlineScrollHandler = () => this.positionInlineList();
+                        // capture 才能收到表格自身那层 overflow 容器的滚动
+                        window.addEventListener('scroll', this._inlineScrollHandler, true);
+                        window.addEventListener('resize', this._inlineScrollHandler);
+                    }
+                    // 输入框是 x-if 渲染的，本轮还不存在，聚焦要等下一帧
+                    this.$nextTick(() => {
+                        const input = document.getElementById('inline-model-input');
+                        if (input) {
+                            input.focus();
+                            input.select();
+                        }
+                    });
+                },
+
+                cancelInlineModel() {
+                    this.inlineModel = {
+                        routeIndex: -1, targetIndex: -1, value: '',
+                        models: [], modelsLoading: false, listPos: null,
+                        token: this.inlineModel.token + 1
+                    };
+                    if (this._inlineScrollHandler) {
+                        window.removeEventListener('scroll', this._inlineScrollHandler, true);
+                        window.removeEventListener('resize', this._inlineScrollHandler);
+                        this._inlineScrollHandler = null;
+                    }
+                },
+
+                // 锚点每次按下标现查，不缓存元素引用：落盘失败回滚会整份换掉 config，
+                // x-for 随之重建这些节点，存着的引用会变成一个已脱离文档的空矩形。
+                inlineAnchorEl() {
+                    const state = this.inlineModel;
+                    if (state.routeIndex < 0) return null;
+                    return document.querySelector(`[data-inline-anchor="${state.routeIndex}:${state.targetIndex}"]`);
+                },
+
+                // 浮层贴着候选项的下缘展开。宽度至少 220px：上游模型名普遍比列表里
+                // 显示的那一小段长，按锚点宽度会挤成竖排单字。
+                positionInlineList() {
+                    const el = this.inlineAnchorEl();
+                    if (!el) return;
+                    const rect = el.getBoundingClientRect();
+                    const width = Math.max(rect.width, 220);
+                    this.inlineModel.listPos = {
+                        // 靠右的候选项要往左收，否则浮层探出视口右侧
+                        left: Math.max(8, Math.min(rect.left, window.innerWidth - width - 8)),
+                        top: rect.bottom + 4,
+                        width
+                    };
+                },
+
+                // 复用候选行那套查询：缓存、错误提示、空列表提醒都在 fetchModelsFor 里，
+                // 这里只负责 loading 态与结果落点。
+                async fetchInlineModels() {
+                    const state = this.inlineModel;
+                    const route = this.config.routes?.[state.routeIndex];
+                    const target = route ? this.routeTargets(route)[state.targetIndex] : null;
+                    if (!target?.provider) return;
+
+                    const token = state.token;
+                    state.modelsLoading = true;
+                    state.models = [];
+                    try {
+                        const models = await this.fetchModelsFor(target.provider);
+                        // 查询期间可能已经关掉或换去编辑别的格子，回来的结果就不该再落进去
+                        if (models && this.inlineModel.token === token) {
+                            this.inlineModel.models = models;
+                            this.positionInlineList();
+                        }
+                    } finally {
+                        if (this.inlineModel.token === token) this.inlineModel.modelsLoading = false;
+                    }
+                },
+
+                async commitInlineModel() {
+                    const state = this.inlineModel;
+                    const routeIndex = state.routeIndex;
+                    const targetIndex = state.targetIndex;
+                    const route = this.config.routes?.[routeIndex];
+                    if (!route) {
+                        this.cancelInlineModel();
+                        return;
+                    }
+                    const targets = this.routeTargets(route);
+                    const current = targets[targetIndex];
+                    if (!current) {
+                        this.cancelInlineModel();
+                        return;
+                    }
+
+                    const model = (state.value || '').trim();
+                    // 没改就直接收起：PUT 会触发全量校验 + 热重载，白发一次不划算
+                    if (model === (current.model || '')) {
+                        this.cancelInlineModel();
+                        return;
+                    }
+                    // 口径同 saveRoute：候选模型名不允许留空。后端把空 model 解释成
+                    // 「沿用请求模型」，但那是一项路由语义选择，应该在弹窗里明确地做，
+                    // 不该由「把输入框清空」这个动作顺手改掉。
+                    if (!model) {
+                        this.showStatus('模型名不能为空，如需沿用请求模型请在编辑弹窗里配置', 'error');
+                        return;
+                    }
+                    // 后端拒绝同一路由内重复的 (provider, model) 对，这里先挡一层
+                    const dup = targets.some((t, i) =>
+                        i !== targetIndex && t.provider === current.provider && (t.model || '') === model);
+                    if (dup) {
+                        this.showStatus(`候选重复: ${current.provider} / ${model}`, 'error');
+                        return;
+                    }
+
+                    const snapshot = this.snapshotConfig();
+                    this.writeTargetModel(routeIndex, targetIndex, model);
+                    // 与 saveRoute 同一套语义：落盘成功才收起，失败回滚并留着输入框，
+                    // 让用户能就着错误提示改，而不是把刚敲的值弄丢。
+                    if (await this.persistConfig()) {
+                        this.cancelInlineModel();
+                    } else {
+                        this.restoreConfig(snapshot);
+                    }
+                },
+
+                // 把模型名写回配置。必须按路由的真实形状分两条路写，不能往
+                // routeTargets 的返回值上赋值：单候选路由在磁盘上是扁平的
+                // provider/model 写法（saveRoute 有意保持），routeTargets 对它返回的是
+                // 每次调用都新建的临时对象，写进去的值下一次重渲染就没了——
+                // 表现是「改了、也保存成功了、值没变」，而且没有任何报错。
+                writeTargetModel(routeIndex, targetIndex, model) {
+                    const route = this.config.routes?.[routeIndex];
+                    if (!route) return;
+                    if (Array.isArray(route.targets) && route.targets.length) {
+                        if (route.targets[targetIndex]) route.targets[targetIndex].model = model;
+                        return;
+                    }
+                    // 扁平写法只可能有一个候选，下标必然是 0。这里不升格成 targets 数组：
+                    // 升格会让磁盘配置凭空多出一层结构，而单候选下两种写法语义完全等价。
+                    if (targetIndex === 0) route.model = model;
                 },
 
                 // ── 列表拖拽排序 ────────────────────────────────────

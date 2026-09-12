@@ -45,6 +45,14 @@
                 // 候选行带 select / input，用下标当 x-for key 时拖动换位会让 Alpine
                 // 复用错行的 DOM、把值串到别的候选上，所以每行需要一个跟着数据走的身份。
                 _routeTargetSeq: 0,
+                // 路由列表里「点击模型名就地改」的编辑态。
+                // routeIndex < 0 表示没在编辑——用哨兵值而不是 null：输入框的
+                // x-model 指向 inlineModel.value，而 x-if 移除 DOM 与子 effect 求值
+                // 的先后在 Alpine 里没有保证，置 null 会偶发读到 null.value。
+                // token 每次打开自增，供异步查询回来时判断是否已经换行/已关闭。
+                inlineModel: { routeIndex: -1, targetIndex: -1, value: '', models: [], modelsLoading: false, listPos: null, token: 0 },
+                // 行内编辑期间挂在 window 上的滚动监听，关闭时要摘掉，见 startInlineModel。
+                _inlineScrollHandler: null,
                 tip: { show: false, text: '', x: 0, y: 0 },
                 // _confirmResolve 存 Promise 的 resolve，让 confirm 从阻塞调用变成 await
                 confirmDialog: { open: false, title: '', message: '', confirmText: '删除' },

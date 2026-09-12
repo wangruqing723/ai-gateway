@@ -276,11 +276,71 @@
                                                     <td class="w-full max-w-0 px-3 py-2.5 align-top">
                                                         <div class="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1.5">
                                                             <template x-for="(target, ti) in routeTargets(route)" :key="ti">
-                                                                <div class="flex items-center gap-1.5 whitespace-nowrap">
+                                                                <div class="flex items-center gap-1.5 whitespace-nowrap" :data-inline-anchor="index + ':' + ti">
                                                                     <span class="font-mono text-[11px] text-muted" x-text="(ti + 1) + '.'"></span>
                                                                     <span class="chip bg-white/[.05] text-text" x-text="target.provider"></span>
                                                                     <span class="text-[11px] text-muted">→</span>
-                                                                    <span class="font-mono text-xs text-emerald-200" x-text="target.model || '(沿用请求模型)'"></span>
+                                                                    <!-- 模型名可就地改：只读态是文本，点一下才换成输入框。
+                                                                         provider 不给就地改——换 provider 连带 apiKey / 格式 / 上限覆盖
+                                                                         整套都变了，属结构性改动，仍走编辑弹窗。
+                                                                         role=button + tabindex 让键盘也能进入编辑（Enter 触发）。 -->
+                                                                    <template x-if="!isInlineModel(index, ti)">
+                                                                        <span class="rounded px-1 py-0.5 font-mono text-xs text-emerald-200 transition hover:bg-cyan2/10 hover:text-cyan"
+                                                                              :class="target.model ? 'cursor-pointer' : 'cursor-pointer text-muted'"
+                                                                              role="button" tabindex="0"
+                                                                              @click="startInlineModel(index, ti)"
+                                                                              @keydown.enter.prevent="startInlineModel(index, ti)"
+                                                                              @keydown.space.prevent="startInlineModel(index, ti)"
+                                                                              :title="'点击修改模型名（当前: ' + (target.model || '沿用请求模型') + '）'"
+                                                                              :aria-label="'修改候选 ' + (ti + 1) + ' 的模型名'"
+                                                                              x-text="target.model || '(沿用请求模型)'"></span>
+                                                                    </template>
+                                                                    <!-- 编辑态用 x-if 而不是 x-show：输入框带固定 id 供聚焦，
+                                                                         x-show 会让每一行都渲染一个同 id 的输入框。
+
+                                                                         控件量级刻意压到与只读态相当：这是表格行内的就地编辑，
+                                                                         不是弹窗表单。查询按钮内嵌进输入框（同弹窗候选行的写法），
+                                                                         确认 / 取消不套 .btn —— .btn 的 .625rem 纵向 padding
+                                                                         加边框是给独立操作按钮的量级，三个并排会把整行顶高一截。 -->
+                                                                    <template x-if="isInlineModel(index, ti)">
+                                                                        <span class="inline-flex items-center gap-0.5">
+                                                                            <!-- relative 是内嵌查询按钮的定位上下文。
+                                                                                 inline-flex 而不是 inline-block：inline-block 会让内部
+                                                                                 输入框参与行盒基线对齐，下方多出一截 descender 空间，
+                                                                                 与旁边的裸图标按钮就对不齐了。 -->
+                                                                            <span class="relative inline-flex items-center">
+                                                                                <!-- Enter 提交、Esc 取消；不做 blur 提交：提交会立刻写盘并
+                                                                                     热重载，误触失焦就落一次盘代价太大，改用显式按钮。 -->
+                                                                                <input id="inline-model-input" type="text" autocomplete="off" spellcheck="false"
+                                                                                       x-model="inlineModel.value"
+                                                                                       @keydown.enter.prevent="commitInlineModel()"
+                                                                                       @keydown.escape.prevent.stop="cancelInlineModel()"
+                                                                                       :aria-label="'候选 ' + (ti + 1) + ' 模型名'"
+                                                                                       placeholder="上游模型名"
+                                                                                       class="field w-44 py-0.5 pl-2 pr-7 font-mono text-xs">
+                                                                                <button type="button" @click="fetchInlineModels()"
+                                                                                        :disabled="inlineModel.modelsLoading"
+                                                                                        class="absolute right-1 top-1/2 -translate-y-1/2 rounded text-muted transition hover:text-cyan disabled:opacity-40"
+                                                                                        title="查询该 Provider 的上游模型列表" aria-label="查询上游模型列表">
+                                                                                    <span class="material-symbols-outlined text-[15px]" x-show="!inlineModel.modelsLoading">search</span>
+                                                                                    <span class="material-symbols-outlined gw-spin text-[15px]" x-show="inlineModel.modelsLoading" x-cloak>progress_activity</span>
+                                                                                </button>
+                                                                            </span>
+                                                                            <!-- 图标名必须在 vendor 的字体子集内，否则连字字体会把名字
+                                                                                 原样渲染成英文单词（见 vendor/README.md）。
+                                                                                 子集里没有 check，用同为对勾语义的 task_alt。 -->
+                                                                            <button type="button" @click="commitInlineModel()" :disabled="loading"
+                                                                                    class="inline-flex items-center rounded p-0.5 text-cyan transition hover:bg-cyan2/15 disabled:opacity-40"
+                                                                                    title="保存（Enter）" aria-label="保存模型名">
+                                                                                <span class="material-symbols-outlined text-[17px] leading-none">task_alt</span>
+                                                                            </button>
+                                                                            <button type="button" @click="cancelInlineModel()"
+                                                                                    class="inline-flex items-center rounded p-0.5 text-muted transition hover:bg-white/10 hover:text-text"
+                                                                                    title="取消（Esc）" aria-label="取消编辑">
+                                                                                <span class="material-symbols-outlined text-[17px] leading-none">close</span>
+                                                                            </button>
+                                                                        </span>
+                                                                    </template>
                                                                 </div>
                                                             </template>
                                                         </div>
@@ -1998,6 +2058,29 @@
                 </button>
             </div>
         </div>
+    </div>
+
+    <!-- 路由列表行内编辑的上游模型列表浮层。
+         fixed 定位、且挂在表格外面：路由表外层是 overflow-x-auto，absolute
+         浮层会被滚动容器裁掉（同下面 immediate-tooltip 的成因）。位置由
+         positionInlineList 按锚点实时算，滚动 / 改窗口大小时重算。
+         z-[60] 在 tooltip（70）之下、弹窗（50）之上。
+
+         :style 必须用对象形式，不能用字符串模板：字符串形式 Alpine 走
+         setAttribute('style', …) 整体替换内联样式，会把 x-show 写上的
+         display:none 一起抹掉。而 startInlineModel 一开编辑就调
+         positionInlineList，listPos 变化触发 :style 重算，于是模型列表还空着
+         浮层就露出一条空壳（就是「输入框下面多一个空白下拉框」）。
+         对象形式逐条写 style property，不碰 display。 -->
+    <div x-show="inlineModel.routeIndex >= 0 && inlineModel.models.length > 0" x-cloak x-transition
+         @click.outside="inlineModel.models = []"
+         :style="{ left: (inlineModel.listPos?.left ?? 0) + 'px', top: (inlineModel.listPos?.top ?? 0) + 'px', width: (inlineModel.listPos?.width ?? 220) + 'px' }"
+         class="fixed z-[60] max-h-52 overflow-y-auto rounded-lg border border-line bg-panel3 py-1 text-xs shadow-glow">
+        <template x-for="m in inlineModel.models" :key="m">
+            <div @click="inlineModel.value = m; inlineModel.models = []"
+                 class="cursor-pointer px-3 py-1.5 font-mono hover:bg-cyan2/10"
+                 x-text="m"></div>
+        </template>
     </div>
 
     <!-- 自定义 tooltip：fixed 定位而不是 CSS ::after，因为徽章所在表格外层是
