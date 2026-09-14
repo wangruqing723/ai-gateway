@@ -77,14 +77,16 @@ type providerBucket struct {
 }
 
 type metricBucket struct {
-	second       int64
-	requests     int
-	successes    int
-	visionImages int
-	visionFailed int
-	statusCodes  map[string]int
-	latency      latencyHistogram
-	providers    map[string]*providerBucket
+	second           int64
+	requests         int
+	successes        int
+	visionImages     int
+	visionFailed     int
+	visionCached     int
+	visionRecognized int
+	statusCodes      map[string]int
+	latency          latencyHistogram
+	providers        map[string]*providerBucket
 }
 
 // logProviderStats 是 provider 统计兜底分支所需的最小记录集合。
@@ -101,6 +103,8 @@ func (b *metricBucket) reset(second int64) {
 	b.successes = 0
 	b.visionImages = 0
 	b.visionFailed = 0
+	b.visionCached = 0
+	b.visionRecognized = 0
 	b.statusCodes = make(map[string]int)
 	b.latency = latencyHistogram{}
 	b.providers = make(map[string]*providerBucket)
@@ -159,8 +163,13 @@ type RequestLog struct {
 	AttemptDetails []AttemptDetail `json:"attemptDetails,omitempty"`
 	// EstimatedInputTokens 是本次请求的估算输入 token 数；未启用 contextWindow 时为 0。
 	EstimatedInputTokens int `json:"estimatedInputTokens,omitempty"`
-	// VisionImages / VisionFailed 是图片块级别的独立统计，不参与 isSuccess 判定。
+	// Vision* 是图片块级别的独立统计，不参与 isSuccess 判定。
+	// VisionImages = VisionCached + VisionRecognized + VisionFailed：agentic 客户端每轮重发
+	// 完整历史会把同一张图反复计入 VisionImages，其中多数是缓存命中（VisionCached），
+	// 真正调用视觉模型识别的只有 VisionRecognized。前端据此拆分展示，避免把命中误读成新图。
 	VisionImages       int       `json:"visionImages,omitempty"`
+	VisionCached       int       `json:"visionCached,omitempty"`
+	VisionRecognized   int       `json:"visionRecognized,omitempty"`
 	VisionFailed       int       `json:"visionFailed,omitempty"`
 	VisionFailCategory string    `json:"visionFailCategory,omitempty"`
 	VisionFailMessage  string    `json:"visionFailMessage,omitempty"`
@@ -219,8 +228,14 @@ type ProviderStats struct {
 
 // VisionSummary 是统计窗口内图片识别质量的独立汇总。
 type VisionSummary struct {
-	WindowImages int                  `json:"windowImages"`
-	WindowFailed int                  `json:"windowFailed"`
+	WindowImages     int `json:"windowImages"`
+	WindowCached     int `json:"windowCached"`
+	WindowRecognized int `json:"windowRecognized"`
+	WindowFailed     int `json:"windowFailed"`
+	// FailureRate 的分母是「真实识别尝试」= WindowRecognized + WindowFailed，
+	// 不含缓存命中。命中不调用视觉 API、不可能失败，算进分母会把失败率按
+	// 客户端重发历史的次数稀释——agentic 客户端每轮重发同一张图，命中数越多
+	// 失败率越低，同一批失败能从 28.6% 被冲到 2.2%，失去告警意义。
 	FailureRate  float64              `json:"failureRate"`
 	RecentFailed []VisionFailureEntry `json:"recentFailed"`
 }
@@ -372,6 +387,8 @@ func (c *Collector) addMetricLocked(record RequestLog, observedAt time.Time) {
 	}
 	bucket.visionImages += record.VisionImages
 	bucket.visionFailed += record.VisionFailed
+	bucket.visionCached += record.VisionCached
+	bucket.visionRecognized += record.VisionRecognized
 	bucket.statusCodes[strconv.Itoa(record.Status)]++
 	bucket.latency.add(record.DurationMs)
 
@@ -435,6 +452,8 @@ func (c *Collector) Metrics(now time.Time) Response {
 	successes := 0
 	visionImages := 0
 	visionFailed := 0
+	visionCached := 0
+	visionRecognized := 0
 	providerTotals := make(map[string]*providerBucket)
 	for i := range c.buckets {
 		bucket := &c.buckets[i]
@@ -445,6 +464,8 @@ func (c *Collector) Metrics(now time.Time) Response {
 		successes += bucket.successes
 		visionImages += bucket.visionImages
 		visionFailed += bucket.visionFailed
+		visionCached += bucket.visionCached
+		visionRecognized += bucket.visionRecognized
 		latency.merge(bucket.latency)
 		for status, count := range bucket.statusCodes {
 			resp.StatusCodes[status] += count
@@ -492,6 +513,8 @@ func (c *Collector) Metrics(now time.Time) Response {
 			}
 			visionImages += record.VisionImages
 			visionFailed += record.VisionFailed
+			visionCached += record.VisionCached
+			visionRecognized += record.VisionRecognized
 			return true
 		})
 	}
@@ -530,9 +553,12 @@ func (c *Collector) Metrics(now time.Time) Response {
 
 	resp.RecentErrors = recent
 	resp.Vision = VisionSummary{
-		WindowImages: visionImages,
-		WindowFailed: visionFailed,
-		FailureRate:  ratio(visionFailed, visionImages),
+		WindowImages:     visionImages,
+		WindowCached:     visionCached,
+		WindowRecognized: visionRecognized,
+		WindowFailed:     visionFailed,
+		// 分母只取真实识别尝试，缓存命中不参与：命中不调用视觉 API，不存在失败的可能。
+		FailureRate:  ratio(visionFailed, visionRecognized+visionFailed),
 		RecentFailed: recentVisionFailures,
 	}
 	return resp

@@ -161,11 +161,17 @@
                 visionSummaryText() {
                     const summary = this.visionSummary || {};
                     const total = Number(summary.windowImages) || 0;
+                    const recognized = Number(summary.windowRecognized) || 0;
+                    const cached = Number(summary.windowCached) || 0;
                     const failed = Number(summary.windowFailed) || 0;
                     if (total <= 0) return '暂无图片请求';
                     const rate = Number(summary.failureRate);
                     const percent = Number.isFinite(rate) ? (rate * 100).toFixed(1) : '0.0';
-                    return `图片识别：${failed} 失败 / ${total} 张（失败率 ${percent}%）`;
+                    // total = recognized + cached + failed。agentic 客户端每轮重发历史会把同一张图
+                    // 反复计入 total，其中多数是缓存命中；拆出「实际识别 / 缓存命中」避免把命中误读成新识别的图片。
+                    // failureRate 的分母是真实识别尝试（recognized + failed），不含缓存命中，
+                    // 所以它不等于 failed/total——别按后者反推，命中越多前者才越有意义。
+                    return `图片识别：${recognized} 实际识别 · ${cached} 缓存命中 · ${failed} 失败（识别失败率 ${percent}%）`;
                 },
 
                 visionSummaryClass() {

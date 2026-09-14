@@ -164,7 +164,7 @@ func TestMetricsAndLogsExposeVisionFailuresAndEvents(t *testing.T) {
 	now := time.Now().Add(-time.Second)
 	srv.metrics.Add(metrics.RequestLog{
 		ID: "vision-request", Started: now, Status: http.StatusOK, Provider: "p",
-		Vision: true, VisionImages: 2, VisionFailed: 1,
+		Vision: true, VisionImages: 3, VisionCached: 1, VisionRecognized: 1, VisionFailed: 1,
 		VisionFailCategory: "network", VisionFailMessage: "连接失败",
 	})
 	srv.eventLog.Add("health_down", "p", "HTTP 503")
@@ -178,7 +178,8 @@ func TestMetricsAndLogsExposeVisionFailuresAndEvents(t *testing.T) {
 	if err := json.Unmarshal(metricsRecorder.Body.Bytes(), &response); err != nil {
 		t.Fatalf("decode metrics response: %v", err)
 	}
-	if response.Vision.WindowImages != 2 || response.Vision.WindowFailed != 1 {
+	if response.Vision.WindowImages != 3 || response.Vision.WindowCached != 1 ||
+		response.Vision.WindowRecognized != 1 || response.Vision.WindowFailed != 1 {
 		t.Fatalf("metrics vision = %#v", response.Vision)
 	}
 	if len(response.Events) != 1 || response.Events[0].Kind != "health_down" {
@@ -211,7 +212,7 @@ func TestHandleStoresVisionResultWithoutChangingRequestSuccess(t *testing.T) {
 	primary := &config.Provider{Name: "primary", BaseURL: upstream.URL, Format: "openai", MaxConcurrent: 1, MaxQueueWait: 1000}
 	visual := &config.Provider{Name: "visual", BaseURL: upstream.URL, Format: "openai", MaxConcurrent: 1, MaxQueueWait: 1000}
 	spy := &runtimeVisionSpy{result: vision.Result{
-		Total: 2, Failed: 2,
+		Total: 4, Cached: 1, Recognized: 1, Failed: 2,
 		FirstFailure: &vision.Failure{Category: "upstream_http", Message: "视觉 API 响应异常 (HTTP 401)"},
 	}}
 	srv := &server{
@@ -240,7 +241,8 @@ func TestHandleStoresVisionResultWithoutChangingRequestSuccess(t *testing.T) {
 	if len(logs) != 1 {
 		t.Fatalf("request logs = %#v", logs)
 	}
-	if logs[0].Status != http.StatusOK || logs[0].VisionImages != 2 || logs[0].VisionFailed != 2 {
+	if logs[0].Status != http.StatusOK || logs[0].VisionImages != 4 || logs[0].VisionFailed != 2 ||
+		logs[0].VisionCached != 1 || logs[0].VisionRecognized != 1 {
 		t.Fatalf("vision result/request success = %#v", logs[0])
 	}
 	if logs[0].VisionFailCategory != "upstream_http" || logs[0].VisionFailMessage == "" {

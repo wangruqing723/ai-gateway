@@ -212,6 +212,8 @@ func TestCollectorMetricsAggregatesVisionAndKeepsRequestSuccessIndependent(t *te
 			Provider:           "p",
 			DurationMs:         10,
 			VisionImages:       3,
+			VisionCached:       1,
+			VisionRecognized:   1,
 			VisionFailed:       1,
 			VisionFailCategory: "network",
 			VisionFailMessage:  "连接失败",
@@ -222,7 +224,10 @@ func TestCollectorMetricsAggregatesVisionAndKeepsRequestSuccessIndependent(t *te
 	if got.Summary.SuccessRate != 1 || got.Summary.ErrorRate != 0 {
 		t.Fatalf("vision failure changed request success: summary = %#v", got.Summary)
 	}
-	if got.Vision.WindowImages != 30 || got.Vision.WindowFailed != 10 || got.Vision.FailureRate != 1.0/3.0 {
+	// 失败率分母只取真实识别尝试（recognized + failed = 20），缓存命中的 10 次不参与，
+	// 所以是 10/20 = 0.5 而不是按 WindowImages 算的 10/30。
+	if got.Vision.WindowImages != 30 || got.Vision.WindowCached != 10 || got.Vision.WindowRecognized != 10 ||
+		got.Vision.WindowFailed != 10 || got.Vision.FailureRate != 0.5 {
 		t.Fatalf("vision summary = %#v", got.Vision)
 	}
 	if len(got.Vision.RecentFailed) != 8 {
@@ -233,19 +238,51 @@ func TestCollectorMetricsAggregatesVisionAndKeepsRequestSuccessIndependent(t *te
 	}
 }
 
+// 失败率的分母是真实识别尝试（recognized + failed），缓存命中不参与。
+// agentic 客户端每轮重发同一张图，命中数会远大于真实识别次数；把命中算进
+// 分母会按重发次数稀释失败率，让「识别一直在失败」看起来像个位数百分比。
+func TestCollectorVisionFailureRateExcludesCacheHitsFromDenominator(t *testing.T) {
+	now := time.Date(2026, 6, 27, 10, 1, 0, 0, time.UTC)
+
+	// 7 个图片块：5 次缓存命中 + 1 次识别成功 + 1 次识别失败。
+	// 旧口径 1/7≈14.3% 会把 50% 的真实失败率冲淡。
+	c := NewCollectorWithWindow(10, 1)
+	c.Add(RequestLog{
+		ID: "resend", Started: now.Add(-time.Second), Status: 200, Provider: "p",
+		VisionImages: 7, VisionCached: 5, VisionRecognized: 1, VisionFailed: 1,
+		VisionFailCategory: "network",
+	})
+	got := c.Metrics(now)
+	if got.Vision.FailureRate != 0.5 {
+		t.Fatalf("failure rate = %v, want 0.5 (1 failed / 2 real attempts); summary = %#v",
+			got.Vision.FailureRate, got.Vision)
+	}
+
+	// 全缓存命中：没有真实识别尝试，分母为 0，失败率应为 0 而不是 NaN。
+	allCached := NewCollectorWithWindow(10, 1)
+	allCached.Add(RequestLog{
+		ID: "all-cached", Started: now.Add(-time.Second), Status: 200, Provider: "p",
+		VisionImages: 6, VisionCached: 6,
+	})
+	gotCached := allCached.Metrics(now)
+	if gotCached.Vision.FailureRate != 0 || gotCached.Vision.WindowCached != 6 {
+		t.Fatalf("all-cached vision summary = %#v, want failureRate 0 and 6 cached", gotCached.Vision)
+	}
+}
+
 func TestCollectorRecentVisionFailuresUsesLogRingBeyondMetricWindow(t *testing.T) {
 	c := NewCollectorWithWindow(10, 1)
 	now := time.Date(2026, 6, 27, 10, 1, 0, 0, time.UTC)
 	c.Add(RequestLog{
 		ID: "old-vision-failure", Started: now.Add(-2 * time.Minute), Status: 200, Provider: "p",
-		VisionImages: 1, VisionFailed: 1, VisionFailCategory: "network",
+		VisionImages: 3, VisionCached: 1, VisionRecognized: 1, VisionFailed: 1, VisionFailCategory: "network",
 	})
 
 	got := c.Metrics(now)
 	if len(got.Vision.RecentFailed) != 1 || got.Vision.RecentFailed[0].ID != "old-vision-failure" {
 		t.Fatalf("recent vision failures = %#v, want log-ring entry", got.Vision.RecentFailed)
 	}
-	if got.Vision.WindowImages != 0 || got.Vision.WindowFailed != 0 {
+	if got.Vision.WindowImages != 0 || got.Vision.WindowCached != 0 || got.Vision.WindowRecognized != 0 || got.Vision.WindowFailed != 0 {
 		t.Fatalf("out-of-window vision was included in window summary: %#v", got.Vision)
 	}
 }
@@ -255,7 +292,7 @@ func TestCollectorMetricsVisionFallbackScansLogRing(t *testing.T) {
 	now := time.Date(2026, 6, 27, 10, 1, 0, 0, time.UTC)
 	c.Add(RequestLog{
 		ID: "fallback", Started: now.Add(-time.Second), Status: 200, Provider: "p",
-		VisionImages: 2, VisionFailed: 1, VisionFailCategory: "response_parse",
+		VisionImages: 3, VisionCached: 1, VisionRecognized: 1, VisionFailed: 1, VisionFailCategory: "response_parse",
 	})
 
 	// 模拟窗口桶暂时没有该记录；日志环仍是设计要求的兜底来源。
@@ -266,7 +303,7 @@ func TestCollectorMetricsVisionFallbackScansLogRing(t *testing.T) {
 	c.mu.Unlock()
 
 	got := c.Metrics(now)
-	if got.Vision.WindowImages != 2 || got.Vision.WindowFailed != 1 {
+	if got.Vision.WindowImages != 3 || got.Vision.WindowCached != 1 || got.Vision.WindowRecognized != 1 || got.Vision.WindowFailed != 1 {
 		t.Fatalf("vision fallback = %#v", got.Vision)
 	}
 }

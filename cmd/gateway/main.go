@@ -637,6 +637,8 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		internal.Messages, visionResult = s.translator.Translate(r.Context(), internal.Messages, vp, matched.VisionModel,
 			func(f string, a ...any) { logf(reqID, f, a...) })
 		reqLog.VisionImages = visionResult.Total
+		reqLog.VisionCached = visionResult.Cached
+		reqLog.VisionRecognized = visionResult.Recognized
 		reqLog.VisionFailed = visionResult.Failed
 		if visionResult.FirstFailure != nil {
 			reqLog.VisionFailCategory = visionResult.FirstFailure.Category
