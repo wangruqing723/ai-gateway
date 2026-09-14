@@ -668,7 +668,8 @@ func TestEmbeddedAdminPageUsesLocalAssetsAndSafeConfigState(t *testing.T) {
 		// 样式改成构建期产物后，页面只留一条 <link>；Play CDN 那个 407KB 运行时编译器已删除。
 		`href="/vendor/tailwind.css"`,
 		`src="/vendor/alpine.min.js"`,
-		`rel="icon" href="data:,"`,
+		// 网站图标内联为自包含的 SVG data URI，不引外部文件（CSP img-src 已放行 data:）。
+		`rel="icon" type="image/svg+xml" href="data:image/svg+xml,`,
 		`x-show="isConfigTab()"`,
 		// 保存按钮按脏状态禁用。canSave() 是 isConfigTab() && isDirty() 的封装，
 		// 保存按钮、未保存浮层与 beforeunload 三处共用它，避免各写一份判据后互相矛盾。

@@ -4,7 +4,10 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AI Gateway 配置管理</title>
-    <link rel="icon" href="data:,">
+    <!-- 网站图标：内联 SVG data URI。图形就是侧边栏 logo 用的那个 Material Symbols `hub` 实心字形
+         （中心节点 + 5 个外围节点，与侧边栏 icon-fill 渲染的同一图标），配色照搬 logo：cyan2 圆角方块 + ink 图形。
+         自包含：不引外部文件、不发网络请求，CSP 的 img-src 'self' data: 已放行。改图标直接编辑下面这段 SVG（颜色用 %23 转义 # 号）。 -->
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%2300d2ff'/><path transform='translate(6.4 6.4) scale(.8)' fill='%23090a0f' d='M3.875 22.125Q3 21.25 3 20t.875-2.125T6 17q.35 0 .65.075t.575.2L8.65 15.5q-.7-.775-.975-1.75T7.55 11.8l-2.025-.675q-.425.625-1.075 1T3 12.5q-1.25 0-2.125-.875T0 9.5t.875-2.125T3 6.5t2.125.875T6 9.5v.2l2.025.7q.5-.9 1.338-1.525t1.887-.8V5.9q-.975-.275-1.612-1.063T9 3q0-1.25.875-2.125T12 0t2.125.875T15 3q0 1.05-.65 1.838T12.75 5.9v2.175q1.05.175 1.888.8t1.337 1.525L18 9.7v-.2q0-1.25.875-2.125T21 6.5t2.125.875T24 9.5t-.875 2.125T21 12.5q-.8 0-1.463-.375t-1.062-1l-2.025.675q.15.975-.125 1.938T15.35 15.5l1.425 1.75q.275-.125.575-.187T18 17q1.25 0 2.125.875T21 20t-.875 2.125T18 23t-2.125-.875T15 20q0-.5.163-.962t.437-.838l-1.425-1.775Q13.15 17 11.988 17T9.8 16.425L8.4 18.2q.275.375.438.838T9 20q0 1.25-.875 2.125T6 23t-2.125-.875'/></svg>">
     <!-- 样式是构建期产物，源文件在 web/src/tailwind.css + web/tailwind.config.js，
          用 `make web-css` 重新生成。此前这里挂的是 Tailwind Play CDN 那个 407KB 运行时编译器，
          在浏览器里现场扫 DOM 生成 CSS；现在换成 25KB 静态表，省掉运行时编译，
