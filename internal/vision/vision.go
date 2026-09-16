@@ -93,6 +93,50 @@ func HasImages(messages []any) bool {
 	return false
 }
 
+// CountImages 统计消息数组中的图片块数量（对齐 HasImages 的遍历深度：
+// 顶层 content 加一层 tool_result 内嵌图片，不递归更深）。用于 vision provider
+// 被禁用时把每张图片记为一次识别失败，保持与正常翻译路径相同的图片块级计数口径。
+func CountImages(messages []any) int {
+	total := 0
+	for _, m := range messages {
+		msg, ok := m.(map[string]any)
+		if !ok {
+			continue
+		}
+		content, ok := msg["content"].([]any)
+		if !ok {
+			continue
+		}
+		total += countImagesInBlocks(content)
+	}
+	return total
+}
+
+// countImagesInBlocks 与 blocksHaveImage 同构，返回图片块数而非布尔。
+func countImagesInBlocks(blocks []any) int {
+	n := 0
+	for _, b := range blocks {
+		block, ok := b.(map[string]any)
+		if !ok {
+			continue
+		}
+		if block["type"] == "image" {
+			n++
+			continue
+		}
+		if block["type"] == "tool_result" {
+			if inner, ok := block["content"].([]any); ok {
+				for _, child := range inner {
+					if childBlock, ok := child.(map[string]any); ok && childBlock["type"] == "image" {
+						n++
+					}
+				}
+			}
+		}
+	}
+	return n
+}
+
 // blocksHaveImage 检测当前层及一层 tool_result，保持与历史 Node gate 一致。
 func blocksHaveImage(blocks []any) bool {
 	for _, b := range blocks {

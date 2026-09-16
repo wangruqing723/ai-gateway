@@ -80,6 +80,18 @@ func (c *Checker) Snapshot(cfg *config.Config) map[string]Status {
 
 	out := make(map[string]Status, len(cfg.Providers))
 	for name, provider := range cfg.Providers {
+		// 被禁用的 provider 不出现在健康快照里：前端靠 config.providers[name].enabled
+		// 判定禁用态并渲染标记，这里给它一个 unchecked 反而会和「已禁用」混淆。
+		// 周期检测与批量手动检测同样跳过（见 checkAll）；单 provider 显式检测
+		// （CheckProvider）不跳过——那是禁用期间确认上游是否恢复的唯一入口。
+		//
+		// 必须先排除 nil：IsEnabled() 对 nil receiver 返回 false（候选路径上
+		// 「取不到 provider 就不转发」是唯一安全答案），但那与「使用者禁用了它」
+		// 是两件事。nil 是配置写坏了，checkAll 会给它落一条 error 状态，
+		// 这里跟着跳过会把那条结论从快照里抹掉，界面上什么都看不到。
+		if provider != nil && !provider.IsEnabled() {
+			continue
+		}
 		fingerprint := providerFingerprint(name, provider)
 		if cached, ok := c.statuses[name]; ok && cached.fingerprint == fingerprint {
 			out[name] = cached.status
@@ -171,6 +183,12 @@ func (c *Checker) checkAll(ctx context.Context, cfg *config.Config, resolve Clie
 	for name, p := range cfg.Providers {
 		if p == nil {
 			results <- result{name: name, status: errorStatus(name, "", "provider 配置为空", 0), fingerprint: providerFingerprint(name, nil)}
+			continue
+		}
+		// 周期检测与批量手动检测都跳过被禁用的 provider：禁用的常见起因恰恰是
+		// 它挂了或 key 过期，继续探只会稳定失败、刷日志、刷异常计数。
+		// 单 provider 显式检测走 CheckProvider，不在此处，不受这条限制。
+		if !p.IsEnabled() {
 			continue
 		}
 		pCopy := *p

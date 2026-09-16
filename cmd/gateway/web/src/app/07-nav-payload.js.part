@@ -53,7 +53,11 @@
                             // 且每次保存都抹掉所有 provider 的该字段。空值发 undefined，与后端 omitempty
                             // 对齐（oneMContext 空等同 strip）；extraHeaders 在 this.config 里已是 map。
                             oneMContext: provider.oneMContext || undefined,
-                            extraHeaders: provider.extraHeaders || undefined
+                            extraHeaders: provider.extraHeaders || undefined,
+                            // enabled 必须带上：PUT 是全量替换，漏掉会让每次保存都把所有 provider
+                            // 的禁用状态悄悄抹回启用。true 发 undefined 走 omitempty（保持老配置
+                            // 不扩散该字段），false 显式写入。
+                            enabled: provider.enabled === false ? false : undefined
                         };
                     });
                     return {

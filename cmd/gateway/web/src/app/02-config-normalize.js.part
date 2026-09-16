@@ -28,7 +28,10 @@
                             oneMContext: pick(p, 'oneMContext', 'OneMContext') || '',
                             // extraHeaders 保留 map 原样，未配置时留 undefined 而不是 {}：
                             // 兜成空对象会让每次保存都往 YAML 里写一行空 extraHeaders。
-                            extraHeaders: pick(p, 'extraHeaders', 'ExtraHeaders') || undefined
+                            extraHeaders: pick(p, 'extraHeaders', 'ExtraHeaders') || undefined,
+                            // enabled 归一：后端 nil（未返回）与 true 同义，一律视为 true；
+                            // 仅显式 false 才是禁用。漏读会让禁用状态在下次保存时被抹回启用。
+                            enabled: pick(p, 'enabled', 'Enabled') !== false
                         };
                     });
 

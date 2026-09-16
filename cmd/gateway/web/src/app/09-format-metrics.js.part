@@ -297,9 +297,15 @@
                         const b = breakers ? (breakers[name] || { state: 'closed' }) : null;
                         const running = Number(q.running || 0);
                         const queued = Number(q.queued || 0);
+                        const enabled = provider.enabled !== false;
                         let status = '空闲';
                         let statusClass = 'border-good/35 bg-good/10 text-emerald-100';
-                        if (this.config.directMode) {
+                        // 已禁用压过一切运行时状态：网关根本不会把请求排给它，
+                        // 再显示「空闲」「直通」会让人以为它还在服务。
+                        if (!enabled) {
+                            status = '已禁用';
+                            statusClass = 'bg-white/[.05] text-muted';
+                        } else if (this.config.directMode) {
                             status = '直通';
                             statusClass = 'border-cyan2/35 bg-cyan2/10 text-cyan';
                         } else if (queued > 0) {
@@ -311,6 +317,7 @@
                         }
                         return {
                             name,
+                            enabled,
                             format: provider.format || 'anthropic',
                             running,
                             queued,
@@ -331,31 +338,39 @@
                     });
                 },
 
-                // providerStateCounts 卡片标题旁的三档汇总。
+                // providerStateCounts 卡片标题旁的汇总徽章。
                 //
-                // 口径刻意分两个维度取值，因为它们本就是两套独立机制：
+                // 口径刻意分几个独立维度取值，因为它们本就是几套独立机制：
                 // - 熔断（breakers）是运行时自动维护的，open / half_open 都算「熔断」——
                 //   半开虽然放探针，但此刻仍在受限状态，混进正常会掩盖故障。
                 // - 正常 / 异常取健康检测（providerHealth），它要手动触发，
                 //   所以 unchecked 既不算正常也不算异常，单独一档，否则「从没检测过」
                 //   会被误报成全部健康。
-                // 三档之和不等于 provider 总数是预期的：一个 provider 可以同时熔断
+                // - 已禁用是使用者显式声明，只从「正常」「未检测」里扣：网关不会向它转发，
+                //   计进正常会虚报可用容量，计进未检测又像是漏了检测没做。异常保留，
+                //   禁用前测出来的 error 是真实结论，往往正是禁用它的理由。
+                // 各档之和不等于 provider 总数是预期的：一个 provider 可以同时熔断
                 // 且健康检测为 error，两边都会计一次。
                 providerStateCounts() {
                     const health = this.health?.providerHealth || {};
                     // null 表示熔断未启用，与「全部闭合」是两种语义，往下传给模板区分展示。
                     const breakers = this.health?.breakers || null;
-                    const names = Object.keys(this.config.providers || {});
-                    let ok = 0, error = 0, unchecked = 0, tripped = 0;
+                    const providers = this.config.providers || {};
+                    const names = Object.keys(providers);
+                    let ok = 0, error = 0, unchecked = 0, tripped = 0, disabled = 0;
                     for (const name of names) {
+                        const isDisabled = providers[name]?.enabled === false;
+                        if (isDisabled) disabled++;
                         const status = health[name]?.status;
-                        if (status === 'ok' || status === 'warn') ok++;
-                        else if (status === 'error') error++;
-                        else unchecked++;
+                        if (status === 'error') error++;
+                        else if (!isDisabled) {
+                            if (status === 'ok' || status === 'warn') ok++;
+                            else unchecked++;
+                        }
                         const state = breakers ? breakers[name]?.state : null;
                         if (state === 'open' || state === 'half_open') tripped++;
                     }
-                    return { total: names.length, ok, error, unchecked, tripped, breakerEnabled: !!breakers };
+                    return { total: names.length, ok, error, unchecked, tripped, disabled, breakerEnabled: !!breakers };
                 },
 
                 providerHealthLabel(health) {

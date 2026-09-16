@@ -577,3 +577,117 @@ func TestMatchRouteSingleTargetUsesRouteMaxTokens(t *testing.T) {
 		t.Fatalf("单目标路由 MaxTokens = %v，期望 16384", got)
 	}
 }
+
+func routerBoolPtr(v bool) *bool { return &v }
+
+// TestMatchRouteKeepsDisabledCandidates 锁住一条刻意的设计：router 不剔除被禁用的候选。
+//
+// 在这里剔除会让候选列表变空、静默 continue 到下一条路由，请求最终落到 catch-all 上
+// 一个完全不相关的模型，且日志里看不出发生过什么。过滤必须留在 main.go 的候选循环，
+// 那里能记 AttemptDetail(provider_disabled) 并给出 503 all_candidates_disabled 终态。
+func TestMatchRouteKeepsDisabledCandidates(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Providers["alpha"].Enabled = routerBoolPtr(false)
+	cfg.Routes = []config.Route{
+		{Match: "claude-*", Targets: []config.Target{
+			{Provider: "alpha", Model: "m-alpha"},
+			{Provider: "beta", Model: "m-beta"},
+		}},
+		{Match: "*", Provider: "gamma", Model: "m-gamma"},
+	}
+
+	m := MatchRoute("claude-opus-4", cfg)
+	if m == nil {
+		t.Fatal("期望命中首条路由，实际为 nil")
+	}
+	if len(m.Candidates) != 2 {
+		t.Fatalf("候选数 = %d, 期望 2（禁用候选也要保留）", len(m.Candidates))
+	}
+	if got := m.Candidates[0].Provider.Name; got != "alpha" {
+		t.Errorf("首个候选 = %q, 期望 alpha（顺序不因禁用改变）", got)
+	}
+	if m.Candidates[0].Provider.IsEnabled() {
+		t.Error("首个候选应带着禁用状态传给 main.go")
+	}
+	if m.RouteMatch != "claude-*" {
+		t.Errorf("RouteMatch = %q, 期望 claude-*（不得因禁用落到 catch-all）", m.RouteMatch)
+	}
+}
+
+// TestMatchRouteAllCandidatesDisabledStillMatches 单目标路由的唯一目标被禁用时，
+// 仍返回该路由而不是继续往下匹配：main.go 据此给出 503，而不是把请求打到别的模型。
+func TestMatchRouteAllCandidatesDisabledStillMatches(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Providers["alpha"].Enabled = routerBoolPtr(false)
+	cfg.Routes = []config.Route{
+		{Match: "claude-*", Provider: "alpha", Model: "m-alpha"},
+		{Match: "*", Provider: "beta", Model: "m-beta"},
+	}
+
+	m := MatchRoute("claude-opus-4", cfg)
+	if m == nil {
+		t.Fatal("唯一候选被禁用时仍应命中该路由，实际为 nil")
+	}
+	if m.RouteMatch != "claude-*" {
+		t.Fatalf("RouteMatch = %q, 期望 claude-*", m.RouteMatch)
+	}
+	if len(m.Candidates) != 1 || m.Candidates[0].Provider.IsEnabled() {
+		t.Fatalf("期望保留 1 个禁用候选，实际 %d 个", len(m.Candidates))
+	}
+}
+
+// TestMatchRouteDisabledVisionProviderSetsFlag vision 不走候选循环，禁用只能在
+// router 处理：置空 VisionProvider 并标记 VisionDisabled，让 main.go 把图片记为
+// 识别失败（软降级），而不是拿一个禁用的上游去发翻译请求。
+func TestMatchRouteDisabledVisionProviderSetsFlag(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Providers["beta"].Enabled = routerBoolPtr(false)
+	cfg.Routes = []config.Route{{
+		Match:    "*",
+		Provider: "alpha",
+		Model:    "m",
+		Vision:   &config.Vision{Provider: "beta", Model: "vision-model"},
+	}}
+
+	m := MatchRoute("x", cfg)
+	if m == nil {
+		t.Fatal("期望命中路由，实际为 nil")
+	}
+	if m.VisionProvider != nil {
+		t.Error("vision provider 被禁用时 VisionProvider 必须为 nil")
+	}
+	if !m.VisionDisabled {
+		t.Error("VisionDisabled 应为 true")
+	}
+	// 模型名仍要带出来：软降级的日志与指标要能说清「本来该用哪个视觉模型」。
+	if m.VisionModel != "vision-model" {
+		t.Errorf("VisionModel = %q, 期望 vision-model", m.VisionModel)
+	}
+	// 主候选不受影响，请求照常转发（带原始图片块）。
+	if len(m.Candidates) != 1 || m.Candidates[0].Provider.Name != "alpha" {
+		t.Fatalf("主候选被 vision 禁用影响了: %+v", m.Candidates)
+	}
+}
+
+// TestMatchRouteEnabledVisionProviderNotFlagged 反向锁：vision provider 启用时
+// 不得误标 VisionDisabled，否则每个带图请求都会被记成识别失败。
+func TestMatchRouteEnabledVisionProviderNotFlagged(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Routes = []config.Route{{
+		Match:    "*",
+		Provider: "alpha",
+		Model:    "m",
+		Vision:   &config.Vision{Provider: "beta", Model: "vision-model"},
+	}}
+
+	m := MatchRoute("x", cfg)
+	if m == nil {
+		t.Fatal("期望命中路由，实际为 nil")
+	}
+	if m.VisionDisabled {
+		t.Error("vision provider 启用时不应标记 VisionDisabled")
+	}
+	if m.VisionProvider == nil {
+		t.Fatal("VisionProvider 应非 nil")
+	}
+}

@@ -602,6 +602,9 @@
                                     <table class="w-full border-collapse text-left">
                                         <thead class="bg-panel2 text-xs uppercase tracking-wide text-muted">
                                             <tr>
+                                                <!-- 启用列放最前：它决定这一行的其余配置当下是否生效，
+                                                     排在名称之后会让人先读完配置才发现整行是停用的。 -->
+                                                <th scope="col" class="whitespace-nowrap px-3 py-3 text-center font-bold">启用</th>
                                                 <th scope="col" class="whitespace-nowrap px-3 py-3 font-bold">名称</th>
                                                 <th scope="col" class="whitespace-nowrap px-3 py-3 font-bold">格式</th>
                                                 <th scope="col" class="whitespace-nowrap px-3 py-3 font-bold">Base URL</th>
@@ -615,7 +618,23 @@
                                         </thead>
                                         <tbody class="divide-y divide-line">
                                             <template x-for="(provider, name) in config.providers" :key="name">
-                                                <tr class="bg-panel/35 transition hover:bg-white/[.04]">
+                                                <!-- 禁用行整体压暗但不改文字色：这一行的配置仍要能读（用户正是
+                                                     要看它配了什么才决定要不要启用），只是不再生效。opacity 加在
+                                                     tr 上会一并淡化开关本身，所以开关那格用 opacity-100 抵消。 -->
+                                                <tr class="bg-panel/35 transition hover:bg-white/[.04]"
+                                                    :class="provider.enabled === false && 'opacity-50'">
+                                                    <!-- 开关用 checkbox 而不是按钮：它表达的是一个持续状态而非动作，
+                                                         也直接拿到原生键盘可达性与 aria-checked。x-model 直接绑内存：
+                                                         和其他字段一样改完由右上角「保存」或右下角未保存浮层统一落盘，
+                                                         不在这里就地 persist——禁用不该比改一个 URL 有更重的确认流程。 -->
+                                                    <td class="w-px whitespace-nowrap px-3 py-2.5 text-center opacity-100">
+                                                        <input autocomplete="off" type="checkbox"
+                                                               x-model="provider.enabled"
+                                                               :disabled="loading"
+                                                               :title="provider.enabled === false ? '启用「' + name + '」（保存后生效）' : '禁用「' + name + '」（保存后生效），请求不再转发到该上游'"
+                                                               :aria-label="provider.enabled === false ? '启用「' + name + '」' : '禁用「' + name + '」'"
+                                                               class="h-4 w-4 cursor-pointer rounded border-line bg-panel text-cyan2 focus:ring-cyan2 disabled:cursor-not-allowed disabled:opacity-60">
+                                                    </td>
                                                     <!-- 历史布局曾让名称、Base URL 两列各 w-1/2 + max-w-0：
                                                          名称列按内容定宽会被超长名称撑到近千像素，后面几列被顶出容器；
                                                          两列都写 w-full 时长名字仍独吞空间（实测 626px）。
@@ -688,7 +707,7 @@
                                                 </tr>
                                             </template>
                                             <tr x-show="!config.providers || Object.keys(config.providers).length === 0">
-                                                <td colspan="9" class="px-3 py-10 text-center text-sm text-muted">还没有 Provider</td>
+                                                <td colspan="10" class="px-3 py-10 text-center text-sm text-muted">还没有 Provider</td>
                                             </tr>
                                         </tbody>
                                     </table>
@@ -862,6 +881,17 @@
                                               @blur="hideTip()"
                                               tabindex="0" aria-describedby="immediate-tooltip"
                                               x-text="'未检测 ' + providerStateCounts().unchecked"></span>
+                                        <!-- 已禁用只在存在时出现：全启用时这个徽章消失，
+                                             不长期占位。禁用不并入正常/异常/未检测任一档，
+                                             它是使用者显式声明、与运行时状态正交。 -->
+                                        <span x-show="providerStateCounts().disabled > 0"
+                                              class="chip bg-white/[.05] px-1.5 text-[11px] text-muted"
+                                              @mouseenter="showTip('已显式禁用、网关不会转发请求的 Provider 数', $event)"
+                                              @mouseleave="hideTip()"
+                                              @focus="showTip('已显式禁用、网关不会转发请求的 Provider 数', $event)"
+                                              @blur="hideTip()"
+                                              tabindex="0" aria-describedby="immediate-tooltip"
+                                              x-text="'已禁用 ' + providerStateCounts().disabled"></span>
                                     </div>
                                 </div>
                                 <div class="flex gap-2">
@@ -932,7 +962,9 @@
                                     </thead>
                                     <tbody class="divide-y divide-line">
                                         <template x-for="row in providerStatusRows()" :key="row.name">
-                                            <tr class="bg-panel/35">
+                                            <!-- 已禁用行压暗但不藏按钮：单行检测是禁用期间唯一有意义
+                                                 的操作（盯着它恢复），按钮必须保持可见可点。 -->
+                                            <tr class="bg-panel/35" :class="!row.enabled && 'opacity-50'">
                                                 <td class="max-w-0 truncate px-3 py-2 font-mono text-xs font-bold text-white"
                                                     @mouseenter="showTip(row.name, $event)"
                                                     @mouseleave="hideTip()"
@@ -1669,7 +1701,18 @@
                 <div class="rounded-lg border border-line bg-panel2/50 p-4">
                     <!-- 分区标题与字段标签分层：14px 白色（弹窗主标题 18px、分区 14px、
                          字段标签 12px 灰，三级阶梯），扫读时先落分区名再落字段名。 -->
-                    <div class="mb-3 text-sm font-bold tracking-wide text-white">基本信息</div>
+                    <!-- 启用开关贴在分区标题右侧，不占独立字段行：它不是要填的值，
+                         而是整个 Provider 的总闸，跟名称/格式/URL 并排会被当成同级配置项。
+                         列表页那个开关改完立即落盘，这里跟随「保存 Provider」一起提交。 -->
+                    <div class="mb-3 flex flex-wrap items-center justify-between gap-3">
+                        <span class="text-sm font-bold tracking-wide text-white">基本信息</span>
+                        <label class="flex cursor-pointer items-center gap-2 text-xs"
+                               :class="providerForm.enabled === false ? 'text-warn' : 'text-muted'">
+                            <input autocomplete="off" type="checkbox" x-model="providerForm.enabled"
+                                   class="h-4 w-4 rounded border-line bg-panel text-cyan2 focus:ring-cyan2">
+                            <span x-text="providerForm.enabled === false ? '已禁用，请求不再转发到该上游' : '启用'"></span>
+                        </label>
+                    </div>
                     <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
                         <label class="block">
                             <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">名称</span>
@@ -1880,7 +1923,10 @@
                                      自己认领选中态，才与 model 无条件一致。 -->
                                 <select autocomplete="off" :id="'route-target-provider-' + ti" x-model="target.provider" @change="onRouteTargetProviderChange(ti)" :aria-label="'候选 ' + (ti + 1) + ' Provider'" class="field w-36 shrink-0 text-sm sm:w-40">
                                     <template x-for="(provider, name) in config.providers" :key="name">
-                                        <option :value="name" :selected="name === target.provider" x-text="name"></option>
+                                        <!-- 已禁用 provider 仍可选：路由可能预先配好等待恢复的目标，
+                                             但要让用户一眼看到这个候选当前不会被转发。 -->
+                                        <option :value="name" :selected="name === target.provider"
+                                                x-text="name + (provider.enabled === false ? '（已禁用）' : '')"></option>
                                     </template>
                                 </select>
                                 <!-- relative 是模型列表浮层的定位上下文，浮层是它的子元素 -->
@@ -2282,6 +2328,8 @@
                     // 该初始状态也是 provider 重建点之一，漏字段会让绑定在保存时被静默丢弃。
                     oneMContext: '',
                     extraHeaders: [],
+                    // enabled 默认 true：新增 provider 默认启用；editProvider 回填既有值。
+                    enabled: true,
                     apiKeyConfigured: false,
                     clearApiKey: false
                 },
@@ -2406,7 +2454,10 @@
                             oneMContext: pick(p, 'oneMContext', 'OneMContext') || '',
                             // extraHeaders 保留 map 原样，未配置时留 undefined 而不是 {}：
                             // 兜成空对象会让每次保存都往 YAML 里写一行空 extraHeaders。
-                            extraHeaders: pick(p, 'extraHeaders', 'ExtraHeaders') || undefined
+                            extraHeaders: pick(p, 'extraHeaders', 'ExtraHeaders') || undefined,
+                            // enabled 归一：后端 nil（未返回）与 true 同义，一律视为 true；
+                            // 仅显式 false 才是禁用。漏读会让禁用状态在下次保存时被抹回启用。
+                            enabled: pick(p, 'enabled', 'Enabled') !== false
                         };
                     });
 
@@ -2983,7 +3034,11 @@
                             // 且每次保存都抹掉所有 provider 的该字段。空值发 undefined，与后端 omitempty
                             // 对齐（oneMContext 空等同 strip）；extraHeaders 在 this.config 里已是 map。
                             oneMContext: provider.oneMContext || undefined,
-                            extraHeaders: provider.extraHeaders || undefined
+                            extraHeaders: provider.extraHeaders || undefined,
+                            // enabled 必须带上：PUT 是全量替换，漏掉会让每次保存都把所有 provider
+                            // 的禁用状态悄悄抹回启用。true 发 undefined 走 omitempty（保持老配置
+                            // 不扩散该字段），false 显式写入。
+                            enabled: provider.enabled === false ? false : undefined
                         };
                     });
                     return {
@@ -3549,9 +3604,15 @@
                         const b = breakers ? (breakers[name] || { state: 'closed' }) : null;
                         const running = Number(q.running || 0);
                         const queued = Number(q.queued || 0);
+                        const enabled = provider.enabled !== false;
                         let status = '空闲';
                         let statusClass = 'border-good/35 bg-good/10 text-emerald-100';
-                        if (this.config.directMode) {
+                        // 已禁用压过一切运行时状态：网关根本不会把请求排给它，
+                        // 再显示「空闲」「直通」会让人以为它还在服务。
+                        if (!enabled) {
+                            status = '已禁用';
+                            statusClass = 'bg-white/[.05] text-muted';
+                        } else if (this.config.directMode) {
                             status = '直通';
                             statusClass = 'border-cyan2/35 bg-cyan2/10 text-cyan';
                         } else if (queued > 0) {
@@ -3563,6 +3624,7 @@
                         }
                         return {
                             name,
+                            enabled,
                             format: provider.format || 'anthropic',
                             running,
                             queued,
@@ -3583,31 +3645,39 @@
                     });
                 },
 
-                // providerStateCounts 卡片标题旁的三档汇总。
+                // providerStateCounts 卡片标题旁的汇总徽章。
                 //
-                // 口径刻意分两个维度取值，因为它们本就是两套独立机制：
+                // 口径刻意分几个独立维度取值，因为它们本就是几套独立机制：
                 // - 熔断（breakers）是运行时自动维护的，open / half_open 都算「熔断」——
                 //   半开虽然放探针，但此刻仍在受限状态，混进正常会掩盖故障。
                 // - 正常 / 异常取健康检测（providerHealth），它要手动触发，
                 //   所以 unchecked 既不算正常也不算异常，单独一档，否则「从没检测过」
                 //   会被误报成全部健康。
-                // 三档之和不等于 provider 总数是预期的：一个 provider 可以同时熔断
+                // - 已禁用是使用者显式声明，只从「正常」「未检测」里扣：网关不会向它转发，
+                //   计进正常会虚报可用容量，计进未检测又像是漏了检测没做。异常保留，
+                //   禁用前测出来的 error 是真实结论，往往正是禁用它的理由。
+                // 各档之和不等于 provider 总数是预期的：一个 provider 可以同时熔断
                 // 且健康检测为 error，两边都会计一次。
                 providerStateCounts() {
                     const health = this.health?.providerHealth || {};
                     // null 表示熔断未启用，与「全部闭合」是两种语义，往下传给模板区分展示。
                     const breakers = this.health?.breakers || null;
-                    const names = Object.keys(this.config.providers || {});
-                    let ok = 0, error = 0, unchecked = 0, tripped = 0;
+                    const providers = this.config.providers || {};
+                    const names = Object.keys(providers);
+                    let ok = 0, error = 0, unchecked = 0, tripped = 0, disabled = 0;
                     for (const name of names) {
+                        const isDisabled = providers[name]?.enabled === false;
+                        if (isDisabled) disabled++;
                         const status = health[name]?.status;
-                        if (status === 'ok' || status === 'warn') ok++;
-                        else if (status === 'error') error++;
-                        else unchecked++;
+                        if (status === 'error') error++;
+                        else if (!isDisabled) {
+                            if (status === 'ok' || status === 'warn') ok++;
+                            else unchecked++;
+                        }
                         const state = breakers ? breakers[name]?.state : null;
                         if (state === 'open' || state === 'half_open') tripped++;
                     }
-                    return { total: names.length, ok, error, unchecked, tripped, breakerEnabled: !!breakers };
+                    return { total: names.length, ok, error, unchecked, tripped, disabled, breakerEnabled: !!breakers };
                 },
 
                 providerHealthLabel(health) {
@@ -4033,6 +4103,9 @@
                             // 逐键渲染成嵌套 YAML，键排序保证预览稳定；空 map 不输出。
                             Object.keys(p.extraHeaders).sort().forEach((k) => lines.push(`      ${k}: "${p.extraHeaders[k]}"`));
                         }
+                        // enabled 仅在 false 时输出：true 是默认值，写出来会和后端 omitempty
+                        // 不一致，预览里多一行噪音。false 必须显式输出，否则禁用状态会被预览掩盖。
+                        if (p.enabled === false) lines.push(`    enabled: false`);
                         return lines.join('\n');
                     }).join('\n');
                 },
@@ -4095,6 +4168,7 @@
                         proxy: '',
                         oneMContext: '',
                         extraHeaders: [],
+                        enabled: true,
                         apiKeyConfigured: false,
                         clearApiKey: false
                     };
@@ -4120,6 +4194,8 @@
                         proxy: p.proxy || '',
                         oneMContext: p.oneMContext || '',
                         extraHeaders: this.headersToRows(p.extraHeaders),
+                        // enabled 回填：后端 nil 表示启用（默认），前端归一成 true。
+                        enabled: p.enabled !== false,
                         apiKeyConfigured: !!p.apiKeyConfigured,
                         clearApiKey: false
                     };
@@ -4153,6 +4229,9 @@
                         proxy: (p.proxy || '').includes('__AI_GATEWAY_KEEP_PROXY_PASSWORD__') ? '' : (p.proxy || ''),
                         oneMContext: p.oneMContext || '',
                         extraHeaders: this.headersToRows(p.extraHeaders),
+                        // 副本默认启用：复制一个被禁用的 provider 时，新副本应当是启用的，
+                        // 否则用户复制后还要手动启用，与「复制=另起一个可用的」预期不符。
+                        enabled: true,
                         apiKeyConfigured: false,
                         clearApiKey: false
                     };
@@ -4219,7 +4298,10 @@
                         oneMContext: this.providerForm.oneMContext || undefined,
                         // 空表格发 undefined 而不是 {}：后端 omitempty 只认 nil/空 map，
                         // 但发 {} 会让 YAML 里多出一行空 extraHeaders，配置越存越脏。
-                        extraHeaders: this.rowsToHeaders(this.providerForm.extraHeaders)
+                        extraHeaders: this.rowsToHeaders(this.providerForm.extraHeaders),
+                        // enabled 透传表单值。true 时发 undefined 走 omitempty（保持
+                        // 老配置不扩散该字段），false 时显式写入。
+                        enabled: this.providerForm.enabled === false ? false : undefined
                     };
                     // 弹窗保存直接落盘：点这个按钮已经是一次明确确认，再要求点顶部保存
                     // 等于同一件事确认两遍，实际结果是用户忘记第二步。

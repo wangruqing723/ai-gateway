@@ -263,7 +263,11 @@ func printBanner(cfg *config.Config, c *cache.Cache) {
 	logSystem("  配置文件 : %s", cfg.Path)
 	logSystem("  Providers:")
 	for name, p := range cfg.Providers {
-		logSystem("    %s: %s [%s] key=%s 并发=%d", name, p.BaseURL, p.Format, mask(p.APIKey), p.MaxConcurrent)
+		disabled := ""
+		if !p.IsEnabled() {
+			disabled = " [已禁用]"
+		}
+		logSystem("    %s: %s [%s] key=%s 并发=%d%s", name, p.BaseURL, p.Format, mask(p.APIKey), p.MaxConcurrent, disabled)
 	}
 	logSystem("  Routes  : %d 条", len(cfg.Routes))
 	for _, r := range cfg.Routes {
@@ -286,7 +290,21 @@ func printBanner(cfg *config.Config, c *cache.Cache) {
 			}
 			strategy = fmt.Sprintf(" [%s]", s)
 		}
-		logSystem("    %-30s → %s%s%s", r.Match, strings.Join(parts, ", "), strategy, vis)
+		// 全部候选都被禁用：启动不报错（禁用不该影响启动），但在这里出声。
+		// A2 语义下这种路由的请求会在运行时 503 all_candidates_disabled，
+		// 启动时一行警告是零成本的提前告知。
+		allDisabled := len(targets) > 0
+		for _, t := range targets {
+			if p := cfg.Providers[t.Provider]; p != nil && p.IsEnabled() {
+				allDisabled = false
+				break
+			}
+		}
+		warn := ""
+		if allDisabled {
+			warn = "  ⚠️ 全部候选已禁用"
+		}
+		logSystem("    %-30s → %s%s%s%s", r.Match, strings.Join(parts, ", "), strategy, vis, warn)
 	}
 	logSystem("───────────────────────────────────────────")
 	cs := c.GetStats()

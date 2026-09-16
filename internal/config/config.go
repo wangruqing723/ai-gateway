@@ -149,6 +149,19 @@ type Provider struct {
 	// 三条出网路径（转发、模型列表查询、健康检测）共用，理由同 userAgent：
 	// 上游的准入判断不区分请求是谁发起的。
 	ExtraHeaders map[string]string `yaml:"extraHeaders,omitempty" json:"extraHeaders,omitempty"`
+	// Enabled 控制该 provider 是否参与请求转发，nil 表示未配置（等同 true）。
+	//
+	// false 时该 provider 在候选循环里被剔除，不参与请求转发与 vision 翻译，
+	// 但健康检测、模型列表查询等配置期探测不受影响。
+	//
+	// 用 *bool 而非 bool：值类型的零值 false 会让所有未写该字段的存量配置
+	// 在加载后变成「已禁用」，网关一升级就全线停摆。nil 与 false 必须走不同
+	// 分支（一个启用、一个禁用），故指针在这里不是为了让 validate 报错，
+	// 而是为了让 nil 承载「默认启用」。
+	//
+	// applyDefaults 有意不物化它（理由同 OneMContext）：物化后每次 PUT 保存
+	// 都会给每个 provider 落一行 enabled: true，纯噪音。读取统一走 IsEnabled()。
+	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
 }
 
 // Vision 路由上的视觉子配置
@@ -255,6 +268,17 @@ func BoolOr(p *bool, def bool) bool {
 		return def
 	}
 	return *p
+}
+
+// IsEnabled 该 provider 是否参与请求转发。nil 表示未配置，默认启用。
+//
+// 读取一律走本 accessor，不要直接解 Enabled 指针：applyDefaults 有意不物化该字段
+// （理由同 OneMContext），nil 是长期存在的合法终态，默认值只留这一处来源。
+func (p *Provider) IsEnabled() bool {
+	if p == nil {
+		return false
+	}
+	return BoolOr(p.Enabled, true)
 }
 
 func boolPtr(v bool) *bool { return &v }
@@ -460,6 +484,8 @@ func applyDefaults(c *Config) {
 		if p.MaxQueueWait == 0 {
 			p.MaxQueueWait = 30000
 		}
+		// Enabled 有意不物化：nil 与 true 同义，填上会让每次 PUT 保存都给
+		// 所有 provider 落一行 enabled: true。理由同 OneMContext 的空值。
 	}
 	applyFailoverDefaults(&c.Failover)
 	applyBreakerDefaults(&c.Breaker)
@@ -1063,6 +1089,8 @@ func validateProvider(name string, p *Provider, validateLimits bool) error {
 	if err := validateExtraHeaders(name, p.ExtraHeaders); err != nil {
 		return err
 	}
+	// Enabled 无需校验：nil 与 true 同义（默认启用），false 是合法的软停用状态。
+	// 三种取值都合法，没有可报错的边界。
 	return nil
 }
 
@@ -1145,6 +1173,10 @@ func validateRouteTargets(c *Config, r *Route) error {
 		if _, ok := c.Providers[r.Provider]; !ok {
 			return fmt.Errorf("route %q 引用了未定义的 provider: %s", r.Match, r.Provider)
 		}
+		// 有意不校验该 provider 是否被禁用：禁用是软停用，任何时候都不该影响
+		// 启动或保存。validate 同时服务 Load 与 PUT /api/config，在这里报错会让
+		// 前端那个开关直接点不动，且一旦落盘网关就再也起不来。全部候选被禁用
+		// 由运行时按 503 all_candidates_disabled 收口。
 		if strings.TrimSpace(r.Model) == "" {
 			return fmt.Errorf("route %q 缺少 model 字段", r.Match)
 		}

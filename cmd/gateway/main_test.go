@@ -2535,9 +2535,13 @@ func (s *healthStatsCacheSpy) Cleanup(int, int) (cache.CleanupResult, error) {
 type runtimeVisionSpy struct {
 	modes  []bool
 	result vision.Result
+	// translateCalls 记录翻译器被调用的次数，供「vision provider 已禁用时
+	// 一次上游翻译都不该发生」这类断言使用。
+	translateCalls int
 }
 
 func (s *runtimeVisionSpy) Translate(_ context.Context, messages []any, _ *config.Provider, _ string, _ vision.LogFunc) ([]any, vision.Result) {
+	s.translateCalls++
 	return messages, s.result
 }
 func (s *runtimeVisionSpy) SetDirectMode(enabled bool) { s.modes = append(s.modes, enabled) }
@@ -3097,5 +3101,219 @@ func TestMaxTokensPrecedenceClientValueBeatsGlobalDefault(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func testBoolPtr(v bool) *bool { return &v }
+
+// TestHandleSkipsDisabledCandidateWithoutConsumingAttempts 锁住「禁用跳过不消耗尝试额度」。
+//
+// 本例刻意不开 failover：attemptLimit 因此是 1，若禁用跳过消耗了额度，循环在跳过
+// 第一个候选后就到顶、第二个健康候选根本不会被尝试，请求以 502 收场。它能通过
+// 正是因为 disabledSkips 不计入 attempts。
+func TestHandleSkipsDisabledCandidateWithoutConsumingAttempts(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"chatcmpl-test","model":"upstream","choices":[{"message":{"role":"assistant","content":"ok"}}]}`)
+	}))
+	defer upstream.Close()
+
+	off := &config.Provider{
+		Name: "stopped", BaseURL: upstream.URL, Format: "openai",
+		MaxConcurrent: 1, MaxQueueWait: 1000, Enabled: testBoolPtr(false),
+	}
+	on := &config.Provider{
+		Name: "healthy", BaseURL: upstream.URL, Format: "openai",
+		MaxConcurrent: 1, MaxQueueWait: 1000,
+	}
+	srv := &server{
+		cfg: &config.Config{
+			Host: "127.0.0.1", Port: 7789,
+			Timeout: 500, StreamActivityTimeout: 500,
+			DirectMode: true, DirectTimeoutNoStream: 500, DirectTimeoutStreamHeader: 500, DirectTimeoutStreamActive: 500,
+			Providers: map[string]*config.Provider{"stopped": off, "healthy": on},
+			Routes: []config.Route{{Match: "*", Targets: []config.Target{
+				{Provider: "stopped", Model: "upstream-a"},
+				{Provider: "healthy", Model: "upstream-b"},
+			}}},
+		},
+		qm:                queue.NewManager(),
+		resolveHTTPClient: testClientResolver(upstream.Client()),
+		metrics:           metrics.NewCollector(10),
+		providerHealth:    providerhealth.NewChecker(),
+		translator:        &runtimeVisionSpy{},
+	}
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:7789/v1/chat/completions",
+		strings.NewReader(`{"model":"client-model","messages":[{"role":"user","content":"hi"}]}`))
+	request.Header.Set("Content-Type", "application/json")
+	srv.handle(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status/body = %d/%s", recorder.Code, recorder.Body.String())
+	}
+	if got := recorder.Header().Get("x-ai-gateway-provider"); got != "healthy" {
+		t.Errorf("x-ai-gateway-provider = %q, 期望 healthy", got)
+	}
+	if got := recorder.Header().Get("x-ai-gateway-attempts"); got != "1" {
+		t.Errorf("x-ai-gateway-attempts = %q, 期望 1（禁用跳过不算一次尝试）", got)
+	}
+
+	logs := srv.metrics.Logs(metrics.LogFilter{Limit: 1})
+	if len(logs) != 1 {
+		t.Fatalf("请求日志 = %#v", logs)
+	}
+	if logs[0].Attempts != 1 {
+		t.Errorf("Attempts = %d, 期望 1", logs[0].Attempts)
+	}
+	if !strings.Contains(logs[0].AttemptTrail, "stopped:provider_disabled") {
+		t.Errorf("AttemptTrail = %q, 期望含 stopped:provider_disabled", logs[0].AttemptTrail)
+	}
+	if len(logs[0].AttemptDetails) != 2 {
+		t.Fatalf("AttemptDetails 条数 = %d, 期望 2（跳过 + 真实尝试）: %#v", len(logs[0].AttemptDetails), logs[0].AttemptDetails)
+	}
+	skip := logs[0].AttemptDetails[0]
+	if skip.Kind != "provider_disabled" || skip.Outcome != "skipped" || skip.Reason != "provider_disabled" {
+		t.Errorf("跳过明细 = %#v", skip)
+	}
+	if skip.Provider != "stopped" || skip.TargetModel != "upstream-a" {
+		t.Errorf("跳过明细未记住候选身份 = %#v", skip)
+	}
+	// 跳过没有真实尝试，不能占用 AttemptNumber：那个序号是给上游请求编号的。
+	if skip.AttemptNumber != 0 {
+		t.Errorf("跳过明细 AttemptNumber = %d, 期望 0", skip.AttemptNumber)
+	}
+}
+
+// TestHandleAllCandidatesDisabledReturns503 锁住 503 all_candidates_disabled 终态。
+//
+// 不带 retry-after 是有意的：人工禁用没有恢复时间，给个假秒数会让客户端按节奏空转重试。
+func TestHandleAllCandidatesDisabledReturns503(t *testing.T) {
+	off1 := &config.Provider{
+		Name: "a", BaseURL: "http://127.0.0.1:1", Format: "openai",
+		MaxConcurrent: 1, MaxQueueWait: 1000, Enabled: testBoolPtr(false),
+	}
+	off2 := &config.Provider{
+		Name: "b", BaseURL: "http://127.0.0.1:1", Format: "openai",
+		MaxConcurrent: 1, MaxQueueWait: 1000, Enabled: testBoolPtr(false),
+	}
+	srv := &server{
+		cfg: &config.Config{
+			Host: "127.0.0.1", Port: 7789,
+			Timeout: 500, StreamActivityTimeout: 500,
+			DirectMode: true, DirectTimeoutNoStream: 500, DirectTimeoutStreamHeader: 500, DirectTimeoutStreamActive: 500,
+			Providers: map[string]*config.Provider{"a": off1, "b": off2},
+			Routes: []config.Route{{Match: "*", Targets: []config.Target{
+				{Provider: "a", Model: "m-a"},
+				{Provider: "b", Model: "m-b"},
+			}}},
+		},
+		qm:                queue.NewManager(),
+		resolveHTTPClient: testClientResolver(http.DefaultClient),
+		metrics:           metrics.NewCollector(10),
+		providerHealth:    providerhealth.NewChecker(),
+		translator:        &runtimeVisionSpy{},
+	}
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:7789/v1/chat/completions",
+		strings.NewReader(`{"model":"client-model","messages":[{"role":"user","content":"hi"}]}`))
+	request.Header.Set("Content-Type", "application/json")
+	srv.handle(recorder, request)
+
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status/body = %d/%s", recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), "all_candidates_disabled") {
+		t.Errorf("响应体缺少 all_candidates_disabled: %s", recorder.Body.String())
+	}
+	if got := recorder.Header().Get("retry-after"); got != "" {
+		t.Errorf("retry-after = %q, 人工禁用不应给恢复时间", got)
+	}
+
+	logs := srv.metrics.Logs(metrics.LogFilter{Limit: 1})
+	if len(logs) != 1 {
+		t.Fatalf("请求日志 = %#v", logs)
+	}
+	if logs[0].Attempts != 0 {
+		t.Errorf("Attempts = %d, 期望 0", logs[0].Attempts)
+	}
+	if !strings.Contains(logs[0].AttemptTrail, "a:provider_disabled") ||
+		!strings.Contains(logs[0].AttemptTrail, "b:provider_disabled") {
+		t.Errorf("AttemptTrail = %q, 期望两个候选都留痕", logs[0].AttemptTrail)
+	}
+	if len(logs[0].AttemptDetails) != 2 {
+		t.Errorf("AttemptDetails 条数 = %d, 期望 2: %#v", len(logs[0].AttemptDetails), logs[0].AttemptDetails)
+	}
+}
+
+// TestHandleDisabledVisionProviderDegradesSoftly 锁住 vision provider 被禁用时的软降级。
+//
+// 请求必须成功（带原始图片块打到目标模型），同时每张图片记一次识别失败，
+// 让这个降级在 /api/metrics 与运行异常区可见——否则用户禁用了 vision 却毫无提示，
+// 只会看到目标模型答得莫名其妙。
+func TestHandleDisabledVisionProviderDegradesSoftly(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"chatcmpl-test","model":"upstream","choices":[{"message":{"role":"assistant","content":"ok"}}]}`)
+	}))
+	defer upstream.Close()
+
+	primary := &config.Provider{Name: "primary", BaseURL: upstream.URL, Format: "openai", MaxConcurrent: 1, MaxQueueWait: 1000}
+	visual := &config.Provider{
+		Name: "visual", BaseURL: upstream.URL, Format: "openai",
+		MaxConcurrent: 1, MaxQueueWait: 1000, Enabled: testBoolPtr(false),
+	}
+	spy := &runtimeVisionSpy{}
+	srv := &server{
+		cfg: &config.Config{
+			Host: "127.0.0.1", Port: 7789,
+			Timeout: 500, StreamActivityTimeout: 500,
+			DirectMode: true, DirectTimeoutNoStream: 500, DirectTimeoutStreamHeader: 500, DirectTimeoutStreamActive: 500,
+			Providers: map[string]*config.Provider{"primary": primary, "visual": visual},
+			Routes: []config.Route{{
+				Match: "*", Provider: "primary", Model: "upstream",
+				Vision: &config.Vision{Provider: "visual", Model: "vision-model"},
+			}},
+		},
+		qm:                queue.NewManager(),
+		resolveHTTPClient: testClientResolver(upstream.Client()),
+		metrics:           metrics.NewCollector(10),
+		providerHealth:    providerhealth.NewChecker(),
+		translator:        spy,
+	}
+
+	recorder := httptest.NewRecorder()
+	body := `{"model":"client-model","messages":[{"role":"user","content":[` +
+		`{"type":"image_url","image_url":{"url":"https://images.example/a.png"}},` +
+		`{"type":"image_url","image_url":{"url":"https://images.example/b.png"}}]}]}`
+	request := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:7789/v1/chat/completions", strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	srv.handle(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("vision 禁用不应影响请求成败，status/body = %d/%s", recorder.Code, recorder.Body.String())
+	}
+	// 禁用意味着完全不调用视觉模型，一次上游翻译都不该发生。
+	if spy.translateCalls != 0 {
+		t.Errorf("vision provider 已禁用却调用了翻译器 %d 次", spy.translateCalls)
+	}
+
+	logs := srv.metrics.Logs(metrics.LogFilter{Limit: 1})
+	if len(logs) != 1 {
+		t.Fatalf("请求日志 = %#v", logs)
+	}
+	if logs[0].Vision {
+		t.Errorf("Vision = true，禁用时不该标记为「已启用视觉」")
+	}
+	if logs[0].VisionImages != 2 || logs[0].VisionFailed != 2 {
+		t.Errorf("VisionImages/VisionFailed = %d/%d, 期望 2/2", logs[0].VisionImages, logs[0].VisionFailed)
+	}
+	if logs[0].VisionCached != 0 || logs[0].VisionRecognized != 0 {
+		t.Errorf("禁用时不该有缓存命中或识别成功 = %#v", logs[0])
+	}
+	if logs[0].VisionFailCategory != "other" || logs[0].VisionFailMessage == "" {
+		t.Errorf("失败分类/说明 = %q/%q", logs[0].VisionFailCategory, logs[0].VisionFailMessage)
 	}
 }

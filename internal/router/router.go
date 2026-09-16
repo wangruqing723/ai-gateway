@@ -32,6 +32,9 @@ type Match struct {
 	Candidates     []Candidate
 	VisionProvider *config.Provider // 可能为 nil
 	VisionModel    string
+	// VisionDisabled 表示路由配置了 vision，但 vision provider 被禁用。
+	// 此时 VisionProvider 为 nil，main.go 据此把图片块记为识别失败（软降级）。
+	VisionDisabled bool
 }
 
 // MatchRoute 根据模型名匹配路由规则，首条命中生效（对齐 minimatch nocase）。
@@ -49,6 +52,10 @@ func MatchRoute(model string, cfg *config.Config) *Match {
 				// 校验期已拦截未定义 provider；此处保守跳过，避免运行时 panic。
 				continue
 			}
+			// 被禁用的 provider 不在这里剔除：候选过滤落在 main.go 的候选循环，
+			// 那里能记 AttemptDetail(provider_disabled) 并给出 503 all_candidates_disabled
+			// 终态。在 router 剔除会让候选空时静默 continue 到下一条路由，请求可能
+			// 落到 catch-all 上一个完全不相关的模型，且诊断信息全无。
 			// 复制 Provider 结构体，避免并发请求修改共享指针字段（如 APIKey）
 			pCopy := *src
 			targetModel := target.Model
@@ -82,9 +89,16 @@ func MatchRoute(model string, cfg *config.Config) *Match {
 		m := &Match{RouteMatch: route.Match, Strategy: route.Strategy, Candidates: candidates}
 		if route.Vision != nil {
 			if vSrc := cfg.Providers[route.Vision.Provider]; vSrc != nil {
-				vpCopy := *vSrc
-				m.VisionProvider = &vpCopy
-				m.VisionModel = route.Vision.Model
+				if vSrc.IsEnabled() {
+					vpCopy := *vSrc
+					m.VisionProvider = &vpCopy
+					m.VisionModel = route.Vision.Model
+				} else {
+					// vision provider 被禁用：标记后让 main.go 把图片块
+					// 记为识别失败。vision 不走候选循环，这是它的唯一落点。
+					m.VisionDisabled = true
+					m.VisionModel = route.Vision.Model
+				}
 			}
 		}
 		return m

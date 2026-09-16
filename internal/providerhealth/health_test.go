@@ -793,3 +793,87 @@ func TestSnapshotIncludesUncheckedProviders(t *testing.T) {
 		t.Fatalf("expected unchecked status, got %#v", statuses["pending"])
 	}
 }
+
+func boolPtr(v bool) *bool { return &v }
+
+// TestSnapshotSkipsDisabledProviders 锁住「禁用的 provider 不出现在健康快照里」。
+//
+// 不给它一个 unchecked：前端靠 config.providers[name].enabled 渲染「已禁用」标记，
+// 快照里再放一条 unchecked 会让同一个 provider 在界面上同时是「已禁用」和「未检测」。
+func TestSnapshotSkipsDisabledProviders(t *testing.T) {
+	cfg := &config.Config{Providers: map[string]*config.Provider{
+		"on":  {Name: "on", BaseURL: "https://a.example.com", Format: "openai"},
+		"off": {Name: "off", BaseURL: "https://b.example.com", Format: "openai", Enabled: boolPtr(false)},
+	}}
+
+	statuses := NewChecker().Snapshot(cfg)
+	if _, ok := statuses["off"]; ok {
+		t.Fatalf("禁用的 provider 不应出现在快照里: %#v", statuses["off"])
+	}
+	if statuses["on"].Status != "unchecked" {
+		t.Fatalf("启用的 provider 应为 unchecked，实际 %#v", statuses["on"])
+	}
+}
+
+// TestCheckAllSkipsDisabledProviders 锁住批量检测跳过禁用者。
+//
+// 禁用的常见起因恰恰是上游挂了或 key 过期，继续周期探只会稳定失败、
+// 刷日志、刷异常计数。这里用一个会计数的假上游断言它一次都没被探。
+func TestCheckAllSkipsDisabledProviders(t *testing.T) {
+	var offHits, onHits atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/off/") {
+			offHits.Add(1)
+		} else {
+			onHits.Add(1)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	cfg := &config.Config{Providers: map[string]*config.Provider{
+		"on":  {Name: "on", BaseURL: server.URL + "/on", APIKey: "k", Format: "openai"},
+		"off": {Name: "off", BaseURL: server.URL + "/off", APIKey: "k", Format: "openai", Enabled: boolPtr(false)},
+	}}
+
+	statuses := NewChecker().CheckAll(context.Background(), cfg, testResolver(server.Client()))
+	if got := offHits.Load(); got != 0 {
+		t.Fatalf("禁用的 provider 被探测了 %d 次，期望 0", got)
+	}
+	if got := onHits.Load(); got != 1 {
+		t.Fatalf("启用的 provider 探测 %d 次，期望 1", got)
+	}
+	if _, ok := statuses["off"]; ok {
+		t.Fatalf("禁用的 provider 不应出现在结果里: %#v", statuses["off"])
+	}
+	if statuses["on"].Status != "ok" {
+		t.Fatalf("on 状态 = %#v，期望 ok", statuses["on"])
+	}
+}
+
+// TestCheckProviderStillChecksDisabledProvider 锁住相反的一面：单 provider 显式检测
+// 不跳过禁用者。那是禁用期间确认上游是否恢复的唯一入口——用户点某一行的检测按钮，
+// 正是想知道「现在能不能把它开回来」，此时拒绝检测等于把恢复判断的依据也拿掉了。
+func TestCheckProviderStillChecksDisabledProvider(t *testing.T) {
+	var hits atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	cfg := &config.Config{Providers: map[string]*config.Provider{
+		"off": {Name: "off", BaseURL: server.URL, APIKey: "k", Format: "openai", Enabled: boolPtr(false)},
+	}}
+
+	status, ok := NewChecker().CheckProvider(context.Background(), cfg, testResolver(server.Client()), "off")
+	if !ok {
+		t.Fatal("显式检测禁用的 provider 应返回 ok=true")
+	}
+	if status.Status != "ok" {
+		t.Fatalf("status = %#v，期望 ok", status)
+	}
+	if got := hits.Load(); got != 1 {
+		t.Fatalf("上游被探测 %d 次，期望 1", got)
+	}
+}

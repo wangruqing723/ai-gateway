@@ -117,6 +117,11 @@ func main() {
 	srv.breaker.SetSettings(breakerSettingsWithCallback(cfg, srv.onBreakerStateChange))
 	initialLimits := make(map[string]queue.Limits, len(cfg.Providers))
 	for name, provider := range cfg.Providers {
+		// 被禁用的 provider 不建立队列槽：走 queue.Reconcile 的 retired/drain，
+		// 新 Acquire 返回 ErrProviderRemoved，是候选过滤之外的第二道闸。
+		if !provider.IsEnabled() {
+			continue
+		}
 		initialLimits[name] = queue.Limits{MaxConcurrent: provider.MaxConcurrent, MaxPerSecond: provider.MaxPerSecond}
 	}
 	qm.Reconcile(initialLimits)
@@ -586,6 +591,18 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 	needVision := matched.VisionProvider != nil && vision.HasImages(internal.Messages)
 	reqLog.Vision = needVision
 
+	// vision provider 被禁用：路由配了 vision 但该 provider enabled=false，
+	// MatchRoute 把 VisionProvider 置 nil 并标记 VisionDisabled。此时图片翻译
+	// 整段跳过，请求带原始图片块打到目标模型。按 Q10/F1 把每张图片记为一次
+	// 识别失败，复用现有软降级通道，让这个降级在 /api/metrics 与运行异常区可见。
+	if matched.VisionDisabled && vision.HasImages(internal.Messages) {
+		imgCount := vision.CountImages(internal.Messages)
+		reqLog.VisionImages = imgCount
+		reqLog.VisionFailed = imgCount
+		reqLog.VisionFailCategory = "other"
+		reqLog.VisionFailMessage = "vision provider 已禁用，跳过图片翻译"
+	}
+
 	// 协议规范化失败且没有任何候选是同格式（同格式走原样透传，不需要 canonical 重建）
 	// —— 此时无论试哪个候选都会失败，必须在 vision 之前返回：视觉翻译是一次真实的
 	// 上游调用，放在后面等于先花钱再拒绝。单候选时代这条检查就在 vision 之前，
@@ -677,6 +694,9 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		attempts      int
 		lastAbandoned bool
 		breakerSkips  int
+		// disabledSkips 因 provider 被禁用而跳过的次数；与熔断跳过一样不消耗额度。
+		// 人工声明优先于自动熔断，所以这个判断放在 breaker.Allow 之前。
+		disabledSkips int
 		// freeSkips 因上游自报限流而放弃、且未消耗额度的次数
 		freeSkips int
 		// contextSkips 因输入装不进候选窗口而跳过的次数；与熔断跳过一样不消耗额度。
@@ -690,6 +710,28 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 	for pos := 0; pos < len(order) && attempts < attemptLimit; pos++ {
 		candidate := matched.Candidates[order[pos]]
 		name := candidate.Provider.Name
+
+		// 禁用过滤：被使用者显式停用的 provider 直接跳过，不占用尝试额度。
+		// 优先于熔断判断：禁用是稳定的人工状态，比瞬时熔断更该顶在前面。
+		if !candidate.Provider.IsEnabled() {
+			disabledSkips++
+			trail = append(trail, name+":provider_disabled")
+			skipStarted := time.Now()
+			nextDetailSequence++
+			reqLog.AttemptDetails = append(reqLog.AttemptDetails, metrics.AttemptDetail{
+				Sequence:       nextDetailSequence,
+				Kind:           "provider_disabled",
+				Provider:       name,
+				TargetModel:    candidate.TargetModel,
+				ProviderFormat: candidate.Provider.Format,
+				StartedAt:      skipStarted.In(beijingLoc).Format(time.RFC3339Nano),
+				DurationMs:     time.Since(skipStarted).Milliseconds(),
+				Outcome:        "skipped",
+				Reason:         "provider_disabled",
+			})
+			logf(reqID, "  候选 %s 已禁用，跳过", name)
+			continue
+		}
 
 		// 熔断过滤：开路的 provider 直接跳过，不占用尝试额度
 		if s.breaker != nil {
@@ -823,6 +865,13 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 	}
 
 	switch {
+	case attempts == 0 && disabledSkips > 0:
+		// 全部候选的 provider 都被禁用：人工停用优先于自动熔断，单独一档。
+		// 503 表达「服务端暂时不可用」，成因在配置侧、不是客户端请求问题。
+		// 不带 retry-after：人工禁用没有恢复时间，给假数字会误导客户端重试。
+		reqLog.AttemptTrail = strings.Join(trail, " → ")
+		reqLog.Error = "全部候选上游均已禁用"
+		writeJSONError(w, http.StatusServiceUnavailable, "all_candidates_disabled", reqLog.Error)
 	case attempts == 0 && breakerSkips > 0:
 		// 全部候选被熔断：给出最早恢复者的剩余冷却，让客户端知道何时重试
 		reqLog.AttemptTrail = strings.Join(trail, " → ")
@@ -1665,6 +1714,11 @@ func (s *server) handleHealth(w http.ResponseWriter, head bool) {
 
 	queues := make(map[string]queue.Status)
 	for name, p := range cfg.Providers {
+		// 被禁用的 provider 没有 queue 槽（Reconcile 已排除），不进 /health 的 queues，
+		// 前端靠 config.providers[name].enabled 判定禁用态并渲染灰行。
+		if !p.IsEnabled() {
+			continue
+		}
 		queues[name] = s.qm.StatusOf(name, p.MaxConcurrent, p.MaxPerSecond)
 	}
 	cs, heapAllocMB, sysMB := s.healthStats(time.Now())
@@ -2547,6 +2601,14 @@ func (s *server) applyRuntimeConfig(newCfg *config.Config, revision string) []st
 	limits := make(map[string]queue.Limits, len(newCfg.Providers))
 	activeProxies := make(map[string]struct{}, len(newCfg.Providers))
 	for name, provider := range newCfg.Providers {
+		// 三处 Reconcile 统一排除被禁用的 provider：
+		//   - queue：retired/drain，新 Acquire 被拒（候选过滤的第二道闸）；
+		//   - breaker：删除其状态，重新启用拿到干净计数与冷却；
+		//   - httpclient.Pool：关闭其代理空闲连接（按规范化 URL 聚合，仅当没有
+		//     其他启用 provider 共用该代理时才真正清掉）。
+		if !provider.IsEnabled() {
+			continue
+		}
 		limits[name] = queue.Limits{MaxConcurrent: provider.MaxConcurrent, MaxPerSecond: provider.MaxPerSecond}
 		if provider.Proxy != "" {
 			activeProxies[provider.Proxy] = struct{}{}
@@ -2578,7 +2640,10 @@ func (s *server) applyRuntimeConfig(newCfg *config.Config, revision string) []st
 	if s.breaker != nil {
 		s.breaker.SetSettings(breakerSettingsWithCallback(newCfg, s.onBreakerStateChange))
 		active := make(map[string]struct{}, len(newCfg.Providers))
-		for name := range newCfg.Providers {
+		for name, provider := range newCfg.Providers {
+			if !provider.IsEnabled() {
+				continue
+			}
 			active[name] = struct{}{}
 		}
 		s.breaker.Reconcile(active)

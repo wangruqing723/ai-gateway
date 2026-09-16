@@ -1247,3 +1247,130 @@ routes:
 		t.Fatalf("错误应提示重复候选，实际: %v", err)
 	}
 }
+
+// TestProviderIsEnabled 锁住三态语义：nil 默认启用、显式 true 启用、显式 false 禁用。
+// nil 与 false 必须走不同分支——若哪天把 Enabled 改成值类型，存量配置（全是 nil）
+// 会集体变成 false、网关一升级就全线停摆，这条会在那时失败。
+func TestProviderIsEnabled(t *testing.T) {
+	tests := []struct {
+		name  string
+		value *bool
+		want  bool
+	}{
+		{name: "未配置默认启用", value: nil, want: true},
+		{name: "显式 true 启用", value: boolPtr(true), want: true},
+		{name: "显式 false 禁用", value: boolPtr(false), want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := &Provider{Name: "primary", Enabled: tt.value}
+			if got := p.IsEnabled(); got != tt.want {
+				t.Fatalf("IsEnabled() = %v, 期望 %v", got, tt.want)
+			}
+		})
+	}
+
+	// nil receiver 判为禁用而不是 panic：候选构建路径上 provider 可能取不到，
+	// 那种情况下「不转发」是唯一安全的答案。
+	var nilProvider *Provider
+	if nilProvider.IsEnabled() {
+		t.Fatal("nil provider 应判为禁用")
+	}
+}
+
+// TestEnabledValidationAcceptsAllThreeStates 校验三种取值都能通过 validate。
+// 禁用是软停用状态，不管在 Load 还是 PUT /api/config 都不该报错。
+func TestEnabledValidationAcceptsAllThreeStates(t *testing.T) {
+	tests := []struct {
+		name  string
+		block string
+	}{
+		{name: "不写 enabled", block: ""},
+		{name: "enabled: true", block: "\n    enabled: true"},
+		{name: "enabled: false", block: "\n    enabled: false"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			raw := strings.Replace(validConfigYAML(), "    format: openai", "    format: openai"+tt.block, 1)
+			cfg, err := DecodeAndValidate([]byte(raw))
+			if err != nil {
+				t.Fatalf("DecodeAndValidate 失败: %v", err)
+			}
+			wantEnabled := tt.block != "\n    enabled: false"
+			if got := cfg.Providers["primary"].IsEnabled(); got != wantEnabled {
+				t.Fatalf("IsEnabled() = %v, 期望 %v", got, wantEnabled)
+			}
+		})
+	}
+}
+
+// TestDisabledProviderStillPassesRouteAndVisionValidation 锁住「禁用不影响启动与保存」。
+//
+// validate 同时服务 Load 与 PUT /api/config：在这里对禁用报错会让前端那个开关
+// 点不下去（保存即 400），而一旦用户手改 YAML 落了盘，网关就再也起不来了。
+// 单 target 路由的唯一目标被禁用，以及 vision provider 被禁用，都留给运行时处理。
+func TestDisabledProviderStillPassesRouteAndVisionValidation(t *testing.T) {
+	raw := `
+providers:
+  only:
+    baseUrl: "https://a.example.com"
+    apiKey: "k"
+    format: anthropic
+    enabled: false
+  visual:
+    baseUrl: "https://b.example.com"
+    apiKey: "k"
+    format: openai
+    enabled: false
+routes:
+  - match: "*"
+    provider: only
+    model: "m"
+    vision:
+      provider: visual
+      model: "vision-model"
+`
+	cfg, err := DecodeAndValidate([]byte(raw))
+	if err != nil {
+		t.Fatalf("禁用 provider 不应导致校验失败，实际: %v", err)
+	}
+	if cfg.Providers["only"].IsEnabled() {
+		t.Error("only 应为禁用")
+	}
+	if cfg.Providers["visual"].IsEnabled() {
+		t.Error("visual 应为禁用")
+	}
+}
+
+// TestEnabledOmitEmptyYAML 锁住零值语义：未配置的 enabled 不能被 applyDefaults
+// 物化成 true 写回配置文件，否则每次 PUT 保存都给所有 provider 落一行纯噪音。
+func TestEnabledOmitEmptyYAML(t *testing.T) {
+	cfg, err := DecodeAndValidate([]byte(validConfigYAML()))
+	if err != nil {
+		t.Fatalf("DecodeAndValidate 失败: %v", err)
+	}
+	if cfg.Providers["primary"].Enabled != nil {
+		t.Fatalf("未配置的 enabled 被物化成 %v", *cfg.Providers["primary"].Enabled)
+	}
+	out, err := yaml.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("yaml.Marshal 失败: %v", err)
+	}
+	if strings.Contains(string(out), "enabled: true") {
+		t.Fatalf("未配置 enabled 却出现在 YAML 中:\n%s", out)
+	}
+
+	// 显式 false 必须落盘，否则重启后禁用状态丢失、流量重新打到停用的上游上。
+	rawDisabled := strings.Replace(validConfigYAML(), "    format: openai", "    format: openai\n    enabled: false", 1)
+	disabled, err := DecodeAndValidate([]byte(rawDisabled))
+	if err != nil {
+		t.Fatalf("DecodeAndValidate 失败: %v", err)
+	}
+	outDisabled, err := yaml.Marshal(disabled)
+	if err != nil {
+		t.Fatalf("yaml.Marshal 失败: %v", err)
+	}
+	if !strings.Contains(string(outDisabled), "enabled: false") {
+		t.Fatalf("enabled: false 未落盘:\n%s", outDisabled)
+	}
+}

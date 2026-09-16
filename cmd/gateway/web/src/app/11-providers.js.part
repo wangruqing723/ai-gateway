@@ -17,6 +17,7 @@
                         proxy: '',
                         oneMContext: '',
                         extraHeaders: [],
+                        enabled: true,
                         apiKeyConfigured: false,
                         clearApiKey: false
                     };
@@ -42,6 +43,8 @@
                         proxy: p.proxy || '',
                         oneMContext: p.oneMContext || '',
                         extraHeaders: this.headersToRows(p.extraHeaders),
+                        // enabled 回填：后端 nil 表示启用（默认），前端归一成 true。
+                        enabled: p.enabled !== false,
                         apiKeyConfigured: !!p.apiKeyConfigured,
                         clearApiKey: false
                     };
@@ -75,6 +78,9 @@
                         proxy: (p.proxy || '').includes('__AI_GATEWAY_KEEP_PROXY_PASSWORD__') ? '' : (p.proxy || ''),
                         oneMContext: p.oneMContext || '',
                         extraHeaders: this.headersToRows(p.extraHeaders),
+                        // 副本默认启用：复制一个被禁用的 provider 时，新副本应当是启用的，
+                        // 否则用户复制后还要手动启用，与「复制=另起一个可用的」预期不符。
+                        enabled: true,
                         apiKeyConfigured: false,
                         clearApiKey: false
                     };
@@ -141,7 +147,10 @@
                         oneMContext: this.providerForm.oneMContext || undefined,
                         // 空表格发 undefined 而不是 {}：后端 omitempty 只认 nil/空 map，
                         // 但发 {} 会让 YAML 里多出一行空 extraHeaders，配置越存越脏。
-                        extraHeaders: this.rowsToHeaders(this.providerForm.extraHeaders)
+                        extraHeaders: this.rowsToHeaders(this.providerForm.extraHeaders),
+                        // enabled 透传表单值。true 时发 undefined 走 omitempty（保持
+                        // 老配置不扩散该字段），false 时显式写入。
+                        enabled: this.providerForm.enabled === false ? false : undefined
                     };
                     // 弹窗保存直接落盘：点这个按钮已经是一次明确确认，再要求点顶部保存
                     // 等于同一件事确认两遍，实际结果是用户忘记第二步。

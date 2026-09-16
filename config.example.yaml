@@ -133,6 +133,12 @@ providers:
     #                       # x-api-key / authorization / content-type / User-Agent 被禁止：
     #                       # 前三个由网关按 format 维护，UA 请用上面的 userAgent 字段。
     #                       # 不要在这里放密钥：/api/config 不对该字段脱敏，会明文返回。
+    # enabled: true          # 可选：false 时该 provider 不参与转发（默认 true）。
+    #                         # 禁用后候选循环里跳过该 provider，不消耗 maxAttempts；
+    #                         # 全部候选都被禁用的路由在运行时返回 503 all_candidates_disabled，
+    #                         # 启动不报错（禁用不该挡住网关起来）。
+    #                         # 周期健康探测与整表快照跳过已禁用 provider；单行的手动
+    #                         # 检测仍可单独探测，便于禁用期间盯着它恢复。模型列表查询不受影响。
 
   mimo_vision:
     baseUrl: "https://api.xiaomimimo.com"
