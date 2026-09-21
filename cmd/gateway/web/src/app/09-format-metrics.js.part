@@ -224,6 +224,16 @@
                     return `${m} 分钟`;
                 },
 
+                // windowChipText 是仪表盘各处窗口 chip 的统一文案来源。
+                // 请求量、成功率、P95 延迟、状态码分布、Provider 延迟排行、图片识别
+                // 都是同一个统计窗口口径（后端 windowMinutes），但此前只有请求量卡
+                // 标了窗口，其余全无——一次性的「识别 / 请求」事件滑出窗口后长期显示 0，
+                // 会被误读成统计坏了。这些位置统一挂一个「最近 N 分钟」chip，
+                // 走同一个来源，将来改措辞或窗口口径只动这一处。
+                windowChipText() {
+                    return `最近 ${this.metricWindowLabel()}`;
+                },
+
                 // latencySampleCount 抽出来给 metricDuration 和 latencySpreadText 共用，
                 // 免得两处各写一份「样本数怎么取」的表达式，回头必然分叉。
                 latencySampleCount() {

@@ -772,31 +772,39 @@
                          grid 会把最高的那张的高度摊给整行，其余卡底部空一大块。 -->
                     <div class="grid grid-cols-1 gap-4 md:grid-cols-2 2xl:grid-cols-4">
                         <article class="glass rounded-lg p-4">
-                            <div class="mb-3 flex items-center justify-between">
-                                <span class="text-sm font-bold text-muted">请求量</span>
+                            <div class="mb-3 flex items-center justify-between gap-2">
+                                <span class="flex min-w-0 items-center gap-2">
+                                    <span class="text-sm font-bold text-muted">请求量</span>
+                                    <span x-show="_firstLoadDone" class="chip shrink-0 bg-white/[.05] px-1.5 text-[11px] text-muted" x-text="windowChipText()"></span>
+                                </span>
                                 <span class="material-symbols-outlined text-cyan">speed</span>
                             </div>
                             <div x-show="_firstLoadDone" class="text-3xl font-extrabold text-white" x-text="metricValue('windowRequests', '--')"></div>
                             <div x-show="!_firstLoadDone" class="gw-skeleton h-9 w-20"></div>
-                            <div x-show="_firstLoadDone" class="mt-1 text-xs text-muted" x-text="'最近 ' + metricWindowLabel() + '请求数'"></div>
-                            <div x-show="!_firstLoadDone" class="gw-skeleton mt-1 h-4 w-32"></div>
+                            <div class="mt-1 text-xs text-muted">请求数</div>
                             <div x-show="_firstLoadDone" class="mt-1 font-mono text-xs text-muted" x-text="requestRateSubText()"></div>
                             <div x-show="!_firstLoadDone" class="gw-skeleton mt-1 h-4 w-40"></div>
                         </article>
                         <article class="glass rounded-lg p-4">
-                            <div class="mb-3 flex items-center justify-between">
-                                <span class="text-sm font-bold text-muted">成功率</span>
+                            <div class="mb-3 flex items-center justify-between gap-2">
+                                <span class="flex min-w-0 items-center gap-2">
+                                    <span class="text-sm font-bold text-muted">成功率</span>
+                                    <span x-show="_firstLoadDone" class="chip shrink-0 bg-white/[.05] px-1.5 text-[11px] text-muted" x-text="windowChipText()"></span>
+                                </span>
                                 <span class="material-symbols-outlined text-good">task_alt</span>
                             </div>
                             <div x-show="_firstLoadDone" class="text-3xl font-extrabold text-white" x-text="metricPercent('successRate')"></div>
                             <div x-show="!_firstLoadDone" class="gw-skeleton h-9 w-24"></div>
-                            <div class="mt-1 text-xs text-muted">最近窗口内的成功请求占比</div>
+                            <div class="mt-1 text-xs text-muted">成功请求占比</div>
                             <div x-show="_firstLoadDone" class="mt-1 font-mono text-xs text-muted" x-text="successSubText()"></div>
                             <div x-show="!_firstLoadDone" class="gw-skeleton mt-1 h-4 w-36"></div>
                         </article>
                         <article class="glass rounded-lg p-4">
-                            <div class="mb-3 flex items-center justify-between">
-                                <span class="text-sm font-bold text-muted">P95 延迟</span>
+                            <div class="mb-3 flex items-center justify-between gap-2">
+                                <span class="flex min-w-0 items-center gap-2">
+                                    <span class="text-sm font-bold text-muted">P95 延迟</span>
+                                    <span x-show="_firstLoadDone" class="chip shrink-0 bg-white/[.05] px-1.5 text-[11px] text-muted" x-text="windowChipText()"></span>
+                                </span>
                                 <span class="material-symbols-outlined text-warn">timer</span>
                             </div>
                             <div x-show="_firstLoadDone" class="text-3xl font-extrabold text-white" x-text="metricDuration('p95LatencyMs')"></div>
@@ -1121,12 +1129,15 @@
                             </section>
 
                             <section class="glass rounded-lg p-4">
-                                <h2 class="text-base font-extrabold text-white">状态码分布</h2>
+                                <div class="flex flex-wrap items-center gap-2">
+                                    <h2 class="text-base font-extrabold text-white">状态码分布</h2>
+                                    <span x-show="_firstLoadDone" class="chip shrink-0 bg-white/[.05] px-1.5 text-[11px] text-muted" x-text="windowChipText()"></span>
+                                </div>
                                 <!-- 只有一个成功率百分比时，看不出掉的是 429 还是 500，而这两者的处置
                                      完全不同：前者调限流或换候选，后者是上游自己坏了。
                                      statusCodes 后端逐秒桶一直在累计，这里是第一次真正用上。 -->
                                 <div x-show="_firstLoadDone" class="mb-3 mt-1 text-xs text-muted"
-                                     x-text="'最近 ' + metricWindowLabel() + '共 ' + statusCodeTotal() + ' 条'"></div>
+                                     x-text="'共 ' + statusCodeTotal() + ' 条'"></div>
                                 <div x-show="!_firstLoadDone" class="gw-skeleton mb-3 mt-1 h-4 w-32"></div>
                                 <div x-show="_firstLoadDone && statusBuckets().length > 0">
                                     <div class="flex h-2 w-full overflow-hidden rounded-full bg-white/[.06]">
@@ -1164,7 +1175,10 @@
                         <section class="glass relative rounded-lg xl:col-span-5">
                           <div class="flex flex-col xl:absolute xl:inset-0">
                             <div class="border-b border-line p-4 shrink-0">
-                                <div class="font-bold text-white">Provider 延迟排行</div>
+                                <div class="flex flex-wrap items-center gap-2">
+                                    <div class="font-bold text-white">Provider 延迟排行</div>
+                                    <span x-show="_firstLoadDone" class="chip shrink-0 bg-white/[.05] px-1.5 text-[11px] text-muted" x-text="windowChipText()"></span>
+                                </div>
                                 <!-- 排序口径必须写出来：样本不足的行被压到后面，否则
                                      「那个 30s 的怎么不在第一行」会被当成 bug 来报。 -->
                                 <div class="mt-1 text-xs text-muted">按 P95 倒序；样本不足 20 的排在可信行之后</div>
@@ -1208,7 +1222,10 @@
                             </div>
                             <div x-show="_firstLoadDone" class="space-y-4 p-4">
                                 <div class="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-line bg-panel2/40 px-3 py-2.5">
-                                    <span class="text-sm font-bold text-muted">图片识别</span>
+                                    <span class="flex items-center gap-2">
+                                        <span class="text-sm font-bold text-muted">图片识别</span>
+                                        <span class="chip shrink-0 bg-white/[.05] px-1.5 text-[11px] text-muted" x-text="windowChipText()"></span>
+                                    </span>
                                     <span class="font-mono text-sm" :class="visionSummaryClass()" x-text="visionSummaryText()"></span>
                                 </div>
 
@@ -3529,6 +3546,16 @@
                     const m = Number(this.metricValue('windowMinutes', 1)) || 1;
                     if (m >= 60 && m % 60 === 0) return `${m / 60} 小时`;
                     return `${m} 分钟`;
+                },
+
+                // windowChipText 是仪表盘各处窗口 chip 的统一文案来源。
+                // 请求量、成功率、P95 延迟、状态码分布、Provider 延迟排行、图片识别
+                // 都是同一个统计窗口口径（后端 windowMinutes），但此前只有请求量卡
+                // 标了窗口，其余全无——一次性的「识别 / 请求」事件滑出窗口后长期显示 0，
+                // 会被误读成统计坏了。这些位置统一挂一个「最近 N 分钟」chip，
+                // 走同一个来源，将来改措辞或窗口口径只动这一处。
+                windowChipText() {
+                    return `最近 ${this.metricWindowLabel()}`;
                 },
 
                 // latencySampleCount 抽出来给 metricDuration 和 latencySpreadText 共用，
