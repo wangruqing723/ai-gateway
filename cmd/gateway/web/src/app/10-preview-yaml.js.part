@@ -84,6 +84,21 @@
                     return ['providerHealth:', `  checkIntervalSeconds: ${interval}`].join('\n');
                 },
 
+                // renderExtraBodyLines 把 extraBody map 渲染成缩进 YAML 行数组，provider /
+                // route / target 三处共用（pad 是 extraBody: 一行的缩进，键再缩进两格）。
+                // 值可能是 bool/number/对象：字符串加引号，其余用 JSON 内联渲染
+                // （YAML 是 JSON 的超集，{"k":v} 与 true / 20 都是合法 YAML 标量）。
+                renderExtraBodyLines(obj, pad) {
+                    if (!obj || !Object.keys(obj).length) return [];
+                    const lines = [`${pad}extraBody:`];
+                    Object.keys(obj).sort().forEach((k) => {
+                        const v = obj[k];
+                        const rendered = typeof v === 'string' ? `"${v}"` : JSON.stringify(v);
+                        lines.push(`${pad}  ${k}: ${rendered}`);
+                    });
+                    return lines;
+                },
+
                 providersYaml() {
                     return Object.entries(this.config.providers || {}).map(([name, p]) => {
                         const lines = [
@@ -110,6 +125,9 @@
                             // 逐键渲染成嵌套 YAML，键排序保证预览稳定；空 map 不输出。
                             Object.keys(p.extraHeaders).sort().forEach((k) => lines.push(`      ${k}: "${p.extraHeaders[k]}"`));
                         }
+                        if (p.extraBody && Object.keys(p.extraBody).length) {
+                            lines.push(...this.renderExtraBodyLines(p.extraBody, '    '));
+                        }
                         // enabled 仅在 false 时输出：true 是默认值，写出来会和后端 omitempty
                         // 不一致，预览里多一行噪音。false 必须显式输出，否则禁用状态会被预览掩盖。
                         if (p.enabled === false) lines.push(`    enabled: false`);
@@ -127,6 +145,7 @@
                                 base.push(`        model: "${t.model || ''}"`);
                                 if (t.maxTokens != null) base.push(`        maxTokens: ${t.maxTokens}`);
                                 if (t.contextWindow != null) base.push(`        contextWindow: ${t.contextWindow}`);
+                                base.push(...this.renderExtraBodyLines(t.extraBody, '        '));
                             });
                         } else {
                             base.push(`    provider: ${r.provider || ''}`);
@@ -139,6 +158,7 @@
                         }
                         if (r.maxTokens != null) base.push(`    maxTokens: ${r.maxTokens}`);
                         if (r.contextWindow != null) base.push(`    contextWindow: ${r.contextWindow}`);
+                        base.push(...this.renderExtraBodyLines(r.extraBody, '    '));
                         if (r.vision) {
                             base.push('    vision:');
                             base.push(`      provider: ${r.vision.provider || ''}`);

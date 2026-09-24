@@ -156,6 +156,10 @@
                     // 该初始状态也是 provider 重建点之一，漏字段会让绑定在保存时被静默丢弃。
                     oneMContext: '',
                     extraHeaders: [],
+                    // extraBody 与 extraHeaders 同为有序行数组：键 + 值文本。值在保存时按
+                    // JSON 解析（true / 20 / {...} 保留类型，解析失败按字符串），是 provider
+                    // 重建点之一，漏字段会让绑定在保存时被静默丢弃。
+                    extraBody: [],
                     // enabled 默认 true：新增 provider 默认启用；editProvider 回填既有值。
                     enabled: true,
                     apiKeyConfigured: false,

@@ -3,6 +3,7 @@ package config
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -82,6 +83,14 @@ const (
 	// maxExtraHeaderNameRunes extraHeaders 单个头名称的长度上限。
 	maxExtraHeaderNameRunes = 128
 
+	// maxExtraBodyEntries 单个 provider 的 extraBody 条目上限。
+	maxExtraBodyEntries = 20
+	// maxExtraBodyKeyRunes extraBody 单个字段名的长度上限。
+	maxExtraBodyKeyRunes = 128
+	// maxExtraBodyValueBytes extraBody 单个值序列化后的字节上限，防止把巨大对象
+	// 塞进请求体。按 JSON 编码后的字节计，覆盖字符串、数组、嵌套对象。
+	maxExtraBodyValueBytes = 8192
+
 	// 默认值集中在此，供 applyDefaults 与各 accessor 共用一处来源。
 	defaultFailoverAttempts      = 2
 	defaultMaxRetryAfterMs       = 5000
@@ -113,6 +122,29 @@ var extraHeaderBlocklist = map[string]struct{}{
 // 热重载或未来新增的配置入口漏了校验也不会把鉴权头送出去。
 func ExtraHeaderBlocked(name string) bool {
 	_, blocked := extraHeaderBlocklist[strings.ToLower(strings.TrimSpace(name))]
+	return blocked
+}
+
+// extraBodyBlocklist 是 extraBody 禁止覆盖的请求体字段（键为小写形式）。
+//
+// 这些字段由网关按客户端请求与 provider format 维护：model / messages / input
+// 是路由与转换的产物，stream 决定网关走透传还是逐行转换（改了会与 SSE 处理错位），
+// max_tokens 系列由 maxTokens / contextWindow 逻辑统一裁决。放开任一项都会让
+// extraBody 把网关自己的决策改坏，且错误现场跑到上游侧才暴露。
+var extraBodyBlocklist = map[string]struct{}{
+	"model":                 {},
+	"messages":              {},
+	"input":                 {},
+	"stream":                {},
+	"max_tokens":            {},
+	"max_output_tokens":     {},
+	"max_completion_tokens": {},
+}
+
+// ExtraBodyBlocked 判断该请求体字段是否禁止由 extraBody 设置（大小写不敏感）。
+// 导出给转发侧在真正合并前做二次拦截，理由同 ExtraHeaderBlocked。
+func ExtraBodyBlocked(key string) bool {
+	_, blocked := extraBodyBlocklist[strings.ToLower(strings.TrimSpace(key))]
 	return blocked
 }
 
@@ -149,6 +181,16 @@ type Provider struct {
 	// 三条出网路径（转发、模型列表查询、健康检测）共用，理由同 userAgent：
 	// 上游的准入判断不区分请求是谁发起的。
 	ExtraHeaders map[string]string `yaml:"extraHeaders,omitempty" json:"extraHeaders,omitempty"`
+	// ExtraBody 是转发给该上游时合并进请求体的自定义字段，nil 表示不附加。
+	//
+	// 用于上游要求的、三种标准格式（anthropic / openai / openai-responses）都不产出
+	// 的私有字段，典型如 Qwen / DashScope 系中转要求的 enable_thinking: true。
+	// 在网关构建完请求体（含 maxTokens 覆盖）之后浅合并，配置值最终生效；但
+	// model / messages / input / stream / max_tokens 系列由 extraBodyBlocklist 挡住，
+	// 避免配置把网关的路由、转换与输出上限决策改坏。值保留 JSON 原始类型
+	// （bool / number / string / 对象 / 数组），只对转发路径生效——模型列表查询与
+	// 健康检测是无体 GET，不涉及。
+	ExtraBody map[string]any `yaml:"extraBody,omitempty" json:"extraBody,omitempty"`
 	// Enabled 控制该 provider 是否参与请求转发，nil 表示未配置（等同 true）。
 	//
 	// false 时该 provider 在候选循环里被剔除，不参与请求转发与 vision 翻译，
@@ -179,6 +221,13 @@ type Target struct {
 	MaxTokens *int `yaml:"maxTokens,omitempty" json:"maxTokens,omitempty"`
 	// ContextWindow 覆盖该目标的上下文窗口，nil 表示不覆盖。优先级 target > route > provider。
 	ContextWindow *int `yaml:"contextWindow,omitempty" json:"contextWindow,omitempty"`
+	// ExtraBody 覆盖该目标转发时合并进请求体的自定义字段，nil 表示不覆盖。
+	//
+	// 与 maxTokens 的「整值覆盖」不同，extraBody 是按键叠加：最终请求体先合 provider
+	// 的 extraBody、再合 route、最后合 target，同名键后者胜出（target > route > provider）。
+	// 选按键叠加而非整值替换：extraBody 是一袋互相独立的私有字段，整值替换会逼用户
+	// 在 target 层把 provider 已声明的字段全部重抄一遍。黑名单同 provider 级。
+	ExtraBody map[string]any `yaml:"extraBody,omitempty" json:"extraBody,omitempty"`
 }
 
 // Route 路由规则，按顺序匹配，首条命中生效。
@@ -206,6 +255,9 @@ type Route struct {
 	MaxTokens *int `yaml:"maxTokens,omitempty" json:"maxTokens,omitempty"`
 	// ContextWindow 覆盖该路由的上下文窗口，nil 表示不覆盖。优先级 target > route > provider。
 	ContextWindow *int `yaml:"contextWindow,omitempty" json:"contextWindow,omitempty"`
+	// ExtraBody 覆盖该路由转发时合并进请求体的自定义字段，nil 表示不覆盖。
+	// 按键叠加，优先级 target > route > provider，语义见 Target.ExtraBody。
+	ExtraBody map[string]any `yaml:"extraBody,omitempty" json:"extraBody,omitempty"`
 }
 
 // TargetList 返回统一形态的候选列表。
@@ -987,6 +1039,9 @@ func validate(c *Config) error {
 		if err := validateContextWindow(fmt.Sprintf("route %q.contextWindow", r.Match), r.ContextWindow); err != nil {
 			return err
 		}
+		if err := validateExtraBody(fmt.Sprintf("route %q.extraBody", r.Match), r.ExtraBody); err != nil {
+			return err
+		}
 		if r.Vision != nil {
 			if strings.TrimSpace(r.Vision.Provider) == "" {
 				return fmt.Errorf("route %q.vision 缺少 provider 字段", r.Match)
@@ -1089,6 +1144,9 @@ func validateProvider(name string, p *Provider, validateLimits bool) error {
 	if err := validateExtraHeaders(name, p.ExtraHeaders); err != nil {
 		return err
 	}
+	if err := validateExtraBody(fmt.Sprintf("providers.%s.extraBody", name), p.ExtraBody); err != nil {
+		return err
+	}
 	// Enabled 无需校验：nil 与 true 同义（默认启用），false 是合法的软停用状态。
 	// 三种取值都合法，没有可报错的边界。
 	return nil
@@ -1139,6 +1197,41 @@ func validateExtraHeaders(name string, headers map[string]string) error {
 			if (r < 0x20 && r != '\t') || r == 0x7F {
 				return fmt.Errorf("providers.%s.extraHeaders[%s] 取值不能包含 ASCII 控制字符", name, trimmed)
 			}
+		}
+	}
+	return nil
+}
+
+// validateExtraBody 校验自定义请求体字段的数量、字段名与值大小。
+// validateExtraBody 校验自定义请求体字段的数量、字段名与值大小。
+// label 是错误信息里的完整路径前缀（如 providers.foo.extraBody / route "x".extraBody），
+// 供 provider / route / target 三处共用同一套校验。
+func validateExtraBody(label string, body map[string]any) error {
+	if len(body) == 0 {
+		return nil
+	}
+	if len(body) > maxExtraBodyEntries {
+		return fmt.Errorf("%s 最多 %d 个条目（当前 %d）", label, maxExtraBodyEntries, len(body))
+	}
+	for key, value := range body {
+		trimmed := strings.TrimSpace(key)
+		if trimmed == "" {
+			return fmt.Errorf("%s 的字段名不能为空", label)
+		}
+		if n := utf8.RuneCountInString(trimmed); n > maxExtraBodyKeyRunes {
+			return fmt.Errorf("%s[%s] 字段名长度应不超过 %d 个字符（当前 %d）", label, trimmed, maxExtraBodyKeyRunes, n)
+		}
+		if ExtraBodyBlocked(trimmed) {
+			return fmt.Errorf("%s 不能设置 %s（model / messages / input / stream / max_tokens 系列由网关维护）", label, trimmed)
+		}
+		// 值序列化一次校验大小：既确认它可编码进上游 JSON 请求体，又挡住把巨大对象
+		// 塞进配置。map[string]any 里出现不可编码类型的概率极低，出现即视为非法。
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			return fmt.Errorf("%s[%s] 取值无法编码为 JSON: %v", label, trimmed, err)
+		}
+		if len(encoded) > maxExtraBodyValueBytes {
+			return fmt.Errorf("%s[%s] 取值序列化后应不超过 %d 字节（当前 %d）", label, trimmed, maxExtraBodyValueBytes, len(encoded))
 		}
 	}
 	return nil
@@ -1205,6 +1298,9 @@ func validateRouteTargets(c *Config, r *Route) error {
 			return fmt.Errorf("route %q.targets[%d].maxTokens 应在 1-%d 之间", r.Match, i, MaxOutputTokensCeiling)
 		}
 		if err := validateContextWindow(fmt.Sprintf("route %q.targets[%d].contextWindow", r.Match, i), t.ContextWindow); err != nil {
+			return err
+		}
+		if err := validateExtraBody(fmt.Sprintf("route %q.targets[%d].extraBody", r.Match, i), t.ExtraBody); err != nil {
 			return err
 		}
 		key := targetKey{provider: t.Provider, model: t.Model}

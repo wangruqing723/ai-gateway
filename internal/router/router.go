@@ -20,6 +20,9 @@ type Candidate struct {
 	// ContextWindow 该候选的上下文窗口，nil 表示未配置（不启用预算裁决）。
 	// 优先级：target > route > provider，由 MatchRoute 合成。
 	ContextWindow *int
+	// ExtraBody 合并进上游请求体的自定义字段，nil 表示无。
+	// 按键叠加 provider → route → target，同名键后者胜出，由 MatchRoute 合成。
+	ExtraBody map[string]any
 }
 
 // Match 路由匹配结果。
@@ -81,6 +84,7 @@ func MatchRoute(model string, cfg *config.Config) *Match {
 				TargetModel:   targetModel,
 				MaxTokens:     resolveMaxTokens(target, route, src),
 				ContextWindow: contextWindow,
+				ExtraBody:     resolveExtraBody(target, route, src),
 			})
 		}
 		if len(candidates) == 0 {
@@ -128,6 +132,31 @@ func resolveContextWindow(target config.Target, route config.Route, provider *co
 		return route.ContextWindow
 	}
 	return provider.ContextWindow
+}
+
+// resolveExtraBody 按键叠加 provider → route → target 合成该候选的 extraBody，
+// 同名键后者胜出（target > route > provider）。与 maxTokens 的整值覆盖不同：
+// extraBody 是一袋独立字段，叠加让 provider 声明的公共字段（如 enable_thinking）
+// 无需在每个 target 重抄，target 只写它要额外覆盖的键。
+//
+// 返回全新 map，不引用任何一层的原始 map：候选的 Provider 是值拷贝但 map 是
+// 引用，就地改会污染共享配置，也会让并发请求互相看到对方的写入。三层都为空时
+// 返回 nil，与「未配置」逐字节等价。
+func resolveExtraBody(target config.Target, route config.Route, provider *config.Provider) map[string]any {
+	if len(provider.ExtraBody) == 0 && len(route.ExtraBody) == 0 && len(target.ExtraBody) == 0 {
+		return nil
+	}
+	merged := make(map[string]any, len(provider.ExtraBody)+len(route.ExtraBody)+len(target.ExtraBody))
+	for k, v := range provider.ExtraBody {
+		merged[k] = v
+	}
+	for k, v := range route.ExtraBody {
+		merged[k] = v
+	}
+	for k, v := range target.ExtraBody {
+		merged[k] = v
+	}
+	return merged
 }
 
 // OneMContextMarker 是 Claude Code 声明 100 万上下文的本地标记。

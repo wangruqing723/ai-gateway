@@ -108,6 +108,64 @@ func TestApplyExtraHeadersNilAndEmpty(t *testing.T) {
 	}
 }
 
+func TestApplyExtraBodyMergesTypedValues(t *testing.T) {
+	body := map[string]any{"model": "kept", "messages": []any{"kept"}}
+	ApplyExtraBody(body, map[string]any{
+		"enable_thinking": true,
+		"top_k":           20,
+		"parameters":      map[string]any{"result_format": "message"},
+		"   ":             "blank-name",
+	})
+	if body["enable_thinking"] != true {
+		t.Errorf("enable_thinking = %#v，期望布尔 true", body["enable_thinking"])
+	}
+	if body["top_k"] != 20 {
+		t.Errorf("top_k = %#v，期望 20", body["top_k"])
+	}
+	if _, ok := body["parameters"].(map[string]any); !ok {
+		t.Errorf("parameters = %#v，期望保留嵌套对象", body["parameters"])
+	}
+	if _, ok := body["   "]; ok {
+		t.Errorf("空白字段名不应写入")
+	}
+}
+
+// TestApplyExtraBodyCannotOverrideManagedFields 锁住运行时兜底：即使配置校验被绕过，
+// model / messages / stream / max_tokens 系列也绝不能被 extraBody 覆盖。
+func TestApplyExtraBodyCannotOverrideManagedFields(t *testing.T) {
+	body := map[string]any{
+		"model":      "real-model",
+		"messages":   []any{"real"},
+		"stream":     true,
+		"max_tokens": 4096,
+	}
+	ApplyExtraBody(body, map[string]any{
+		"model":      "hijacked",
+		"messages":   []any{"hijacked"},
+		"Stream":     false,
+		"max_tokens": 1,
+	})
+	if body["model"] != "real-model" {
+		t.Errorf("model = %#v，期望保持 real-model", body["model"])
+	}
+	if body["stream"] != true {
+		t.Errorf("stream = %#v，期望保持 true", body["stream"])
+	}
+	if body["max_tokens"] != 4096 {
+		t.Errorf("max_tokens = %#v，期望保持 4096", body["max_tokens"])
+	}
+}
+
+func TestApplyExtraBodyNilAndEmpty(t *testing.T) {
+	for _, extra := range []map[string]any{nil, {}} {
+		body := map[string]any{"model": "kept"}
+		ApplyExtraBody(body, extra)
+		if len(body) != 1 || body["model"] != "kept" {
+			t.Fatalf("extra=%#v 改变了 body：%#v", extra, body)
+		}
+	}
+}
+
 // blankHeader 返回一个不带任何默认头的 http.Header，便于断言「某个头不存在」。
 func blankHeader(t *testing.T) http.Header {
 	t.Helper()

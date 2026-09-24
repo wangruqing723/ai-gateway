@@ -1841,6 +1841,22 @@
                         <span class="mt-1 block text-xs text-muted">在网关自设的头之后写入，可覆盖 anthropic-version / accept。转发、模型列表查询、健康检测三条路径都会带上。</span>
                         <span class="mt-1 block text-xs text-warn">不要在这里放密钥（密钥用 API Key 字段）：该值会由 /api/config 明文返回。x-api-key / authorization / content-type / User-Agent 会被忽略。</span>
                     </div>
+                    <div class="mt-4">
+                        <div class="mb-1.5 flex items-center justify-between">
+                            <span class="text-xs font-bold uppercase tracking-wide text-muted">自定义请求体字段</span>
+                            <button type="button" @click="addExtraBodyRow()" class="rounded border border-line px-2 py-0.5 text-xs text-muted hover:text-white">+ 添加</button>
+                        </div>
+                        <template x-for="(row, bi) in (providerForm.extraBody || [])" :key="bi">
+                            <div class="mb-2 flex items-center gap-2">
+                                <input autocomplete="off" type="text" x-model="row.key" placeholder="字段名"
+                                       class="field flex-1" :class="extraBodyBlocked(row.key) ? 'border-danger' : ''">
+                                <input autocomplete="off" type="text" x-model="row.value" placeholder="值（如 true / 20 / &quot;文本&quot;）" class="field flex-1">
+                                <button type="button" @click="removeExtraBodyRow(bi)" class="shrink-0 rounded border border-line px-2 py-1 text-xs text-muted hover:text-danger">删除</button>
+                            </div>
+                        </template>
+                        <span class="mt-1 block text-xs text-muted">合并进转发的请求体，用于上游要求而标准格式不产出的私有字段，如 enable_thinking 填 true。值按 JSON 解析：true 是布尔、20 是数字、裸词按字符串。</span>
+                        <span class="mt-1 block text-xs text-warn">model / messages / input / stream / max_tokens 系列由网关维护，填了会被忽略。只对转发生效，模型列表查询与健康检测不带。</span>
+                    </div>
                 </div>
             </div>
             <!-- 检测结果留在滚动区外：它是点底部「检测」按钮的即时反馈，
@@ -2004,6 +2020,22 @@
                                     <input autocomplete="off" :id="'route-target-context-window-' + ti" type="number" min="1" max="10000000" x-model.number="target.contextWindow"
                                            placeholder="不启用预算" class="field w-32 py-1 text-sm">
                                     <span class="shrink-0 text-[11px]">tokens，留空用默认</span>
+                                    <!-- 候选级 extraBody：整行铺开，按键叠加在上游 / 路由之上，只覆盖该候选。 -->
+                                    <div class="w-full">
+                                        <div class="mb-1 flex items-center justify-between">
+                                            <span class="text-[11px] font-bold uppercase tracking-wide text-muted">自定义请求体字段</span>
+                                            <button type="button" @click="addRouteTargetBodyRow(ti)" class="rounded border border-line px-2 py-0.5 text-[11px] text-muted hover:text-white">+ 添加</button>
+                                        </div>
+                                        <template x-for="(row, bi) in (target.extraBody || [])" :key="bi">
+                                            <div class="mb-1 flex items-center gap-2">
+                                                <input autocomplete="off" type="text" x-model="row.key" placeholder="字段名"
+                                                       class="field flex-1 py-1 text-sm" :class="extraBodyBlocked(row.key) ? 'border-danger' : ''">
+                                                <input autocomplete="off" type="text" x-model="row.value" placeholder="值（true / 20 / &quot;文本&quot;）" class="field flex-1 py-1 text-sm">
+                                                <button type="button" @click="removeRouteTargetBodyRow(ti, bi)" class="shrink-0 rounded border border-line px-2 py-1 text-[11px] text-muted hover:text-danger">删除</button>
+                                            </div>
+                                        </template>
+                                        <span class="block text-[11px]">值按 JSON 解析（true 是布尔 / 20 是数字 / 裸词按字符串），只覆盖该候选，叠加在上游与路由的同名字段之上。</span>
+                                    </div>
                                 </div>
                             </div>
                         </template>
@@ -2069,6 +2101,24 @@
                             <span class="mt-1 block text-xs text-muted">作为本路由所有候选的默认窗口；候选级设置优先级更高。留空时继续查找 Provider 窗口。</span>
                         </label>
                     </div>
+                </div>
+                <!-- 路由级 extraBody：作为本路由所有候选的默认自定义请求体字段。
+                     按键叠加，优先级 候选 > 路由 > 上游；候选级在上面每个候选行内单独覆盖。 -->
+                <div class="rounded-lg border border-line bg-panel2/50 p-4">
+                    <div class="mb-3 flex items-center justify-between">
+                        <span class="text-sm font-bold tracking-wide text-white">自定义请求体字段</span>
+                        <button type="button" @click="addRouteBodyRow()" class="rounded border border-line px-2 py-0.5 text-xs text-muted hover:text-white">+ 添加</button>
+                    </div>
+                    <template x-for="(row, bi) in (routeForm.extraBody || [])" :key="bi">
+                        <div class="mb-2 flex items-center gap-2">
+                            <input autocomplete="off" type="text" x-model="row.key" placeholder="字段名"
+                                   class="field flex-1" :class="extraBodyBlocked(row.key) ? 'border-danger' : ''">
+                            <input autocomplete="off" type="text" x-model="row.value" placeholder="值（如 true / 20 / &quot;文本&quot;）" class="field flex-1">
+                            <button type="button" @click="removeRouteBodyRow(bi)" class="shrink-0 rounded border border-line px-2 py-1 text-xs text-muted hover:text-danger">删除</button>
+                        </div>
+                    </template>
+                    <span class="mt-1 block text-xs text-muted">合并进转发请求体，用于上游要求而标准格式不产出的私有字段，如 enable_thinking 填 true。值按 JSON 解析：true 是布尔、20 是数字、裸词按字符串。</span>
+                    <span class="mt-1 block text-xs text-warn">model / messages / input / stream / max_tokens 系列由网关维护，填了会被忽略。按键叠加，候选级覆盖路由级、路由级覆盖上游级。</span>
                 </div>
                 <!-- 保留 cyan 色调把它与其他分区区分开（它是可选功能开关，不是必填项），
                      但分区形态与其他分区统一。 -->
@@ -2345,6 +2395,10 @@
                     // 该初始状态也是 provider 重建点之一，漏字段会让绑定在保存时被静默丢弃。
                     oneMContext: '',
                     extraHeaders: [],
+                    // extraBody 与 extraHeaders 同为有序行数组：键 + 值文本。值在保存时按
+                    // JSON 解析（true / 20 / {...} 保留类型，解析失败按字符串），是 provider
+                    // 重建点之一，漏字段会让绑定在保存时被静默丢弃。
+                    extraBody: [],
                     // enabled 默认 true：新增 provider 默认启用；editProvider 回填既有值。
                     enabled: true,
                     apiKeyConfigured: false,
@@ -2472,6 +2526,9 @@
                             // extraHeaders 保留 map 原样，未配置时留 undefined 而不是 {}：
                             // 兜成空对象会让每次保存都往 YAML 里写一行空 extraHeaders。
                             extraHeaders: pick(p, 'extraHeaders', 'ExtraHeaders') || undefined,
+                            // extraBody 同 extraHeaders：保留 map 原样，未配置留 undefined 而非 {}，
+                            // 兜成空对象会让每次保存都往 YAML 里写一行空 extraBody。
+                            extraBody: pick(p, 'extraBody', 'ExtraBody') || undefined,
                             // enabled 归一：后端 nil（未返回）与 true 同义，一律视为 true；
                             // 仅显式 false 才是禁用。漏读会让禁用状态在下次保存时被抹回启用。
                             enabled: pick(p, 'enabled', 'Enabled') !== false
@@ -2495,6 +2552,9 @@
                         // route 级 contextWindow 未配置时不挂字段，YAML 预览和保存都不制造 null 行。
                         const routeContextWindow = pick(r, 'contextWindow', 'ContextWindow') ?? null;
                         if (routeContextWindow !== null) route.contextWindow = routeContextWindow;
+                        // route 级 extraBody：保留 map 原样，未配置不挂字段（否则每次保存写空 extraBody）。
+                        const routeExtraBody = pick(r, 'extraBody', 'ExtraBody');
+                        if (routeExtraBody) route.extraBody = routeExtraBody;
                         // 多目标写法：保留 targets 原样，后端两种写法互斥，不能同时下发
                         if (Array.isArray(rawTargets) && rawTargets.length) {
                             route.targets = rawTargets.map((t) => {
@@ -2506,6 +2566,8 @@
                                 if (tMax !== null) tgt.maxTokens = tMax;
                                 const tContextWindow = pick(t, 'contextWindow', 'ContextWindow') ?? null;
                                 if (tContextWindow !== null) tgt.contextWindow = tContextWindow;
+                                const tExtraBody = pick(t, 'extraBody', 'ExtraBody');
+                                if (tExtraBody) tgt.extraBody = tExtraBody;
                                 return tgt;
                             });
                             route.provider = '';
@@ -3052,6 +3114,10 @@
                             // 对齐（oneMContext 空等同 strip）；extraHeaders 在 this.config 里已是 map。
                             oneMContext: provider.oneMContext || undefined,
                             extraHeaders: provider.extraHeaders || undefined,
+                            // extraBody 同 extraHeaders：PUT 是全量替换，漏掉会静默丢配置且每次
+                            // 保存都抹掉所有 provider 的该字段。空值发 undefined，与后端 omitempty
+                            // 对齐；在 this.config 里已是 map（值保留 JSON 类型）。
+                            extraBody: provider.extraBody || undefined,
                             // enabled 必须带上：PUT 是全量替换，漏掉会让每次保存都把所有 provider
                             // 的禁用状态悄悄抹回启用。true 发 undefined 走 omitempty（保持老配置
                             // 不扩散该字段），false 显式写入。
@@ -4104,6 +4170,21 @@
                     return ['providerHealth:', `  checkIntervalSeconds: ${interval}`].join('\n');
                 },
 
+                // renderExtraBodyLines 把 extraBody map 渲染成缩进 YAML 行数组，provider /
+                // route / target 三处共用（pad 是 extraBody: 一行的缩进，键再缩进两格）。
+                // 值可能是 bool/number/对象：字符串加引号，其余用 JSON 内联渲染
+                // （YAML 是 JSON 的超集，{"k":v} 与 true / 20 都是合法 YAML 标量）。
+                renderExtraBodyLines(obj, pad) {
+                    if (!obj || !Object.keys(obj).length) return [];
+                    const lines = [`${pad}extraBody:`];
+                    Object.keys(obj).sort().forEach((k) => {
+                        const v = obj[k];
+                        const rendered = typeof v === 'string' ? `"${v}"` : JSON.stringify(v);
+                        lines.push(`${pad}  ${k}: ${rendered}`);
+                    });
+                    return lines;
+                },
+
                 providersYaml() {
                     return Object.entries(this.config.providers || {}).map(([name, p]) => {
                         const lines = [
@@ -4130,6 +4211,9 @@
                             // 逐键渲染成嵌套 YAML，键排序保证预览稳定；空 map 不输出。
                             Object.keys(p.extraHeaders).sort().forEach((k) => lines.push(`      ${k}: "${p.extraHeaders[k]}"`));
                         }
+                        if (p.extraBody && Object.keys(p.extraBody).length) {
+                            lines.push(...this.renderExtraBodyLines(p.extraBody, '    '));
+                        }
                         // enabled 仅在 false 时输出：true 是默认值，写出来会和后端 omitempty
                         // 不一致，预览里多一行噪音。false 必须显式输出，否则禁用状态会被预览掩盖。
                         if (p.enabled === false) lines.push(`    enabled: false`);
@@ -4147,6 +4231,7 @@
                                 base.push(`        model: "${t.model || ''}"`);
                                 if (t.maxTokens != null) base.push(`        maxTokens: ${t.maxTokens}`);
                                 if (t.contextWindow != null) base.push(`        contextWindow: ${t.contextWindow}`);
+                                base.push(...this.renderExtraBodyLines(t.extraBody, '        '));
                             });
                         } else {
                             base.push(`    provider: ${r.provider || ''}`);
@@ -4159,6 +4244,7 @@
                         }
                         if (r.maxTokens != null) base.push(`    maxTokens: ${r.maxTokens}`);
                         if (r.contextWindow != null) base.push(`    contextWindow: ${r.contextWindow}`);
+                        base.push(...this.renderExtraBodyLines(r.extraBody, '    '));
                         if (r.vision) {
                             base.push('    vision:');
                             base.push(`      provider: ${r.vision.provider || ''}`);
@@ -4195,6 +4281,7 @@
                         proxy: '',
                         oneMContext: '',
                         extraHeaders: [],
+                        extraBody: [],
                         enabled: true,
                         apiKeyConfigured: false,
                         clearApiKey: false
@@ -4221,6 +4308,7 @@
                         proxy: p.proxy || '',
                         oneMContext: p.oneMContext || '',
                         extraHeaders: this.headersToRows(p.extraHeaders),
+                        extraBody: this.bodyToRows(p.extraBody),
                         // enabled 回填：后端 nil 表示启用（默认），前端归一成 true。
                         enabled: p.enabled !== false,
                         apiKeyConfigured: !!p.apiKeyConfigured,
@@ -4256,6 +4344,7 @@
                         proxy: (p.proxy || '').includes('__AI_GATEWAY_KEEP_PROXY_PASSWORD__') ? '' : (p.proxy || ''),
                         oneMContext: p.oneMContext || '',
                         extraHeaders: this.headersToRows(p.extraHeaders),
+                        extraBody: this.bodyToRows(p.extraBody),
                         // 副本默认启用：复制一个被禁用的 provider 时，新副本应当是启用的，
                         // 否则用户复制后还要手动启用，与「复制=另起一个可用的」预期不符。
                         enabled: true,
@@ -4326,6 +4415,9 @@
                         // 空表格发 undefined 而不是 {}：后端 omitempty 只认 nil/空 map，
                         // 但发 {} 会让 YAML 里多出一行空 extraHeaders，配置越存越脏。
                         extraHeaders: this.rowsToHeaders(this.providerForm.extraHeaders),
+                        // extraBody 同 extraHeaders：空表格发 undefined 而非 {}，避免 YAML 里
+                        // 多出一行空 extraBody。值按 JSON 解析，保留 bool/number/对象类型。
+                        extraBody: this.rowsToBody(this.providerForm.extraBody),
                         // enabled 透传表单值。true 时发 undefined 走 omitempty（保持
                         // 老配置不扩散该字段），false 时显式写入。
                         enabled: this.providerForm.enabled === false ? false : undefined
@@ -4375,6 +4467,49 @@
                 extraHeaderBlocked(key) {
                     const name = (key || '').trim().toLowerCase();
                     return ['x-api-key', 'authorization', 'content-type', 'user-agent'].includes(name);
+                },
+
+                // bodyToRows 把配置里的 extraBody map 摊成有序行数组。值不是字符串时
+                // 序列化成 JSON 文本回填，保证 true / 20 / {...} 编辑后仍能原样解析回去。
+                bodyToRows(body) {
+                    if (!body || typeof body !== 'object') return [];
+                    return Object.keys(body).sort().map((key) => {
+                        const v = body[key];
+                        const value = typeof v === 'string' ? v : JSON.stringify(v);
+                        return { key, value };
+                    });
+                },
+
+                // rowsToBody 把表单行折回 map。key 去空白后为空的行整行丢弃。值按 JSON 解析：
+                // true → 布尔、20 → 数字、{...} → 对象，解析失败按原始字符串（裸词 enable 等）。
+                // 这样 enable_thinking 填 true 得到布尔而非字符串 "true"，满足上游强类型校验。
+                rowsToBody(rows) {
+                    if (!Array.isArray(rows)) return undefined;
+                    const out = {};
+                    for (const row of rows) {
+                        const key = (row?.key || '').trim();
+                        if (!key) continue;
+                        const raw = row?.value ?? '';
+                        let value = raw;
+                        try { value = JSON.parse(raw); } catch (_) { value = raw; }
+                        out[key] = value;
+                    }
+                    return Object.keys(out).length ? out : undefined;
+                },
+
+                addExtraBodyRow() {
+                    if (!Array.isArray(this.providerForm.extraBody)) this.providerForm.extraBody = [];
+                    this.providerForm.extraBody.push({ key: '', value: '' });
+                },
+
+                removeExtraBodyRow(index) {
+                    this.providerForm.extraBody.splice(index, 1);
+                },
+
+                // extraBodyBlocked 与后端 config.extraBodyBlocklist 同名单，表单里即时标红。
+                extraBodyBlocked(key) {
+                    const name = (key || '').trim().toLowerCase();
+                    return ['model', 'messages', 'input', 'stream', 'max_tokens', 'max_output_tokens', 'max_completion_tokens'].includes(name);
                 },
 
                 proxyHost(proxy) {
@@ -4467,6 +4602,7 @@
                         strategy: 'failover',
                         maxTokens: null,
                         contextWindow: null,
+                        extraBody: [],
                         enableVision: false,
                         visionProvider: providers[0] || '',
                         visionModel: '',
@@ -4482,12 +4618,13 @@
                     const route = this.config.routes[index];
                     this.routeForm = {
                         match: route.match,
-                        targets: this.routeTargets(route).map((t) => this.newRouteTarget(t.provider || '', t.model || '', t.maxTokens ?? null, t.contextWindow ?? null)),
+                        targets: this.routeTargets(route).map((t) => this.newRouteTarget(t.provider || '', t.model || '', t.maxTokens ?? null, t.contextWindow ?? null, this.bodyToRows(t.extraBody))),
                         // 配置里没写 strategy 就是默认 failover；这里补成真实枚举值，
                         // 留空会让下拉匹配不到 option、显示回落到第一项
                         strategy: route.strategy || 'failover',
                         maxTokens: route.maxTokens ?? null,
                         contextWindow: route.contextWindow ?? null,
+                        extraBody: this.bodyToRows(route.extraBody),
                         enableVision: !!route.vision,
                         visionProvider: route.vision?.provider || '',
                         visionModel: route.vision?.model || '',
@@ -4509,10 +4646,11 @@
                     this.editingRouteIndex = -1;
                     this.routeForm = {
                         match: route.match || '',
-                        targets: this.routeTargets(route).map((t) => this.newRouteTarget(t.provider || '', t.model || '', t.maxTokens ?? null, t.contextWindow ?? null)),
+                        targets: this.routeTargets(route).map((t) => this.newRouteTarget(t.provider || '', t.model || '', t.maxTokens ?? null, t.contextWindow ?? null, this.bodyToRows(t.extraBody))),
                         strategy: route.strategy || 'failover',
                         maxTokens: route.maxTokens ?? null,
                         contextWindow: route.contextWindow ?? null,
+                        extraBody: this.bodyToRows(route.extraBody),
                         enableVision: !!route.vision,
                         visionProvider: route.vision?.provider || '',
                         visionModel: route.vision?.model || '',
@@ -4534,8 +4672,8 @@
                 // 把原来那行的 DOM 留在原位只改绑定值，而行内 <select> 的选中态在
                 // options 已渲染的情况下不会被重新认领（见模板里 :selected 那段注释的
                 // 同源问题），表现就是拖完两行的 provider 串了。
-                newRouteTarget(provider, model = '', maxTokens = null, contextWindow = null) {
-                    return { _id: ++this._routeTargetSeq, provider, model, maxTokens, contextWindow, models: [], modelsLoading: false, limitsOpen: maxTokens != null || contextWindow != null };
+                newRouteTarget(provider, model = '', maxTokens = null, contextWindow = null, extraBody = []) {
+                    return { _id: ++this._routeTargetSeq, provider, model, maxTokens, contextWindow, extraBody: Array.isArray(extraBody) ? extraBody : [], models: [], modelsLoading: false, limitsOpen: maxTokens != null || contextWindow != null || (Array.isArray(extraBody) && extraBody.length > 0) };
                 },
 
                 // 视觉字段的瞬态查询状态。三处 routeForm 重建（addRoute / editRoute /
@@ -4556,6 +4694,7 @@
                     if ((f.targets || []).length > 1 && f.strategy && f.strategy !== 'failover') n++;
                     if (this.numOrNull(f.maxTokens) !== null) n++;
                     if (this.numOrNull(f.contextWindow) !== null) n++;
+                    if ((f.extraBody || []).some((r) => (r?.key || '').trim())) n++;
                     if (f.enableVision) n++;
                     return n;
                 },
@@ -4568,6 +4707,7 @@
                     let n = 0;
                     if (this.numOrNull(t.maxTokens) !== null) n++;
                     if (this.numOrNull(t.contextWindow) !== null) n++;
+                    if ((t.extraBody || []).some((r) => (r?.key || '').trim())) n++;
                     return n;
                 },
 
@@ -4604,6 +4744,27 @@
                 removeRouteTarget(index) {
                     if (this.routeForm.targets.length <= 1) return;
                     this.routeForm.targets.splice(index, 1);
+                },
+
+                // 路由级与候选级 extraBody 的行操作。表单里存有序行数组，saveRoute 用
+                // rowsToBody 折回 map（值按 JSON 解析），语义同 provider 级 extraBody。
+                addRouteBodyRow() {
+                    if (!Array.isArray(this.routeForm.extraBody)) this.routeForm.extraBody = [];
+                    this.routeForm.extraBody.push({ key: '', value: '' });
+                },
+
+                removeRouteBodyRow(index) {
+                    this.routeForm.extraBody.splice(index, 1);
+                },
+
+                addRouteTargetBodyRow(ti) {
+                    const t = this.routeForm.targets[ti];
+                    if (!Array.isArray(t.extraBody)) t.extraBody = [];
+                    t.extraBody.push({ key: '', value: '' });
+                },
+
+                removeRouteTargetBodyRow(ti, index) {
+                    this.routeForm.targets[ti].extraBody.splice(index, 1);
                 },
 
                 // 用已落盘 provider 配置里的 apiKey 拉上游 /v1/models。
@@ -4723,6 +4884,9 @@
                         if (max !== null) out.maxTokens = max;
                         const contextWindow = this.numOrNull(t.contextWindow);
                         if (contextWindow !== null) out.contextWindow = contextWindow;
+                        // 候选级 extraBody：空表格折回 undefined，不落盘噪音。
+                        const extraBody = this.rowsToBody(t.extraBody);
+                        if (extraBody) out.extraBody = extraBody;
                         return out;
                     });
                     if (!targets.length || targets.some((t) => !t.provider || !t.model)) {
@@ -4769,6 +4933,15 @@
                         ? targets[0].contextWindow
                         : this.numOrNull(this.routeForm.contextWindow);
                     if (routeContextWindow !== null) route.contextWindow = routeContextWindow;
+                    // 路由级 extraBody 同 maxTokens：单候选把候选级折进路由级（targets 不落盘），
+                    // 按键叠加、候选级更具体故后合覆盖路由级；多候选保留路由级作为中间层，
+                    // 各 target 的覆盖已随 targets 数组一并落盘。
+                    const routeExtraForm = this.rowsToBody(this.routeForm.extraBody);
+                    let routeExtraBody = routeExtraForm;
+                    if (targets.length === 1 && targets[0].extraBody) {
+                        routeExtraBody = Object.assign({}, routeExtraForm || {}, targets[0].extraBody);
+                    }
+                    if (routeExtraBody && Object.keys(routeExtraBody).length) route.extraBody = routeExtraBody;
                     if (this.routeForm.enableVision) {
                         route.vision = {
                             provider: this.routeForm.visionProvider,

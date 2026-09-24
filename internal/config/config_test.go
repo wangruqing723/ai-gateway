@@ -375,6 +375,140 @@ func TestExtraHeaderBlocked(t *testing.T) {
 	}
 }
 
+func TestExtraBodyValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		block   string
+		wantErr string
+	}{
+		{name: "布尔值合法", block: "    extraBody:\n      enable_thinking: true"},
+		{name: "数字值合法", block: "    extraBody:\n      top_k: 20"},
+		{name: "字符串值合法", block: "    extraBody:\n      service_tier: default"},
+		{name: "嵌套对象合法", block: "    extraBody:\n      parameters:\n        result_format: message"},
+		{name: "禁止 model", block: "    extraBody:\n      model: sneaky", wantErr: "不能设置 model"},
+		{name: "禁止 messages", block: "    extraBody:\n      messages: []", wantErr: "不能设置 messages"},
+		{name: "禁止 stream", block: "    extraBody:\n      stream: true", wantErr: "不能设置 stream"},
+		{name: "禁止 max_tokens", block: "    extraBody:\n      max_tokens: 100", wantErr: "不能设置 max_tokens"},
+		{name: "禁止 max_output_tokens", block: "    extraBody:\n      max_output_tokens: 100", wantErr: "不能设置 max_output_tokens"},
+		{name: "禁止大写变体", block: "    extraBody:\n      Model: sneaky", wantErr: "不能设置 Model"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			raw := strings.Replace(validConfigYAML(), "    format: openai", "    format: openai\n"+tt.block, 1)
+			_, err := DecodeAndValidate([]byte(raw))
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("应合法，实际报错 %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("校验错误 = %v，期望含 %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestExtraBodyLimits(t *testing.T) {
+	var many strings.Builder
+	many.WriteString("    extraBody:\n")
+	for i := 0; i < maxExtraBodyEntries+1; i++ {
+		fmt.Fprintf(&many, "      k%d: %d\n", i, i)
+	}
+	raw := strings.Replace(validConfigYAML(), "    format: openai", "    format: openai\n"+many.String(), 1)
+	if _, err := DecodeAndValidate([]byte(raw)); err == nil || !strings.Contains(err.Error(), "最多") {
+		t.Fatalf("超量 extraBody 校验错误 = %v，期望含「最多」", err)
+	}
+
+	long := strings.Repeat("v", maxExtraBodyValueBytes+1)
+	raw = strings.Replace(validConfigYAML(), "    format: openai",
+		"    format: openai\n    extraBody:\n      big: \""+long+"\"", 1)
+	if _, err := DecodeAndValidate([]byte(raw)); err == nil || !strings.Contains(err.Error(), "序列化") {
+		t.Fatalf("超大取值校验错误 = %v，期望含「序列化」", err)
+	}
+}
+
+// TestExtraBodyValidationRouteAndTarget 覆盖 route / target 两级的 extraBody 校验：
+// 合法值放行，黑名单字段报错，且错误路径带上正确的层级定位。
+func TestExtraBodyValidationRouteAndTarget(t *testing.T) {
+	routeLevel := `port: 7789
+host: 127.0.0.1
+timeout: 120000
+streamActivityTimeout: 60000
+directMode: false
+directTimeoutNoStream: 60000
+directTimeoutStreamHeader: 60000
+directTimeoutStreamActive: 120000
+cache:
+  maxAgeDays: 7
+  maxRecords: 1000
+providers:
+  primary:
+    baseUrl: https://api.example.com
+    apiKey: ""
+    format: openai
+    maxConcurrent: 5
+    maxPerSecond: 0
+    maxQueueWait: 30000
+routes:
+  - match: "*"
+    provider: primary
+    model: upstream-model
+    extraBody:
+      enable_thinking: true
+`
+	if _, err := DecodeAndValidate([]byte(routeLevel)); err != nil {
+		t.Fatalf("route 级合法 extraBody 应通过，实际 %v", err)
+	}
+
+	routeBad := strings.Replace(routeLevel, "      enable_thinking: true", "      stream: true", 1)
+	if _, err := DecodeAndValidate([]byte(routeBad)); err == nil || !strings.Contains(err.Error(), "不能设置 stream") || !strings.Contains(err.Error(), "extraBody") {
+		t.Fatalf("route 级黑名单校验 = %v，期望含 extraBody 与「不能设置 stream」", err)
+	}
+
+	targetLevel := strings.Replace(routeLevel, `    provider: primary
+    model: upstream-model
+    extraBody:
+      enable_thinking: true`, `    targets:
+      - provider: primary
+        model: upstream-model
+        extraBody:
+          model: hijacked`, 1)
+	if _, err := DecodeAndValidate([]byte(targetLevel)); err == nil || !strings.Contains(err.Error(), "targets[0].extraBody") || !strings.Contains(err.Error(), "不能设置 model") {
+		t.Fatalf("target 级黑名单校验 = %v，期望含 targets[0].extraBody 与「不能设置 model」", err)
+	}
+}
+
+func TestExtraBodyBlocked(t *testing.T) {
+	blocked := []string{"model", "Model", "messages", "input", "stream", "max_tokens", "MAX_TOKENS", "max_output_tokens", "max_completion_tokens", "  model  "}
+	for _, key := range blocked {
+		if !ExtraBodyBlocked(key) {
+			t.Errorf("ExtraBodyBlocked(%q) = false，期望 true", key)
+		}
+	}
+	allowed := []string{"enable_thinking", "top_k", "service_tier", "parameters", "enable_search"}
+	for _, key := range allowed {
+		if ExtraBodyBlocked(key) {
+			t.Errorf("ExtraBodyBlocked(%q) = true，期望 false", key)
+		}
+	}
+}
+
+// TestExtraBodyOmitEmptyYAML 锁住零值语义：未配置的 extraBody 不能出现在写回的 YAML 里。
+func TestExtraBodyOmitEmptyYAML(t *testing.T) {
+	cfg, err := DecodeAndValidate([]byte(validConfigYAML()))
+	if err != nil {
+		t.Fatalf("DecodeAndValidate 失败: %v", err)
+	}
+	out, err := yaml.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("yaml.Marshal 失败: %v", err)
+	}
+	if strings.Contains(string(out), "extraBody") {
+		t.Fatalf("未配置 extraBody 却出现在 YAML 中:\n%s", out)
+	}
+}
+
 func TestContextWindowValidationAndDefaults(t *testing.T) {
 	tests := []struct {
 		name string

@@ -29,6 +29,9 @@
                             // extraHeaders 保留 map 原样，未配置时留 undefined 而不是 {}：
                             // 兜成空对象会让每次保存都往 YAML 里写一行空 extraHeaders。
                             extraHeaders: pick(p, 'extraHeaders', 'ExtraHeaders') || undefined,
+                            // extraBody 同 extraHeaders：保留 map 原样，未配置留 undefined 而非 {}，
+                            // 兜成空对象会让每次保存都往 YAML 里写一行空 extraBody。
+                            extraBody: pick(p, 'extraBody', 'ExtraBody') || undefined,
                             // enabled 归一：后端 nil（未返回）与 true 同义，一律视为 true；
                             // 仅显式 false 才是禁用。漏读会让禁用状态在下次保存时被抹回启用。
                             enabled: pick(p, 'enabled', 'Enabled') !== false
@@ -52,6 +55,9 @@
                         // route 级 contextWindow 未配置时不挂字段，YAML 预览和保存都不制造 null 行。
                         const routeContextWindow = pick(r, 'contextWindow', 'ContextWindow') ?? null;
                         if (routeContextWindow !== null) route.contextWindow = routeContextWindow;
+                        // route 级 extraBody：保留 map 原样，未配置不挂字段（否则每次保存写空 extraBody）。
+                        const routeExtraBody = pick(r, 'extraBody', 'ExtraBody');
+                        if (routeExtraBody) route.extraBody = routeExtraBody;
                         // 多目标写法：保留 targets 原样，后端两种写法互斥，不能同时下发
                         if (Array.isArray(rawTargets) && rawTargets.length) {
                             route.targets = rawTargets.map((t) => {
@@ -63,6 +69,8 @@
                                 if (tMax !== null) tgt.maxTokens = tMax;
                                 const tContextWindow = pick(t, 'contextWindow', 'ContextWindow') ?? null;
                                 if (tContextWindow !== null) tgt.contextWindow = tContextWindow;
+                                const tExtraBody = pick(t, 'extraBody', 'ExtraBody');
+                                if (tExtraBody) tgt.extraBody = tExtraBody;
                                 return tgt;
                             });
                             route.provider = '';

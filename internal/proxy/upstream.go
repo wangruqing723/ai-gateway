@@ -91,3 +91,19 @@ func ApplyExtraHeaders(h http.Header, extra map[string]string) {
 		h.Set(name, value)
 	}
 }
+
+// ApplyExtraBody 把 provider 的 extraBody 浅合并进已构建好的上游请求体 body。
+//
+// 在网关写完 model / messages / max_tokens 等字段之后调用，配置值最终生效；
+// 但 model / messages / input / stream / max_tokens 系列由黑名单挡住，运行时
+// 再挡一遍而不只依赖配置校验，理由同 ApplyExtraHeaders：热重载或未来新增的
+// 配置入口漏了校验也不会把网关自己的决策改坏。值原样写入，保留 JSON 类型。
+func ApplyExtraBody(body map[string]any, extra map[string]any) {
+	for key, value := range extra {
+		name := strings.TrimSpace(key)
+		if name == "" || config.ExtraBodyBlocked(name) {
+			continue
+		}
+		body[name] = value
+	}
+}

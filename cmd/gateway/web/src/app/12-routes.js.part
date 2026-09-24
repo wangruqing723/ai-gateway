@@ -13,6 +13,7 @@
                         strategy: 'failover',
                         maxTokens: null,
                         contextWindow: null,
+                        extraBody: [],
                         enableVision: false,
                         visionProvider: providers[0] || '',
                         visionModel: '',
@@ -28,12 +29,13 @@
                     const route = this.config.routes[index];
                     this.routeForm = {
                         match: route.match,
-                        targets: this.routeTargets(route).map((t) => this.newRouteTarget(t.provider || '', t.model || '', t.maxTokens ?? null, t.contextWindow ?? null)),
+                        targets: this.routeTargets(route).map((t) => this.newRouteTarget(t.provider || '', t.model || '', t.maxTokens ?? null, t.contextWindow ?? null, this.bodyToRows(t.extraBody))),
                         // 配置里没写 strategy 就是默认 failover；这里补成真实枚举值，
                         // 留空会让下拉匹配不到 option、显示回落到第一项
                         strategy: route.strategy || 'failover',
                         maxTokens: route.maxTokens ?? null,
                         contextWindow: route.contextWindow ?? null,
+                        extraBody: this.bodyToRows(route.extraBody),
                         enableVision: !!route.vision,
                         visionProvider: route.vision?.provider || '',
                         visionModel: route.vision?.model || '',
@@ -55,10 +57,11 @@
                     this.editingRouteIndex = -1;
                     this.routeForm = {
                         match: route.match || '',
-                        targets: this.routeTargets(route).map((t) => this.newRouteTarget(t.provider || '', t.model || '', t.maxTokens ?? null, t.contextWindow ?? null)),
+                        targets: this.routeTargets(route).map((t) => this.newRouteTarget(t.provider || '', t.model || '', t.maxTokens ?? null, t.contextWindow ?? null, this.bodyToRows(t.extraBody))),
                         strategy: route.strategy || 'failover',
                         maxTokens: route.maxTokens ?? null,
                         contextWindow: route.contextWindow ?? null,
+                        extraBody: this.bodyToRows(route.extraBody),
                         enableVision: !!route.vision,
                         visionProvider: route.vision?.provider || '',
                         visionModel: route.vision?.model || '',
@@ -80,8 +83,8 @@
                 // 把原来那行的 DOM 留在原位只改绑定值，而行内 <select> 的选中态在
                 // options 已渲染的情况下不会被重新认领（见模板里 :selected 那段注释的
                 // 同源问题），表现就是拖完两行的 provider 串了。
-                newRouteTarget(provider, model = '', maxTokens = null, contextWindow = null) {
-                    return { _id: ++this._routeTargetSeq, provider, model, maxTokens, contextWindow, models: [], modelsLoading: false, limitsOpen: maxTokens != null || contextWindow != null };
+                newRouteTarget(provider, model = '', maxTokens = null, contextWindow = null, extraBody = []) {
+                    return { _id: ++this._routeTargetSeq, provider, model, maxTokens, contextWindow, extraBody: Array.isArray(extraBody) ? extraBody : [], models: [], modelsLoading: false, limitsOpen: maxTokens != null || contextWindow != null || (Array.isArray(extraBody) && extraBody.length > 0) };
                 },
 
                 // 视觉字段的瞬态查询状态。三处 routeForm 重建（addRoute / editRoute /
@@ -102,6 +105,7 @@
                     if ((f.targets || []).length > 1 && f.strategy && f.strategy !== 'failover') n++;
                     if (this.numOrNull(f.maxTokens) !== null) n++;
                     if (this.numOrNull(f.contextWindow) !== null) n++;
+                    if ((f.extraBody || []).some((r) => (r?.key || '').trim())) n++;
                     if (f.enableVision) n++;
                     return n;
                 },
@@ -114,6 +118,7 @@
                     let n = 0;
                     if (this.numOrNull(t.maxTokens) !== null) n++;
                     if (this.numOrNull(t.contextWindow) !== null) n++;
+                    if ((t.extraBody || []).some((r) => (r?.key || '').trim())) n++;
                     return n;
                 },
 
@@ -150,6 +155,27 @@
                 removeRouteTarget(index) {
                     if (this.routeForm.targets.length <= 1) return;
                     this.routeForm.targets.splice(index, 1);
+                },
+
+                // 路由级与候选级 extraBody 的行操作。表单里存有序行数组，saveRoute 用
+                // rowsToBody 折回 map（值按 JSON 解析），语义同 provider 级 extraBody。
+                addRouteBodyRow() {
+                    if (!Array.isArray(this.routeForm.extraBody)) this.routeForm.extraBody = [];
+                    this.routeForm.extraBody.push({ key: '', value: '' });
+                },
+
+                removeRouteBodyRow(index) {
+                    this.routeForm.extraBody.splice(index, 1);
+                },
+
+                addRouteTargetBodyRow(ti) {
+                    const t = this.routeForm.targets[ti];
+                    if (!Array.isArray(t.extraBody)) t.extraBody = [];
+                    t.extraBody.push({ key: '', value: '' });
+                },
+
+                removeRouteTargetBodyRow(ti, index) {
+                    this.routeForm.targets[ti].extraBody.splice(index, 1);
                 },
 
                 // 用已落盘 provider 配置里的 apiKey 拉上游 /v1/models。
@@ -269,6 +295,9 @@
                         if (max !== null) out.maxTokens = max;
                         const contextWindow = this.numOrNull(t.contextWindow);
                         if (contextWindow !== null) out.contextWindow = contextWindow;
+                        // 候选级 extraBody：空表格折回 undefined，不落盘噪音。
+                        const extraBody = this.rowsToBody(t.extraBody);
+                        if (extraBody) out.extraBody = extraBody;
                         return out;
                     });
                     if (!targets.length || targets.some((t) => !t.provider || !t.model)) {
@@ -315,6 +344,15 @@
                         ? targets[0].contextWindow
                         : this.numOrNull(this.routeForm.contextWindow);
                     if (routeContextWindow !== null) route.contextWindow = routeContextWindow;
+                    // 路由级 extraBody 同 maxTokens：单候选把候选级折进路由级（targets 不落盘），
+                    // 按键叠加、候选级更具体故后合覆盖路由级；多候选保留路由级作为中间层，
+                    // 各 target 的覆盖已随 targets 数组一并落盘。
+                    const routeExtraForm = this.rowsToBody(this.routeForm.extraBody);
+                    let routeExtraBody = routeExtraForm;
+                    if (targets.length === 1 && targets[0].extraBody) {
+                        routeExtraBody = Object.assign({}, routeExtraForm || {}, targets[0].extraBody);
+                    }
+                    if (routeExtraBody && Object.keys(routeExtraBody).length) route.extraBody = routeExtraBody;
                     if (this.routeForm.enableVision) {
                         route.vision = {
                             provider: this.routeForm.visionProvider,

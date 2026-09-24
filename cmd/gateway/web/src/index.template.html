@@ -1841,6 +1841,22 @@
                         <span class="mt-1 block text-xs text-muted">在网关自设的头之后写入，可覆盖 anthropic-version / accept。转发、模型列表查询、健康检测三条路径都会带上。</span>
                         <span class="mt-1 block text-xs text-warn">不要在这里放密钥（密钥用 API Key 字段）：该值会由 /api/config 明文返回。x-api-key / authorization / content-type / User-Agent 会被忽略。</span>
                     </div>
+                    <div class="mt-4">
+                        <div class="mb-1.5 flex items-center justify-between">
+                            <span class="text-xs font-bold uppercase tracking-wide text-muted">自定义请求体字段</span>
+                            <button type="button" @click="addExtraBodyRow()" class="rounded border border-line px-2 py-0.5 text-xs text-muted hover:text-white">+ 添加</button>
+                        </div>
+                        <template x-for="(row, bi) in (providerForm.extraBody || [])" :key="bi">
+                            <div class="mb-2 flex items-center gap-2">
+                                <input autocomplete="off" type="text" x-model="row.key" placeholder="字段名"
+                                       class="field flex-1" :class="extraBodyBlocked(row.key) ? 'border-danger' : ''">
+                                <input autocomplete="off" type="text" x-model="row.value" placeholder="值（如 true / 20 / &quot;文本&quot;）" class="field flex-1">
+                                <button type="button" @click="removeExtraBodyRow(bi)" class="shrink-0 rounded border border-line px-2 py-1 text-xs text-muted hover:text-danger">删除</button>
+                            </div>
+                        </template>
+                        <span class="mt-1 block text-xs text-muted">合并进转发的请求体，用于上游要求而标准格式不产出的私有字段，如 enable_thinking 填 true。值按 JSON 解析：true 是布尔、20 是数字、裸词按字符串。</span>
+                        <span class="mt-1 block text-xs text-warn">model / messages / input / stream / max_tokens 系列由网关维护，填了会被忽略。只对转发生效，模型列表查询与健康检测不带。</span>
+                    </div>
                 </div>
             </div>
             <!-- 检测结果留在滚动区外：它是点底部「检测」按钮的即时反馈，
@@ -2004,6 +2020,22 @@
                                     <input autocomplete="off" :id="'route-target-context-window-' + ti" type="number" min="1" max="10000000" x-model.number="target.contextWindow"
                                            placeholder="不启用预算" class="field w-32 py-1 text-sm">
                                     <span class="shrink-0 text-[11px]">tokens，留空用默认</span>
+                                    <!-- 候选级 extraBody：整行铺开，按键叠加在上游 / 路由之上，只覆盖该候选。 -->
+                                    <div class="w-full">
+                                        <div class="mb-1 flex items-center justify-between">
+                                            <span class="text-[11px] font-bold uppercase tracking-wide text-muted">自定义请求体字段</span>
+                                            <button type="button" @click="addRouteTargetBodyRow(ti)" class="rounded border border-line px-2 py-0.5 text-[11px] text-muted hover:text-white">+ 添加</button>
+                                        </div>
+                                        <template x-for="(row, bi) in (target.extraBody || [])" :key="bi">
+                                            <div class="mb-1 flex items-center gap-2">
+                                                <input autocomplete="off" type="text" x-model="row.key" placeholder="字段名"
+                                                       class="field flex-1 py-1 text-sm" :class="extraBodyBlocked(row.key) ? 'border-danger' : ''">
+                                                <input autocomplete="off" type="text" x-model="row.value" placeholder="值（true / 20 / &quot;文本&quot;）" class="field flex-1 py-1 text-sm">
+                                                <button type="button" @click="removeRouteTargetBodyRow(ti, bi)" class="shrink-0 rounded border border-line px-2 py-1 text-[11px] text-muted hover:text-danger">删除</button>
+                                            </div>
+                                        </template>
+                                        <span class="block text-[11px]">值按 JSON 解析（true 是布尔 / 20 是数字 / 裸词按字符串），只覆盖该候选，叠加在上游与路由的同名字段之上。</span>
+                                    </div>
                                 </div>
                             </div>
                         </template>
@@ -2069,6 +2101,24 @@
                             <span class="mt-1 block text-xs text-muted">作为本路由所有候选的默认窗口；候选级设置优先级更高。留空时继续查找 Provider 窗口。</span>
                         </label>
                     </div>
+                </div>
+                <!-- 路由级 extraBody：作为本路由所有候选的默认自定义请求体字段。
+                     按键叠加，优先级 候选 > 路由 > 上游；候选级在上面每个候选行内单独覆盖。 -->
+                <div class="rounded-lg border border-line bg-panel2/50 p-4">
+                    <div class="mb-3 flex items-center justify-between">
+                        <span class="text-sm font-bold tracking-wide text-white">自定义请求体字段</span>
+                        <button type="button" @click="addRouteBodyRow()" class="rounded border border-line px-2 py-0.5 text-xs text-muted hover:text-white">+ 添加</button>
+                    </div>
+                    <template x-for="(row, bi) in (routeForm.extraBody || [])" :key="bi">
+                        <div class="mb-2 flex items-center gap-2">
+                            <input autocomplete="off" type="text" x-model="row.key" placeholder="字段名"
+                                   class="field flex-1" :class="extraBodyBlocked(row.key) ? 'border-danger' : ''">
+                            <input autocomplete="off" type="text" x-model="row.value" placeholder="值（如 true / 20 / &quot;文本&quot;）" class="field flex-1">
+                            <button type="button" @click="removeRouteBodyRow(bi)" class="shrink-0 rounded border border-line px-2 py-1 text-xs text-muted hover:text-danger">删除</button>
+                        </div>
+                    </template>
+                    <span class="mt-1 block text-xs text-muted">合并进转发请求体，用于上游要求而标准格式不产出的私有字段，如 enable_thinking 填 true。值按 JSON 解析：true 是布尔、20 是数字、裸词按字符串。</span>
+                    <span class="mt-1 block text-xs text-warn">model / messages / input / stream / max_tokens 系列由网关维护，填了会被忽略。按键叠加，候选级覆盖路由级、路由级覆盖上游级。</span>
                 </div>
                 <!-- 保留 cyan 色调把它与其他分区区分开（它是可选功能开关，不是必填项），
                      但分区形态与其他分区统一。 -->

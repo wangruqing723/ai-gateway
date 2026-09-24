@@ -312,6 +312,62 @@ func TestMatchRouteContextWindowPriority(t *testing.T) {
 	}
 }
 
+func TestMatchRouteExtraBodyOverlay(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Providers["alpha"].ExtraBody = map[string]any{"enable_thinking": true, "top_k": 20}
+	cfg.Routes = []config.Route{{
+		Match:     "*",
+		ExtraBody: map[string]any{"top_k": 50, "service_tier": "flex"},
+		Targets: []config.Target{
+			{Provider: "alpha", Model: "upstream", ExtraBody: map[string]any{"service_tier": "default"}},
+			{Provider: "alpha", Model: "upstream2"},
+		},
+	}}
+	m := MatchRoute("requested", cfg)
+	if m == nil || len(m.Candidates) != 2 {
+		t.Fatalf("期望命中并得到 2 个候选，实际 %#v", m)
+	}
+
+	// 候选 0 带 target.extraBody：三层叠加，同名键 target > route > provider。
+	c0 := m.Candidates[0].ExtraBody
+	if c0["enable_thinking"] != true {
+		t.Errorf("候选0 enable_thinking = %#v，期望 provider 层的 true", c0["enable_thinking"])
+	}
+	if c0["top_k"] != 50 {
+		t.Errorf("候选0 top_k = %#v，期望 route 覆盖 provider 后的 50", c0["top_k"])
+	}
+	if c0["service_tier"] != "default" {
+		t.Errorf("候选0 service_tier = %#v，期望 target 覆盖 route 后的 default", c0["service_tier"])
+	}
+
+	// 候选 1 无 target.extraBody：只叠 provider + route。
+	c1 := m.Candidates[1].ExtraBody
+	if c1["service_tier"] != "flex" {
+		t.Errorf("候选1 service_tier = %#v，期望 route 层的 flex", c1["service_tier"])
+	}
+
+	// 合成的 map 必须是新副本：改候选 0 不能污染 provider 原始 map，也不能串到候选 1。
+	c0["enable_thinking"] = false
+	if got := cfg.Providers["alpha"].ExtraBody["enable_thinking"]; got != true {
+		t.Errorf("候选写入污染了 provider 原始 extraBody: %#v", got)
+	}
+	if m.Candidates[1].ExtraBody["enable_thinking"] != true {
+		t.Errorf("候选之间共享了同一个 extraBody map")
+	}
+}
+
+func TestMatchRouteExtraBodyNilWhenUnset(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Routes = []config.Route{{Match: "*", Provider: "alpha", Model: "upstream"}}
+	m := MatchRoute("requested", cfg)
+	if m == nil {
+		t.Fatal("期望命中路由")
+	}
+	if m.Candidates[0].ExtraBody != nil {
+		t.Fatalf("三层都未配置时 ExtraBody 应为 nil，实际 %#v", m.Candidates[0].ExtraBody)
+	}
+}
+
 func TestOneMSuffixOverridesContextWindowButNotMaxTokens(t *testing.T) {
 	window := 200000
 	maxTokens := 8192

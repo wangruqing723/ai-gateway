@@ -133,6 +133,14 @@ providers:
     #                       # x-api-key / authorization / content-type / User-Agent 被禁止：
     #                       # 前三个由网关按 format 维护，UA 请用上面的 userAgent 字段。
     #                       # 不要在这里放密钥：/api/config 不对该字段脱敏，会明文返回。
+    # extraBody:            # 可选：合并进转发请求体的自定义字段（最多 20 条，单值序列化后最长 8192 字节）
+    #   enable_thinking: true                     # 例：Qwen / DashScope 系中转要求思考型模型必须带此字段
+    #                       # 用于上游要求而三种标准格式（anthropic/openai/openai-responses）都不产出的
+    #                       # 私有字段。在网关写完 model/messages/max_tokens 之后浅合并，值保留 JSON 原始
+    #                       # 类型（true 是布尔、20 是数字、可写嵌套对象/数组）。只对转发生效，
+    #                       # /v1/models 查询与健康检测是无体 GET，不涉及。
+    #                       # model / messages / input / stream / max_tokens 系列被禁止：
+    #                       # 它们由网关按路由、转换与输出上限决策维护，放开会把请求改坏。
     # enabled: true          # 可选：false 时该 provider 不参与转发（默认 true）。
     #                         # 禁用后候选循环里跳过该 provider，不消耗 maxAttempts；
     #                         # 全部候选都被禁用的路由在运行时返回 503 all_candidates_disabled，
@@ -203,14 +211,20 @@ routes:
   # 完整优先级：候选 > 路由 > 上游 > 客户端传入值 > 全局默认 32768。
   # 同一路由下各上游输出上限不同时写在候选上；整条路由统一时写在路由级。
   # contextWindow 也可写在候选、路由、上游三处，但它只向下压 maxTokens，不向上抬。
+  # extraBody 同样可写在候选、路由、上游三处，但它是「按键叠加」而非整值覆盖：
+  # 最终请求体先合上游的 extraBody、再合路由、最后合候选，同名键后者胜出。
   # - match: "gpt-5*"
   #   maxTokens: 32768              # 路由级：本路由所有候选统一用它
   #   contextWindow: 128000         # 路由级：本路由所有候选的默认窗口
+  #   extraBody:                    # 路由级：本路由所有候选默认合并的私有字段
+  #     enable_thinking: true
   #   targets:
   #     - provider: mimo
   #       model: "mimo-v2.5-pro"
   #       maxTokens: 16384          # 候选级：只覆盖这一个候选，优先于路由级
   #       contextWindow: 200000     # 候选级：只覆盖这一个候选，优先级最高
+  #       extraBody:                # 候选级：叠加/覆盖路由与上游的同名键
+  #         enable_thinking: false
 
   - match: "*"
     provider: mimo

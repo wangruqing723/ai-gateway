@@ -17,6 +17,7 @@
                         proxy: '',
                         oneMContext: '',
                         extraHeaders: [],
+                        extraBody: [],
                         enabled: true,
                         apiKeyConfigured: false,
                         clearApiKey: false
@@ -43,6 +44,7 @@
                         proxy: p.proxy || '',
                         oneMContext: p.oneMContext || '',
                         extraHeaders: this.headersToRows(p.extraHeaders),
+                        extraBody: this.bodyToRows(p.extraBody),
                         // enabled 回填：后端 nil 表示启用（默认），前端归一成 true。
                         enabled: p.enabled !== false,
                         apiKeyConfigured: !!p.apiKeyConfigured,
@@ -78,6 +80,7 @@
                         proxy: (p.proxy || '').includes('__AI_GATEWAY_KEEP_PROXY_PASSWORD__') ? '' : (p.proxy || ''),
                         oneMContext: p.oneMContext || '',
                         extraHeaders: this.headersToRows(p.extraHeaders),
+                        extraBody: this.bodyToRows(p.extraBody),
                         // 副本默认启用：复制一个被禁用的 provider 时，新副本应当是启用的，
                         // 否则用户复制后还要手动启用，与「复制=另起一个可用的」预期不符。
                         enabled: true,
@@ -148,6 +151,9 @@
                         // 空表格发 undefined 而不是 {}：后端 omitempty 只认 nil/空 map，
                         // 但发 {} 会让 YAML 里多出一行空 extraHeaders，配置越存越脏。
                         extraHeaders: this.rowsToHeaders(this.providerForm.extraHeaders),
+                        // extraBody 同 extraHeaders：空表格发 undefined 而非 {}，避免 YAML 里
+                        // 多出一行空 extraBody。值按 JSON 解析，保留 bool/number/对象类型。
+                        extraBody: this.rowsToBody(this.providerForm.extraBody),
                         // enabled 透传表单值。true 时发 undefined 走 omitempty（保持
                         // 老配置不扩散该字段），false 时显式写入。
                         enabled: this.providerForm.enabled === false ? false : undefined
@@ -197,6 +203,49 @@
                 extraHeaderBlocked(key) {
                     const name = (key || '').trim().toLowerCase();
                     return ['x-api-key', 'authorization', 'content-type', 'user-agent'].includes(name);
+                },
+
+                // bodyToRows 把配置里的 extraBody map 摊成有序行数组。值不是字符串时
+                // 序列化成 JSON 文本回填，保证 true / 20 / {...} 编辑后仍能原样解析回去。
+                bodyToRows(body) {
+                    if (!body || typeof body !== 'object') return [];
+                    return Object.keys(body).sort().map((key) => {
+                        const v = body[key];
+                        const value = typeof v === 'string' ? v : JSON.stringify(v);
+                        return { key, value };
+                    });
+                },
+
+                // rowsToBody 把表单行折回 map。key 去空白后为空的行整行丢弃。值按 JSON 解析：
+                // true → 布尔、20 → 数字、{...} → 对象，解析失败按原始字符串（裸词 enable 等）。
+                // 这样 enable_thinking 填 true 得到布尔而非字符串 "true"，满足上游强类型校验。
+                rowsToBody(rows) {
+                    if (!Array.isArray(rows)) return undefined;
+                    const out = {};
+                    for (const row of rows) {
+                        const key = (row?.key || '').trim();
+                        if (!key) continue;
+                        const raw = row?.value ?? '';
+                        let value = raw;
+                        try { value = JSON.parse(raw); } catch (_) { value = raw; }
+                        out[key] = value;
+                    }
+                    return Object.keys(out).length ? out : undefined;
+                },
+
+                addExtraBodyRow() {
+                    if (!Array.isArray(this.providerForm.extraBody)) this.providerForm.extraBody = [];
+                    this.providerForm.extraBody.push({ key: '', value: '' });
+                },
+
+                removeExtraBodyRow(index) {
+                    this.providerForm.extraBody.splice(index, 1);
+                },
+
+                // extraBodyBlocked 与后端 config.extraBodyBlocklist 同名单，表单里即时标红。
+                extraBodyBlocked(key) {
+                    const name = (key || '').trim().toLowerCase();
+                    return ['model', 'messages', 'input', 'stream', 'max_tokens', 'max_output_tokens', 'max_completion_tokens'].includes(name);
                 },
 
                 proxyHost(proxy) {

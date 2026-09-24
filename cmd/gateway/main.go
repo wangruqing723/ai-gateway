@@ -1097,6 +1097,11 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 		// 仍须补上现有的全局默认值，保证改动前逐字节兼容。
 		converter.EnsureMaxTokens(upstreamMap, p.Format)
 	}
+	// extraBody 在所有网关维护字段（maxTokens 等）写完之后合并，配置值最终生效；
+	// model / messages / input / stream / max_tokens 系列由黑名单挡住。候选的 ExtraBody
+	// 已由 router 按 provider → route → target 叠加好，用于上游要求而三种标准格式都
+	// 不产出的私有字段，典型如 enable_thinking: true。
+	proxy.ApplyExtraBody(upstreamMap, in.candidate.ExtraBody)
 	upstreamBody, err := json.Marshal(upstreamMap)
 	if err != nil {
 		buildErr := "上游请求体序列化失败: " + err.Error()
