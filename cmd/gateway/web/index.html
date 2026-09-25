@@ -4772,8 +4772,9 @@
                 // 候选 target 的运行时形状：provider/model/maxTokens/contextWindow/localRetry 是落盘字段，
                 // models/modelsLoading（查询远程模型列表）与 limitsOpen（行内上限展开区）
                 // 是瞬态状态，saveRoute 不读它们。
-                // limitsOpen 初值跟着参数走：已配上限的候选打开弹窗时默认展开——
-                // 值已经在了，藏起来反而危险（用户看不到已有的覆盖，容易存出非预期的配置）。
+                // limitsOpen 初值恒为 false：候选设置一律默认折叠，不论是否已配。
+                // 已配的候选不会被藏没——模板里 tune 按钮会因 targetLimitCount>0 高亮并显示已设项数，
+                // 用户一眼能看出哪条候选有覆盖，需要改再点开。
                 // _id 是这一行的稳定身份，给 x-for 的 :key 用，同样不落盘。
                 // 不能继续用下标当 key：拖拽换位后下标 1 指向的是另一条数据，Alpine 会
                 // 把原来那行的 DOM 留在原位只改绑定值，而行内 <select> 的选中态在
@@ -4781,7 +4782,7 @@
                 // 同源问题），表现就是拖完两行的 provider 串了。
                 newRouteTarget(provider, model = '', maxTokens = null, contextWindow = null, extraBody = [], localRetry = null) {
                     const retryForm = this.localRetryForm(localRetry);
-                    return { _id: ++this._routeTargetSeq, provider, model, maxTokens, contextWindow, localRetry: retryForm, extraBody: Array.isArray(extraBody) ? extraBody : [], models: [], modelsLoading: false, limitsOpen: maxTokens != null || contextWindow != null || this.localRetryHasValue(retryForm) || (Array.isArray(extraBody) && extraBody.length > 0) };
+                    return { _id: ++this._routeTargetSeq, provider, model, maxTokens, contextWindow, localRetry: retryForm, extraBody: Array.isArray(extraBody) ? extraBody : [], models: [], modelsLoading: false, limitsOpen: false };
                 },
 
                 // 视觉字段的瞬态查询状态。三处 routeForm 重建（addRoute / editRoute /
