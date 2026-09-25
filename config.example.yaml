@@ -113,6 +113,9 @@ providers:
     maxConcurrent: 3      # 最大并发请求数（默认 5，范围 1-100）
     maxPerSecond: 2       # 每秒最多请求数（默认 0，范围 0-100）
     maxQueueWait: 30000   # 队列最大等待毫秒（默认 30000，范围 1-600000）
+    # localRetry:          # 可选：在该 Provider 的单个候选上重试；route/target 可逐字段覆盖
+    #   maxRetries: 2      # 额外重试次数（0-10）；0 表示本层关闭
+    #   intervalMs: 1000   # 固定重试间隔毫秒（0-60000；省略时默认 1000）
     # maxTokens: 32768    # 可选：覆盖转发给该上游的输出上限（Anthropic/Chat 的 max_tokens、
     #                     # Responses 的 max_output_tokens），配了就硬覆盖客户端传入值。
     #                     # 完整优先级：候选 > 路由 > 上游 > 客户端传入值 > 全局默认 32768。
@@ -211,6 +214,21 @@ routes:
   # 完整优先级：候选 > 路由 > 上游 > 客户端传入值 > 全局默认 32768。
   # 同一路由下各上游输出上限不同时写在候选上；整条路由统一时写在路由级。
   # contextWindow 也可写在候选、路由、上游三处，但它只向下压 maxTokens，不向上抬。
+  # localRetry 可写在候选、路由、上游三处，逐字段按 target > route > provider 覆盖；
+  # 本地子尝试不增加 failover.maxAttempts 计数；候选最终成功或放弃时才计一次，
+  # 且 failover.enabled: false 时 localRetry 也可单独生效。
+  # 显式 maxRetries: 0 会关闭本层继承值；429 且 Retry-After 超限时会直接换候选。
+  # - match: "claude-sonnet-4*"
+  #   localRetry:
+  #     maxRetries: 2
+  #     intervalMs: 500
+  #   targets:
+  #     - provider: mimo
+  #       model: "mimo-v2.5-pro"
+  #       localRetry:
+  #         maxRetries: 0       # 仅此候选关闭重试，覆盖路由级 maxRetries
+  #     - provider: deepseek
+  #       model: "deepseek-chat"
   # extraBody 同样可写在候选、路由、上游三处，但它是「按键叠加」而非整值覆盖：
   # 最终请求体先合上游的 extraBody、再合路由、最后合候选，同名键后者胜出。
   # - match: "gpt-5*"

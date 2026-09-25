@@ -1,6 +1,6 @@
                 routeTargets(route) {
                     if (Array.isArray(route?.targets) && route.targets.length) return route.targets;
-                    return [{ provider: route?.provider || '', model: route?.model || '', maxTokens: null, contextWindow: null }];
+                    return [{ provider: route?.provider || '', model: route?.model || '', maxTokens: null, contextWindow: null, localRetry: undefined }];
                 },
 
                 addRoute() {
@@ -13,6 +13,7 @@
                         strategy: 'failover',
                         maxTokens: null,
                         contextWindow: null,
+                        localRetry: { maxRetries: null, intervalMs: null },
                         extraBody: [],
                         enableVision: false,
                         visionProvider: providers[0] || '',
@@ -29,12 +30,13 @@
                     const route = this.config.routes[index];
                     this.routeForm = {
                         match: route.match,
-                        targets: this.routeTargets(route).map((t) => this.newRouteTarget(t.provider || '', t.model || '', t.maxTokens ?? null, t.contextWindow ?? null, this.bodyToRows(t.extraBody))),
+                        targets: this.routeTargets(route).map((t) => this.newRouteTarget(t.provider || '', t.model || '', t.maxTokens ?? null, t.contextWindow ?? null, this.bodyToRows(t.extraBody), this.localRetryForm(t.localRetry))),
                         // 配置里没写 strategy 就是默认 failover；这里补成真实枚举值，
                         // 留空会让下拉匹配不到 option、显示回落到第一项
                         strategy: route.strategy || 'failover',
                         maxTokens: route.maxTokens ?? null,
                         contextWindow: route.contextWindow ?? null,
+                        localRetry: this.localRetryForm(route.localRetry),
                         extraBody: this.bodyToRows(route.extraBody),
                         enableVision: !!route.vision,
                         visionProvider: route.vision?.provider || '',
@@ -57,10 +59,11 @@
                     this.editingRouteIndex = -1;
                     this.routeForm = {
                         match: route.match || '',
-                        targets: this.routeTargets(route).map((t) => this.newRouteTarget(t.provider || '', t.model || '', t.maxTokens ?? null, t.contextWindow ?? null, this.bodyToRows(t.extraBody))),
+                        targets: this.routeTargets(route).map((t) => this.newRouteTarget(t.provider || '', t.model || '', t.maxTokens ?? null, t.contextWindow ?? null, this.bodyToRows(t.extraBody), this.localRetryForm(t.localRetry))),
                         strategy: route.strategy || 'failover',
                         maxTokens: route.maxTokens ?? null,
                         contextWindow: route.contextWindow ?? null,
+                        localRetry: this.localRetryForm(route.localRetry),
                         extraBody: this.bodyToRows(route.extraBody),
                         enableVision: !!route.vision,
                         visionProvider: route.vision?.provider || '',
@@ -73,7 +76,7 @@
                     this.showStatus(`已按「${route.match || '(空)'}」预填，记得改匹配模式`, 'success');
                 },
 
-                // 候选 target 的运行时形状：provider/model/maxTokens/contextWindow 是落盘字段，
+                // 候选 target 的运行时形状：provider/model/maxTokens/contextWindow/localRetry 是落盘字段，
                 // models/modelsLoading（查询远程模型列表）与 limitsOpen（行内上限展开区）
                 // 是瞬态状态，saveRoute 不读它们。
                 // limitsOpen 初值跟着参数走：已配上限的候选打开弹窗时默认展开——
@@ -83,8 +86,9 @@
                 // 把原来那行的 DOM 留在原位只改绑定值，而行内 <select> 的选中态在
                 // options 已渲染的情况下不会被重新认领（见模板里 :selected 那段注释的
                 // 同源问题），表现就是拖完两行的 provider 串了。
-                newRouteTarget(provider, model = '', maxTokens = null, contextWindow = null, extraBody = []) {
-                    return { _id: ++this._routeTargetSeq, provider, model, maxTokens, contextWindow, extraBody: Array.isArray(extraBody) ? extraBody : [], models: [], modelsLoading: false, limitsOpen: maxTokens != null || contextWindow != null || (Array.isArray(extraBody) && extraBody.length > 0) };
+                newRouteTarget(provider, model = '', maxTokens = null, contextWindow = null, extraBody = [], localRetry = null) {
+                    const retryForm = this.localRetryForm(localRetry);
+                    return { _id: ++this._routeTargetSeq, provider, model, maxTokens, contextWindow, localRetry: retryForm, extraBody: Array.isArray(extraBody) ? extraBody : [], models: [], modelsLoading: false, limitsOpen: maxTokens != null || contextWindow != null || this.localRetryHasValue(retryForm) || (Array.isArray(extraBody) && extraBody.length > 0) };
                 },
 
                 // 视觉字段的瞬态查询状态。三处 routeForm 重建（addRoute / editRoute /
@@ -105,6 +109,7 @@
                     if ((f.targets || []).length > 1 && f.strategy && f.strategy !== 'failover') n++;
                     if (this.numOrNull(f.maxTokens) !== null) n++;
                     if (this.numOrNull(f.contextWindow) !== null) n++;
+                    if (this.localRetryHasValue(f.localRetry)) n++;
                     if ((f.extraBody || []).some((r) => (r?.key || '').trim())) n++;
                     if (f.enableVision) n++;
                     return n;
@@ -118,6 +123,7 @@
                     let n = 0;
                     if (this.numOrNull(t.maxTokens) !== null) n++;
                     if (this.numOrNull(t.contextWindow) !== null) n++;
+                    if (this.localRetryHasValue(t.localRetry)) n++;
                     if ((t.extraBody || []).some((r) => (r?.key || '').trim())) n++;
                     return n;
                 },
@@ -287,7 +293,8 @@
                     const targets = (this.routeForm.targets || []).map((t) => {
                         const out = {
                             provider: (t.provider || '').trim(),
-                            model: (t.model || '').trim()
+                            model: (t.model || '').trim(),
+                            localRetry: this.localRetryPayload(t.localRetry)
                         };
                         // 只在真配了才落盘：*int 字段带 null 进 yaml 会落一行 maxTokens: null，
                         // 后端解成 nil 虽无害，但预览和磁盘上多出一堆噪音。
@@ -331,6 +338,17 @@
                     if (targets.length > 1 && this.routeForm.strategy && this.routeForm.strategy !== 'failover') {
                         route.strategy = this.routeForm.strategy;
                     }
+                    // 多候选保留路由级默认与每个候选覆盖；单候选采用扁平 provider/model 形状，
+                    // 因此按字段把 target 值合入 route，target 非空值优先，空值继续继承 route。
+                    const routeLocalRetry = this.localRetryPayload(this.routeForm.localRetry);
+                    const targetLocalRetry = targets.length === 1 ? targets[0].localRetry : undefined;
+                    const mergedLocalRetry = targets.length === 1
+                        ? this.localRetryPayload({
+                            maxRetries: targetLocalRetry?.maxRetries ?? routeLocalRetry?.maxRetries ?? null,
+                            intervalMs: targetLocalRetry?.intervalMs ?? routeLocalRetry?.intervalMs ?? null
+                        })
+                        : routeLocalRetry;
+                    if (mergedLocalRetry) route.localRetry = mergedLocalRetry;
                     // 路由级 maxTokens 同样只在配了时才落盘。
                     // 单候选写法（provider/model）下 targets 数组不落盘，候选级的值会随之丢失，
                     // 所以把它折进路由级——两者在单候选下语义完全等价，优先取候选级（更具体）。

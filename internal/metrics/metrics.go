@@ -196,6 +196,7 @@ type AttemptDetail struct {
 	UpstreamRequestID  string `json:"upstreamRequestId,omitempty"`
 	RetryAfterMs       int64  `json:"retryAfterMs,omitempty"`
 	FreeAttempt        bool   `json:"freeAttempt,omitempty"`
+	LocalRetry         bool   `json:"localRetry,omitempty"`
 	ResponseStarted    bool   `json:"responseStarted,omitempty"`
 }
 

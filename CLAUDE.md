@@ -167,8 +167,8 @@ go test ./internal/<pkg>/ -run TestName -v
    3. `router.ResolveAPIKey` 优先使用 provider 配置，其次从 `x-api-key` 或 `Authorization: Bearer` 读取。
    4. 按 provider `format` 通过 checked API 转为 Anthropic 或 OpenAI Chat 上游请求；该候选构建失败则跳过，全部失败才返回错误。
    5. 非直通模式通过 `queue.Manager.Acquire` 获取执行槽，`release()` 必须 `defer` 在单次尝试函数内，否则循环里累积不释放。
-   6. `proxy.Forward` 转发请求，并把响应转换回客户端格式；`ShouldRetry` 判定可转移时返回 `ErrAttemptAbandoned` 且不写客户端。判定结果是 `failoverDecision`，其中 `freeAttempt` 表示本次放弃不消耗额度。
-   7. `breaker.Report` 上报本次结果，判据取 `OnUpstreamStatus` 回调拿到的真实上游状态码，并且**在任何状态码下都要看 `forwardErr`**——2xx 响应头之后才失败（流中途断开、活跃超时、响应转换失败）同样计入熔断，否则那类上游永远开不了路。
+   6. `proxy.Forward` 转发请求，并把响应转换回客户端格式；`ShouldRetry` 按 failover/localRetry 判定返回 `ErrAttemptAbandoned` 且不写客户端。判定结果是 `failoverDecision`，其中 `freeAttempt` 表示本次放弃不消耗额度。
+   7. 同一候选的本地重试之间释放队列 slot；该候选内层循环结束后，`breaker.Report` 用最终结果上报一次。判据取 `OnUpstreamStatus` 回调拿到的真实上游状态码，并且**在任何状态码下都要看 `forwardErr`**——2xx 响应头之后才失败（流中途断开、活跃超时、响应转换失败）同样计入熔断。
 9. 成功或额度耗尽后写响应头 `x-ai-gateway-provider` / `x-ai-gateway-attempts`，并记一条请求日志（`Attempts`、`AttemptTrail`）。全部候选都装不下时返回 413 `context_window_exceeded`；熔断跳过优先于该终态。
 
 ## Key Mechanisms
@@ -177,7 +177,8 @@ go test ./internal/<pkg>/ -run TestName -v
 - **队列模式**：默认模式，使用 per-provider 动态 FIFO admission、滑动窗口限速和覆盖完整等待阶段的 `maxQueueWait`。
 - **负载均衡**：路由级 `strategy` 字段，与 `failover.enabled` 正交——策略决定「先试谁」，failover 决定「失败了还能试谁」，`round-robin` + failover 关闭是合法组合（纯分流、不转移）。`round-robin` 按 per-route 计数器轮转起点；`least-queue` 按 `queue.StatusOf` 的 `running+queued` 升序，相同负载按轮转顺序打散。directMode 无队列，负载恒为 0，`least-queue` 因此自然退化成 `round-robin`，而不是静默退回配置顺序。单候选路由写非 `failover` 策略在启动校验时直接报错，不静默忽略。
 - **会话粘性**：`round-robin` / `least-queue` 下对可缓存前缀（system + 首条 user 消息文本）做 SHA-256 当近似会话身份，命中则把该目标提到队首，保住上游侧 prompt cache 前缀。TTL 5 分钟、LRU 上限 1000 条、前缀短于 256 字符不参与。只在候选**成功后**才 `Remember`，绝不在选中时绑定——绑定失败过的目标会把整条会话钉在坏上游上。映射值存 `provider/model` 而不是下标，热重载改 `targets` 顺序后下标会指向另一个上游。
-- **故障转移额度**：`maxAttempts` 只约束「真实尝试」。两类放弃不消耗额度：熔断跳过，以及 429 且 `Retry-After` 超过 `failover.maxRetryAfterMs`（上游自报这段时间不可用，与熔断跳过同等待遇）。否则一个自曝限流的上游会挤掉本来还能试的健康候选。`maxRetryAfterMs` 显式写 0 表示不设上限。最后一个候选 `allowRetry=false`，它的 429 会原样透传给客户端，比网关合成终态更准确。
+- **故障转移额度**：`maxAttempts` 只约束「真实尝试」。两类放弃不消耗额度：熔断跳过，以及 429 且 `Retry-After` 超过 `failover.maxRetryAfterMs`（上游自报这段时间不可用，与熔断跳过同等待遇）。否则一个自曝限流的上游会挤掉本来还能试的健康候选。`maxRetryAfterMs` 显式写 0 表示不设上限。最后一个候选 `allowFailoverTransfer=false`，它的 429 会原样透传给客户端，比网关合成终态更准确。
+- **本地重试**：`localRetry.maxRetries` 是同一候选的额外转发次数，间隔由 `intervalMs` 固定指定（默认 1000ms）；两字段在 provider / route / target 之间按字段级 target > route > provider 覆盖，显式 0 关闭本层。它复用 failover 的失败分类，但独立于 `failover.enabled`；本地子尝试不额外增加 `maxAttempts`，同一候选最终只计一次，且长 `Retry-After` 的 freeAttempt 不做本地重试。响应开始前的可转移失败才会重试；队列 slot 在两次请求间释放，客户端断开可中止等待，每候选最终结果只向 breaker 上报一次。
 - **上下文窗口与动态输出预算**：`Provider.ContextWindow`、`Route.ContextWindow`、`Target.ContextWindow` 按 **target > route > provider** 覆盖，三层都为 nil 时完全不启用。启用后在 vision 翻译之后估算输入 token，图片块按每张固定 1500 token 计值（不按 base64 长度，避免把图片文本严重高估；固定值也避免朝不安全方向低估），预算为 `contextWindow - estimatedInput - contextSafetyMargin`。预算低于 1024 的候选在 `forwardAttempt` 前跳过，不发网络请求、不调用 `breaker.Report`、不消耗 `maxAttempts`；全部候选装不下返回 413 `context_window_exceeded`。预算只对既有 maxTokens 优先级链做 `min` 向下压制，不向上抬；`[1M]` 标记会剥离并把窗口覆盖为 1000000，但不改变 maxTokens。
 - **可配置的转移边界**：非流式整体超时用独立的 `onRequestTimeout`（默认 **false**），不并入 `onTransportError`——后者覆盖的连接失败几乎不耗时、是 failover 最该管的场景，而整体超时每个候选都要等满一整个 `timeout` 预算，转移会让总耗时接近翻倍。流式活跃超时不可配置转移：那时字节已写给客户端。
 - **配置零值语义**：`Failover` / `Breaker` 的数值项一律用 `*int`，`applyDefaults` 只在 `nil` 时填默认值。值类型分不清「写了 0」和「没写」：`maxRetryAfterMs: 0` 是合法的「不设上限」会被改掉，而 `maxAttempts` / `breaker` 三项写 0 本该报错，却会被静默改成默认值、让 `validate` 的下界检查变成死代码。读取统一走 accessor（`AttemptLimit()` / `RetryAfterCapMs()` / `FailureThreshold()` / `CooldownMs()` / `ProbeLimit()`），默认值只留一处来源。

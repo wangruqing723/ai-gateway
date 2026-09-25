@@ -560,7 +560,7 @@ func TestFailoverRateLimitCapZeroMeansNoCap(t *testing.T) {
 // TestFailoverAllCandidatesRateLimitedReturns429 全部候选都自报超阈值限流时，
 // 客户端必须收到 429 而不是被误报成协议错误 400。
 //
-// 实际走的是「最后一个候选原样透传」这条路径：最后一个候选 allowRetry=false，
+// 实际走的是「最后一个候选原样透传」这条路径：最后一个候选 allowFailoverTransfer=false，
 // ShouldRetry 不会触发，proxy 直接把上游的 429 连同 Retry-After 写给客户端 ——
 // 比网关自己合成一个终态更准确。main.go 里的 all_candidates_rate_limited 分支
 // 只是防御性兜底。

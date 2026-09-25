@@ -17,6 +17,8 @@
                             maxTokens: pick(p, 'maxTokens', 'MaxTokens') ?? null,
                             // contextWindow 同样是 *int：null 表示不启用窗口预算裁决。
                             contextWindow: pick(p, 'contextWindow', 'ContextWindow') ?? null,
+                            // localRetry 逐字段保留 null 与显式 0；空对象归一为 undefined，保存时整体省略。
+                            localRetry: this.normalizeLocalRetry(pick(p, 'localRetry', 'LocalRetry')),
                             // userAgent 必须读出来，理由同下面 route.strategy 那条：
                             // 这里是每次加载配置（含 5 秒轮询）铺进 this.config 的地方，
                             // 漏读等于刚从服务端拿到的值立刻在内存里丢掉，下次保存就写不回去。
@@ -55,6 +57,9 @@
                         // route 级 contextWindow 未配置时不挂字段，YAML 预览和保存都不制造 null 行。
                         const routeContextWindow = pick(r, 'contextWindow', 'ContextWindow') ?? null;
                         if (routeContextWindow !== null) route.contextWindow = routeContextWindow;
+                        // localRetry 是嵌套配置；未配置保持 undefined，避免序列化出空对象。
+                        const routeLocalRetry = this.normalizeLocalRetry(pick(r, 'localRetry', 'LocalRetry'));
+                        if (routeLocalRetry) route.localRetry = routeLocalRetry;
                         // route 级 extraBody：保留 map 原样，未配置不挂字段（否则每次保存写空 extraBody）。
                         const routeExtraBody = pick(r, 'extraBody', 'ExtraBody');
                         if (routeExtraBody) route.extraBody = routeExtraBody;
@@ -63,7 +68,8 @@
                             route.targets = rawTargets.map((t) => {
                                 const tgt = {
                                     provider: pick(t, 'provider', 'Provider') || '',
-                                    model: pick(t, 'model', 'Model') || ''
+                                    model: pick(t, 'model', 'Model') || '',
+                                    localRetry: this.normalizeLocalRetry(pick(t, 'localRetry', 'LocalRetry'))
                                 };
                                 const tMax = pick(t, 'maxTokens', 'MaxTokens') ?? null;
                                 if (tMax !== null) tgt.maxTokens = tMax;
@@ -114,6 +120,42 @@
                             checkIntervalSeconds: pick(providerHealth, 'checkIntervalSeconds', 'CheckIntervalSeconds') ?? 0
                         }
                     };
+                },
+
+                // LocalRetry 的数字值使用 null 表示继承，显式 0 必须保留。
+                // 后端 omitempty 负责省略 nil；这里也把空对象折成 undefined。
+                normalizeLocalRetry(raw) {
+                    if (!raw || typeof raw !== 'object') return undefined;
+                    const pick = (obj, lower, upper) => obj?.[lower] ?? obj?.[upper];
+                    const numberOrNull = (value) => typeof value === 'number' && Number.isFinite(value) ? value : null;
+                    const localRetry = {
+                        maxRetries: numberOrNull(pick(raw, 'maxRetries', 'MaxRetries')),
+                        intervalMs: numberOrNull(pick(raw, 'intervalMs', 'IntervalMs'))
+                    };
+                    return localRetry.maxRetries === null && localRetry.intervalMs === null ? undefined : localRetry;
+                },
+
+                // 表单始终绑定一个对象；未配置的字段显示为空，而不是 0。
+                localRetryForm(raw) {
+                    const localRetry = this.normalizeLocalRetry(raw);
+                    return {
+                        maxRetries: localRetry?.maxRetries ?? null,
+                        intervalMs: localRetry?.intervalMs ?? null
+                    };
+                },
+
+                // 请求体 / 配置内存中同时遵循 *int 的 null 语义；两项皆空时
+                // 整体返回 undefined，让 JSON/YAML omitempty 保持干净。
+                localRetryPayload(raw) {
+                    if (!raw || typeof raw !== 'object') return undefined;
+                    const maxRetries = this.numOrNull(raw.maxRetries);
+                    const intervalMs = this.numOrNull(raw.intervalMs);
+                    if (maxRetries === null && intervalMs === null) return undefined;
+                    return { maxRetries, intervalMs };
+                },
+
+                localRetryHasValue(raw) {
+                    return !!raw && (this.numOrNull(raw.maxRetries) !== null || this.numOrNull(raw.intervalMs) !== null);
                 },
 
                 // normalizeFailover 把 failover 块规范成表单可绑定的形状。

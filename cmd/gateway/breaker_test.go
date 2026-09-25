@@ -57,7 +57,7 @@ func statusServer(code int, hits *atomic.Int32, headers map[string]string) *http
 	}))
 }
 
-// TestBreakerOpensAfterConsecutiveFailures 覆盖回归点：最后一个候选（allowRetry=false，
+// TestBreakerOpensAfterConsecutiveFailures 覆盖回归点：最后一个候选（allowFailoverTransfer=false，
 // 不触发放弃）的 5xx 必须计入失败，否则单候选路由永远开不了路。
 func TestBreakerOpensAfterConsecutiveFailures(t *testing.T) {
 	var hits atomic.Int32

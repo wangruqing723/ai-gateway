@@ -99,6 +99,16 @@
                     return lines;
                 },
 
+                // LocalRetry 的父对象与字段都按 omitempty 输出；显式 0 仍然显示。
+                renderLocalRetryLines(value, pad) {
+                    const localRetry = this.localRetryPayload(value);
+                    if (!localRetry) return [];
+                    const lines = [`${pad}localRetry:`];
+                    if (localRetry.maxRetries !== null) lines.push(`${pad}  maxRetries: ${localRetry.maxRetries}`);
+                    if (localRetry.intervalMs !== null) lines.push(`${pad}  intervalMs: ${localRetry.intervalMs}`);
+                    return lines;
+                },
+
                 providersYaml() {
                     return Object.entries(this.config.providers || {}).map(([name, p]) => {
                         const lines = [
@@ -118,6 +128,7 @@
                         );
                         if (p.maxTokens != null) lines.push(`    maxTokens: ${p.maxTokens}`);
                         if (p.contextWindow != null) lines.push(`    contextWindow: ${p.contextWindow}`);
+                        lines.push(...this.renderLocalRetryLines(p.localRetry, '    '));
                         // oneMContext / extraHeaders 按后端 omitempty：仅在配了时输出，否则预览与落盘不一致。
                         if (p.oneMContext) lines.push(`    oneMContext: ${p.oneMContext}`);
                         if (p.extraHeaders && Object.keys(p.extraHeaders).length) {
@@ -145,6 +156,7 @@
                                 base.push(`        model: "${t.model || ''}"`);
                                 if (t.maxTokens != null) base.push(`        maxTokens: ${t.maxTokens}`);
                                 if (t.contextWindow != null) base.push(`        contextWindow: ${t.contextWindow}`);
+                                base.push(...this.renderLocalRetryLines(t.localRetry, '        '));
                                 base.push(...this.renderExtraBodyLines(t.extraBody, '        '));
                             });
                         } else {
@@ -158,6 +170,7 @@
                         }
                         if (r.maxTokens != null) base.push(`    maxTokens: ${r.maxTokens}`);
                         if (r.contextWindow != null) base.push(`    contextWindow: ${r.contextWindow}`);
+                        base.push(...this.renderLocalRetryLines(r.localRetry, '    '));
                         base.push(...this.renderExtraBodyLines(r.extraBody, '    '));
                         if (r.vision) {
                             base.push('    vision:');

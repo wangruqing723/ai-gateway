@@ -1801,6 +1801,20 @@
                         <input autocomplete="off" type="number" min="1" max="10000000" x-model.number="providerForm.contextWindow" placeholder="留空 = 不启用窗口预算裁决" class="field">
                         <span class="mt-1 block text-xs text-muted">估算输入后从这里扣除输入和顶层安全余量，剩余值只会向下压低输出上限；不会裁剪或摘要上下文。</span>
                     </label>
+                    <div class="mt-4 rounded-lg border border-line bg-panel p-3">
+                        <div class="mb-3 text-xs font-bold uppercase tracking-wide text-muted">本地重试</div>
+                        <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                            <label class="block">
+                                <span class="mb-1.5 block text-xs text-muted">最大重试次数</span>
+                                <input autocomplete="off" type="number" min="0" max="10" step="1" x-model.number="providerForm.localRetry.maxRetries" placeholder="留空 = 不设置；0 = 关闭" class="field">
+                            </label>
+                            <label class="block">
+                                <span class="mb-1.5 block text-xs text-muted">重试间隔 ms</span>
+                                <input autocomplete="off" type="number" min="0" max="60000" step="1" x-model.number="providerForm.localRetry.intervalMs" placeholder="留空 = 默认 1000 ms" class="field">
+                            </label>
+                        </div>
+                        <span class="mt-2 block text-xs text-muted">同一候选失败后再试；留空字段不覆盖路由或候选配置。若上层未配置重试次数，Provider 级留空表示不启用；次数允许 0–10，间隔允许 0–60000 ms。</span>
+                    </div>
                     <label class="mt-4 block">
                         <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">[1m] 标记转发</span>
                         <select x-model="providerForm.oneMContext" class="field">
@@ -1991,8 +2005,8 @@
                                 <div class="flex shrink-0 items-center gap-1">
                                     <button type="button" @click="target.limitsOpen = !target.limitsOpen"
                                             :aria-expanded="String(target.limitsOpen)" :aria-controls="'route-target-limits-' + ti"
-                                            :title="targetLimitCount(ti) ? '输出 / 窗口上限（已设 ' + targetLimitCount(ti) + ' 项）' : '输出 / 窗口上限'"
-                                            :aria-label="'候选 ' + (ti + 1) + ' 上限设置'"
+                                            :title="targetLimitCount(ti) ? '候选设置（已设 ' + targetLimitCount(ti) + ' 项）' : '候选设置'"
+                                            :aria-label="'候选 ' + (ti + 1) + ' 设置'"
                                             class="btn btn-secondary px-2 py-1.5"
                                             :class="target.limitsOpen || targetLimitCount(ti) ? 'border-cyan2/50 bg-cyan2/10 text-cyan' : ''">
                                         <span class="material-symbols-outlined text-[16px]">tune</span>
@@ -2020,6 +2034,18 @@
                                     <input autocomplete="off" :id="'route-target-context-window-' + ti" type="number" min="1" max="10000000" x-model.number="target.contextWindow"
                                            placeholder="不启用预算" class="field w-32 py-1 text-sm">
                                     <span class="shrink-0 text-[11px]">tokens，留空用默认</span>
+                                    <div class="w-full rounded border border-line bg-panel2/50 p-2">
+                                        <span class="mb-2 block text-[11px] font-bold uppercase tracking-wide text-muted">候选本地重试</span>
+                                        <div class="flex flex-wrap items-center gap-2">
+                                            <label :for="'route-target-local-retries-' + ti" class="shrink-0">最大重试次数</label>
+                                            <input autocomplete="off" :id="'route-target-local-retries-' + ti" type="number" min="0" max="10" step="1" x-model.number="target.localRetry.maxRetries"
+                                                   placeholder="继承；0 = 关闭" class="field w-32 py-1 text-sm">
+                                            <label :for="'route-target-local-interval-' + ti" class="shrink-0">间隔 ms</label>
+                                            <input autocomplete="off" :id="'route-target-local-interval-' + ti" type="number" min="0" max="60000" step="1" x-model.number="target.localRetry.intervalMs"
+                                                   placeholder="默认 1000" class="field w-32 py-1 text-sm">
+                                        </div>
+                                        <span class="mt-1 block text-[11px]">留空的字段继承路由或上游配置。</span>
+                                    </div>
                                     <!-- 候选级 extraBody：整行铺开，按键叠加在上游 / 路由之上，只覆盖该候选。 -->
                                     <div class="w-full">
                                         <div class="mb-1 flex items-center justify-between">
@@ -2101,6 +2127,20 @@
                             <span class="mt-1 block text-xs text-muted">作为本路由所有候选的默认窗口；候选级设置优先级更高。留空时继续查找 Provider 窗口。</span>
                         </label>
                     </div>
+                </div>
+                <div class="rounded-lg border border-line bg-panel2/50 p-4">
+                    <div class="mb-3 text-sm font-bold tracking-wide text-white">路由本地重试默认值</div>
+                    <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                        <label class="block">
+                            <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">最大重试次数</span>
+                            <input autocomplete="off" type="number" min="0" max="10" step="1" x-model.number="routeForm.localRetry.maxRetries" placeholder="留空 = 继承上游；0 = 关闭" class="field">
+                        </label>
+                        <label class="block">
+                            <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">重试间隔 ms</span>
+                            <input autocomplete="off" type="number" min="0" max="60000" step="1" x-model.number="routeForm.localRetry.intervalMs" placeholder="留空 = 默认 1000 ms" class="field">
+                        </label>
+                    </div>
+                    <span class="mt-2 block text-xs text-muted">同一候选失败后再试；留空的字段继承 Provider 配置。候选级字段优先级更高。</span>
                 </div>
                 <!-- 路由级 extraBody：作为本路由所有候选的默认自定义请求体字段。
                      按键叠加，优先级 候选 > 路由 > 上游；候选级在上面每个候选行内单独覆盖。 -->
@@ -2389,6 +2429,7 @@
                     maxQueueWait: 30000,
                     maxTokens: null,
                     contextWindow: null,
+                    localRetry: { maxRetries: null, intervalMs: null },
                     userAgent: '',
                     proxy: '',
                     // oneMContext / extraHeaders 与 addProvider 的空表单保持同一形态：
@@ -2414,11 +2455,12 @@
                     // _id 是 x-for 的稳定 key（见 _routeTargetSeq）；这份初始占位在
                     // 真正打开弹窗前就会被 addRoute / editRoute 整体替换掉，给 0 只为
                     // 让首次渲染也有 key，不与 newRouteTarget 的自增值（从 1 起）撞车。
-                    targets: [{ _id: 0, provider: '', model: '', maxTokens: null, contextWindow: null, models: [], modelsLoading: false, limitsOpen: false }],
+                    targets: [{ _id: 0, provider: '', model: '', maxTokens: null, contextWindow: null, localRetry: { maxRetries: null, intervalMs: null }, models: [], modelsLoading: false, limitsOpen: false }],
                     // 候选选择策略，空等同 failover（按配置顺序）
                     strategy: '',
                     maxTokens: null,
                     contextWindow: null,
+                    localRetry: { maxRetries: null, intervalMs: null },
                     enableVision: false,
                     visionProvider: '',
                     visionModel: '',
@@ -2514,6 +2556,8 @@
                             maxTokens: pick(p, 'maxTokens', 'MaxTokens') ?? null,
                             // contextWindow 同样是 *int：null 表示不启用窗口预算裁决。
                             contextWindow: pick(p, 'contextWindow', 'ContextWindow') ?? null,
+                            // localRetry 逐字段保留 null 与显式 0；空对象归一为 undefined，保存时整体省略。
+                            localRetry: this.normalizeLocalRetry(pick(p, 'localRetry', 'LocalRetry')),
                             // userAgent 必须读出来，理由同下面 route.strategy 那条：
                             // 这里是每次加载配置（含 5 秒轮询）铺进 this.config 的地方，
                             // 漏读等于刚从服务端拿到的值立刻在内存里丢掉，下次保存就写不回去。
@@ -2552,6 +2596,9 @@
                         // route 级 contextWindow 未配置时不挂字段，YAML 预览和保存都不制造 null 行。
                         const routeContextWindow = pick(r, 'contextWindow', 'ContextWindow') ?? null;
                         if (routeContextWindow !== null) route.contextWindow = routeContextWindow;
+                        // localRetry 是嵌套配置；未配置保持 undefined，避免序列化出空对象。
+                        const routeLocalRetry = this.normalizeLocalRetry(pick(r, 'localRetry', 'LocalRetry'));
+                        if (routeLocalRetry) route.localRetry = routeLocalRetry;
                         // route 级 extraBody：保留 map 原样，未配置不挂字段（否则每次保存写空 extraBody）。
                         const routeExtraBody = pick(r, 'extraBody', 'ExtraBody');
                         if (routeExtraBody) route.extraBody = routeExtraBody;
@@ -2560,7 +2607,8 @@
                             route.targets = rawTargets.map((t) => {
                                 const tgt = {
                                     provider: pick(t, 'provider', 'Provider') || '',
-                                    model: pick(t, 'model', 'Model') || ''
+                                    model: pick(t, 'model', 'Model') || '',
+                                    localRetry: this.normalizeLocalRetry(pick(t, 'localRetry', 'LocalRetry'))
                                 };
                                 const tMax = pick(t, 'maxTokens', 'MaxTokens') ?? null;
                                 if (tMax !== null) tgt.maxTokens = tMax;
@@ -2611,6 +2659,42 @@
                             checkIntervalSeconds: pick(providerHealth, 'checkIntervalSeconds', 'CheckIntervalSeconds') ?? 0
                         }
                     };
+                },
+
+                // LocalRetry 的数字值使用 null 表示继承，显式 0 必须保留。
+                // 后端 omitempty 负责省略 nil；这里也把空对象折成 undefined。
+                normalizeLocalRetry(raw) {
+                    if (!raw || typeof raw !== 'object') return undefined;
+                    const pick = (obj, lower, upper) => obj?.[lower] ?? obj?.[upper];
+                    const numberOrNull = (value) => typeof value === 'number' && Number.isFinite(value) ? value : null;
+                    const localRetry = {
+                        maxRetries: numberOrNull(pick(raw, 'maxRetries', 'MaxRetries')),
+                        intervalMs: numberOrNull(pick(raw, 'intervalMs', 'IntervalMs'))
+                    };
+                    return localRetry.maxRetries === null && localRetry.intervalMs === null ? undefined : localRetry;
+                },
+
+                // 表单始终绑定一个对象；未配置的字段显示为空，而不是 0。
+                localRetryForm(raw) {
+                    const localRetry = this.normalizeLocalRetry(raw);
+                    return {
+                        maxRetries: localRetry?.maxRetries ?? null,
+                        intervalMs: localRetry?.intervalMs ?? null
+                    };
+                },
+
+                // 请求体 / 配置内存中同时遵循 *int 的 null 语义；两项皆空时
+                // 整体返回 undefined，让 JSON/YAML omitempty 保持干净。
+                localRetryPayload(raw) {
+                    if (!raw || typeof raw !== 'object') return undefined;
+                    const maxRetries = this.numOrNull(raw.maxRetries);
+                    const intervalMs = this.numOrNull(raw.intervalMs);
+                    if (maxRetries === null && intervalMs === null) return undefined;
+                    return { maxRetries, intervalMs };
+                },
+
+                localRetryHasValue(raw) {
+                    return !!raw && (this.numOrNull(raw.maxRetries) !== null || this.numOrNull(raw.intervalMs) !== null);
                 },
 
                 // normalizeFailover 把 failover 块规范成表单可绑定的形状。
@@ -3101,6 +3185,8 @@
                             // 故表单存 0 时改发 null，由用户重新输入合法值。
                             maxTokens: provider.maxTokens ?? null,
                             contextWindow: provider.contextWindow ?? null,
+                            // 两项都留空时整体省略；分别保留 null（继承）与显式 0（关闭/立即重试）。
+                            localRetry: this.localRetryPayload(provider.localRetry),
                             // userAgent 必须带上，理由同下面的 failover / breaker：PUT 是全量替换。
                             // 这里是构造请求体的地方，漏掉的话 saveProvider 写进 this.config 的值
                             // 到不了磁盘，而且**每次保存都会抹掉所有 provider 的该字段**，无任何报错。
@@ -4185,6 +4271,16 @@
                     return lines;
                 },
 
+                // LocalRetry 的父对象与字段都按 omitempty 输出；显式 0 仍然显示。
+                renderLocalRetryLines(value, pad) {
+                    const localRetry = this.localRetryPayload(value);
+                    if (!localRetry) return [];
+                    const lines = [`${pad}localRetry:`];
+                    if (localRetry.maxRetries !== null) lines.push(`${pad}  maxRetries: ${localRetry.maxRetries}`);
+                    if (localRetry.intervalMs !== null) lines.push(`${pad}  intervalMs: ${localRetry.intervalMs}`);
+                    return lines;
+                },
+
                 providersYaml() {
                     return Object.entries(this.config.providers || {}).map(([name, p]) => {
                         const lines = [
@@ -4204,6 +4300,7 @@
                         );
                         if (p.maxTokens != null) lines.push(`    maxTokens: ${p.maxTokens}`);
                         if (p.contextWindow != null) lines.push(`    contextWindow: ${p.contextWindow}`);
+                        lines.push(...this.renderLocalRetryLines(p.localRetry, '    '));
                         // oneMContext / extraHeaders 按后端 omitempty：仅在配了时输出，否则预览与落盘不一致。
                         if (p.oneMContext) lines.push(`    oneMContext: ${p.oneMContext}`);
                         if (p.extraHeaders && Object.keys(p.extraHeaders).length) {
@@ -4231,6 +4328,7 @@
                                 base.push(`        model: "${t.model || ''}"`);
                                 if (t.maxTokens != null) base.push(`        maxTokens: ${t.maxTokens}`);
                                 if (t.contextWindow != null) base.push(`        contextWindow: ${t.contextWindow}`);
+                                base.push(...this.renderLocalRetryLines(t.localRetry, '        '));
                                 base.push(...this.renderExtraBodyLines(t.extraBody, '        '));
                             });
                         } else {
@@ -4244,6 +4342,7 @@
                         }
                         if (r.maxTokens != null) base.push(`    maxTokens: ${r.maxTokens}`);
                         if (r.contextWindow != null) base.push(`    contextWindow: ${r.contextWindow}`);
+                        base.push(...this.renderLocalRetryLines(r.localRetry, '    '));
                         base.push(...this.renderExtraBodyLines(r.extraBody, '    '));
                         if (r.vision) {
                             base.push('    vision:');
@@ -4277,6 +4376,7 @@
                         maxQueueWait: 30000,
                         maxTokens: null,
                         contextWindow: null,
+                        localRetry: { maxRetries: null, intervalMs: null },
                         userAgent: '',
                         proxy: '',
                         oneMContext: '',
@@ -4304,6 +4404,7 @@
                         maxQueueWait: p.maxQueueWait,
                         maxTokens: p.maxTokens ?? null,
                         contextWindow: p.contextWindow ?? null,
+                        localRetry: this.localRetryForm(p.localRetry),
                         userAgent: p.userAgent || '',
                         proxy: p.proxy || '',
                         oneMContext: p.oneMContext || '',
@@ -4339,6 +4440,7 @@
                         maxQueueWait: p.maxQueueWait,
                         maxTokens: p.maxTokens ?? null,
                         contextWindow: p.contextWindow ?? null,
+                        localRetry: this.localRetryForm(p.localRetry),
                         userAgent: p.userAgent || '',
                         // 副本名在磁盘上没有旧密码可供 sentinel 回查，认证代理必须重填。
                         proxy: (p.proxy || '').includes('__AI_GATEWAY_KEEP_PROXY_PASSWORD__') ? '' : (p.proxy || ''),
@@ -4408,6 +4510,8 @@
                         maxTokens: this.numOrNull(this.providerForm.maxTokens),
                         // 留空发送 null：contextWindow 为 nil 时完全不启用窗口预算裁决。
                         contextWindow: this.numOrNull(this.providerForm.contextWindow),
+                        // 两项皆空时整体省略；单项为空保留 null 以继续继承下层配置。
+                        localRetry: this.localRetryPayload(this.providerForm.localRetry),
                         userAgent: this.providerForm.userAgent || undefined,
                         proxy: this.providerForm.proxy || undefined,
                         // 留空发 undefined：oneMContext 为空等同 strip，不写进配置文件。
@@ -4589,7 +4693,7 @@
                 // routeTargets 统一读取路由的候选列表：写了 targets 用 targets，否则退化成单目标
                 routeTargets(route) {
                     if (Array.isArray(route?.targets) && route.targets.length) return route.targets;
-                    return [{ provider: route?.provider || '', model: route?.model || '', maxTokens: null, contextWindow: null }];
+                    return [{ provider: route?.provider || '', model: route?.model || '', maxTokens: null, contextWindow: null, localRetry: undefined }];
                 },
 
                 addRoute() {
@@ -4602,6 +4706,7 @@
                         strategy: 'failover',
                         maxTokens: null,
                         contextWindow: null,
+                        localRetry: { maxRetries: null, intervalMs: null },
                         extraBody: [],
                         enableVision: false,
                         visionProvider: providers[0] || '',
@@ -4618,12 +4723,13 @@
                     const route = this.config.routes[index];
                     this.routeForm = {
                         match: route.match,
-                        targets: this.routeTargets(route).map((t) => this.newRouteTarget(t.provider || '', t.model || '', t.maxTokens ?? null, t.contextWindow ?? null, this.bodyToRows(t.extraBody))),
+                        targets: this.routeTargets(route).map((t) => this.newRouteTarget(t.provider || '', t.model || '', t.maxTokens ?? null, t.contextWindow ?? null, this.bodyToRows(t.extraBody), this.localRetryForm(t.localRetry))),
                         // 配置里没写 strategy 就是默认 failover；这里补成真实枚举值，
                         // 留空会让下拉匹配不到 option、显示回落到第一项
                         strategy: route.strategy || 'failover',
                         maxTokens: route.maxTokens ?? null,
                         contextWindow: route.contextWindow ?? null,
+                        localRetry: this.localRetryForm(route.localRetry),
                         extraBody: this.bodyToRows(route.extraBody),
                         enableVision: !!route.vision,
                         visionProvider: route.vision?.provider || '',
@@ -4646,10 +4752,11 @@
                     this.editingRouteIndex = -1;
                     this.routeForm = {
                         match: route.match || '',
-                        targets: this.routeTargets(route).map((t) => this.newRouteTarget(t.provider || '', t.model || '', t.maxTokens ?? null, t.contextWindow ?? null, this.bodyToRows(t.extraBody))),
+                        targets: this.routeTargets(route).map((t) => this.newRouteTarget(t.provider || '', t.model || '', t.maxTokens ?? null, t.contextWindow ?? null, this.bodyToRows(t.extraBody), this.localRetryForm(t.localRetry))),
                         strategy: route.strategy || 'failover',
                         maxTokens: route.maxTokens ?? null,
                         contextWindow: route.contextWindow ?? null,
+                        localRetry: this.localRetryForm(route.localRetry),
                         extraBody: this.bodyToRows(route.extraBody),
                         enableVision: !!route.vision,
                         visionProvider: route.vision?.provider || '',
@@ -4662,7 +4769,7 @@
                     this.showStatus(`已按「${route.match || '(空)'}」预填，记得改匹配模式`, 'success');
                 },
 
-                // 候选 target 的运行时形状：provider/model/maxTokens/contextWindow 是落盘字段，
+                // 候选 target 的运行时形状：provider/model/maxTokens/contextWindow/localRetry 是落盘字段，
                 // models/modelsLoading（查询远程模型列表）与 limitsOpen（行内上限展开区）
                 // 是瞬态状态，saveRoute 不读它们。
                 // limitsOpen 初值跟着参数走：已配上限的候选打开弹窗时默认展开——
@@ -4672,8 +4779,9 @@
                 // 把原来那行的 DOM 留在原位只改绑定值，而行内 <select> 的选中态在
                 // options 已渲染的情况下不会被重新认领（见模板里 :selected 那段注释的
                 // 同源问题），表现就是拖完两行的 provider 串了。
-                newRouteTarget(provider, model = '', maxTokens = null, contextWindow = null, extraBody = []) {
-                    return { _id: ++this._routeTargetSeq, provider, model, maxTokens, contextWindow, extraBody: Array.isArray(extraBody) ? extraBody : [], models: [], modelsLoading: false, limitsOpen: maxTokens != null || contextWindow != null || (Array.isArray(extraBody) && extraBody.length > 0) };
+                newRouteTarget(provider, model = '', maxTokens = null, contextWindow = null, extraBody = [], localRetry = null) {
+                    const retryForm = this.localRetryForm(localRetry);
+                    return { _id: ++this._routeTargetSeq, provider, model, maxTokens, contextWindow, localRetry: retryForm, extraBody: Array.isArray(extraBody) ? extraBody : [], models: [], modelsLoading: false, limitsOpen: maxTokens != null || contextWindow != null || this.localRetryHasValue(retryForm) || (Array.isArray(extraBody) && extraBody.length > 0) };
                 },
 
                 // 视觉字段的瞬态查询状态。三处 routeForm 重建（addRoute / editRoute /
@@ -4694,6 +4802,7 @@
                     if ((f.targets || []).length > 1 && f.strategy && f.strategy !== 'failover') n++;
                     if (this.numOrNull(f.maxTokens) !== null) n++;
                     if (this.numOrNull(f.contextWindow) !== null) n++;
+                    if (this.localRetryHasValue(f.localRetry)) n++;
                     if ((f.extraBody || []).some((r) => (r?.key || '').trim())) n++;
                     if (f.enableVision) n++;
                     return n;
@@ -4707,6 +4816,7 @@
                     let n = 0;
                     if (this.numOrNull(t.maxTokens) !== null) n++;
                     if (this.numOrNull(t.contextWindow) !== null) n++;
+                    if (this.localRetryHasValue(t.localRetry)) n++;
                     if ((t.extraBody || []).some((r) => (r?.key || '').trim())) n++;
                     return n;
                 },
@@ -4876,7 +4986,8 @@
                     const targets = (this.routeForm.targets || []).map((t) => {
                         const out = {
                             provider: (t.provider || '').trim(),
-                            model: (t.model || '').trim()
+                            model: (t.model || '').trim(),
+                            localRetry: this.localRetryPayload(t.localRetry)
                         };
                         // 只在真配了才落盘：*int 字段带 null 进 yaml 会落一行 maxTokens: null，
                         // 后端解成 nil 虽无害，但预览和磁盘上多出一堆噪音。
@@ -4920,6 +5031,17 @@
                     if (targets.length > 1 && this.routeForm.strategy && this.routeForm.strategy !== 'failover') {
                         route.strategy = this.routeForm.strategy;
                     }
+                    // 多候选保留路由级默认与每个候选覆盖；单候选采用扁平 provider/model 形状，
+                    // 因此按字段把 target 值合入 route，target 非空值优先，空值继续继承 route。
+                    const routeLocalRetry = this.localRetryPayload(this.routeForm.localRetry);
+                    const targetLocalRetry = targets.length === 1 ? targets[0].localRetry : undefined;
+                    const mergedLocalRetry = targets.length === 1
+                        ? this.localRetryPayload({
+                            maxRetries: targetLocalRetry?.maxRetries ?? routeLocalRetry?.maxRetries ?? null,
+                            intervalMs: targetLocalRetry?.intervalMs ?? routeLocalRetry?.intervalMs ?? null
+                        })
+                        : routeLocalRetry;
+                    if (mergedLocalRetry) route.localRetry = mergedLocalRetry;
                     // 路由级 maxTokens 同样只在配了时才落盘。
                     // 单候选写法（provider/model）下 targets 数组不落盘，候选级的值会随之丢失，
                     // 所以把它折进路由级——两者在单候选下语义完全等价，优先取候选级（更具体）。

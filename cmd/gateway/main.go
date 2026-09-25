@@ -704,6 +704,7 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		soonestRetry       time.Duration
 		nextHTTPAttemptNo  int
 		nextDetailSequence int
+		localRetryCanceled bool
 	)
 	// 按 order 遍历全部候选，但真实尝试次数受 attemptLimit 约束：
 	// 被熔断跳过的候选不消耗尝试额度，否则熔断反而会削弱可用性。
@@ -788,37 +789,56 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 
 		// 是否还有后续候选可试：额度未用尽且 order 里后面还有候选
 		hasNext := attempts+1 < attemptLimit && pos+1 < len(order)
-		nextDetailSequence++
-		attemptStarted := time.Now()
-		detail := metrics.AttemptDetail{
-			Sequence:       nextDetailSequence,
-			Provider:       name,
-			TargetModel:    candidate.TargetModel,
-			ProviderFormat: candidate.Provider.Format,
-			StartedAt:      attemptStarted.In(beijingLoc).Format(time.RFC3339Nano),
-		}
+		localRetriesRemaining := candidate.LocalRetryMax
+		localRetryAttempt := false
+		var outcome forwardAttemptOutcome
+		for {
+			nextDetailSequence++
+			attemptStarted := time.Now()
+			detail := metrics.AttemptDetail{
+				Sequence:       nextDetailSequence,
+				Provider:       name,
+				TargetModel:    candidate.TargetModel,
+				ProviderFormat: candidate.Provider.Format,
+				StartedAt:      attemptStarted.In(beijingLoc).Format(time.RFC3339Nano),
+				LocalRetry:     localRetryAttempt,
+			}
 
-		outcome := s.forwardAttempt(w, r, forwardAttemptInput{
-			cfg:           cfg,
-			reqID:         reqID,
-			start:         start,
-			clientFormat:  clientFormat,
-			originalModel: model,
-			internal:      internal,
-			rawBody:       body,
-			needVision:    needVision,
-			candidate:     candidate,
-			contextBudget: contextBudget,
-			allowRetry:    hasNext,
-			attemptNo:     attempts + 1,
-			httpAttemptNo: nextHTTPAttemptNo + 1,
-			reqLog:        &reqLog,
-			detail:        &detail,
-		})
-		detail.DurationMs = time.Since(attemptStarted).Milliseconds()
-		reqLog.AttemptDetails = append(reqLog.AttemptDetails, detail)
-		if outcome.requestStarted {
-			nextHTTPAttemptNo++
+			outcome = s.forwardAttempt(w, r, forwardAttemptInput{
+				cfg:                   cfg,
+				reqID:                 reqID,
+				start:                 start,
+				clientFormat:          clientFormat,
+				originalModel:         model,
+				internal:              internal,
+				rawBody:               body,
+				needVision:            needVision,
+				candidate:             candidate,
+				contextBudget:         contextBudget,
+				allowFailoverTransfer: hasNext,
+				allowLocalRetry:       localRetriesRemaining > 0,
+				attemptNo:             attempts + 1,
+				httpAttemptNo:         nextHTTPAttemptNo + 1,
+				reqLog:                &reqLog,
+				detail:                &detail,
+			})
+			detail.DurationMs = time.Since(attemptStarted).Milliseconds()
+			reqLog.AttemptDetails = append(reqLog.AttemptDetails, detail)
+			if outcome.requestStarted {
+				nextHTTPAttemptNo++
+			}
+
+			if outcome.buildErr != "" || !outcome.abandoned || outcome.freeAttempt || localRetriesRemaining <= 0 {
+				break
+			}
+
+			localRetriesRemaining--
+			trail = append(trail, name+":local_retry")
+			if !waitLocalRetry(r.Context(), candidate.LocalRetryIntervalMs) {
+				localRetryCanceled = true
+				break
+			}
+			localRetryAttempt = true
 		}
 
 		if outcome.buildErr != "" {
@@ -857,11 +877,19 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 		logf(reqID, "  候选 %s 放弃（%s），尝试下一个", name, outcome.trail)
+		if localRetryCanceled {
+			break
+		}
 	}
 
 	reqLog.Attempts = attempts
 	if len(trail) > 1 {
 		reqLog.AttemptTrail = strings.Join(trail, " → ")
+	}
+	if localRetryCanceled {
+		// 客户端在本地重试等待期间断开，不再转向下一个候选，也不写合成终态。
+		reqLog.Error = "客户端在本地重试等待期间断开连接"
+		return
 	}
 
 	switch {
@@ -920,6 +948,19 @@ func resolveContextBudget(window *int, estimatedInput, safetyMargin int) (budget
 	}
 	budget = *window - estimatedInput - safetyMargin
 	return budget, budget >= MinOutputBudget
+}
+
+// waitLocalRetry 等待固定间隔；客户端断开时立即返回，不继续重试。
+func waitLocalRetry(ctx context.Context, intervalMs int) bool {
+	if ctx.Err() != nil {
+		return false
+	}
+	select {
+	case <-time.After(time.Duration(intervalMs) * time.Millisecond):
+		return ctx.Err() == nil
+	case <-ctx.Done():
+		return false
+	}
 }
 
 func contextWindowExceededMessage(candidates []router.Candidate, estimatedInput, safetyMargin int) string {
@@ -998,9 +1039,11 @@ type forwardAttemptInput struct {
 	attemptNo     int // 从 1 开始，用于 x-ai-gateway-attempts
 	// httpAttemptNo 只对实际调用 proxy 的请求递增；与保留兼容语义的 attemptNo 分开。
 	httpAttemptNo int
-	allowRetry    bool
-	reqLog        *metrics.RequestLog
-	detail        *metrics.AttemptDetail
+	// 是否允许本次失败换候选 / 在当前候选内重试；两种决策互相独立。
+	allowFailoverTransfer bool
+	allowLocalRetry       bool
+	reqLog                *metrics.RequestLog
+	detail                *metrics.AttemptDetail
 }
 
 // forwardAttemptOutcome 单次尝试结果。
@@ -1150,15 +1193,16 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 					in.detail.Reason = "queue_timeout"
 					in.detail.Outcome = "skipped"
 				}
-				// 排队超时且允许转移：换下一个候选，别把客户端 503 掉
-				// 走访问器而不是直接 BoolOr：默认值只应写在 TransferOnXxx 一处，
-				// 否则改默认值时这里会静默不同步
-				if in.allowRetry && cfg.Failover.TransferOnQueueTimeout() && cfg.Failover.Enabled {
+				decision := classifyFailure(&cfg.Failover, 0, 0, queue.ErrQueueTimeout)
+				failoverOK := cfg.Failover.Enabled && in.allowFailoverTransfer && decision.transfer
+				localOK := in.allowLocalRetry && decision.transfer && !decision.freeAttempt
+				if failoverOK || localOK {
 					if in.detail != nil {
 						in.detail.Outcome = "transferred"
+						in.detail.Reason = decision.reason
 					}
 					// 本地队列背压，不是上游故障
-					return forwardAttemptOutcome{abandoned: true, trail: p.Name + ":queue_timeout", breakerOutcome: breaker.OutcomeIgnored}
+					return forwardAttemptOutcome{abandoned: true, trail: p.Name + ":" + decision.reason, breakerOutcome: breaker.OutcomeIgnored}
 				}
 				in.reqLog.Error = err.Error()
 				writeJSONError(w, http.StatusServiceUnavailable, "queue_timeout", err.Error())
@@ -1267,10 +1311,12 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 			captureUpstreamStream(reqID, p.Name, targetModel, in.clientFormat, p.Format, raw, truncated, convErr)
 		}
 	}
-	if in.allowRetry {
+	if in.allowFailoverTransfer || in.allowLocalRetry {
 		opts.ShouldRetry = func(upstreamCode int, retryAfter time.Duration, err error) bool {
-			decision := failoverReason(&cfg.Failover, upstreamCode, retryAfter, err)
-			if !decision.transfer {
+			decision := classifyFailure(&cfg.Failover, upstreamCode, retryAfter, err)
+			failoverOK := cfg.Failover.Enabled && in.allowFailoverTransfer && decision.transfer
+			localOK := in.allowLocalRetry && decision.transfer && !decision.freeAttempt
+			if !failoverOK && !localOK {
 				return false
 			}
 			abandonReason = decision.reason
@@ -1356,7 +1402,7 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 	// 状态码，据此判断会把网关侧错误算到上游头上。upstreamStatus 为 0 时按 forwardErr
 	// 分类，正好覆盖传输错误与超时。
 	//
-	// 这里必须显式赋值：OutcomeSuccess 是零值，漏赋会让最后一个候选（allowRetry=false，
+	// 这里必须显式赋值：OutcomeSuccess 是零值，漏赋会让最后一个候选（allowFailoverTransfer=false，
 	// 不触发放弃）的 5xx 被当成成功上报，既开不了路还会清零此前累积的失败streak。
 	breakerOutcome := breakerOutcomeFor(upstreamStatus, forwardErr)
 	if in.detail != nil {
@@ -1536,7 +1582,16 @@ func failoverReason(f *config.Failover, upstreamCode int, retryAfter time.Durati
 	if !f.Enabled {
 		return failoverDecision{}
 	}
+	return classifyFailure(f, upstreamCode, retryAfter, err)
+}
+
+// classifyFailure 只按失败类型与开关分类，不读取 failover.enabled。
+// localRetry 复用同一码表，但不依赖「是否还有下一个候选」这个全局开关。
+func classifyFailure(f *config.Failover, upstreamCode int, retryAfter time.Duration, err error) failoverDecision {
 	if upstreamCode == 0 {
+		if errors.Is(err, queue.ErrQueueTimeout) {
+			return failoverDecision{reason: "queue_timeout", transfer: f.TransferOnQueueTimeout()}
+		}
 		// 传输层失败：连接错误 / 超时
 		switch {
 		case errors.Is(err, proxy.ErrStreamHeaderTimeout):
