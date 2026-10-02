@@ -19,16 +19,16 @@ module.exports = {
     theme: {
         extend: {
             colors: {
-                ink: '#090a0f',
-                panel: '#12131c',
-                panel2: '#191b25',
-                panel3: '#22242f',
-                line: 'rgba(255,255,255,.09)',
-                muted: '#9da6b5',
-                text: '#e7eaf0',
-                cyan: '#47d6ff',
-                cyan2: '#00d2ff',
-                violet: '#8f92ff',
+                ink: '#0b0e14',
+                panel: '#141824',
+                panel2: '#1b2130',
+                panel3: '#252c3d',
+                line: 'rgba(148,163,184,.14)',
+                muted: '#94a3b8',
+                text: '#e8edf5',
+                cyan: '#38bdf8',
+                cyan2: '#22d3ee',
+                violet: '#a5a8ff',
                 good: '#34d399',
                 warn: '#fbbf24',
                 danger: '#fb7185'
@@ -38,12 +38,12 @@ module.exports = {
                 mono: ['JetBrains Mono', 'ui-monospace', 'SFMono-Regular']
             },
             borderRadius: {
-                lg: '8px',
-                xl: '8px',
-                '2xl': '8px'
+                lg: '12px',
+                xl: '16px',
+                '2xl': '20px'
             },
             boxShadow: {
-                glow: '0 0 0 1px rgba(71,214,255,.12), 0 16px 48px rgba(0,0,0,.28)'
+                glow: '0 0 0 1px rgba(148,163,184,.08), 0 18px 50px rgba(0,0,0,.35)'
             }
         }
     }
