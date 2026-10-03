@@ -13,6 +13,7 @@
                         maxQueueWait: 30000,
                         maxTokens: null,
                         contextWindow: null,
+                        localRetry: { maxRetries: null, intervalMs: null },
                         userAgent: '',
                         proxy: '',
                         oneMContext: '',
@@ -40,6 +41,7 @@
                         maxQueueWait: p.maxQueueWait,
                         maxTokens: p.maxTokens ?? null,
                         contextWindow: p.contextWindow ?? null,
+                        localRetry: this.localRetryForm(p.localRetry),
                         userAgent: p.userAgent || '',
                         proxy: p.proxy || '',
                         oneMContext: p.oneMContext || '',
@@ -75,6 +77,7 @@
                         maxQueueWait: p.maxQueueWait,
                         maxTokens: p.maxTokens ?? null,
                         contextWindow: p.contextWindow ?? null,
+                        localRetry: this.localRetryForm(p.localRetry),
                         userAgent: p.userAgent || '',
                         // 副本名在磁盘上没有旧密码可供 sentinel 回查，认证代理必须重填。
                         proxy: (p.proxy || '').includes('__AI_GATEWAY_KEEP_PROXY_PASSWORD__') ? '' : (p.proxy || ''),
@@ -144,6 +147,8 @@
                         maxTokens: this.numOrNull(this.providerForm.maxTokens),
                         // 留空发送 null：contextWindow 为 nil 时完全不启用窗口预算裁决。
                         contextWindow: this.numOrNull(this.providerForm.contextWindow),
+                        // 两项皆空时整体省略；单项为空保留 null 以继续继承下层配置。
+                        localRetry: this.localRetryPayload(this.providerForm.localRetry),
                         userAgent: this.providerForm.userAgent || undefined,
                         proxy: this.providerForm.proxy || undefined,
                         // 留空发 undefined：oneMContext 为空等同 strip，不写进配置文件。

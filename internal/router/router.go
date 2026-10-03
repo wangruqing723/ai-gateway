@@ -23,6 +23,10 @@ type Candidate struct {
 	// ExtraBody 合并进上游请求体的自定义字段，nil 表示无。
 	// 按键叠加 provider → route → target，同名键后者胜出，由 MatchRoute 合成。
 	ExtraBody map[string]any
+	// LocalRetryMax 是同一候选的额外重试次数，0 表示关闭。
+	LocalRetryMax int
+	// LocalRetryIntervalMs 是同一候选每次重试前等待的毫秒数。
+	LocalRetryIntervalMs int
 }
 
 // Match 路由匹配结果。
@@ -79,12 +83,15 @@ func MatchRoute(model string, cfg *config.Config) *Match {
 					targetModel += oneMMarker
 				}
 			}
+			localRetryMax, localRetryIntervalMs := resolveLocalRetry(target, route, src)
 			candidates = append(candidates, Candidate{
-				Provider:      &pCopy,
-				TargetModel:   targetModel,
-				MaxTokens:     resolveMaxTokens(target, route, src),
-				ContextWindow: contextWindow,
-				ExtraBody:     resolveExtraBody(target, route, src),
+				Provider:             &pCopy,
+				TargetModel:          targetModel,
+				MaxTokens:            resolveMaxTokens(target, route, src),
+				ContextWindow:        contextWindow,
+				ExtraBody:            resolveExtraBody(target, route, src),
+				LocalRetryMax:        localRetryMax,
+				LocalRetryIntervalMs: localRetryIntervalMs,
 			})
 		}
 		if len(candidates) == 0 {
@@ -108,6 +115,28 @@ func MatchRoute(model string, cfg *config.Config) *Match {
 		return m
 	}
 	return nil
+}
+
+// resolveLocalRetry 按字段级优先级 target > route > provider 合成本地重试配置。
+// 显式 MaxRetries: 0 会覆盖下层开启值；未指定 intervalMs 时使用固定默认间隔。
+func resolveLocalRetry(target config.Target, route config.Route, provider *config.Provider) (maxRetries int, intervalMs int) {
+	intervalMs = config.DefaultLocalRetryIntervalMs
+
+	for _, retry := range []*config.LocalRetry{target.LocalRetry, route.LocalRetry, provider.LocalRetry} {
+		if retry != nil && retry.MaxRetries != nil {
+			if *retry.MaxRetries > 0 {
+				maxRetries = *retry.MaxRetries
+			}
+			break
+		}
+	}
+	for _, retry := range []*config.LocalRetry{target.LocalRetry, route.LocalRetry, provider.LocalRetry} {
+		if retry != nil && retry.IntervalMs != nil {
+			intervalMs = *retry.IntervalMs
+			break
+		}
+	}
+	return maxRetries, intervalMs
 }
 
 // resolveMaxTokens 按优先级 target > route > provider 合成该候选的输出上限。

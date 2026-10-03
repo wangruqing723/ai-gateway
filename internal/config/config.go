@@ -91,13 +91,19 @@ const (
 	// 塞进请求体。按 JSON 编码后的字节计，覆盖字符串、数组、嵌套对象。
 	maxExtraBodyValueBytes = 8192
 
-	// 默认值集中在此，供 applyDefaults 与各 accessor 共用一处来源。
+	// 默认值集中在此，供 applyDefaults、解析函数与各 accessor 共用一处来源。
 	defaultFailoverAttempts      = 2
 	defaultMaxRetryAfterMs       = 5000
+	defaultLocalRetryIntervalMs  = 1000
+	maxLocalRetries              = 10
+	maxLocalRetryIntervalMs      = 60000
 	defaultBreakerFailures       = 3
 	defaultBreakerOpenMs         = 30_000
 	defaultBreakerHalfOpenProbes = 1
 )
+
+// DefaultLocalRetryIntervalMs 是 router 合成未配置间隔时使用的默认值。
+const DefaultLocalRetryIntervalMs = defaultLocalRetryIntervalMs
 
 var (
 	saveMu           sync.Mutex
@@ -148,6 +154,14 @@ func ExtraBodyBlocked(key string) bool {
 	return blocked
 }
 
+// LocalRetry 是单个候选的本地重试配置。数值项使用指针区分「继承」与「显式关闭」。
+type LocalRetry struct {
+	// MaxRetries 是同一候选的额外重试次数；nil 表示继承，0 表示本层关闭。
+	MaxRetries *int `yaml:"maxRetries,omitempty" json:"maxRetries,omitempty"`
+	// IntervalMs 是本地重试前的固定等待时长；nil 时由 router 使用默认值。
+	IntervalMs *int `yaml:"intervalMs,omitempty" json:"intervalMs,omitempty"`
+}
+
 // Provider 上游 provider 定义
 type Provider struct {
 	Name          string `yaml:"-" json:"name,omitempty"`                        // 运行时填充（map 的 key）
@@ -167,6 +181,8 @@ type Provider struct {
 	MaxTokens *int `yaml:"maxTokens,omitempty" json:"maxTokens,omitempty"`
 	// ContextWindow 是该 provider 的上下文窗口，nil 表示不启用窗口预算裁决。
 	ContextWindow *int `yaml:"contextWindow,omitempty" json:"contextWindow,omitempty"`
+	// LocalRetry 按字段级 target > route > provider 合成单候选本地重试策略。
+	LocalRetry *LocalRetry `yaml:"localRetry,omitempty" json:"localRetry,omitempty"`
 	// OneMContext 决定客户端模型名尾部的 [1m] 标记是否随请求转发给该上游。
 	//
 	// 空值与 OneMContextStrip 等价（剥掉后缀，保持历史行为）；OneMContextPreserve
@@ -221,6 +237,8 @@ type Target struct {
 	MaxTokens *int `yaml:"maxTokens,omitempty" json:"maxTokens,omitempty"`
 	// ContextWindow 覆盖该目标的上下文窗口，nil 表示不覆盖。优先级 target > route > provider。
 	ContextWindow *int `yaml:"contextWindow,omitempty" json:"contextWindow,omitempty"`
+	// LocalRetry 按字段级 target > route > provider 覆盖本地重试策略。
+	LocalRetry *LocalRetry `yaml:"localRetry,omitempty" json:"localRetry,omitempty"`
 	// ExtraBody 覆盖该目标转发时合并进请求体的自定义字段，nil 表示不覆盖。
 	//
 	// 与 maxTokens 的「整值覆盖」不同，extraBody 是按键叠加：最终请求体先合 provider
@@ -255,6 +273,8 @@ type Route struct {
 	MaxTokens *int `yaml:"maxTokens,omitempty" json:"maxTokens,omitempty"`
 	// ContextWindow 覆盖该路由的上下文窗口，nil 表示不覆盖。优先级 target > route > provider。
 	ContextWindow *int `yaml:"contextWindow,omitempty" json:"contextWindow,omitempty"`
+	// LocalRetry 按字段级 target > route > provider 覆盖本地重试策略。
+	LocalRetry *LocalRetry `yaml:"localRetry,omitempty" json:"localRetry,omitempty"`
 	// ExtraBody 覆盖该路由转发时合并进请求体的自定义字段，nil 表示不覆盖。
 	// 按键叠加，优先级 target > route > provider，语义见 Target.ExtraBody。
 	ExtraBody map[string]any `yaml:"extraBody,omitempty" json:"extraBody,omitempty"`
@@ -1042,6 +1062,9 @@ func validate(c *Config) error {
 		if err := validateExtraBody(fmt.Sprintf("route %q.extraBody", r.Match), r.ExtraBody); err != nil {
 			return err
 		}
+		if err := validateLocalRetry(fmt.Sprintf("route %q.localRetry", r.Match), r.LocalRetry); err != nil {
+			return err
+		}
 		if r.Vision != nil {
 			if strings.TrimSpace(r.Vision.Provider) == "" {
 				return fmt.Errorf("route %q.vision 缺少 provider 字段", r.Match)
@@ -1136,6 +1159,9 @@ func validateProvider(name string, p *Provider, validateLimits bool) error {
 		}
 	}
 	if err := validateContextWindow(fmt.Sprintf("providers.%s.contextWindow", name), p.ContextWindow); err != nil {
+		return err
+	}
+	if err := validateLocalRetry(fmt.Sprintf("providers.%s.localRetry", name), p.LocalRetry); err != nil {
 		return err
 	}
 	if err := validateOneMContext(name, p.OneMContext); err != nil {
@@ -1300,6 +1326,9 @@ func validateRouteTargets(c *Config, r *Route) error {
 		if err := validateContextWindow(fmt.Sprintf("route %q.targets[%d].contextWindow", r.Match, i), t.ContextWindow); err != nil {
 			return err
 		}
+		if err := validateLocalRetry(fmt.Sprintf("route %q.targets[%d].localRetry", r.Match, i), t.LocalRetry); err != nil {
+			return err
+		}
 		if err := validateExtraBody(fmt.Sprintf("route %q.targets[%d].extraBody", r.Match, i), t.ExtraBody); err != nil {
 			return err
 		}
@@ -1318,6 +1347,20 @@ func validateContextWindow(path string, window *int) error {
 	}
 	if *window < 1 || *window > ContextWindowCeiling {
 		return fmt.Errorf("%s 应在 1-%d 之间", path, ContextWindowCeiling)
+	}
+	return nil
+}
+
+// validateLocalRetry 校验本地重试次数与固定间隔的边界；0 对两项都合法。
+func validateLocalRetry(label string, retry *LocalRetry) error {
+	if retry == nil {
+		return nil
+	}
+	if retry.MaxRetries != nil && (*retry.MaxRetries < 0 || *retry.MaxRetries > maxLocalRetries) {
+		return fmt.Errorf("%s.maxRetries 应在 0-%d 之间", label, maxLocalRetries)
+	}
+	if retry.IntervalMs != nil && (*retry.IntervalMs < 0 || *retry.IntervalMs > maxLocalRetryIntervalMs) {
+		return fmt.Errorf("%s.intervalMs 应在 0-%d 之间", label, maxLocalRetryIntervalMs)
 	}
 	return nil
 }

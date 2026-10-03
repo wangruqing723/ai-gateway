@@ -150,6 +150,7 @@
                     maxQueueWait: 30000,
                     maxTokens: null,
                     contextWindow: null,
+                    localRetry: { maxRetries: null, intervalMs: null },
                     userAgent: '',
                     proxy: '',
                     // oneMContext / extraHeaders 与 addProvider 的空表单保持同一形态：
@@ -175,11 +176,12 @@
                     // _id 是 x-for 的稳定 key（见 _routeTargetSeq）；这份初始占位在
                     // 真正打开弹窗前就会被 addRoute / editRoute 整体替换掉，给 0 只为
                     // 让首次渲染也有 key，不与 newRouteTarget 的自增值（从 1 起）撞车。
-                    targets: [{ _id: 0, provider: '', model: '', maxTokens: null, contextWindow: null, models: [], modelsLoading: false, limitsOpen: false }],
+                    targets: [{ _id: 0, provider: '', model: '', maxTokens: null, contextWindow: null, localRetry: { maxRetries: null, intervalMs: null }, models: [], modelsLoading: false, limitsOpen: false }],
                     // 候选选择策略，空等同 failover（按配置顺序）
                     strategy: '',
                     maxTokens: null,
                     contextWindow: null,
+                    localRetry: { maxRetries: null, intervalMs: null },
                     enableVision: false,
                     visionProvider: '',
                     visionModel: '',

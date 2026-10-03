@@ -146,9 +146,21 @@ type RequestLog struct {
 	TargetModel    string `json:"targetModel,omitempty"`
 	Stream         bool   `json:"stream"`
 	DurationMs     int64  `json:"durationMs"`
-	QueueWaitMs    int64  `json:"queueWaitMs,omitempty"`
-	Error          string `json:"error,omitempty"`
-	Vision         bool   `json:"vision,omitempty"`
+	// FirstByteMs 首字耗时：从请求进入网关，到网关向客户端写出第一个内容块的毫秒数。
+	//
+	// 只有流式请求才有值，非流式恒为 0（omitempty 后在 JSON 里整条缺席）——
+	// 非流式是整体响应一次写完，没有「首字」这个概念，补一个等于总耗时的数字只会误导。
+	//
+	// 起点与 DurationMs 同为请求进入时刻，因此两个数可直接相减得到「首字之后的传输耗时」，
+	// 并且天然包含排队等待、图片翻译与前面失败候选的时间。故障转移后由成功的那个候选打点，
+	// 不会重复：流式一旦开始写客户端就不再询问 ShouldRetry，至多一个候选能写出内容。
+	//
+	// 判据是「写出内容事件」而非「写出响应头」：SSE 的 ping 注释行与空行不计入，
+	// 否则连接刚建立就被记成首字，这个数会恒等于一个很小的常数、失去意义。
+	FirstByteMs int64  `json:"firstByteMs,omitempty"`
+	QueueWaitMs int64  `json:"queueWaitMs,omitempty"`
+	Error       string `json:"error,omitempty"`
+	Vision      bool   `json:"vision,omitempty"`
 	// VisionModel 是视觉翻译实际使用的模型名（vision 启用时才有值），
 	// 便于区分「这次图片是谁认的」——TargetModel 是下游对话模型，两者无关。
 	VisionModel    string `json:"visionModel,omitempty"`
@@ -196,6 +208,7 @@ type AttemptDetail struct {
 	UpstreamRequestID  string `json:"upstreamRequestId,omitempty"`
 	RetryAfterMs       int64  `json:"retryAfterMs,omitempty"`
 	FreeAttempt        bool   `json:"freeAttempt,omitempty"`
+	LocalRetry         bool   `json:"localRetry,omitempty"`
 	ResponseStarted    bool   `json:"responseStarted,omitempty"`
 }
 

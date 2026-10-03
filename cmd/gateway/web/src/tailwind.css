@@ -78,16 +78,17 @@
     html, body { height: 100%; }
     body {
         background:
-            radial-gradient(circle at 68% -20%, rgba(0, 210, 255, .12), transparent 34rem),
-            linear-gradient(180deg, #0b0c12 0%, #090a0f 100%);
-        color: #e7eaf0;
+            radial-gradient(circle at 78% -12%, rgba(34, 211, 238, .10), transparent 36rem),
+            radial-gradient(circle at 8% 108%, rgba(99, 102, 241, .07), transparent 40rem),
+            linear-gradient(180deg, #0d1118 0%, #0b0e14 100%);
+        color: #e8edf5;
     }
     /* 带 !important，放哪一层都盖得住，跟着 base 走即可 */
     [x-cloak] { display: none !important; }
     ::-webkit-scrollbar { width: 10px; height: 10px; }
-    ::-webkit-scrollbar-track { background: #0b0c12; }
-    ::-webkit-scrollbar-thumb { background: #343846; border: 2px solid #0b0c12; border-radius: 999px; }
-    ::-webkit-scrollbar-thumb:hover { background: #4b5567; }
+    ::-webkit-scrollbar-track { background: #0b0e14; }
+    ::-webkit-scrollbar-thumb { background: #2d3650; border: 2px solid #0b0e14; border-radius: 999px; }
+    ::-webkit-scrollbar-thumb:hover { background: #3f4a63; }
 }
 
 @layer components {
@@ -111,28 +112,28 @@
         -webkit-font-feature-settings: 'liga';
         font-feature-settings: 'liga';
         -webkit-font-smoothing: antialiased;
-        font-variation-settings: 'FILL' 0, 'wght' 500, 'GRAD' 0, 'opsz' 24;
+        font-variation-settings: 'FILL' 0, 'wght' 300, 'GRAD' 0, 'opsz' 24;
     }
     /* 必须排在 .material-symbols-outlined 之后：两者同为单类选择器，靠源码顺序决胜 */
-    .icon-fill { font-variation-settings: 'FILL' 1, 'wght' 600, 'GRAD' 0, 'opsz' 24; }
+    .icon-fill { font-variation-settings: 'FILL' 1, 'wght' 400, 'GRAD' 0, 'opsz' 24; }
     .glass {
-        background: rgba(18, 19, 28, .78);
-        border: 1px solid rgba(255, 255, 255, .09);
-        backdrop-filter: blur(14px);
+        background: rgba(20, 24, 36, .72);
+        border: 1px solid rgba(148, 163, 184, .14);
+        backdrop-filter: blur(16px);
     }
     .field {
         width: 100%;
-        border-radius: 8px;
-        border: 1px solid rgba(255,255,255,.12);
-        background: #090a0f;
+        border-radius: 10px;
+        border: 1px solid rgba(148,163,184,.18);
+        background: #0b0e14;
         padding: .625rem .75rem;
-        color: #e7eaf0;
+        color: #e8edf5;
         outline: none;
         transition: border-color .15s ease, box-shadow .15s ease, background .15s ease;
     }
     .field:focus {
-        border-color: rgba(71, 214, 255, .85);
-        box-shadow: 0 0 0 3px rgba(71, 214, 255, .12);
+        border-color: rgba(56, 189, 248, .85);
+        box-shadow: 0 0 0 3px rgba(56, 189, 248, .14);
     }
     .field:disabled { opacity: .55; cursor: not-allowed; }
     .btn {
@@ -140,8 +141,8 @@
         align-items: center;
         justify-content: center;
         gap: .5rem;
-        border-radius: 8px;
-        border: 1px solid rgba(255,255,255,.1);
+        border-radius: 10px;
+        border: 1px solid rgba(148,163,184,.14);
         padding: .625rem .875rem;
         font-size: .875rem;
         font-weight: 700;
@@ -149,10 +150,10 @@
     }
     .btn:hover { transform: translateY(-1px); }
     .btn:disabled { opacity: .55; cursor: not-allowed; transform: none; }
-    .btn-primary { background: #00d2ff; color: #002633; border-color: rgba(0,210,255,.72); }
-    .btn-primary:hover { background: #47d6ff; }
-    .btn-secondary { background: rgba(255,255,255,.06); color: #e7eaf0; }
-    .btn-secondary:hover { background: rgba(255,255,255,.1); border-color: rgba(255,255,255,.18); }
+    .btn-primary { background: #22d3ee; color: #042530; border-color: rgba(34,211,238,.55); }
+    .btn-primary:hover { background: #38bdf8; }
+    .btn-secondary { background: rgba(148,163,184,.08); color: #e8edf5; }
+    .btn-secondary:hover { background: rgba(148,163,184,.14); border-color: rgba(148,163,184,.24); }
     .btn-danger { background: rgba(251,113,133,.14); color: #fecdd3; border-color: rgba(251,113,133,.32); }
     .btn-danger:hover { background: rgba(251,113,133,.22); }
     .chip {
@@ -160,7 +161,7 @@
         align-items: center;
         gap: .35rem;
         border-radius: 999px;
-        border: 1px solid rgba(255,255,255,.1);
+        border: 1px solid rgba(148,163,184,.14);
         padding: .25rem .55rem;
         font-size: .75rem;
         font-weight: 700;
