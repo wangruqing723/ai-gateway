@@ -82,6 +82,14 @@ type ErrorBodyFunc func(body string, truncated bool)
 // ResponseStartedFunc 表示网关已经开始向客户端写入响应；此后不能再安全 failover。
 type ResponseStartedFunc func()
 
+// FirstByteFunc 表示网关已向客户端写出第一个「内容事件」。
+//
+// 与 ResponseStartedFunc 的区别是本回调晚得多，也正是这个差值有意义：
+// 后者在写响应头、甚至写错误正文之前就会触发，语义是「不能再转移了」；
+// 本回调只在真正有内容落到客户端时触发，才对得上使用者理解的「首字」。
+// 只有流式路径会调用它，非流式整体一次写完、没有首字概念。
+type FirstByteFunc func()
+
 // StreamConversionErrorFunc 报告跨格式流式转换失败时已收到的上游原始 SSE。
 // raw 是原始字节（含 SSE 换行），truncated 表示超出缓冲上限后被截断。
 type StreamConversionErrorFunc func(raw []byte, truncated bool, convErr error)
@@ -114,6 +122,9 @@ type Options struct {
 	OnErrorBody ErrorBodyFunc
 	// OnResponseStarted 在向客户端写响应头或正文前调用。
 	OnResponseStarted ResponseStartedFunc
+	// OnFirstByte 在向客户端写出第一个内容事件后调用，仅流式路径。
+	// 可能被调用多次（每个内容事件都会调），调用方只记录第一次即可。
+	OnFirstByte FirstByteFunc
 	// OnStreamConversionError 在跨格式流式转换失败时提供已收到的上游原始 SSE 字节。
 	//
 	// 为 nil 时（默认）完全不缓冲原始流，不产生额外内存开销——排查开关关闭是常态，
@@ -156,6 +167,48 @@ func markResponseStarted(opts *Options) {
 	if opts.OnResponseStarted != nil {
 		opts.OnResponseStarted()
 	}
+}
+
+// markFirstByte 上报「已向客户端写出第一个内容事件」。
+//
+// 与 markResponseStarted 同一约定：可能被调用多次，由调用方只记录第一次。
+// 不在 Options 里塞一个 bool 自己去重——Options 的字段注释明确说「循环内不被修改」，
+// 往里加可变状态会破坏那个约定，也会让同一个 Options 不能被重复使用。
+func markFirstByte(opts *Options) {
+	if opts.OnFirstByte != nil {
+		opts.OnFirstByte()
+	}
+}
+
+// containsStreamContent 判断一段将要写给客户端的 SSE 字节里是否含「内容事件」。
+//
+// 首字耗时要的是客户端真正看到内容的时刻，不是连接建立的时刻。SSE 里有两类字节
+// 不携带内容：以 ':' 开头的注释行（keep-alive 常用 ": ping"）和作为事件分隔符的空行。
+// 把它们算进去，首字耗时会退化成「上游响应头耗时」这个近似常数，失去意义。
+//
+// 判据取「存在一个 data: 行，且载荷非空、且不是 [DONE] 终止符」。这条规则对
+// Anthropic、OpenAI Chat、OpenAI Responses 三种 SSE 都成立——它们的事件一律带 data 行，
+// 而 event: 行总是伴随 data: 行出现，不会漏判。
+//
+// 透传路径按 16 KiB 读块调用，块可能把一行从中间切断（如 `data: {"ty`）。
+// 这种半行同样判为有内容：内容确实已经开始到达客户端了。
+func containsStreamContent(payload []byte) bool {
+	for _, line := range bytes.Split(payload, []byte("\n")) {
+		line = bytes.TrimRight(line, "\r")
+		if len(line) == 0 || line[0] == ':' {
+			continue
+		}
+		rest, ok := bytes.CutPrefix(line, []byte("data:"))
+		if !ok {
+			continue
+		}
+		rest = bytes.TrimSpace(rest)
+		if len(rest) == 0 || bytes.Equal(rest, []byte("[DONE]")) {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 func upstreamRequestID(h http.Header) string {
@@ -606,6 +659,11 @@ func handleStream(ctx context.Context, cancel context.CancelFunc, resp *http.Res
 				if werr := writeAndFlushStream(opts.ClientRes, flusher, buf[:n], activityTimeout); werr != nil {
 					return finishStreamWrite(werr, cancel, opts)
 				}
+				// 写成功之后才算首字：失败的那次客户端什么也没看到。
+				// 透传块可能同时含 ping 与内容，containsStreamContent 只要有内容行就为真。
+				if containsStreamContent(buf[:n]) {
+					markFirstByte(opts)
+				}
 			}
 			if err != nil {
 				return finishStream(err, timedOut.Load(), opts, flusher)
@@ -780,6 +838,11 @@ func writeTransformedLine(transform converter.StreamTransformer, line string, ca
 		}
 		if err := writeAndFlushStream(opts.ClientRes, flusher, []byte(event), writeTimeout); err != nil {
 			return true, finishStreamWrite(err, cancel, opts)
+		}
+		// 跨格式路径同样只认内容事件：转换器也会产出不带内容的事件，
+		// 判据与透传路径共用，两条路径的首字口径因此一致。
+		if containsStreamContent([]byte(event)) {
+			markFirstByte(opts)
 		}
 	}
 	return false, nil

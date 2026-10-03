@@ -1260,6 +1260,10 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 		// 必须用本次尝试的局部变量，不能直接读 in.reqLog.UpstreamStatus：后者跨候选
 		// 共享，候选 1 的 502 会在候选 2 传输失败（不上报）时被当成候选 2 的状态码。
 		attemptStatus int
+		// firstByteDone 保证首字耗时只记一次。放在尝试作用域是安全的：
+		// 流式一旦开始写客户端就不再询问 ShouldRetry，至多一个候选能写出内容事件，
+		// 不存在两个候选各记一次、后者覆盖前者的情况。
+		firstByteDone bool
 	)
 	opts := &proxy.Options{
 		ClientReq:             r,
@@ -1303,6 +1307,16 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 			if in.detail != nil {
 				in.detail.ResponseStarted = true
 			}
+		},
+		// 首字耗时按请求进入时刻（in.start）起算，与 DurationMs 同起点，
+		// 因此天然包含排队等待、图片翻译与前面失败候选的时间，两个数也可直接相减。
+		// 回调与 Forward 同 goroutine 同步执行，无需额外同步。
+		OnFirstByte: func() {
+			if firstByteDone {
+				return
+			}
+			firstByteDone = true
+			in.reqLog.FirstByteMs = time.Since(in.start).Milliseconds()
 		},
 	}
 	// 只在排查开关开启时挂回调：为 nil 时 proxy 完全不缓冲原始流。

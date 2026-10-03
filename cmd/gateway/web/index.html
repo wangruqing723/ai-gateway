@@ -1355,10 +1355,12 @@
                     </div>
                     <!-- table-fixed + colgroup 按比例分宽。table-auto 会按内容比例摊，
                          模型名最长，宽屏就在模型和 Provider 之间空出一大块。
-                         模型给 23%：22% 仍会把 claude-opus-5 → claude-opus-5-thinking
-                         截成 claude-opus-5-thi…，再长仍截断走 tooltip。
-                         Provider 9%：短名（sota3 / gor3 / ar-ld）够用，长自定义名截断走 tooltip。
+                         模型给 24%：23% 已能放下 claude-opus-5 → claude-opus-5-thinking，
+                         再长仍截断走 tooltip。
+                         Provider 11%：短名（sota3 / gor3 / ar-ld）富余，长自定义名截断走 tooltip。
                          时间 8%：只渲染时分秒（logClock），常见桌面宽度下仍宽于 HH:MM:SS。
+                         流式 4%（只放一枚徽章）、耗时 7%，紧邻摆放：首字耗时只在流式下存在，
+                         两列相邻才能互相解释——看到「非流式」徽章就知道旁边为什么只有一个数。
                          转移轨迹 / 错误各 16%，空的时候也不会变成沙漠。
                          九列相加必须等于 100，改任一列都要在别处等量补回。 -->
                     <div class="overflow-x-auto lg:max-h-[calc(100%-9.75rem)]">
@@ -1366,10 +1368,10 @@
                             <colgroup>
                                 <col style="width:8%">
                                 <col style="width:6%">
-                                <col style="width:7%">
                                 <col style="width:8%">
-                                <col style="width:23%">
-                                <col style="width:9%">
+                                <col style="width:24%">
+                                <col style="width:11%">
+                                <col style="width:4%">
                                 <col style="width:7%">
                                 <col style="width:16%">
                                 <col style="width:16%">
@@ -1378,11 +1380,11 @@
                                 <tr>
                                     <th scope="col" class="whitespace-nowrap px-4 py-2.5 font-bold" title="时分秒，悬停看完整时间戳">时间</th>
                                     <th scope="col" class="whitespace-nowrap px-3 py-2.5 font-bold">状态</th>
-                                    <th scope="col" class="whitespace-nowrap px-3 py-2.5 font-bold">流式</th>
                                     <th scope="col" class="whitespace-nowrap px-4 py-2.5 font-bold" title="网关请求 ID，对应 stderr 里的 [r00013]">请求 ID</th>
                                     <th scope="col" class="whitespace-nowrap px-4 py-2.5 font-bold">模型</th>
                                     <th scope="col" class="whitespace-nowrap px-4 py-2.5 font-bold">Provider</th>
-                                    <th scope="col" class="whitespace-nowrap px-4 py-2.5 text-right font-bold">耗时</th>
+                                    <th scope="col" class="whitespace-nowrap px-3 py-2.5 font-bold">流式</th>
+                                    <th scope="col" class="whitespace-nowrap px-4 py-2.5 text-right font-bold" title="流式显示「首字 / 总计」，非流式只有总计">耗时</th>
                                     <th scope="col" class="whitespace-nowrap px-4 py-2.5 font-bold">转移轨迹</th>
                                     <th scope="col" class="whitespace-nowrap px-4 py-2.5 font-bold">错误</th>
                                 </tr>
@@ -1428,9 +1430,6 @@
                                                   @focus="showTip(statusTip(log), $event)"
                                                   @blur="hideTip()" tabindex="0"></span>
                                         </td>
-                                        <td class="whitespace-nowrap px-1.5 py-2.5">
-                                            <span class="chip px-1.5 text-[11px]" :class="log.stream ? 'bg-cyan2/10 text-cyan' : 'bg-white/[.05] text-muted'" x-text="log.stream ? '流式' : '非流式'"></span>
-                                        </td>
                                         <!-- 主行放请求 ID，方便对照 stderr；IP / Key 来源 / 指纹几乎不变，
                                              主行信息量低，改到 tooltip 和展开详情。 -->
                                         <td class="whitespace-nowrap px-4 py-2.5 font-mono text-[11px] text-text"
@@ -1462,9 +1461,13 @@
                                              避免把同一次映射拆到两列去拼。该 provider 把请求打到了 modelTrail
                                              里的上游模型。 -->
                                         <td class="truncate px-4 py-2.5 font-mono text-xs text-text" x-text="log.provider || '--'"></td>
+                                        <td class="whitespace-nowrap px-1.5 py-2.5">
+                                            <span class="chip px-1.5 text-[11px]" :class="log.stream ? 'bg-cyan2/10 text-cyan' : 'bg-white/[.05] text-muted'" x-text="log.stream ? '流式' : '非流式'"></span>
+                                        </td>
+                                        <!-- 着色仍按总耗时：首字快但总耗时很长的请求同样该标红。 -->
                                         <td class="whitespace-nowrap px-4 py-2.5 text-right font-mono text-xs"
                                             :class="slowClass(log.durationMs || log.latencyMs)"
-                                            x-text="durationText(log.durationMs || log.latencyMs)"></td>
+                                            x-text="durationCell(log)"></td>
                                         <td class="truncate px-4 py-2.5 font-mono text-[11px]"
                                             :class="log.attemptTrail ? 'text-warn' : 'text-muted'"
                                             @mouseenter="showTip(log.attemptTrail || '', $event)"
@@ -1531,6 +1534,12 @@
                                                 <div>
                                                     <dt class="text-muted">上游格式</dt>
                                                     <dd class="mt-1 break-words font-mono text-text" x-text="log.upstreamFormat || '--'"></dd>
+                                                </div>
+                                                <!-- 首字耗时只在流式下存在，非流式整条不出现（hasLogValue 对 undefined 为假）。
+                                                     与总耗时相邻摆放，两个数同起点、可直接相减看「首字之后的传输耗时」。 -->
+                                                <div x-show="hasLogValue(log.firstByteMs)">
+                                                    <dt class="text-muted">首字耗时</dt>
+                                                    <dd class="mt-1 font-mono text-cyan" x-text="durationText(log.firstByteMs)"></dd>
                                                 </div>
                                                 <div>
                                                     <dt class="text-muted">总耗时</dt>
@@ -1635,11 +1644,11 @@
                                     <tr x-show="!_firstLoadDone" class="bg-panel/35">
                                         <td class="px-4 py-2.5"><div class="gw-skeleton h-4 w-16"></div></td>
                                         <td class="px-3 py-2.5"><div class="gw-skeleton h-4 w-10"></div></td>
-                                        <td class="px-3 py-2.5"><div class="gw-skeleton h-4 w-12"></div></td>
                                         <td class="px-4 py-2.5"><div class="gw-skeleton h-4 w-16"></div></td>
                                         <td class="px-4 py-2.5"><div class="gw-skeleton h-4 w-52"></div></td>
                                         <td class="px-4 py-2.5"><div class="gw-skeleton h-4 w-16"></div></td>
-                                        <td class="px-4 py-2.5"><div class="gw-skeleton ml-auto h-4 w-12"></div></td>
+                                        <td class="px-3 py-2.5"><div class="gw-skeleton h-4 w-12"></div></td>
+                                        <td class="px-4 py-2.5"><div class="gw-skeleton ml-auto h-4 w-20"></div></td>
                                         <td class="px-4 py-2.5"><div class="gw-skeleton h-4 w-8"></div></td>
                                         <td class="px-4 py-2.5"><div class="gw-skeleton h-4 w-8"></div></td>
                                     </tr>
@@ -3502,6 +3511,21 @@
                     if (ms >= 30000) return 'text-danger';
                     if (ms >= 10000) return 'text-warn';
                     return 'text-text';
+                },
+
+                // durationCell 日志列表「耗时」列的一格双值：流式显示「首字 / 总计」，
+                // 非流式只显示总计。
+                //
+                // 不另开一列：这张表是 table-fixed + colgroup 九列按百分比分宽，
+                // 加第十列要把 min-w-[930px] 继续顶高，窄屏横向滚动更严重。
+                //
+                // 非流式不补破折号占位：首字耗时对它不存在（见后端 FirstByteMs 注释），
+                // 画一个「--」会让人以为数据丢了，而不是这个量本就不适用。
+                // 流式但没取到首字（响应头之后才失败、一个内容块都没写出）同样退回单值。
+                durationCell(log) {
+                    const total = this.durationText(log?.durationMs ?? log?.latencyMs);
+                    if (!log?.stream || !this.hasLogValue(log?.firstByteMs)) return total;
+                    return `${this.durationText(log.firstByteMs)} / ${total}`;
                 },
 
                 // logClock 只取时分秒。列表里整屏都是同一天，重复 100 遍日期没有信息量，

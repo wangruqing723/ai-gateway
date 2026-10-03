@@ -63,6 +63,21 @@
                     return 'text-text';
                 },
 
+                // durationCell 日志列表「耗时」列的一格双值：流式显示「首字 / 总计」，
+                // 非流式只显示总计。
+                //
+                // 不另开一列：这张表是 table-fixed + colgroup 九列按百分比分宽，
+                // 加第十列要把 min-w-[930px] 继续顶高，窄屏横向滚动更严重。
+                //
+                // 非流式不补破折号占位：首字耗时对它不存在（见后端 FirstByteMs 注释），
+                // 画一个「--」会让人以为数据丢了，而不是这个量本就不适用。
+                // 流式但没取到首字（响应头之后才失败、一个内容块都没写出）同样退回单值。
+                durationCell(log) {
+                    const total = this.durationText(log?.durationMs ?? log?.latencyMs);
+                    if (!log?.stream || !this.hasLogValue(log?.firstByteMs)) return total;
+                    return `${this.durationText(log.firstByteMs)} / ${total}`;
+                },
+
                 // logClock 只取时分秒。列表里整屏都是同一天，重复 100 遍日期没有信息量，
                 // 还会把时间列折成三行。完整时间戳挂在 title 上。
                 logClock(log) {
