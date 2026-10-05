@@ -1359,9 +1359,10 @@
                          再长仍截断走 tooltip。
                          Provider 11%：短名（sota3 / gor3 / ar-ld）富余，长自定义名截断走 tooltip。
                          时间 8%：只渲染时分秒（logClock），常见桌面宽度下仍宽于 HH:MM:SS。
-                         流式 4%（只放一枚徽章）、耗时 7%，紧邻摆放：首字耗时只在流式下存在，
+                         流式 4%（只放一枚徽章）、耗时 8%，紧邻摆放：首字耗时只在流式下存在，
                          两列相邻才能互相解释——看到「非流式」徽章就知道旁边为什么只有一个数。
-                         转移轨迹 / 错误各 16%，空的时候也不会变成沙漠。
+                         耗时列给到 8% 是为了让表头「首字/耗时」四字放得下。
+                         转移轨迹 16%、错误 15%，空的时候也不会变成沙漠。
                          九列相加必须等于 100，改任一列都要在别处等量补回。 -->
                     <div class="overflow-x-auto lg:max-h-[calc(100%-9.75rem)]">
                         <table class="w-full min-w-[930px] table-fixed border-collapse text-left">
@@ -1372,9 +1373,9 @@
                                 <col style="width:24%">
                                 <col style="width:11%">
                                 <col style="width:4%">
-                                <col style="width:7%">
+                                <col style="width:8%">
                                 <col style="width:16%">
-                                <col style="width:16%">
+                                <col style="width:15%">
                             </colgroup>
                             <thead class="sticky top-0 z-10 bg-panel2 text-xs uppercase tracking-wide text-muted">
                                 <tr>
@@ -1384,7 +1385,7 @@
                                     <th scope="col" class="whitespace-nowrap px-4 py-2.5 font-bold">模型</th>
                                     <th scope="col" class="whitespace-nowrap px-4 py-2.5 font-bold">Provider</th>
                                     <th scope="col" class="whitespace-nowrap px-3 py-2.5 font-bold">流式</th>
-                                    <th scope="col" class="whitespace-nowrap px-4 py-2.5 text-right font-bold" title="流式显示「首字 / 总计」，非流式只有总计">耗时</th>
+                                    <th scope="col" class="whitespace-nowrap px-4 py-2.5 text-right font-bold" title="流式显示「首字 / 总计」，非流式只有总计">首字/耗时</th>
                                     <th scope="col" class="whitespace-nowrap px-4 py-2.5 font-bold">转移轨迹</th>
                                     <th scope="col" class="whitespace-nowrap px-4 py-2.5 font-bold">错误</th>
                                 </tr>
