@@ -703,7 +703,7 @@
                     <aside id="config-preview-drawer"
                            x-show="isConfigTab() && editMode === 'visual' && previewDrawerOpen" x-transition
                            x-cloak @keydown.escape.window="previewDrawerOpen && closePreviewDrawer()"
-                           class="fixed bottom-0 right-0 top-0 z-50 flex w-full max-w-[calc(100vw-1rem)] flex-col border-l border-line bg-panel shadow-glow sm:w-[32rem]">
+                           class="fixed bottom-0 right-0 top-0 z-50 flex w-full max-w-[calc(100vw-1rem)] flex-col border-l border-line bg-panel shadow-glow sm:w-[33.6rem]">
                         <section class="flex min-h-0 flex-1 flex-col">
                             <div class="flex shrink-0 items-center justify-between border-b border-line p-4">
                                 <div class="flex items-center gap-2 font-bold text-white">
@@ -1923,7 +1923,7 @@
                                  Provider 列表的 bg-panel/35 + hover:bg-white/[.04]。
                                  <sm 改两行堆叠（select+输入换行，按钮组随第二行右对齐），
                                  375px 也不横向滚动。 -->
-                            <div data-drag-row class="flex flex-wrap items-center gap-2 py-1.5 transition hover:bg-white/[.04]"
+                            <div data-drag-row class="flex flex-wrap items-center gap-2 py-1.5 transition hover:bg-white/[.04] sm:flex-nowrap"
                                  :class="[isRowDragSource('target', ti) ? 'gw-drag-source' : '', rowDropClass('target', ti, routeForm.targets.length)]">
                                 <!-- 把手在序号左侧、与序号同属一个 flex 盒：序号列只有 w-6，
                                      再塞图标会把「主」徽标挤变形，所以把手单独占一格。
