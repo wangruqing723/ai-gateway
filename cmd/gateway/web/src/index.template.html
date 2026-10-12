@@ -648,12 +648,12 @@
                                                     </td>
                                                     <td class="w-px whitespace-nowrap px-2 py-2.5 text-center">
                                                 <span x-show="provider.authType === 'chatgptOAuth'"
-                                                      class="material-symbols-outlined text-[18px] text-cyan"
+                                                      class="chip inline-flex px-1.5 text-[10px] font-bold text-cyan"
                                                       @mouseenter="showTip('ChatGPT OAuth 账户', $event)"
                                                       @mouseleave="hideTip()"
                                                       @focus="showTip('ChatGPT OAuth 账户', $event)"
                                                       @blur="hideTip()"
-                                                      tabindex="0">smart_toy</span>
+                                                      tabindex="0">OAuth</span>
                                                 <span x-show="provider.authType !== 'chatgptOAuth' && provider.apiKeyConfigured"
                                                               class="material-symbols-outlined text-[18px] text-good"
                                                               @mouseenter="showTip('已配置密钥', $event)"
@@ -714,9 +714,9 @@
                                                 <span class="material-symbols-outlined text-[18px]" :class="loadingChatGPTAccounts && 'gw-spin'">refresh</span>
                                                 刷新
                                             </button>
-                                            <button @click="startChatGPTOAuth()" :disabled="startingChatGPTOAuth || oauthLoginSession" class="btn btn-primary px-3 py-2 disabled:opacity-60">
+                                            <button @click="openChatGPTOAuthDialog()" :disabled="startingChatGPTOAuth" class="btn btn-primary px-3 py-2 disabled:opacity-60">
                                                 <span class="material-symbols-outlined text-[18px]" :class="startingChatGPTOAuth && 'gw-spin'">add</span>
-                                                <span x-text="startingChatGPTOAuth ? '正在连接…' : '连接账户'"></span>
+                                                <span x-text="oauthLoginSession ? '查看授权' : '连接账户'"></span>
                                             </button>
                                         </div>
                                     </div>
@@ -1798,7 +1798,7 @@
                         </label>
                         <div class="mt-2 flex flex-wrap items-center justify-between gap-2 text-xs text-muted">
                             <span>上游地址和 Responses 格式由 OAuth 类型固定。</span>
-                            <button type="button" @click="startChatGPTOAuth()" class="text-cyan hover:text-white">+ 连接新账户</button>
+                            <button type="button" @click="openChatGPTOAuthDialog()" :disabled="startingChatGPTOAuth" class="text-cyan hover:text-white disabled:opacity-60">+ 连接新账户</button>
                         </div>
                     </div>
                     <div x-show="providerForm.authType !== 'chatgptOAuth'" class="mt-4 block">
@@ -2263,6 +2263,63 @@
                     <span x-show="loading" x-cloak class="material-symbols-outlined gw-spin text-[18px]">progress_activity</span>
                     <span x-text="loading ? '保存中…' : '保存路由'"></span>
                 </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ChatGPT OAuth 授权方式选择。连接账户入口只打开此弹窗，不会创建会话或打开浏览器页面。 -->
+    <div x-show="showChatGPTOAuthDialog" x-transition.opacity x-cloak
+         @keydown.escape.window="closeChatGPTOAuthDialog()"
+         class="fixed inset-0 z-[80] grid place-items-center overflow-y-auto bg-black/70 p-4">
+        <div class="glass w-full max-w-2xl rounded-lg shadow-glow" role="dialog" aria-modal="true" aria-labelledby="chatgpt-oauth-title">
+            <div class="flex items-start justify-between gap-4 border-b border-line p-5">
+                <div>
+                    <h3 id="chatgpt-oauth-title" class="text-base font-extrabold text-white">连接 ChatGPT 账户</h3>
+                    <p class="mt-1 text-sm text-muted">连接账户不会自动打开页面。生成授权链接后，可在新标签页打开或复制；完成授权后，如果服务未自动接收回调，可粘贴 ChatGPT 返回的完整回调链接。</p>
+                </div>
+                <button type="button" @click="closeChatGPTOAuthDialog()" class="btn btn-secondary px-2 py-2" aria-label="关闭授权弹窗">
+                    <span class="material-symbols-outlined">close</span>
+                </button>
+            </div>
+            <div class="space-y-4 p-5">
+                <p x-show="chatGPTOAuthDialogMessage" x-cloak role="status"
+                   :class="chatGPTOAuthDialogMessageType === 'error' ? 'text-danger' : chatGPTOAuthDialogMessageType === 'success' ? 'text-good' : 'text-muted'"
+                   class="text-sm" x-text="chatGPTOAuthDialogMessage"></p>
+                <div x-show="oauthLoginSession" x-cloak class="rounded-lg border border-cyan/30 bg-cyan/5 p-3 text-xs text-muted">
+                    授权会话正在等待完成；此弹窗可以关闭，后台仍会继续查询授权状态。再次点击“查看授权”可重新打开本弹窗。
+                </div>
+                <div x-show="chatGPTOAuthAuthURL" x-cloak class="space-y-2">
+                    <label for="chatgpt-oauth-auth-url" class="block text-xs font-bold uppercase tracking-wide text-muted">授权链接（可手动选中复制）</label>
+                    <textarea id="chatgpt-oauth-auth-url" x-ref="chatGPTOAuthURL" readonly rows="3" :value="chatGPTOAuthAuthURL"
+                              class="field resize-y break-all font-mono text-xs leading-relaxed"></textarea>
+                </div>
+                <div x-show="oauthLoginSession && chatGPTOAuthAuthURL" x-cloak class="space-y-2">
+                    <label for="chatgpt-oauth-return-url" class="block text-xs font-bold uppercase tracking-wide text-muted">ChatGPT 授权后的回调链接</label>
+                    <textarea id="chatgpt-oauth-return-url" autocomplete="off" spellcheck="false" rows="3"
+                              x-model="chatGPTOAuthReturnURL" :disabled="submittingChatGPTOAuthCallback"
+                              placeholder="http://localhost:1455/auth/callback?code=...&amp;state=..."
+                              class="field resize-y break-all font-mono text-xs leading-relaxed disabled:opacity-60"></textarea>
+                    <p class="text-xs leading-relaxed text-muted">完成 ChatGPT 授权后，服务会尝试自动接收回调。如果没有自动完成，请复制浏览器地址栏中的完整回调链接（需包含 code 和 state）粘贴到这里。</p>
+                    <button type="button" @click="submitChatGPTOAuthCallback()"
+                            :disabled="submittingChatGPTOAuthCallback || !chatGPTOAuthReturnURL.trim()"
+                            class="btn btn-secondary disabled:cursor-not-allowed disabled:opacity-50">
+                        <span x-show="submittingChatGPTOAuthCallback" x-cloak class="material-symbols-outlined gw-spin text-[18px]">progress_activity</span>
+                        <span x-text="submittingChatGPTOAuthCallback ? '正在提交…' : '提交回调链接'"></span>
+                    </button>
+                </div>
+            </div>
+            <div class="flex flex-wrap items-center justify-between gap-3 border-t border-line p-5">
+                <button type="button" @click="closeChatGPTOAuthDialog()" class="btn btn-secondary">关闭</button>
+                <div class="flex flex-wrap justify-end gap-2">
+                    <button type="button" @click="startChatGPTOAuth('copy')"
+                            :disabled="startingChatGPTOAuth || submittingChatGPTOAuthCallback"
+                            class="btn btn-secondary disabled:cursor-not-allowed disabled:opacity-50"
+                            x-text="oauthLoginSession ? (chatGPTOAuthCopied ? '已复制，可再次复制' : '一键复制授权链接') : '生成并复制授权链接'"></button>
+                    <button type="button" @click="startChatGPTOAuth('open')"
+                            :disabled="startingChatGPTOAuth || submittingChatGPTOAuthCallback"
+                            class="btn btn-primary disabled:cursor-not-allowed disabled:opacity-50"
+                            x-text="oauthLoginSession ? '重新打开授权页面' : '打开授权页面'"></button>
+                </div>
             </div>
         </div>
     </div>

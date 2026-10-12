@@ -2113,6 +2113,48 @@ func (s *server) handleChatGPTAuthAPI(w http.ResponseWriter, r *http.Request, pa
 		refs := chatGPTAccountReferences(cfg)
 		s.cfgMu.RUnlock()
 		writeJSON(w, http.StatusOK, map[string]any{"data": s.chatgptAuth.List(refs)})
+	case "/api/chatgpt/oauth/callback":
+		if r.Method != http.MethodPost {
+			writeMethodNotAllowed(w, http.MethodPost)
+			return
+		}
+		body, err := readBodyLimited(r, 16<<10)
+		if err != nil {
+			if errors.Is(err, errRequestBodyTooLarge) {
+				writeJSONError(w, http.StatusRequestEntityTooLarge, "request_too_large", "OAuth 回调链接超过大小限制")
+				return
+			}
+			writeJSONError(w, http.StatusBadRequest, "gateway_error", "读取 OAuth 回调链接失败")
+			return
+		}
+		if requestMediaType(r) != "application/json" {
+			writeJSONError(w, http.StatusUnsupportedMediaType, "unsupported_media_type", "OAuth 回调链接请求须使用 application/json")
+			return
+		}
+		var input struct {
+			CallbackURL string `json:"callbackUrl"`
+		}
+		decoder := json.NewDecoder(bytes.NewReader(body))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&input); err != nil {
+			writeJSONError(w, http.StatusBadRequest, "gateway_error", "OAuth 回调链接 JSON 无效: "+err.Error())
+			return
+		}
+		var extra any
+		if err := decoder.Decode(&extra); err != io.EOF {
+			writeJSONError(w, http.StatusBadRequest, "gateway_error", "OAuth 回调链接请求只能包含一个 JSON 对象")
+			return
+		}
+		status, err := s.chatgptAuth.CompleteLoginFromCallback(r.Context(), input.CallbackURL)
+		if errors.Is(err, chatgptauth.ErrInvalidOAuthCallback) {
+			writeJSONError(w, http.StatusBadRequest, "invalid_oauth_callback", err.Error())
+			return
+		}
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "oauth_callback_failed", "处理 OAuth 回调链接失败")
+			return
+		}
+		writeJSON(w, http.StatusOK, status)
 	case "/api/chatgpt/oauth/start":
 		if r.Method != http.MethodPost {
 			writeMethodNotAllowed(w, http.MethodPost)

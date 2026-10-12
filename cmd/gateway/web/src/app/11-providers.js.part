@@ -13,57 +13,206 @@
                     }
                 },
 
-                async startChatGPTOAuth() {
-                    if (this.startingChatGPTOAuth || this.oauthLoginSession) return;
-                    const popup = window.open('about:blank', 'ai-gateway-chatgpt-oauth', 'popup,width=640,height=760');
-                    if (!popup) {
-                        this.showStatus('浏览器拦截了授权窗口，请允许此页面打开弹窗后重试', 'error');
+                openChatGPTOAuthDialog() {
+                    if (this.oauthLoginSession) {
+                        this.showChatGPTOAuthDialog = true;
                         return;
                     }
-                    this.startingChatGPTOAuth = true;
+                    this.showChatGPTOAuthDialog = true;
+                    this.chatGPTOAuthAuthURL = '';
+                    this.chatGPTOAuthReturnURL = '';
+                    this.chatGPTOAuthCopied = false;
+                    this.chatGPTOAuthDialogMessage = '';
+                    this.chatGPTOAuthDialogMessageType = 'info';
+                },
+
+                closeChatGPTOAuthDialog() {
+                    this.showChatGPTOAuthDialog = false;
+                    if (!this.oauthLoginSession) {
+                        this.chatGPTOAuthAuthURL = '';
+                        this.chatGPTOAuthReturnURL = '';
+                        this.chatGPTOAuthCopied = false;
+                    }
+                },
+
+                async copyChatGPTOAuthURL() {
+                    if (!this.chatGPTOAuthAuthURL) return;
                     try {
-                        const res = await fetch('/api/chatgpt/oauth/start', { method: 'POST' });
+                        if (!navigator.clipboard?.writeText) throw new Error('当前浏览器未提供剪贴板权限');
+                        await navigator.clipboard.writeText(this.chatGPTOAuthAuthURL);
+                        this.chatGPTOAuthCopied = true;
+                        this.chatGPTOAuthDialogMessage = '授权链接已复制。请在浏览器中打开链接并完成登录。';
+                        this.chatGPTOAuthDialogMessageType = 'success';
+                    } catch (err) {
+                        this.chatGPTOAuthCopied = false;
+                        this.chatGPTOAuthDialogMessage = '浏览器未允许自动复制，请选中下方授权链接手动复制。';
+                        this.chatGPTOAuthDialogMessageType = 'error';
+                        this.showStatus('自动复制失败，请在弹窗中选中授权链接并手动复制：' + err.message, 'error');
+                        await this.$nextTick();
+                        this.$refs.chatGPTOAuthURL?.focus();
+                        this.$refs.chatGPTOAuthURL?.select();
+                    }
+                },
+
+                openChatGPTOAuthURL() {
+                    if (!this.chatGPTOAuthAuthURL) return;
+                    const tab = window.open(this.chatGPTOAuthAuthURL, '_blank');
+                    if (!tab) {
+                        this.chatGPTOAuthDialogMessage = '浏览器拦截了新标签页，请允许此页面打开新标签页，或复制授权链接后手动打开。';
+                        this.chatGPTOAuthDialogMessageType = 'error';
+                        this.showStatus(this.chatGPTOAuthDialogMessage, 'error');
+                        return null;
+                    }
+                    try { tab.opener = null; } catch (_) {}
+                    return tab;
+                },
+
+                async startChatGPTOAuth(mode) {
+                    if (this.startingChatGPTOAuth || this.submittingChatGPTOAuthCallback) return;
+                    if (this.oauthLoginSession && this.chatGPTOAuthAuthURL) {
+                        if (mode === 'copy') await this.copyChatGPTOAuthURL();
+                        else this.openChatGPTOAuthURL();
+                        return;
+                    }
+
+                    // 点击处理器内同步打开空白标签页，避免异步创建会话后被浏览器拦截。
+                    const tab = mode === 'open'
+                        ? window.open('about:blank', '_blank')
+                        : null;
+                    if (mode === 'open' && !tab) {
+                        this.chatGPTOAuthDialogMessage = '浏览器拦截了新标签页，请允许此页面打开新标签页，或改用复制授权链接。';
+                        this.chatGPTOAuthDialogMessageType = 'error';
+                        this.showStatus(this.chatGPTOAuthDialogMessage, 'error');
+                        return;
+                    }
+
+                    this.startingChatGPTOAuth = true;
+                    this.chatGPTOAuthDialogMessage = '正在创建授权会话…';
+                    this.chatGPTOAuthDialogMessageType = 'info';
+                    try {
+                        const res = await fetch('/api/chatgpt/oauth/start', {
+                            method: 'POST'
+                        });
                         if (!res.ok) throw new Error(await this.errorText(res, '发起授权失败'));
                         const data = await res.json();
+                        if (!data.sessionId || !data.authUrl) throw new Error('服务返回的授权会话信息不完整');
                         this.oauthLoginSession = data.sessionId;
-                        popup.location.href = data.authUrl;
-                        if (this._oauthPollTimer !== null) window.clearInterval(this._oauthPollTimer);
-                        const poll = async () => {
-                            if (!this.oauthLoginSession) return;
+                        this.chatGPTOAuthAuthURL = data.authUrl;
+                        this.chatGPTOAuthReturnURL = '';
+                        this.chatGPTOAuthCopied = false;
+                        this.chatGPTOAuthDialogMessage = mode === 'open' ? '授权页面已打开，请完成登录和授权。' : '授权链接已生成，正在尝试复制。';
+                        this.chatGPTOAuthDialogMessageType = 'info';
+                        if (mode === 'open') {
                             try {
-                                const statusRes = await fetch(`/api/chatgpt/oauth/status?sessionId=${encodeURIComponent(this.oauthLoginSession)}`);
-                                if (!statusRes.ok) throw new Error(await this.errorText(statusRes, '查询授权状态失败'));
-                                const status = await statusRes.json();
-                                if (status.status === 'completed') {
-                                    window.clearInterval(this._oauthPollTimer);
-                                    this._oauthPollTimer = null;
-                                    this.oauthLoginSession = null;
-                                    popup.close();
-                                    await this.loadChatGPTAccounts();
-                                    this.showStatus(`ChatGPT 账户已连接${status.account?.email ? '：' + status.account.email : ''}`, 'success');
-                                } else if (status.status === 'error') {
-                                    window.clearInterval(this._oauthPollTimer);
-                                    this._oauthPollTimer = null;
-                                    this.oauthLoginSession = null;
-                                    popup.close();
-                                    this.showStatus(status.message || 'ChatGPT 授权失败，请重试', 'error');
-                                }
+                                tab.opener = null;
+                                tab.location.replace(data.authUrl);
                             } catch (err) {
-                                window.clearInterval(this._oauthPollTimer);
-                                this._oauthPollTimer = null;
-                                this.oauthLoginSession = null;
-                                popup.close();
-                                this.showStatus('ChatGPT 授权状态查询失败: ' + err.message, 'error');
+                                this.chatGPTOAuthDialogMessage = '无法在新标签页打开授权页面，请复制下方授权链接手动打开。';
+                                this.chatGPTOAuthDialogMessageType = 'error';
+                                try { tab.close(); } catch (_) {}
                             }
-                        };
-                        await poll();
-                        if (this.oauthLoginSession) this._oauthPollTimer = window.setInterval(poll, 1200);
+                        } else {
+                            await this.copyChatGPTOAuthURL();
+                        }
+                        this.startingChatGPTOAuth = false;
+                        await this.pollChatGPTOAuth(data.sessionId, tab);
                     } catch (err) {
-                        popup.close();
+                        try { tab?.close(); } catch (_) {}
+                        this.chatGPTOAuthDialogMessage = err.message;
+                        this.chatGPTOAuthDialogMessageType = 'error';
                         this.showStatus('发起 ChatGPT 授权失败: ' + err.message, 'error');
                     } finally {
                         this.startingChatGPTOAuth = false;
                     }
+                },
+
+                async submitChatGPTOAuthCallback() {
+                    if (!this.oauthLoginSession || this.submittingChatGPTOAuthCallback) return;
+                    const callbackURL = String(this.chatGPTOAuthReturnURL || '').trim();
+                    if (!callbackURL) {
+                        this.chatGPTOAuthDialogMessage = '请粘贴 ChatGPT 授权后的完整回调链接。';
+                        this.chatGPTOAuthDialogMessageType = 'error';
+                        return;
+                    }
+                    this.submittingChatGPTOAuthCallback = true;
+                    this.chatGPTOAuthDialogMessage = '正在提交回调链接…';
+                    this.chatGPTOAuthDialogMessageType = 'info';
+                    try {
+                        const res = await fetch('/api/chatgpt/oauth/callback', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ callbackUrl: callbackURL })
+                        });
+                        if (!res.ok) throw new Error(await this.errorText(res, '提交回调链接失败'));
+                        const status = await res.json();
+                        if (status.status === 'completed') {
+                            this.chatGPTOAuthDialogMessage = `ChatGPT 账户已连接${status.account?.email ? '：' + status.account.email : ''}`;
+                            this.chatGPTOAuthDialogMessageType = 'success';
+                            await this.loadChatGPTAccounts();
+                        } else if (status.status === 'processing') {
+                            this.chatGPTOAuthDialogMessage = '回调正在处理，请稍候。';
+                            this.chatGPTOAuthDialogMessageType = 'info';
+                        } else if (status.status === 'error') {
+                            this.chatGPTOAuthDialogMessage = status.message || 'ChatGPT 授权失败，请重新授权。';
+                            this.chatGPTOAuthDialogMessageType = 'error';
+                        } else {
+                            throw new Error('服务返回了未知的授权状态');
+                        }
+                    } catch (err) {
+                        this.chatGPTOAuthDialogMessage = err.message;
+                        this.chatGPTOAuthDialogMessageType = 'error';
+                    } finally {
+                        this.submittingChatGPTOAuthCallback = false;
+                    }
+                },
+
+                async pollChatGPTOAuth(sessionID, tab) {
+                    if (this._oauthPollTimer !== null) window.clearInterval(this._oauthPollTimer);
+                    let inFlight = false;
+                    const closeTab = () => {
+                        try { if (tab && !tab.closed) tab.close(); } catch (_) {}
+                    };
+                    const stopPolling = () => {
+                        if (this._oauthPollTimer !== null) window.clearInterval(this._oauthPollTimer);
+                        this._oauthPollTimer = null;
+                        this.oauthLoginSession = null;
+                        this.chatGPTOAuthAuthURL = '';
+                        this.chatGPTOAuthReturnURL = '';
+                        this.chatGPTOAuthCopied = false;
+                    };
+                    const poll = async () => {
+                        if (this.oauthLoginSession !== sessionID || inFlight) return;
+                        inFlight = true;
+                        try {
+                            const statusRes = await fetch(`/api/chatgpt/oauth/status?sessionId=${encodeURIComponent(sessionID)}`);
+                            if (!statusRes.ok) throw new Error(await this.errorText(statusRes, '查询授权状态失败'));
+                            const status = await statusRes.json();
+                            if (status.status === 'completed') {
+                                stopPolling();
+                                closeTab();
+                                await this.loadChatGPTAccounts();
+                                this.chatGPTOAuthDialogMessage = `ChatGPT 账户已连接${status.account?.email ? '：' + status.account.email : ''}`;
+                                this.chatGPTOAuthDialogMessageType = 'success';
+                                this.showStatus(this.chatGPTOAuthDialogMessage, 'success');
+                            } else if (status.status === 'error') {
+                                stopPolling();
+                                closeTab();
+                                this.chatGPTOAuthDialogMessage = status.message || 'ChatGPT 授权失败，请重试。';
+                                this.chatGPTOAuthDialogMessageType = 'error';
+                                this.showStatus(this.chatGPTOAuthDialogMessage, 'error');
+                            }
+                        } catch (err) {
+                            stopPolling();
+                            closeTab();
+                            this.chatGPTOAuthDialogMessage = '查询授权状态失败：' + err.message;
+                            this.chatGPTOAuthDialogMessageType = 'error';
+                            this.showStatus(this.chatGPTOAuthDialogMessage, 'error');
+                        } finally {
+                            inFlight = false;
+                        }
+                    };
+                    await poll();
+                    if (this.oauthLoginSession === sessionID) this._oauthPollTimer = window.setInterval(poll, 1200);
                 },
 
                 async removeChatGPTAccount(account) {

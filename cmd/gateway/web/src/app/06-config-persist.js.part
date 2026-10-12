@@ -70,10 +70,10 @@
                     return fields.length ? `；需重启生效: ${fields.join(', ')}` : '';
                 },
 
-                // ESC 逐层退出，不一次关穿。确认弹窗（z-80）叠在编辑弹窗（z-50）之上时，
-                // 它自己的 escape 监听负责关它，这里必须让路，否则一次 ESC 会把两层一起关掉。
+                // ESC 逐层退出，不一次关穿。确认弹窗或 OAuth 授权弹窗叠在编辑弹窗之上时，
+                // 高层弹窗自己的 escape 监听负责关它，这里必须让路，不能顺手关闭编辑表单。
                 escapeProviderModal() {
-                    if (this.confirmDialog.open) return;
+                    if (this.confirmDialog.open || this.showChatGPTOAuthDialog) return;
                     this.showProviderModal = false;
                 },
 

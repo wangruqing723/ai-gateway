@@ -33,6 +33,7 @@ const (
 )
 
 var ErrAccountNotFound = errors.New("ChatGPT OAuth 账户不存在")
+var ErrInvalidOAuthCallback = errors.New("ChatGPT OAuth 回调链接无效或与当前授权会话不匹配")
 
 // AccountView 是不含任何令牌的账户管理视图。
 type AccountView struct {
@@ -349,32 +350,79 @@ func (m *Manager) handleCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	state := r.URL.Query().Get("state")
+	callbackURL := (&url.URL{
+		Scheme:   "http",
+		Host:     r.Host,
+		Path:     r.URL.Path,
+		RawPath:  r.URL.RawPath,
+		RawQuery: r.URL.RawQuery,
+	}).String()
+	status, err := m.CompleteLoginFromCallback(r.Context(), callbackURL)
+	if err != nil {
+		writeCallbackPage(w, "授权链接无效或已使用", false)
+		return
+	}
+	switch status.Status {
+	case "completed":
+		writeCallbackPage(w, "ChatGPT 账户已连接，可以关闭此页面", true)
+	case "processing":
+		writeCallbackPage(w, "授权结果正在处理，可以返回管理页面查看状态", false)
+	default:
+		writeCallbackPage(w, "授权未完成，可以返回管理页面查看状态并重试", false)
+	}
+}
+
+// CompleteLoginFromCallback 校验并处理用户手动提交的完整 OAuth 回调链接。
+func (m *Manager) CompleteLoginFromCallback(ctx context.Context, callbackURL string) (LoginStatus, error) {
+	callbackURL = strings.TrimSpace(callbackURL)
+	u, err := url.Parse(callbackURL)
+	if err != nil || !u.IsAbs() || u.Opaque != "" || u.User != nil || u.Scheme != "http" || u.Host == "" ||
+		u.Path != "/auth/callback" || u.EscapedPath() != "/auth/callback" || u.Fragment != "" ||
+		u.RawFragment != "" || strings.Contains(callbackURL, "#") || u.RawQuery == "" {
+		return LoginStatus{}, ErrInvalidOAuthCallback
+	}
+	query, err := url.ParseQuery(u.RawQuery)
+	if err != nil || len(query["state"]) != 1 || len(query["code"]) > 1 || len(query["error"]) > 1 {
+		return LoginStatus{}, ErrInvalidOAuthCallback
+	}
+	state := query.Get("state")
+	code := query.Get("code")
+	oauthError := query.Get("error")
+	if state == "" || (code == "" && oauthError == "") || (code != "" && oauthError != "") {
+		return LoginStatus{}, ErrInvalidOAuthCallback
+	}
+	callbackURI := (&url.URL{Scheme: u.Scheme, Host: u.Host, Path: u.Path, RawPath: u.RawPath}).String()
+	return m.processLoginCallback(ctx, callbackURI, state, code, oauthError)
+}
+
+func (m *Manager) processLoginCallback(ctx context.Context, callbackURI, state, code, oauthError string) (LoginStatus, error) {
 	m.mu.Lock()
 	_ = m.cleanupSessionsLocked(time.Now())
 	sessionID := m.stateToID[state]
 	session := m.sessions[sessionID]
-	if state == "" || session == nil || session.State != state || session.Status != "pending" {
+	if state == "" || session == nil || session.State != state || !sameCallbackURI(callbackURI, session.RedirectURI) {
 		m.mu.Unlock()
-		writeCallbackPage(w, "授权链接无效或已使用", false)
-		return
+		return LoginStatus{}, ErrInvalidOAuthCallback
 	}
-	delete(m.stateToID, state)
+	if session.Status != "pending" {
+		status := LoginStatus{Status: session.Status, Message: session.Message, Account: session.Account}
+		m.mu.Unlock()
+		return status, nil
+	}
 	session.Status = "processing"
 	m.mu.Unlock()
 
-	if r.URL.Query().Get("error") != "" {
+	if oauthError != "" {
 		m.finishLogin(sessionID, nil, "用户取消了授权", false)
-		writeCallbackPage(w, "授权未完成，可以关闭此页面", false)
-		return
+		status, _ := m.Status(sessionID)
+		return status, nil
 	}
-	code := r.URL.Query().Get("code")
 	if code == "" {
 		m.finishLogin(sessionID, nil, "授权回调缺少 code", false)
-		writeCallbackPage(w, "授权回调无效，请返回管理页面重试", false)
-		return
+		status, _ := m.Status(sessionID)
+		return status, nil
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	tokens, err := m.exchange(ctx, url.Values{
 		"grant_type":    {"authorization_code"},
@@ -385,26 +433,40 @@ func (m *Manager) handleCallback(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		m.finishLogin(sessionID, nil, "ChatGPT 令牌交换失败，请重新授权", false)
-		writeCallbackPage(w, "令牌交换失败，请返回管理页面查看状态并重试", false)
-		return
+		status, _ := m.Status(sessionID)
+		return status, nil
 	}
 	claims := tokenClaims(tokens.IDToken, tokens.AccessToken)
 	accountID := firstString(claims.Auth["chatgpt_account_id"], claims.Auth["account_id"], claims.Root["chatgpt_account_id"])
 	if accountID == "" {
 		m.finishLogin(sessionID, nil, "OAuth 返回的账户信息不完整，请重试", false)
-		writeCallbackPage(w, "账户信息不完整，请返回管理页面重试", false)
-		return
+		status, _ := m.Status(sessionID)
+		return status, nil
 	}
 	metadata := accountMetadata{AccountID: accountID, Email: firstString(claims.Root["email"], claims.Auth["email"]), Plan: firstString(claims.Auth["chatgpt_plan_type"], claims.Auth["plan_type"])}
 	item, err := m.saveTokens(tokens, metadata)
 	if err != nil {
 		m.finishLogin(sessionID, nil, "保存 ChatGPT OAuth 账户失败", false)
-		writeCallbackPage(w, "保存账户失败，请返回管理页面查看日志", false)
-		return
+		status, _ := m.Status(sessionID)
+		return status, nil
 	}
 	view, _ := m.Account(item.ID)
 	m.finishLogin(sessionID, &view, "", true)
-	writeCallbackPage(w, "ChatGPT 账户已连接，可以关闭此页面", true)
+	status, _ := m.Status(sessionID)
+	return status, nil
+}
+
+func sameCallbackURI(actual, expected string) bool {
+	a, err := url.Parse(actual)
+	if err != nil {
+		return false
+	}
+	e, err := url.Parse(expected)
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(a.Scheme, e.Scheme) && strings.EqualFold(a.Hostname(), e.Hostname()) &&
+		a.Port() == e.Port() && a.EscapedPath() == e.EscapedPath()
 }
 
 type tokenResponse struct {
