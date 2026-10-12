@@ -1278,8 +1278,8 @@
 
                 </section>
 
-                <section x-show="activeTab === 'logs'" x-transition x-cloak class="glass rounded-lg lg:h-full lg:min-h-0 lg:overflow-hidden">
-                    <div class="flex flex-col gap-3 border-b border-line p-4">
+                <section x-show="activeTab === 'logs'" x-transition x-cloak class="glass rounded-lg lg:flex lg:h-full lg:min-h-0 lg:flex-col lg:overflow-hidden">
+                    <div class="flex flex-col gap-3 border-b border-line p-4 lg:shrink-0">
                         <div class="flex flex-wrap items-center justify-between gap-3">
                             <div>
                                 <h2 class="text-base font-extrabold text-white">请求日志</h2>
@@ -1364,7 +1364,7 @@
                          耗时列给到 8% 是为了让表头「首字/耗时」四字放得下。
                          转移轨迹 16%、错误 15%，空的时候也不会变成沙漠。
                          九列相加必须等于 100，改任一列都要在别处等量补回。 -->
-                    <div class="overflow-x-auto lg:max-h-[calc(100%-9.75rem)]">
+                    <div class="min-h-0 overflow-x-auto lg:flex-1 lg:overflow-y-auto">
                         <table class="w-full min-w-[930px] table-fixed border-collapse text-left">
                             <colgroup>
                                 <col style="width:8%">
@@ -1923,8 +1923,9 @@
                                  Provider 列表的 bg-panel/35 + hover:bg-white/[.04]。
                                  <sm 改两行堆叠（select+输入换行，按钮组随第二行右对齐），
                                  375px 也不横向滚动。 -->
-                            <div data-drag-row class="flex flex-wrap items-center gap-2 py-1.5 transition hover:bg-white/[.04] sm:flex-nowrap"
+                            <div data-drag-row class="py-1.5 transition hover:bg-white/[.04]"
                                  :class="[isRowDragSource('target', ti) ? 'gw-drag-source' : '', rowDropClass('target', ti, routeForm.targets.length)]">
+                                <div class="flex flex-wrap items-center gap-2 sm:flex-nowrap">
                                 <!-- 把手在序号左侧、与序号同属一个 flex 盒：序号列只有 w-6，
                                      再塞图标会把「主」徽标挤变形，所以把手单独占一格。
                                      只有 2 个以上候选才可拖（1 个没有顺序可言）。 -->
@@ -1997,11 +1998,12 @@
                                         <span class="material-symbols-outlined text-[16px]">delete</span>
                                     </button>
                                 </div>
+                                </div>
                                 <!-- 候选级上限：就地展开在该行正下方，占满整行宽度（序号列右侧起），
                                      由该候选自己的 limitsOpen 控制。两个数字框 + 行内小标签，
                                      不再各自带整行大标签——表头和分区头已经交代了上下文。 -->
                                 <div x-show="target.limitsOpen" x-transition x-cloak :id="'route-target-limits-' + ti"
-                                     class="flex w-full flex-wrap items-center gap-2 pb-1 pl-8 text-xs text-muted">
+                                     class="flex min-w-0 flex-wrap items-center gap-2 pb-1 pl-8 pt-2 text-xs text-muted">
                                     <label :for="'route-target-max-tokens-' + ti" class="shrink-0">最大输出</label>
                                     <input autocomplete="off" :id="'route-target-max-tokens-' + ti" type="number" x-model.number="target.maxTokens"
                                            placeholder="跟随路由/上游" class="field w-32 py-1 text-sm">
