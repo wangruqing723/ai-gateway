@@ -508,6 +508,10 @@
                                                 <span class="text-xs"><span class="font-bold text-text">上游 5xx</span><span class="mt-0.5 block text-muted">服务端错误</span></span>
                                             </label>
                                             <label class="flex cursor-pointer items-start gap-3 rounded-lg border border-line bg-ink px-3 py-2">
+                                                <input autocomplete="off" type="checkbox" x-model="config.failover.onClientError" class="mt-0.5 h-4 w-4 rounded border-line bg-panel text-cyan2 focus:ring-cyan2">
+                                                <span class="text-xs"><span class="font-bold text-text">其他上游 4xx</span><span class="mt-0.5 block text-muted">400 / 404 等状态码，默认允许转移</span></span>
+                                            </label>
+                                            <label class="flex cursor-pointer items-start gap-3 rounded-lg border border-line bg-ink px-3 py-2">
                                                 <input autocomplete="off" type="checkbox" x-model="config.failover.onRateLimit" class="mt-0.5 h-4 w-4 rounded border-line bg-panel text-cyan2 focus:ring-cyan2">
                                                 <span class="text-xs"><span class="font-bold text-text">上游 429</span><span class="mt-0.5 block text-muted">候选属不同厂商 / 账号时才有意义</span></span>
                                             </label>
@@ -525,7 +529,7 @@
                                             </label>
                                             <label class="flex cursor-pointer items-start gap-3 rounded-lg border border-line bg-ink px-3 py-2 sm:col-span-2">
                                                 <input autocomplete="off" type="checkbox" x-model="config.failover.onAuthError" class="mt-0.5 h-4 w-4 rounded border-line bg-panel text-cyan2 focus:ring-cyan2">
-                                                <span class="text-xs"><span class="font-bold text-warn">401 / 403</span><span class="mt-0.5 block text-muted">默认关闭：密钥配错时转移只会连锁失败，还会掩盖真实原因</span></span>
+                                                <span class="text-xs"><span class="font-bold text-text">上游 401 / 403</span><span class="mt-0.5 block text-muted">默认允许转移；可单独关闭认证错误转移</span></span>
                                             </label>
                                         </div>
                                         <p class="mt-2 text-xs text-muted">流式活跃超时不可配置转移：那时字节已经写给客户端，重发会污染流。</p>
@@ -551,7 +555,7 @@
                                     </div>
                                     <p class="mt-2 text-xs text-muted">
                                         计入失败：连接错误、超时、5xx，以及拿到 2xx 响应头之后才失败（流中途断开、活跃超时）。
-                                        429 与 401/403 不计入。状态见「监控」页，也可用 /health 的 breakers 字段查看。
+                                        4xx 不计入熔断，但可按上方开关触发候选转移。状态见「监控」页，也可用 /health 的 breakers 字段查看。
                                     </p>
                                 </div>
 
@@ -643,14 +647,21 @@
                                                               tabindex="0" x-text="provider.baseUrl || ''"></span>
                                                     </td>
                                                     <td class="w-px whitespace-nowrap px-2 py-2.5 text-center">
-                                                        <span x-show="provider.apiKeyConfigured"
+                                                <span x-show="provider.authType === 'chatgptOAuth'"
+                                                      class="chip inline-flex px-1.5 text-[10px] font-bold text-cyan"
+                                                      @mouseenter="showTip('ChatGPT OAuth 账户', $event)"
+                                                      @mouseleave="hideTip()"
+                                                      @focus="showTip('ChatGPT OAuth 账户', $event)"
+                                                      @blur="hideTip()"
+                                                      tabindex="0">OAuth</span>
+                                                <span x-show="provider.authType !== 'chatgptOAuth' && provider.apiKeyConfigured"
                                                               class="material-symbols-outlined text-[18px] text-good"
                                                               @mouseenter="showTip('已配置密钥', $event)"
                                                               @mouseleave="hideTip()"
                                                               @focus="showTip('已配置密钥', $event)"
                                                               @blur="hideTip()"
                                                               tabindex="0">key</span>
-                                                        <span x-show="!provider.apiKeyConfigured"
+                                                <span x-show="provider.authType !== 'chatgptOAuth' && !provider.apiKeyConfigured"
                                                               class="material-symbols-outlined text-[18px] text-muted"
                                                               @mouseenter="showTip('未配置，从客户端请求头读取', $event)"
                                                               @mouseleave="hideTip()"
@@ -692,6 +703,46 @@
                                         </tbody>
                                     </table>
                                 </div>
+                                <div class="border-t border-line p-4">
+                                    <div class="flex flex-wrap items-center justify-between gap-3">
+                                        <div>
+                                            <h3 class="text-sm font-bold text-white">ChatGPT OAuth 账户</h3>
+                                            <p class="mt-1 text-xs text-muted">通过 Codex OAuth 授权，令牌保存在本机 data 目录中。</p>
+                                        </div>
+                                        <div class="flex gap-2">
+                                            <button @click="loadChatGPTAccounts(true)" :disabled="loadingChatGPTAccounts" class="btn btn-secondary px-3 py-2">
+                                                <span class="material-symbols-outlined text-[18px]" :class="loadingChatGPTAccounts && 'gw-spin'">refresh</span>
+                                                刷新
+                                            </button>
+                                            <button @click="openChatGPTOAuthDialog()" :disabled="startingChatGPTOAuth" class="btn btn-primary px-3 py-2 disabled:opacity-60">
+                                                <span class="material-symbols-outlined text-[18px]" :class="startingChatGPTOAuth && 'gw-spin'">add</span>
+                                                <span x-text="oauthLoginSession ? '查看授权' : '连接账户'"></span>
+                                            </button>
+                                        </div>
+                                    </div>
+                                    <div x-show="chatgptAccounts.length === 0" x-cloak class="mt-3 rounded-lg border border-dashed border-line px-4 py-5 text-center text-sm text-muted">
+                                        尚未连接 ChatGPT 账户。连接后可在 Provider 配置中绑定。
+                                    </div>
+                                    <div class="mt-3 grid gap-2 sm:grid-cols-2">
+                                        <template x-for="account in chatgptAccounts" :key="account.id">
+                                            <article class="rounded-lg border border-line bg-panel2/50 p-3">
+                                                <div class="flex items-start justify-between gap-3">
+                                                    <div class="min-w-0">
+                                                        <div class="truncate text-sm font-bold text-white" x-text="account.email || account.id"></div>
+                                                        <div class="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted">
+                                                            <span x-show="account.plan" x-text="account.plan"></span>
+                                                            <span class="chip px-1.5 text-[10px]" :class="account.status === 'ready' ? 'border-good/40 bg-good/10 text-good' : 'border-danger/40 bg-danger/10 text-danger'" x-text="account.status === 'ready' ? '已授权' : '需重新授权'"></span>
+                                                        </div>
+                                                    </div>
+                                                    <button @click="removeChatGPTAccount(account)" :disabled="account.providers?.length" :title="account.providers?.length ? '先解除 Provider 绑定：' + account.providers.join(', ') : '删除账户'" class="btn btn-danger px-2 py-1.5 disabled:cursor-not-allowed disabled:opacity-40" aria-label="删除 ChatGPT 账户">
+                                                        <span class="material-symbols-outlined text-[18px]">delete</span>
+                                                    </button>
+                                                </div>
+                                                <div class="mt-2 truncate font-mono text-[10px] text-muted" x-text="account.providers?.length ? '绑定 Provider：' + account.providers.join(', ') : '未绑定 Provider'"></div>
+                                            </article>
+                                        </template>
+                                    </div>
+                                </div>
                             </section>
                         </div>
 
@@ -703,7 +754,7 @@
                     <aside id="config-preview-drawer"
                            x-show="isConfigTab() && editMode === 'visual' && previewDrawerOpen" x-transition
                            x-cloak @keydown.escape.window="previewDrawerOpen && closePreviewDrawer()"
-                           class="fixed bottom-0 right-0 top-0 z-50 flex w-full max-w-[calc(100vw-1rem)] flex-col border-l border-line bg-panel shadow-glow sm:w-[32rem]">
+                           class="fixed bottom-0 right-0 top-0 z-50 flex w-full max-w-[calc(100vw-1rem)] flex-col border-l border-line bg-panel shadow-glow sm:w-[33.6rem]">
                         <section class="flex min-h-0 flex-1 flex-col">
                             <div class="flex shrink-0 items-center justify-between border-b border-line p-4">
                                 <div class="flex items-center gap-2 font-bold text-white">
@@ -1278,8 +1329,8 @@
 
                 </section>
 
-                <section x-show="activeTab === 'logs'" x-transition x-cloak class="glass rounded-lg lg:h-full lg:min-h-0 lg:overflow-hidden">
-                    <div class="flex flex-col gap-3 border-b border-line p-4">
+                <section x-show="activeTab === 'logs'" x-transition x-cloak class="glass rounded-lg lg:flex lg:h-full lg:min-h-0 lg:flex-col lg:overflow-hidden">
+                    <div class="flex flex-col gap-3 border-b border-line p-4 lg:shrink-0">
                         <div class="flex flex-wrap items-center justify-between gap-3">
                             <div>
                                 <h2 class="text-base font-extrabold text-white">请求日志</h2>
@@ -1364,7 +1415,7 @@
                          耗时列给到 8% 是为了让表头「首字/耗时」四字放得下。
                          转移轨迹 16%、错误 15%，空的时候也不会变成沙漠。
                          九列相加必须等于 100，改任一列都要在别处等量补回。 -->
-                    <div class="overflow-x-auto lg:max-h-[calc(100%-9.75rem)]">
+                    <div class="min-h-0 overflow-x-auto lg:flex-1 lg:overflow-y-auto">
                         <table class="w-full min-w-[930px] table-fixed border-collapse text-left">
                             <colgroup>
                                 <col style="width:8%">
@@ -1714,9 +1765,17 @@
                             <span class="mt-1 block text-xs text-muted" x-show="!editingProvider" x-cloak
                                   x-text="`最多 ${maxProviderNameLen} 个字符，已用 ${[...(providerForm.name || '')].length}`"></span>
                         </label>
+                        <label class="block sm:col-span-2">
+                            <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">认证方式</span>
+                            <select autocomplete="off" x-model="providerForm.authType" @change="providerAuthTypeChanged()" class="field">
+                                <option value="">API Key / 客户端请求头</option>
+                                <option value="chatgptOAuth">ChatGPT OAuth（Codex）</option>
+                            </select>
+                            <span class="mt-1 block text-xs text-muted">ChatGPT OAuth 令牌由网关安全保存，Provider 只关联账户 ID。</span>
+                        </label>
                         <label class="block">
                             <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">格式</span>
-                            <select autocomplete="off" x-model="providerForm.format" class="field">
+                            <select autocomplete="off" x-model="providerForm.format" :disabled="providerForm.authType === 'chatgptOAuth'" class="field disabled:cursor-not-allowed disabled:opacity-60">
                                 <option value="anthropic">Anthropic</option>
                                 <option value="openai">OpenAI Chat Completions</option>
                                 <option value="openai-responses">OpenAI Responses</option>
@@ -1725,9 +1784,24 @@
                     </div>
                     <label class="mt-4 block">
                         <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">Base URL</span>
-                        <input autocomplete="off" type="text" x-model="providerForm.baseUrl" placeholder="https://api.example.com" class="field">
+                        <input autocomplete="off" type="text" x-model="providerForm.baseUrl" :disabled="providerForm.authType === 'chatgptOAuth'" placeholder="https://api.example.com" class="field disabled:cursor-not-allowed disabled:opacity-60">
                     </label>
-                    <div class="mt-4 block">
+                    <div x-show="providerForm.authType === 'chatgptOAuth'" x-cloak class="mt-4 rounded-lg border border-line bg-panel2/50 p-3">
+                        <label class="block">
+                            <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">ChatGPT 账户</span>
+                            <select autocomplete="off" x-model="providerForm.accountId" class="field">
+                                <option value="">选择已连接账户</option>
+                                <template x-for="account in chatgptAccounts" :key="account.id">
+                                    <option :value="account.id" :disabled="account.status !== 'ready'" x-text="(account.email || account.id) + (account.status === 'ready' ? '' : '（需重新授权）')"></option>
+                                </template>
+                            </select>
+                        </label>
+                        <div class="mt-2 flex flex-wrap items-center justify-between gap-2 text-xs text-muted">
+                            <span>上游地址和 Responses 格式由 OAuth 类型固定。</span>
+                            <button type="button" @click="openChatGPTOAuthDialog()" :disabled="startingChatGPTOAuth" class="text-cyan hover:text-white disabled:opacity-60">+ 连接新账户</button>
+                        </div>
+                    </div>
+                    <div x-show="providerForm.authType !== 'chatgptOAuth'" class="mt-4 block">
                         <label for="provider-api-key" class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">API Key</label>
                         <input autocomplete="off" id="provider-api-key" type="password" x-model="providerForm.apiKey"
                                :placeholder="providerForm.apiKeyConfigured ? '已配置，留空保持不变' : '留空则从客户端请求头提取'"
@@ -1857,7 +1931,7 @@
             </div>
             <div class="flex shrink-0 justify-end gap-3 border-t border-line p-5">
                 <button @click="showProviderModal = false" class="btn btn-secondary">取消</button>
-                <button @click="probeProviderForm()" :disabled="probingProvider" class="btn btn-secondary disabled:opacity-60">
+                <button x-show="providerForm.authType !== 'chatgptOAuth'" @click="probeProviderForm()" :disabled="probingProvider" class="btn btn-secondary disabled:opacity-60">
                     <span class="material-symbols-outlined" :class="probingProvider && 'gw-spin'" x-text="probingProvider ? 'progress_activity' : 'health_and_safety'"></span>
                     <span x-text="probingProvider ? '检测中…' : '检测'"></span>
                 </button>
@@ -1923,8 +1997,9 @@
                                  Provider 列表的 bg-panel/35 + hover:bg-white/[.04]。
                                  <sm 改两行堆叠（select+输入换行，按钮组随第二行右对齐），
                                  375px 也不横向滚动。 -->
-                            <div data-drag-row class="flex flex-wrap items-center gap-2 py-1.5 transition hover:bg-white/[.04]"
+                            <div data-drag-row class="py-1.5 transition hover:bg-white/[.04]"
                                  :class="[isRowDragSource('target', ti) ? 'gw-drag-source' : '', rowDropClass('target', ti, routeForm.targets.length)]">
+                                <div class="flex flex-wrap items-center gap-2 sm:flex-nowrap">
                                 <!-- 把手在序号左侧、与序号同属一个 flex 盒：序号列只有 w-6，
                                      再塞图标会把「主」徽标挤变形，所以把手单独占一格。
                                      只有 2 个以上候选才可拖（1 个没有顺序可言）。 -->
@@ -1997,11 +2072,12 @@
                                         <span class="material-symbols-outlined text-[16px]">delete</span>
                                     </button>
                                 </div>
+                                </div>
                                 <!-- 候选级上限：就地展开在该行正下方，占满整行宽度（序号列右侧起），
                                      由该候选自己的 limitsOpen 控制。两个数字框 + 行内小标签，
                                      不再各自带整行大标签——表头和分区头已经交代了上下文。 -->
                                 <div x-show="target.limitsOpen" x-transition x-cloak :id="'route-target-limits-' + ti"
-                                     class="flex w-full flex-wrap items-center gap-2 pb-1 pl-8 text-xs text-muted">
+                                     class="flex min-w-0 flex-wrap items-center gap-2 pb-1 pl-8 pt-2 text-xs text-muted">
                                     <label :for="'route-target-max-tokens-' + ti" class="shrink-0">最大输出</label>
                                     <input autocomplete="off" :id="'route-target-max-tokens-' + ti" type="number" x-model.number="target.maxTokens"
                                            placeholder="跟随路由/上游" class="field w-32 py-1 text-sm">
@@ -2191,6 +2267,63 @@
         </div>
     </div>
 
+    <!-- ChatGPT OAuth 授权方式选择。连接账户入口只打开此弹窗，不会创建会话或打开浏览器页面。 -->
+    <div x-show="showChatGPTOAuthDialog" x-transition.opacity x-cloak
+         @keydown.escape.window="closeChatGPTOAuthDialog()"
+         class="fixed inset-0 z-[80] grid place-items-center overflow-y-auto bg-black/70 p-4">
+        <div class="glass w-full max-w-2xl rounded-lg shadow-glow" role="dialog" aria-modal="true" aria-labelledby="chatgpt-oauth-title">
+            <div class="flex items-start justify-between gap-4 border-b border-line p-5">
+                <div>
+                    <h3 id="chatgpt-oauth-title" class="text-base font-extrabold text-white">连接 ChatGPT 账户</h3>
+                    <p class="mt-1 text-sm text-muted">连接账户不会自动打开页面。生成授权链接后，可在新标签页打开或复制；完成授权后，如果服务未自动接收回调，可粘贴 ChatGPT 返回的完整回调链接。</p>
+                </div>
+                <button type="button" @click="closeChatGPTOAuthDialog()" class="btn btn-secondary px-2 py-2" aria-label="关闭授权弹窗">
+                    <span class="material-symbols-outlined">close</span>
+                </button>
+            </div>
+            <div class="space-y-4 p-5">
+                <p x-show="chatGPTOAuthDialogMessage" x-cloak role="status"
+                   :class="chatGPTOAuthDialogMessageType === 'error' ? 'text-danger' : chatGPTOAuthDialogMessageType === 'success' ? 'text-good' : 'text-muted'"
+                   class="text-sm" x-text="chatGPTOAuthDialogMessage"></p>
+                <div x-show="oauthLoginSession" x-cloak class="rounded-lg border border-cyan/30 bg-cyan/5 p-3 text-xs text-muted">
+                    授权会话正在等待完成；此弹窗可以关闭，后台仍会继续查询授权状态。再次点击“查看授权”可重新打开本弹窗。
+                </div>
+                <div x-show="chatGPTOAuthAuthURL" x-cloak class="space-y-2">
+                    <label for="chatgpt-oauth-auth-url" class="block text-xs font-bold uppercase tracking-wide text-muted">授权链接（可手动选中复制）</label>
+                    <textarea id="chatgpt-oauth-auth-url" x-ref="chatGPTOAuthURL" readonly rows="3" :value="chatGPTOAuthAuthURL"
+                              class="field resize-y break-all font-mono text-xs leading-relaxed"></textarea>
+                </div>
+                <div x-show="oauthLoginSession && chatGPTOAuthAuthURL" x-cloak class="space-y-2">
+                    <label for="chatgpt-oauth-return-url" class="block text-xs font-bold uppercase tracking-wide text-muted">ChatGPT 授权后的回调链接</label>
+                    <textarea id="chatgpt-oauth-return-url" autocomplete="off" spellcheck="false" rows="3"
+                              x-model="chatGPTOAuthReturnURL" :disabled="submittingChatGPTOAuthCallback"
+                              placeholder="http://localhost:1455/auth/callback?code=...&amp;state=..."
+                              class="field resize-y break-all font-mono text-xs leading-relaxed disabled:opacity-60"></textarea>
+                    <p class="text-xs leading-relaxed text-muted">完成 ChatGPT 授权后，服务会尝试自动接收回调。如果没有自动完成，请复制浏览器地址栏中的完整回调链接（需包含 code 和 state）粘贴到这里。</p>
+                    <button type="button" @click="submitChatGPTOAuthCallback()"
+                            :disabled="submittingChatGPTOAuthCallback || !chatGPTOAuthReturnURL.trim()"
+                            class="btn btn-secondary disabled:cursor-not-allowed disabled:opacity-50">
+                        <span x-show="submittingChatGPTOAuthCallback" x-cloak class="material-symbols-outlined gw-spin text-[18px]">progress_activity</span>
+                        <span x-text="submittingChatGPTOAuthCallback ? '正在提交…' : '提交回调链接'"></span>
+                    </button>
+                </div>
+            </div>
+            <div class="flex flex-wrap items-center justify-between gap-3 border-t border-line p-5">
+                <button type="button" @click="closeChatGPTOAuthDialog()" class="btn btn-secondary">关闭</button>
+                <div class="flex flex-wrap justify-end gap-2">
+                    <button type="button" @click="startChatGPTOAuth('copy')"
+                            :disabled="startingChatGPTOAuth || submittingChatGPTOAuthCallback"
+                            class="btn btn-secondary disabled:cursor-not-allowed disabled:opacity-50"
+                            x-text="oauthLoginSession ? (chatGPTOAuthCopied ? '已复制，可再次复制' : '一键复制授权链接') : '生成并复制授权链接'"></button>
+                    <button type="button" @click="startChatGPTOAuth('open')"
+                            :disabled="startingChatGPTOAuth || submittingChatGPTOAuthCallback"
+                            class="btn btn-primary disabled:cursor-not-allowed disabled:opacity-50"
+                            x-text="oauthLoginSession ? '重新打开授权页面' : '打开授权页面'"></button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- 路由列表行内编辑的上游模型列表浮层。
          fixed 定位、且挂在表格外面：路由表外层是 overflow-x-auto，absolute
          浮层会被滚动容器裁掉（同下面 immediate-tooltip 的成因）。位置由
@@ -2274,6 +2407,18 @@
                 // 弹窗临时探测与首页已落盘 provider 的健康缓存隔离，绝不复用 checkingProvider。
                 probingProvider: false,
                 providerProbeStatus: null,
+                chatgptAccounts: [],
+                loadingChatGPTAccounts: false,
+                showChatGPTOAuthDialog: false,
+                chatGPTOAuthAuthURL: '',
+                chatGPTOAuthReturnURL: '',
+                chatGPTOAuthCopied: false,
+                chatGPTOAuthDialogMessage: '',
+                chatGPTOAuthDialogMessageType: 'info',
+                startingChatGPTOAuth: false,
+                submittingChatGPTOAuthCallback: false,
+                oauthLoginSession: null,
+                _oauthPollTimer: null,
                 resettingBreakers: false,
                 // 同理：正在单独重置熔断器的 provider 名
                 resettingBreaker: null,
@@ -2348,11 +2493,12 @@
                         maxRetryAfterMs: null,
                         onTransportError: true,
                         onServerError: true,
+                        onClientError: true,
                         onRateLimit: true,
                         onQueueTimeout: true,
                         onStreamHeaderTimeout: true,
                         onRequestTimeout: false,
-                        onAuthError: false
+                        onAuthError: true
                     },
                     breaker: {
                         enabled: false,
@@ -2399,6 +2545,8 @@
                     baseUrl: '',
                     apiKey: '',
                     format: 'anthropic',
+                    authType: '',
+                    accountId: '',
                     maxConcurrent: 5,
                     maxPerSecond: 0,
                     maxQueueWait: 30000,
@@ -2461,6 +2609,7 @@
                 ],
                 async init() {
                     await this.loadConfig();
+                    await this.loadChatGPTAccounts();
                     if (this.monitorPollingAllowed()) await this.refreshMonitor();
                     this._monitorPollTimer = window.setInterval(() => {
                         if (this.monitorPollingAllowed()) this.refreshMonitor(false);
@@ -2507,6 +2656,7 @@
 
                 destroy() {
                     if (this._monitorPollTimer !== null) window.clearInterval(this._monitorPollTimer);
+                    if (this._oauthPollTimer !== null) window.clearInterval(this._oauthPollTimer);
                     if (this._monitorVisibilityHandler) {
                         document.removeEventListener('visibilitychange', this._monitorVisibilityHandler);
                     }
@@ -2523,6 +2673,8 @@
                             apiKey: pick(p, 'apiKey', 'APIKey') || '',
                             apiKeyConfigured: !!pick(p, 'apiKeyConfigured', 'APIKeyConfigured'),
                             format: pick(p, 'format', 'Format') || 'anthropic',
+                            authType: pick(p, 'authType', 'AuthType') || '',
+                            accountId: pick(p, 'accountId', 'AccountID') || '',
                             maxConcurrent: pick(p, 'maxConcurrent', 'MaxConcurrent') || 5,
                             maxPerSecond: pick(p, 'maxPerSecond', 'MaxPerSecond') || 0,
                             maxQueueWait: pick(p, 'maxQueueWait', 'MaxQueueWait') || 30000,
@@ -2685,13 +2837,14 @@
                         maxRetryAfterMs: num(f.maxRetryAfterMs),
                         onTransportError: bool(f.onTransportError, true),
                         onServerError: bool(f.onServerError, true),
+                        onClientError: bool(f.onClientError, true),
                         onRateLimit: bool(f.onRateLimit, true),
                         onQueueTimeout: bool(f.onQueueTimeout, true),
                         onStreamHeaderTimeout: bool(f.onStreamHeaderTimeout, true),
                         // 默认 false：非流式整体超时转移会让总耗时接近翻倍
                         onRequestTimeout: bool(f.onRequestTimeout, false),
-                        // 默认 false：401/403 通常是配置问题，转移只会连锁失败并掩盖原因
-                        onAuthError: bool(f.onAuthError, false)
+                        // 4xx 默认均允许转移；认证失败仍可通过该开关单独关闭
+                        onAuthError: bool(f.onAuthError, true)
                     };
                 },
 
@@ -3007,6 +3160,7 @@
                         const result = await res.json();
                         this.showStatus((result.message || '配置已保存') + this.restartSuffix(result), 'success');
                         await this.loadConfig();
+                        await this.loadChatGPTAccounts();
                         if (this.editMode === 'yaml') await this.loadYamlConfig();
                         return true;
                     } catch (err) {
@@ -3029,6 +3183,7 @@
                         const result = await res.json();
                         this.showStatus((result.message || '配置已重载') + this.restartSuffix(result), 'success');
                         await this.loadConfig();
+                        await this.loadChatGPTAccounts();
                         if (this.editMode === 'yaml') await this.loadYamlConfig();
                     } catch (err) {
                         this.showStatus('重载失败: ' + err.message, 'error');
@@ -3042,10 +3197,10 @@
                     return fields.length ? `；需重启生效: ${fields.join(', ')}` : '';
                 },
 
-                // ESC 逐层退出，不一次关穿。确认弹窗（z-80）叠在编辑弹窗（z-50）之上时，
-                // 它自己的 escape 监听负责关它，这里必须让路，否则一次 ESC 会把两层一起关掉。
+                // ESC 逐层退出，不一次关穿。确认弹窗或 OAuth 授权弹窗叠在编辑弹窗之上时，
+                // 高层弹窗自己的 escape 监听负责关它，这里必须让路，不能顺手关闭编辑表单。
                 escapeProviderModal() {
-                    if (this.confirmDialog.open) return;
+                    if (this.confirmDialog.open || this.showChatGPTOAuthDialog) return;
                     this.showProviderModal = false;
                 },
 
@@ -3152,6 +3307,8 @@
                             baseUrl: provider.baseUrl || '',
                             apiKey: provider.apiKey || '',
                             format: provider.format || 'anthropic',
+                            authType: provider.authType || undefined,
+                            accountId: provider.accountId || undefined,
                             maxConcurrent: provider.maxConcurrent || 5,
                             maxPerSecond: provider.maxPerSecond || 0,
                             maxQueueWait: provider.maxQueueWait || 30000,
@@ -3226,6 +3383,7 @@
                         maxRetryAfterMs: this.numOrNull(f.maxRetryAfterMs),
                         onTransportError: !!f.onTransportError,
                         onServerError: !!f.onServerError,
+                        onClientError: !!f.onClientError,
                         onRateLimit: !!f.onRateLimit,
                         onQueueTimeout: !!f.onQueueTimeout,
                         onStreamHeaderTimeout: !!f.onStreamHeaderTimeout,
@@ -4217,6 +4375,7 @@
                     [
                         ['onTransportError', f.onTransportError],
                         ['onServerError', f.onServerError],
+                        ['onClientError', f.onClientError],
                         ['onRateLimit', f.onRateLimit],
                         ['onQueueTimeout', f.onQueueTimeout],
                         ['onStreamHeaderTimeout', f.onStreamHeaderTimeout],
@@ -4276,9 +4435,11 @@
                         const lines = [
                             `  ${name}:`,
                             `    baseUrl: "${p.baseUrl || ''}"`,
-                            `    apiKey: "${p.apiKey || ''}"`,
+                            ...(p.authType === 'chatgptOAuth' ? [] : [`    apiKey: "${p.apiKey || ''}"`]),
                             `    format: ${p.format || 'anthropic'}`
                         ];
+                        if (p.authType) lines.push(`    authType: ${p.authType}`);
+                        if (p.accountId) lines.push(`    accountId: ${p.accountId}`);
                         // 只在配了时才输出，与后端 yaml omitempty 一致，避免预览里
                         // 给每个 provider 都摆一行空 userAgent；配了却不显示则是假预览。
                         if (p.userAgent) lines.push(`    userAgent: "${p.userAgent}"`);
@@ -4352,6 +4513,247 @@
                     }
                 },
 
+                async loadChatGPTAccounts(showError = false) {
+                    this.loadingChatGPTAccounts = true;
+                    try {
+                        const res = await fetch('/api/chatgpt/accounts');
+                        if (!res.ok) throw new Error(await this.errorText(res, '读取 ChatGPT 账户失败'));
+                        const data = await res.json();
+                        this.chatgptAccounts = Array.isArray(data.data) ? data.data : [];
+                    } catch (err) {
+                        if (showError) this.showStatus('读取 ChatGPT 账户失败: ' + err.message, 'error');
+                    } finally {
+                        this.loadingChatGPTAccounts = false;
+                    }
+                },
+
+                openChatGPTOAuthDialog() {
+                    if (this.oauthLoginSession) {
+                        this.showChatGPTOAuthDialog = true;
+                        return;
+                    }
+                    this.showChatGPTOAuthDialog = true;
+                    this.chatGPTOAuthAuthURL = '';
+                    this.chatGPTOAuthReturnURL = '';
+                    this.chatGPTOAuthCopied = false;
+                    this.chatGPTOAuthDialogMessage = '';
+                    this.chatGPTOAuthDialogMessageType = 'info';
+                },
+
+                closeChatGPTOAuthDialog() {
+                    this.showChatGPTOAuthDialog = false;
+                    if (!this.oauthLoginSession) {
+                        this.chatGPTOAuthAuthURL = '';
+                        this.chatGPTOAuthReturnURL = '';
+                        this.chatGPTOAuthCopied = false;
+                    }
+                },
+
+                async copyChatGPTOAuthURL() {
+                    if (!this.chatGPTOAuthAuthURL) return;
+                    try {
+                        if (!navigator.clipboard?.writeText) throw new Error('当前浏览器未提供剪贴板权限');
+                        await navigator.clipboard.writeText(this.chatGPTOAuthAuthURL);
+                        this.chatGPTOAuthCopied = true;
+                        this.chatGPTOAuthDialogMessage = '授权链接已复制。请在浏览器中打开链接并完成登录。';
+                        this.chatGPTOAuthDialogMessageType = 'success';
+                    } catch (err) {
+                        this.chatGPTOAuthCopied = false;
+                        this.chatGPTOAuthDialogMessage = '浏览器未允许自动复制，请选中下方授权链接手动复制。';
+                        this.chatGPTOAuthDialogMessageType = 'error';
+                        this.showStatus('自动复制失败，请在弹窗中选中授权链接并手动复制：' + err.message, 'error');
+                        await this.$nextTick();
+                        this.$refs.chatGPTOAuthURL?.focus();
+                        this.$refs.chatGPTOAuthURL?.select();
+                    }
+                },
+
+                openChatGPTOAuthURL() {
+                    if (!this.chatGPTOAuthAuthURL) return;
+                    const tab = window.open(this.chatGPTOAuthAuthURL, '_blank');
+                    if (!tab) {
+                        this.chatGPTOAuthDialogMessage = '浏览器拦截了新标签页，请允许此页面打开新标签页，或复制授权链接后手动打开。';
+                        this.chatGPTOAuthDialogMessageType = 'error';
+                        this.showStatus(this.chatGPTOAuthDialogMessage, 'error');
+                        return null;
+                    }
+                    try { tab.opener = null; } catch (_) {}
+                    return tab;
+                },
+
+                async startChatGPTOAuth(mode) {
+                    if (this.startingChatGPTOAuth || this.submittingChatGPTOAuthCallback) return;
+                    if (this.oauthLoginSession && this.chatGPTOAuthAuthURL) {
+                        if (mode === 'copy') await this.copyChatGPTOAuthURL();
+                        else this.openChatGPTOAuthURL();
+                        return;
+                    }
+
+                    // 点击处理器内同步打开空白标签页，避免异步创建会话后被浏览器拦截。
+                    const tab = mode === 'open'
+                        ? window.open('about:blank', '_blank')
+                        : null;
+                    if (mode === 'open' && !tab) {
+                        this.chatGPTOAuthDialogMessage = '浏览器拦截了新标签页，请允许此页面打开新标签页，或改用复制授权链接。';
+                        this.chatGPTOAuthDialogMessageType = 'error';
+                        this.showStatus(this.chatGPTOAuthDialogMessage, 'error');
+                        return;
+                    }
+
+                    this.startingChatGPTOAuth = true;
+                    this.chatGPTOAuthDialogMessage = '正在创建授权会话…';
+                    this.chatGPTOAuthDialogMessageType = 'info';
+                    try {
+                        const res = await fetch('/api/chatgpt/oauth/start', {
+                            method: 'POST'
+                        });
+                        if (!res.ok) throw new Error(await this.errorText(res, '发起授权失败'));
+                        const data = await res.json();
+                        if (!data.sessionId || !data.authUrl) throw new Error('服务返回的授权会话信息不完整');
+                        this.oauthLoginSession = data.sessionId;
+                        this.chatGPTOAuthAuthURL = data.authUrl;
+                        this.chatGPTOAuthReturnURL = '';
+                        this.chatGPTOAuthCopied = false;
+                        this.chatGPTOAuthDialogMessage = mode === 'open' ? '授权页面已打开，请完成登录和授权。' : '授权链接已生成，正在尝试复制。';
+                        this.chatGPTOAuthDialogMessageType = 'info';
+                        if (mode === 'open') {
+                            try {
+                                tab.opener = null;
+                                tab.location.replace(data.authUrl);
+                            } catch (err) {
+                                this.chatGPTOAuthDialogMessage = '无法在新标签页打开授权页面，请复制下方授权链接手动打开。';
+                                this.chatGPTOAuthDialogMessageType = 'error';
+                                try { tab.close(); } catch (_) {}
+                            }
+                        } else {
+                            await this.copyChatGPTOAuthURL();
+                        }
+                        this.startingChatGPTOAuth = false;
+                        await this.pollChatGPTOAuth(data.sessionId, tab);
+                    } catch (err) {
+                        try { tab?.close(); } catch (_) {}
+                        this.chatGPTOAuthDialogMessage = err.message;
+                        this.chatGPTOAuthDialogMessageType = 'error';
+                        this.showStatus('发起 ChatGPT 授权失败: ' + err.message, 'error');
+                    } finally {
+                        this.startingChatGPTOAuth = false;
+                    }
+                },
+
+                async submitChatGPTOAuthCallback() {
+                    if (!this.oauthLoginSession || this.submittingChatGPTOAuthCallback) return;
+                    const callbackURL = String(this.chatGPTOAuthReturnURL || '').trim();
+                    if (!callbackURL) {
+                        this.chatGPTOAuthDialogMessage = '请粘贴 ChatGPT 授权后的完整回调链接。';
+                        this.chatGPTOAuthDialogMessageType = 'error';
+                        return;
+                    }
+                    this.submittingChatGPTOAuthCallback = true;
+                    this.chatGPTOAuthDialogMessage = '正在提交回调链接…';
+                    this.chatGPTOAuthDialogMessageType = 'info';
+                    try {
+                        const res = await fetch('/api/chatgpt/oauth/callback', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ callbackUrl: callbackURL })
+                        });
+                        if (!res.ok) throw new Error(await this.errorText(res, '提交回调链接失败'));
+                        const status = await res.json();
+                        if (status.status === 'completed') {
+                            this.chatGPTOAuthDialogMessage = `ChatGPT 账户已连接${status.account?.email ? '：' + status.account.email : ''}`;
+                            this.chatGPTOAuthDialogMessageType = 'success';
+                            await this.loadChatGPTAccounts();
+                        } else if (status.status === 'processing') {
+                            this.chatGPTOAuthDialogMessage = '回调正在处理，请稍候。';
+                            this.chatGPTOAuthDialogMessageType = 'info';
+                        } else if (status.status === 'error') {
+                            this.chatGPTOAuthDialogMessage = status.message || 'ChatGPT 授权失败，请重新授权。';
+                            this.chatGPTOAuthDialogMessageType = 'error';
+                        } else {
+                            throw new Error('服务返回了未知的授权状态');
+                        }
+                    } catch (err) {
+                        this.chatGPTOAuthDialogMessage = err.message;
+                        this.chatGPTOAuthDialogMessageType = 'error';
+                    } finally {
+                        this.submittingChatGPTOAuthCallback = false;
+                    }
+                },
+
+                async pollChatGPTOAuth(sessionID, tab) {
+                    if (this._oauthPollTimer !== null) window.clearInterval(this._oauthPollTimer);
+                    let inFlight = false;
+                    const closeTab = () => {
+                        try { if (tab && !tab.closed) tab.close(); } catch (_) {}
+                    };
+                    const stopPolling = () => {
+                        if (this._oauthPollTimer !== null) window.clearInterval(this._oauthPollTimer);
+                        this._oauthPollTimer = null;
+                        this.oauthLoginSession = null;
+                        this.chatGPTOAuthAuthURL = '';
+                        this.chatGPTOAuthReturnURL = '';
+                        this.chatGPTOAuthCopied = false;
+                    };
+                    const poll = async () => {
+                        if (this.oauthLoginSession !== sessionID || inFlight) return;
+                        inFlight = true;
+                        try {
+                            const statusRes = await fetch(`/api/chatgpt/oauth/status?sessionId=${encodeURIComponent(sessionID)}`);
+                            if (!statusRes.ok) throw new Error(await this.errorText(statusRes, '查询授权状态失败'));
+                            const status = await statusRes.json();
+                            if (status.status === 'completed') {
+                                stopPolling();
+                                closeTab();
+                                await this.loadChatGPTAccounts();
+                                this.chatGPTOAuthDialogMessage = `ChatGPT 账户已连接${status.account?.email ? '：' + status.account.email : ''}`;
+                                this.chatGPTOAuthDialogMessageType = 'success';
+                                this.showStatus(this.chatGPTOAuthDialogMessage, 'success');
+                            } else if (status.status === 'error') {
+                                stopPolling();
+                                closeTab();
+                                this.chatGPTOAuthDialogMessage = status.message || 'ChatGPT 授权失败，请重试。';
+                                this.chatGPTOAuthDialogMessageType = 'error';
+                                this.showStatus(this.chatGPTOAuthDialogMessage, 'error');
+                            }
+                        } catch (err) {
+                            stopPolling();
+                            closeTab();
+                            this.chatGPTOAuthDialogMessage = '查询授权状态失败：' + err.message;
+                            this.chatGPTOAuthDialogMessageType = 'error';
+                            this.showStatus(this.chatGPTOAuthDialogMessage, 'error');
+                        } finally {
+                            inFlight = false;
+                        }
+                    };
+                    await poll();
+                    if (this.oauthLoginSession === sessionID) this._oauthPollTimer = window.setInterval(poll, 1200);
+                },
+
+                async removeChatGPTAccount(account) {
+                    if (!account || account.providers?.length) return;
+                    if (!(await this.askConfirm(`删除账户 ${account.email || account.id} 后，本机保存的 OAuth 凭据将被清除。`, { title: '删除 ChatGPT 账户' }))) return;
+                    try {
+                        const res = await fetch(`/api/chatgpt/accounts/${encodeURIComponent(account.id)}`, { method: 'DELETE' });
+                        if (!res.ok) throw new Error(await this.errorText(res, '删除账户失败'));
+                        await this.loadChatGPTAccounts();
+                        this.showStatus('ChatGPT 账户已删除', 'success');
+                    } catch (err) {
+                        this.showStatus('删除 ChatGPT 账户失败: ' + err.message, 'error');
+                    }
+                },
+
+                providerAuthTypeChanged() {
+                    if (this.providerForm.authType === 'chatgptOAuth') {
+                        this.providerForm.baseUrl = 'https://chatgpt.com/backend-api/codex';
+                        this.providerForm.format = 'openai-responses';
+                        this.providerForm.apiKey = '';
+                        this.providerForm.apiKeyConfigured = false;
+                        this.providerForm.clearApiKey = false;
+                    } else if (this.providerForm.baseUrl === 'https://chatgpt.com/backend-api/codex') {
+                        this.providerForm.baseUrl = '';
+                    }
+                },
+
                 addProvider() {
                     this.editingProvider = null;
                     this.probingProvider = false;
@@ -4361,6 +4763,8 @@
                         baseUrl: '',
                         apiKey: '',
                         format: 'anthropic',
+                        authType: '',
+                        accountId: '',
                         maxConcurrent: 5,
                         maxPerSecond: 0,
                         maxQueueWait: 30000,
@@ -4389,6 +4793,8 @@
                         baseUrl: p.baseUrl,
                         apiKey: '',
                         format: p.format,
+                        authType: p.authType || '',
+                        accountId: p.accountId || '',
                         maxConcurrent: p.maxConcurrent,
                         maxPerSecond: p.maxPerSecond,
                         maxQueueWait: p.maxQueueWait,
@@ -4425,6 +4831,8 @@
                         baseUrl: p.baseUrl,
                         apiKey: '',
                         format: p.format,
+                        authType: p.authType || '',
+                        accountId: p.accountId || '',
                         maxConcurrent: p.maxConcurrent,
                         maxPerSecond: p.maxPerSecond,
                         maxQueueWait: p.maxQueueWait,
@@ -4480,18 +4888,26 @@
                         return;
                     }
 
+                    const oauth = this.providerForm.authType === 'chatgptOAuth';
+                    if (oauth && !this.providerForm.accountId) {
+                        this.showStatus('请选择已连接的 ChatGPT 账户，或先在 Provider 页连接账户', 'error');
+                        return;
+                    }
+
                     const existing = this.editingProvider ? this.config.providers[this.editingProvider] : null;
-                    let apiKey = this.providerForm.apiKey;
+                    let apiKey = oauth ? '' : this.providerForm.apiKey;
                     if (!apiKey && this.providerForm.apiKeyConfigured && !this.providerForm.clearApiKey) {
                         apiKey = existing?.apiKey || '';
                     }
                     if (this.providerForm.clearApiKey) apiKey = '';
                     const snapshot = this.snapshotConfig();
                     this.config.providers[this.providerForm.name] = {
-                        baseUrl: this.providerForm.baseUrl,
+                        baseUrl: oauth ? 'https://chatgpt.com/backend-api/codex' : this.providerForm.baseUrl,
                         apiKey,
                         apiKeyConfigured: apiKey !== '',
-                        format: this.providerForm.format,
+                        format: oauth ? 'openai-responses' : this.providerForm.format,
+                        authType: oauth ? 'chatgptOAuth' : undefined,
+                        accountId: oauth ? this.providerForm.accountId : undefined,
                         maxConcurrent: this.providerForm.maxConcurrent || 5,
                         maxPerSecond: this.providerForm.maxPerSecond || 0,
                         maxQueueWait: this.providerForm.maxQueueWait || 30000,
@@ -4617,6 +5033,10 @@
                 },
 
                 async probeProviderForm() {
+                    if (this.providerForm.authType === 'chatgptOAuth') {
+                        this.showStatus('ChatGPT OAuth 账户状态可在 Provider 页面查看', 'success');
+                        return;
+                    }
                     if (this.probingProvider) return;
                     if (!this.providerForm.name || !this.providerForm.baseUrl) {
                         this.showStatus('名称和 URL 不能为空', 'error');
@@ -4879,6 +5299,10 @@
                 async fetchModelsFor(providerName) {
                     const provider = this.config.providers?.[providerName];
                     if (!provider) return null;
+                    if (provider.authType === 'chatgptOAuth') {
+                        this.showStatus('ChatGPT OAuth 不提供模型目录，请在模型框中手动填写模型名', 'success');
+                        return [];
+                    }
 
                     const cacheKey = 'gw.models|' + [providerName, provider.baseUrl, provider.format].join('|');
                     const cached = this.readModelCache(cacheKey);

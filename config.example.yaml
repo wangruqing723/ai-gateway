@@ -46,6 +46,7 @@ failover:
   # 下面几项控制哪些失败允许转移，不写则用括号内默认值：
   onTransportError: true       # 连接失败、上游不可达（默认 true）
   onServerError: true          # 上游 5xx（默认 true）
+  onClientError: true          # 上游其他 4xx，不含下面单独配置的 429 / 401 / 403（默认 true）
   onRateLimit: true            # 上游 429（默认 true）
   onQueueTimeout: true         # 本地排队等待超时（默认 true）
   onStreamHeaderTimeout: true  # 流式等响应头超时，此时客户端还没收到字节（默认 true）
@@ -55,15 +56,14 @@ failover:
   # 不该为了关掉超时转移把它一起关掉。
   # 流式活跃超时不可配置转移：那时字节已写给客户端，重发会污染流。
   onRequestTimeout: false
-  onAuthError: false           # 上游 401/403（默认 false：key 配错时转移只会连锁失败并掩盖真实原因）
+  onAuthError: true            # 上游 401/403（默认 true；可单独关闭）
 
 # ── 熔断（breaker，可选）──────────────────────────────────────
 # 连续失败的 provider 会被暂时摘掉，后续请求直接跳过它换下一个候选，
 # 不必每次都等它超时。默认关闭；不写这个字段即为关闭。
 #
 # 判据只认「上游真的坏了」：传输错误、超时、5xx 计入失败；
-# 429 不计（上游正常限流，交给 failover 的 Retry-After 处理），
-# 401/403 不计（配置问题，熔断修不了还会掩盖密钥过期），
+# 所有 4xx 均不计入熔断（是否转移到其他候选由 failover 单独控制），
 # 本地队列超时不计（网关侧背压，与上游健康无关）。
 #
 # 状态机：closed →（连续失败达阈值）→ open →（冷却结束）→ half_open →（探测结果）→ closed / open。
@@ -101,6 +101,8 @@ metrics:
 
 # ── Provider 定义 ────────────────────────────────────────
 # format: anthropic | openai（Chat Completions）| openai-responses（Responses API）
+# ChatGPT OAuth Provider 使用 authType: chatgptOAuth 与 accountId，并固定 Responses 格式。
+# 账户需先在 Web 管理页「提供商」中连接；保存 Provider 时选择该账户。
 # apiKey 可选：留空则从客户端请求头中自动提取
 providers:
   mimo:

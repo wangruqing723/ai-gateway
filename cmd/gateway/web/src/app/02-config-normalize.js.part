@@ -9,6 +9,8 @@
                             apiKey: pick(p, 'apiKey', 'APIKey') || '',
                             apiKeyConfigured: !!pick(p, 'apiKeyConfigured', 'APIKeyConfigured'),
                             format: pick(p, 'format', 'Format') || 'anthropic',
+                            authType: pick(p, 'authType', 'AuthType') || '',
+                            accountId: pick(p, 'accountId', 'AccountID') || '',
                             maxConcurrent: pick(p, 'maxConcurrent', 'MaxConcurrent') || 5,
                             maxPerSecond: pick(p, 'maxPerSecond', 'MaxPerSecond') || 0,
                             maxQueueWait: pick(p, 'maxQueueWait', 'MaxQueueWait') || 30000,
@@ -171,13 +173,14 @@
                         maxRetryAfterMs: num(f.maxRetryAfterMs),
                         onTransportError: bool(f.onTransportError, true),
                         onServerError: bool(f.onServerError, true),
+                        onClientError: bool(f.onClientError, true),
                         onRateLimit: bool(f.onRateLimit, true),
                         onQueueTimeout: bool(f.onQueueTimeout, true),
                         onStreamHeaderTimeout: bool(f.onStreamHeaderTimeout, true),
                         // 默认 false：非流式整体超时转移会让总耗时接近翻倍
                         onRequestTimeout: bool(f.onRequestTimeout, false),
-                        // 默认 false：401/403 通常是配置问题，转移只会连锁失败并掩盖原因
-                        onAuthError: bool(f.onAuthError, false)
+                        // 4xx 默认均允许转移；认证失败仍可通过该开关单独关闭
+                        onAuthError: bool(f.onAuthError, true)
                     };
                 },
 

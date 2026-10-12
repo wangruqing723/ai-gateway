@@ -254,6 +254,9 @@ func TestFailoverDefaults(t *testing.T) {
 	if !f.TransferOnServerError() {
 		t.Error("onServerError 默认应为 true")
 	}
+	if !f.TransferOnClientError() {
+		t.Error("onClientError 默认应为 true")
+	}
 	if !f.TransferOnRateLimit() {
 		t.Error("onRateLimit 默认应为 true")
 	}
@@ -263,8 +266,8 @@ func TestFailoverDefaults(t *testing.T) {
 	if !f.TransferOnStreamHeaderTimeout() {
 		t.Error("onStreamHeaderTimeout 默认应为 true")
 	}
-	if f.TransferOnAuthError() {
-		t.Error("onAuthError 默认应为 false")
+	if !f.TransferOnAuthError() {
+		t.Error("onAuthError 默认应为 true")
 	}
 }
 
@@ -274,6 +277,7 @@ func TestFailoverExplicitFalseNotOverridden(t *testing.T) {
   enabled: true
   onTransportError: false
   onServerError: false
+  onClientError: false
   onRateLimit: false
   onQueueTimeout: false
   onStreamHeaderTimeout: false
@@ -289,6 +293,7 @@ func TestFailoverExplicitFalseNotOverridden(t *testing.T) {
 	}{
 		{"onTransportError", f.TransferOnTransportError()},
 		{"onServerError", f.TransferOnServerError()},
+		{"onClientError", f.TransferOnClientError()},
 		{"onRateLimit", f.TransferOnRateLimit()},
 		{"onQueueTimeout", f.TransferOnQueueTimeout()},
 		{"onStreamHeaderTimeout", f.TransferOnStreamHeaderTimeout()},
@@ -300,7 +305,7 @@ func TestFailoverExplicitFalseNotOverridden(t *testing.T) {
 	}
 }
 
-// 显式 true 也要保留（onAuthError 默认 false，显式打开必须生效）。
+// 显式 true 也要保留（onAuthError 默认 true，显式配置仍必须原样保留）。
 func TestFailoverExplicitTrueRetained(t *testing.T) {
 	const failover = `failover:
   enabled: true

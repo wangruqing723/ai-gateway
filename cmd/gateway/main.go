@@ -21,6 +21,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -32,6 +33,7 @@ import (
 	"ai-gateway/internal/balancer"
 	"ai-gateway/internal/breaker"
 	"ai-gateway/internal/cache"
+	"ai-gateway/internal/chatgptauth"
 	"ai-gateway/internal/config"
 	"ai-gateway/internal/converter"
 	"ai-gateway/internal/httpclient"
@@ -87,6 +89,22 @@ func main() {
 	}
 
 	translator := vision.New(imgCache, qm, httpPool.For, cfg.DirectMode)
+	authHTTPClient, err := httpPool.For("")
+	if err != nil {
+		_ = imgCache.Close()
+		fmt.Fprintf(os.Stderr, "[gateway] OAuth HTTP 客户端初始化失败: %s\n", err)
+		os.Exit(1)
+	}
+	chatgptAuth, err := chatgptauth.New(filepath.Join("data", "chatgpt-accounts.json"), authHTTPClient)
+	if err != nil {
+		_ = imgCache.Close()
+		fmt.Fprintf(os.Stderr, "[gateway] ChatGPT OAuth 账户存储初始化失败: %s\n", err)
+		os.Exit(1)
+	}
+	oauthCallbackServer, callbackErr := chatgptAuth.StartCallbackServer(os.Getenv("AI_GATEWAY_OAUTH_CALLBACK_BIND"))
+	if callbackErr != nil {
+		logSystem("ChatGPT OAuth 回调不可用: %s", callbackErr)
+	}
 	eventLog := metrics.NewEventLog()
 	healthChecker := providerhealth.NewChecker()
 	revision, err := newConfigRevision()
@@ -108,6 +126,7 @@ func main() {
 		translator:        translator,
 		metrics:           metrics.NewCollectorWithWindow(1000, cfg.Metrics.WindowMinutes),
 		providerHealth:    healthChecker,
+		chatgptAuth:       chatgptAuth,
 		breaker:           breaker.New(breakerSettings(cfg)),
 		eventLog:          eventLog,
 		selector:          balancer.New(),
@@ -141,7 +160,15 @@ func main() {
 		<-stop
 		srv.stopProviderHealthLoop()
 		logSystem("收到退出信号，正在关闭...")
-		if err := shutdownThenClose(httpServer, 30*time.Second, imgCache.Close); err != nil {
+		if err := shutdownThenClose(httpServer, 30*time.Second, func() error {
+			var callbackShutdownErr error
+			if oauthCallbackServer != nil {
+				callbackCtx, callbackCancel := context.WithTimeout(context.Background(), 5*time.Second)
+				callbackShutdownErr = oauthCallbackServer.Shutdown(callbackCtx)
+				callbackCancel()
+			}
+			return errors.Join(callbackShutdownErr, imgCache.Close())
+		}); err != nil {
 			logSystem("优雅关闭异常: %s", err)
 		}
 		close(shutdownDone)
@@ -151,6 +178,9 @@ func main() {
 		srv.stopProviderHealthLoop()
 		signal.Stop(stop)
 		_ = imgCache.Close()
+		if oauthCallbackServer != nil {
+			_ = oauthCallbackServer.Close()
+		}
 		logSystem("服务器错误: %s", err)
 		os.Exit(1)
 	}
@@ -218,6 +248,7 @@ type server struct {
 	translator        visionRuntime
 	metrics           *metrics.Collector
 	providerHealth    providerHealthRuntime
+	chatgptAuth       *chatgptauth.Manager
 	breaker           *breaker.Breaker
 	eventLog          *metrics.EventLog
 	healthLoopMu      sync.Mutex
@@ -391,6 +422,11 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 	// 配置管理 API：/api/config/*
 	if strings.HasPrefix(urlPath, "/api/config") {
 		s.handleConfigAPI(w, r)
+		return
+	}
+
+	if strings.HasPrefix(urlPath, "/api/chatgpt/") {
+		s.handleChatGPTAuthAPI(w, r, urlPath)
 		return
 	}
 
@@ -1070,6 +1106,11 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 	targetModel := in.candidate.TargetModel
 
 	apiKey, keySource := router.ResolveAPIKeyWithSource(p, r.Header)
+	if p.AuthType == "chatgptOAuth" {
+		// OAuth Provider 始终使用绑定账户的凭据，不能回退到客户端传入的 API Key。
+		apiKey = ""
+		keySource = "chatgptOAuth"
+	}
 	p.APIKey = apiKey
 
 	isPassthrough := converter.IsPassthrough(p.Format, in.clientFormat)
@@ -1145,6 +1186,12 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 	// 已由 router 按 provider → route → target 叠加好，用于上游要求而三种标准格式都
 	// 不产出的私有字段，典型如 enable_thinking: true。
 	proxy.ApplyExtraBody(upstreamMap, in.candidate.ExtraBody)
+	if p.AuthType == "chatgptOAuth" {
+		// ChatGPT Codex Responses 端点只接受流式请求；非流式客户端由 proxy 在
+		// 收到 response.completed 后聚合成常规 JSON 响应。
+		upstreamMap["stream"] = true
+		upstreamMap["store"] = false
+	}
 	upstreamBody, err := json.Marshal(upstreamMap)
 	if err != nil {
 		buildErr := "上游请求体序列化失败: " + err.Error()
@@ -1168,6 +1215,30 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 			in.detail.Error = buildErr
 		}
 		return forwardAttemptOutcome{buildErr: buildErr}
+	}
+	oauthAccessToken, chatgptAccountID := "", ""
+	if p.AuthType == "chatgptOAuth" {
+		if s.chatgptAuth == nil {
+			buildErr := "ChatGPT OAuth 账户管理器未初始化"
+			if in.detail != nil {
+				in.detail.Kind = "build_skip"
+				in.detail.Outcome = "build_error"
+				in.detail.Reason = "oauth_unavailable"
+				in.detail.Error = buildErr
+			}
+			return forwardAttemptOutcome{buildErr: buildErr}
+		}
+		oauthAccessToken, chatgptAccountID, err = s.chatgptAuth.AccessToken(r.Context(), p.AccountID, client)
+		if err != nil {
+			buildErr := "获取 ChatGPT OAuth 凭据失败: " + err.Error()
+			if in.detail != nil {
+				in.detail.Kind = "build_skip"
+				in.detail.Outcome = "build_error"
+				in.detail.Reason = "oauth_auth_error"
+				in.detail.Error = buildErr
+			}
+			return forwardAttemptOutcome{buildErr: buildErr}
+		}
 	}
 
 	// 本次尝试真正会用到该候选，更新日志归属
@@ -1270,6 +1341,8 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 		ClientRes:             w,
 		UpstreamBody:          upstreamBody,
 		Provider:              p,
+		OAuthAccessToken:      oauthAccessToken,
+		ChatGPTAccountID:      chatgptAccountID,
 		ClientFormat:          in.clientFormat,
 		OriginalModel:         in.originalModel,
 		IsStreaming:           in.internal.Stream,
@@ -1632,12 +1705,12 @@ func classifyFailure(f *config.Failover, upstreamCode int, retryAfter time.Durat
 		}
 		return failoverDecision{reason: "429/ratelimit", transfer: true}
 	case upstreamCode == http.StatusUnauthorized || upstreamCode == http.StatusForbidden:
-		// 默认关闭：key 配错时转移只会连锁失败，且掩盖真实原因
 		return failoverDecision{reason: fmt.Sprintf("%d/auth", upstreamCode), transfer: f.TransferOnAuthError()}
-	case upstreamCode >= 500:
+	case upstreamCode >= 400 && upstreamCode < 500:
+		return failoverDecision{reason: fmt.Sprintf("%d/client", upstreamCode), transfer: f.TransferOnClientError()}
+	case upstreamCode >= 500 && upstreamCode < 600:
 		return failoverDecision{reason: fmt.Sprintf("%d/server", upstreamCode), transfer: f.TransferOnServerError()}
 	default:
-		// 4xx 业务错误（400 参数错、404 模型不存在等）换 provider 也是同样结果
 		return failoverDecision{}
 	}
 }
@@ -1646,8 +1719,7 @@ func classifyFailure(f *config.Failover, upstreamCode int, retryAfter time.Durat
 //
 // 计入失败：传输错误、超时、5xx、以及「拿到 2xx 响应头之后才失败」（流中途断开、
 // 流式活跃超时、响应体转换失败）。
-// 不计入：429（上游正常限流，判成故障比不熔断更糟）、401/403（配置问题，熔断修不了
-// 还会掩盖密钥过期）、客户端主动断开、普通 4xx（请求本身的问题）。
+// 不计入：所有 4xx（候选转移由 failover 单独控制）、客户端主动断开。
 //
 // err 在任何状态码下都要参与判定，不能只在 upstreamCode == 0 时看。
 func breakerOutcomeFor(upstreamCode int, err error) breaker.Outcome {
@@ -1690,7 +1762,7 @@ func breakerOutcomeFor(upstreamCode int, err error) breaker.Outcome {
 			return breaker.OutcomeSuccess
 		}
 	default:
-		// 普通 4xx：上游是健康的，只是这个请求它不接受
+		// 所有 4xx 都不作为上游故障计入熔断；故障转移由 failover 单独判断。
 		return breaker.OutcomeIgnored
 	}
 }
@@ -1796,12 +1868,18 @@ func (s *server) handleHealth(w http.ResponseWriter, head bool) {
 		queues[name] = s.qm.StatusOf(name, p.MaxConcurrent, p.MaxPerSecond)
 	}
 	cs, heapAllocMB, sysMB := s.healthStats(time.Now())
+	providerHealth := s.providerHealth.Snapshot(cfg)
+	for name, provider := range cfg.Providers {
+		if provider != nil && provider.AuthType == "chatgptOAuth" {
+			providerHealth[name] = s.chatGPTProviderStatus(name, provider)
+		}
+	}
 	health := map[string]any{
 		"status":         "ok",
 		"timeout":        cfg.Timeout,
 		"listenAddress":  net.JoinHostPort(listenHost, strconv.Itoa(listenPort)),
 		"queues":         queues,
-		"providerHealth": s.providerHealth.Snapshot(cfg),
+		"providerHealth": providerHealth,
 		"cache": map[string]any{
 			"total":       cs.Total,
 			"contentSize": cs.ContentSize,
@@ -1905,25 +1983,54 @@ func (s *server) handleProviderHealthCheck(w http.ResponseWriter, r *http.Reques
 	s.cfgMu.RUnlock()
 
 	if name := r.URL.Query().Get("provider"); name != "" {
+		if provider := cfg.Providers[name]; provider != nil && provider.AuthType == "chatgptOAuth" {
+			status := s.chatGPTProviderStatus(name, provider)
+			writeProviderHealthResponse(w, map[string]providerhealth.Status{name: status})
+			return
+		}
 		status, ok := s.providerHealth.CheckProvider(r.Context(), cfg, s.resolveClient, name)
 		if !ok {
 			writeJSONError(w, http.StatusNotFound, "gateway_error", fmt.Sprintf("未找到 provider: %s", name))
 			return
 		}
-		out, _ := json.Marshal(map[string]any{
-			"providers": map[string]providerhealth.Status{name: status},
-		})
-		w.Header().Set("content-type", "application/json")
-		w.Header().Set("content-length", fmt.Sprintf("%d", len(out)))
-		w.WriteHeader(http.StatusOK)
-		w.Write(out)
+		writeProviderHealthResponse(w, map[string]providerhealth.Status{name: status})
 		return
 	}
 
 	statuses := s.providerHealth.CheckAll(r.Context(), cfg, s.resolveClient)
-	out, _ := json.Marshal(map[string]any{
-		"providers": statuses,
-	})
+	for name, provider := range cfg.Providers {
+		if provider != nil && provider.AuthType == "chatgptOAuth" {
+			statuses[name] = s.chatGPTProviderStatus(name, provider)
+		}
+	}
+	writeProviderHealthResponse(w, statuses)
+}
+
+func (s *server) chatGPTProviderStatus(name string, provider *config.Provider) providerhealth.Status {
+	status := providerhealth.Status{Name: name, Endpoint: provider.BaseURL + "/responses", CheckedAt: time.Now().Format(time.RFC3339)}
+	if s.chatgptAuth == nil {
+		status.Status = "error"
+		status.Message = "ChatGPT OAuth 账户管理器不可用"
+		return status
+	}
+	account, ok := s.chatgptAuth.Account(provider.AccountID)
+	if !ok {
+		status.Status = "error"
+		status.Message = "绑定的 ChatGPT OAuth 账户不存在"
+		return status
+	}
+	if account.Status != "ready" {
+		status.Status = "error"
+		status.Message = "ChatGPT OAuth 账户需要重新授权"
+		return status
+	}
+	status.Status = "ok"
+	status.Message = "ChatGPT OAuth 账户已连接；实际可用性将在转发请求时验证"
+	return status
+}
+
+func writeProviderHealthResponse(w http.ResponseWriter, statuses map[string]providerhealth.Status) {
+	out, _ := json.Marshal(map[string]any{"providers": statuses})
 	w.Header().Set("content-type", "application/json")
 	w.Header().Set("content-length", fmt.Sprintf("%d", len(out)))
 	w.WriteHeader(http.StatusOK)
@@ -1951,6 +2058,19 @@ func (s *server) handleProviderModels(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusNotFound, "gateway_error", fmt.Sprintf("未找到 provider: %s", name))
 		return
 	}
+	if provider.AuthType == "chatgptOAuth" {
+		out, _ := json.Marshal(map[string]any{
+			"provider":   name,
+			"models":     []string{},
+			"manualOnly": true,
+			"message":    "ChatGPT OAuth 不提供 /v1/models 目录，请在路由目标中手动填写模型名",
+		})
+		w.Header().Set("content-type", "application/json")
+		w.Header().Set("content-length", fmt.Sprintf("%d", len(out)))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(out)
+		return
+	}
 
 	client, err := s.resolveClient(provider.Proxy)
 	if err != nil {
@@ -1971,6 +2091,159 @@ func (s *server) handleProviderModels(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("content-length", fmt.Sprintf("%d", len(out)))
 	w.WriteHeader(http.StatusOK)
 	w.Write(out)
+}
+
+func (s *server) handleChatGPTAuthAPI(w http.ResponseWriter, r *http.Request, path string) {
+	if isCrossSiteRequest(r) {
+		writeForbiddenOrigin(w)
+		return
+	}
+	if s.chatgptAuth == nil {
+		writeJSONError(w, http.StatusServiceUnavailable, "oauth_unavailable", "ChatGPT OAuth 账户管理器不可用")
+		return
+	}
+	switch path {
+	case "/api/chatgpt/accounts":
+		if r.Method != http.MethodGet {
+			writeMethodNotAllowed(w, http.MethodGet)
+			return
+		}
+		s.cfgMu.RLock()
+		cfg := s.cfg
+		refs := chatGPTAccountReferences(cfg)
+		s.cfgMu.RUnlock()
+		writeJSON(w, http.StatusOK, map[string]any{"data": s.chatgptAuth.List(refs)})
+	case "/api/chatgpt/oauth/callback":
+		if r.Method != http.MethodPost {
+			writeMethodNotAllowed(w, http.MethodPost)
+			return
+		}
+		body, err := readBodyLimited(r, 16<<10)
+		if err != nil {
+			if errors.Is(err, errRequestBodyTooLarge) {
+				writeJSONError(w, http.StatusRequestEntityTooLarge, "request_too_large", "OAuth 回调链接超过大小限制")
+				return
+			}
+			writeJSONError(w, http.StatusBadRequest, "gateway_error", "读取 OAuth 回调链接失败")
+			return
+		}
+		if requestMediaType(r) != "application/json" {
+			writeJSONError(w, http.StatusUnsupportedMediaType, "unsupported_media_type", "OAuth 回调链接请求须使用 application/json")
+			return
+		}
+		var input struct {
+			CallbackURL string `json:"callbackUrl"`
+		}
+		decoder := json.NewDecoder(bytes.NewReader(body))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&input); err != nil {
+			writeJSONError(w, http.StatusBadRequest, "gateway_error", "OAuth 回调链接 JSON 无效: "+err.Error())
+			return
+		}
+		var extra any
+		if err := decoder.Decode(&extra); err != io.EOF {
+			writeJSONError(w, http.StatusBadRequest, "gateway_error", "OAuth 回调链接请求只能包含一个 JSON 对象")
+			return
+		}
+		status, err := s.chatgptAuth.CompleteLoginFromCallback(r.Context(), input.CallbackURL)
+		if errors.Is(err, chatgptauth.ErrInvalidOAuthCallback) {
+			writeJSONError(w, http.StatusBadRequest, "invalid_oauth_callback", err.Error())
+			return
+		}
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "oauth_callback_failed", "处理 OAuth 回调链接失败")
+			return
+		}
+		writeJSON(w, http.StatusOK, status)
+	case "/api/chatgpt/oauth/start":
+		if r.Method != http.MethodPost {
+			writeMethodNotAllowed(w, http.MethodPost)
+			return
+		}
+		started, err := s.chatgptAuth.StartLogin()
+		if err != nil {
+			writeJSONError(w, http.StatusServiceUnavailable, "oauth_unavailable", err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, started)
+	case "/api/chatgpt/oauth/status":
+		if r.Method != http.MethodGet {
+			writeMethodNotAllowed(w, http.MethodGet)
+			return
+		}
+		status, ok := s.chatgptAuth.Status(r.URL.Query().Get("sessionId"))
+		if !ok {
+			writeJSONError(w, http.StatusNotFound, "oauth_session_not_found", "授权会话不存在或已过期")
+			return
+		}
+		writeJSON(w, http.StatusOK, status)
+	default:
+		if strings.HasPrefix(path, "/api/chatgpt/accounts/") {
+			if r.Method != http.MethodDelete {
+				writeMethodNotAllowed(w, http.MethodDelete)
+				return
+			}
+			s.handleDeleteChatGPTAccount(w, r, strings.TrimPrefix(path, "/api/chatgpt/accounts/"))
+			return
+		}
+		writeJSONError(w, http.StatusNotFound, "gateway_error", "未知的 ChatGPT OAuth API 端点")
+	}
+}
+
+func (s *server) handleDeleteChatGPTAccount(w http.ResponseWriter, r *http.Request, escapedID string) {
+	id, err := url.PathUnescape(escapedID)
+	if err != nil || id == "" || strings.Contains(id, "/") {
+		writeJSONError(w, http.StatusBadRequest, "invalid_account_id", "账户 ID 无效")
+		return
+	}
+	s.configOpMu.Lock()
+	defer s.configOpMu.Unlock()
+	s.cfgMu.RLock()
+	refs := chatGPTAccountReferences(s.cfg)[id]
+	s.cfgMu.RUnlock()
+	if len(refs) > 0 {
+		w.Header().Set("content-type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"error": map[string]any{
+				"type":      "account_in_use",
+				"message":   "该账户仍被 Provider 使用，请先解除绑定",
+				"providers": refs,
+			},
+		})
+		return
+	}
+	if err := s.chatgptAuth.Delete(id); err != nil {
+		if errors.Is(err, chatgptauth.ErrAccountNotFound) {
+			writeJSONError(w, http.StatusNotFound, "account_not_found", err.Error())
+			return
+		}
+		writeJSONError(w, http.StatusInternalServerError, "gateway_error", "删除账户失败: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+func chatGPTAccountReferences(cfg *config.Config) map[string][]string {
+	refs := make(map[string][]string)
+	if cfg == nil {
+		return refs
+	}
+	for name, provider := range cfg.Providers {
+		if provider != nil && provider.AuthType == "chatgptOAuth" && provider.AccountID != "" {
+			refs[provider.AccountID] = append(refs[provider.AccountID], name)
+		}
+	}
+	for id := range refs {
+		sort.Strings(refs[id])
+	}
+	return refs
+}
+
+func writeJSON(w http.ResponseWriter, status int, value any) {
+	w.Header().Set("content-type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(value)
 }
 
 type providerProbeRequest struct {
@@ -2608,6 +2881,16 @@ func (s *server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			p.Proxy = replaceProxyPassword(p.Proxy, password)
+		}
+		if p.AuthType == "chatgptOAuth" {
+			if s.chatgptAuth == nil {
+				writeJSONError(w, http.StatusServiceUnavailable, "oauth_unavailable", "ChatGPT OAuth 账户管理器不可用")
+				return
+			}
+			if _, ok := s.chatgptAuth.Account(p.AccountID); !ok {
+				writeJSONError(w, http.StatusBadRequest, "config_validation_error", fmt.Sprintf("providers.%s.accountId 引用了不存在的 ChatGPT OAuth 账户", name))
+				return
+			}
 		}
 	}
 
