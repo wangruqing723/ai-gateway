@@ -94,11 +94,12 @@
                         maxRetryAfterMs: null,
                         onTransportError: true,
                         onServerError: true,
+                        onClientError: true,
                         onRateLimit: true,
                         onQueueTimeout: true,
                         onStreamHeaderTimeout: true,
                         onRequestTimeout: false,
-                        onAuthError: false
+                        onAuthError: true
                     },
                     breaker: {
                         enabled: false,

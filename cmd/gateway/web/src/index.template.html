@@ -508,6 +508,10 @@
                                                 <span class="text-xs"><span class="font-bold text-text">上游 5xx</span><span class="mt-0.5 block text-muted">服务端错误</span></span>
                                             </label>
                                             <label class="flex cursor-pointer items-start gap-3 rounded-lg border border-line bg-ink px-3 py-2">
+                                                <input autocomplete="off" type="checkbox" x-model="config.failover.onClientError" class="mt-0.5 h-4 w-4 rounded border-line bg-panel text-cyan2 focus:ring-cyan2">
+                                                <span class="text-xs"><span class="font-bold text-text">其他上游 4xx</span><span class="mt-0.5 block text-muted">400 / 404 等状态码，默认允许转移</span></span>
+                                            </label>
+                                            <label class="flex cursor-pointer items-start gap-3 rounded-lg border border-line bg-ink px-3 py-2">
                                                 <input autocomplete="off" type="checkbox" x-model="config.failover.onRateLimit" class="mt-0.5 h-4 w-4 rounded border-line bg-panel text-cyan2 focus:ring-cyan2">
                                                 <span class="text-xs"><span class="font-bold text-text">上游 429</span><span class="mt-0.5 block text-muted">候选属不同厂商 / 账号时才有意义</span></span>
                                             </label>
@@ -525,7 +529,7 @@
                                             </label>
                                             <label class="flex cursor-pointer items-start gap-3 rounded-lg border border-line bg-ink px-3 py-2 sm:col-span-2">
                                                 <input autocomplete="off" type="checkbox" x-model="config.failover.onAuthError" class="mt-0.5 h-4 w-4 rounded border-line bg-panel text-cyan2 focus:ring-cyan2">
-                                                <span class="text-xs"><span class="font-bold text-warn">401 / 403</span><span class="mt-0.5 block text-muted">默认关闭：密钥配错时转移只会连锁失败，还会掩盖真实原因</span></span>
+                                                <span class="text-xs"><span class="font-bold text-text">上游 401 / 403</span><span class="mt-0.5 block text-muted">默认允许转移；可单独关闭认证错误转移</span></span>
                                             </label>
                                         </div>
                                         <p class="mt-2 text-xs text-muted">流式活跃超时不可配置转移：那时字节已经写给客户端，重发会污染流。</p>
@@ -551,7 +555,7 @@
                                     </div>
                                     <p class="mt-2 text-xs text-muted">
                                         计入失败：连接错误、超时、5xx，以及拿到 2xx 响应头之后才失败（流中途断开、活跃超时）。
-                                        429 与 401/403 不计入。状态见「监控」页，也可用 /health 的 breakers 字段查看。
+                                        4xx 不计入熔断，但可按上方开关触发候选转移。状态见「监控」页，也可用 /health 的 breakers 字段查看。
                                     </p>
                                 </div>
 

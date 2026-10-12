@@ -24,8 +24,7 @@ const (
 	OutcomeFailure
 	// OutcomeIgnored 不参与熔断判据。
 	//
-	// 429：上游正常限流，判成故障比不熔断更糟（它自己走 failover 的 Retry-After 路径）。
-	// 401/403：配置问题，熔断修不了，还会掩盖密钥过期。
+		// 所有 4xx：是否换候选由 failover 控制，不作为上游故障判据。
 	// 本地队列超时：属于网关侧背压，与上游健康无关。
 	OutcomeIgnored
 )

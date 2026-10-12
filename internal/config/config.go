@@ -307,6 +307,8 @@ type Failover struct {
 	OnTransportError *bool `yaml:"onTransportError" json:"onTransportError,omitempty"`
 	// OnServerError 上游 5xx 时转移。默认 true。
 	OnServerError *bool `yaml:"onServerError" json:"onServerError,omitempty"`
+	// OnClientError 上游 4xx（不含单独配置的 429、401、403）时转移。默认 true。
+	OnClientError *bool `yaml:"onClientError" json:"onClientError,omitempty"`
 	// OnRateLimit 上游 429 时转移。候选为不同厂商/账号时有效。默认 true。
 	OnRateLimit *bool `yaml:"onRateLimit" json:"onRateLimit,omitempty"`
 	// OnQueueTimeout 本地队列等待超时时转移。默认 true。
@@ -323,7 +325,7 @@ type Failover struct {
 	//
 	// 流式活跃超时仍不可配置转移：那时字节已经写给客户端，重发会污染流。
 	OnRequestTimeout *bool `yaml:"onRequestTimeout" json:"onRequestTimeout,omitempty"`
-	// OnAuthError 401 / 403 时转移。默认 false：那通常是配置问题，转移会掩盖它。
+	// OnAuthError 401 / 403 时转移。默认 true，可单独关闭。
 	OnAuthError *bool `yaml:"onAuthError" json:"onAuthError,omitempty"`
 	// MaxRetryAfterMs 上游 429 携带 Retry-After 且超过该值时，该候选不消耗尝试额度。
 	//
@@ -385,8 +387,11 @@ func (f *Failover) TransferOnStreamHeaderTimeout() bool {
 // TransferOnRequestTimeout 非流式整体超时是否转移。默认 false：会让总耗时接近翻倍。
 func (f *Failover) TransferOnRequestTimeout() bool { return BoolOr(f.OnRequestTimeout, false) }
 
+// TransferOnClientError 普通上游 4xx 是否转移。
+func (f *Failover) TransferOnClientError() bool { return BoolOr(f.OnClientError, true) }
+
 // TransferOnAuthError 401 / 403 是否转移。
-func (f *Failover) TransferOnAuthError() bool { return BoolOr(f.OnAuthError, false) }
+func (f *Failover) TransferOnAuthError() bool { return BoolOr(f.OnAuthError, true) }
 
 // AttemptLimit 含首次尝试的总次数上限。
 func (f *Failover) AttemptLimit() int { return IntOr(f.MaxAttempts, defaultFailoverAttempts) }
@@ -399,7 +404,7 @@ func (f *Failover) RetryAfterCapMs() int {
 // Breaker 熔断配置。全局一份，不做 per-provider 覆盖。
 //
 // 计入失败：传输错误、5xx、超时。
-// 不计入：429（上游正常限流，判故障比不熔断更糟）、401/403（配置问题，熔断修不了还会掩盖密钥过期）。
+// 不计入：所有 4xx（是否尝试其他候选由 failover 单独控制）、本地队列超时。
 // 数值项与 Failover 同理用 *int：这三项都不接受 0，值类型会让 validate 的下界检查
 // 变成死代码 —— 用户手误写 0 被 applyDefaults 静默改成默认值，永远看不到报错。
 type Breaker struct {
@@ -590,6 +595,9 @@ func applyFailoverDefaults(f *Failover) {
 	if f.OnServerError == nil {
 		f.OnServerError = boolPtr(true)
 	}
+	if f.OnClientError == nil {
+		f.OnClientError = boolPtr(true)
+	}
 	if f.OnRateLimit == nil {
 		f.OnRateLimit = boolPtr(true)
 	}
@@ -600,7 +608,7 @@ func applyFailoverDefaults(f *Failover) {
 		f.OnStreamHeaderTimeout = boolPtr(true)
 	}
 	if f.OnAuthError == nil {
-		f.OnAuthError = boolPtr(false)
+		f.OnAuthError = boolPtr(true)
 	}
 }
 

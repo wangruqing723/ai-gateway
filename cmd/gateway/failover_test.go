@@ -47,7 +47,7 @@ func defaultTestFailover() config.Failover {
 	retryAfterCap := 5000
 	return config.Failover{
 		Enabled: true, MaxAttempts: &attempts, MaxRetryAfterMs: &retryAfterCap,
-		OnTransportError: &on, OnServerError: &on, OnRateLimit: &on,
+		OnTransportError: &on, OnServerError: &on, OnClientError: &on, OnRateLimit: &on,
 		OnQueueTimeout: &on, OnStreamHeaderTimeout: &on, OnAuthError: &off,
 		// 非流式整体超时默认不转移，与 config.applyDefaults 一致
 		OnRequestTimeout: &off,
@@ -312,8 +312,8 @@ func TestFailoverDisabledKeepsSingleAttempt(t *testing.T) {
 	}
 }
 
-// TestFailoverSkipsTransferOnPlain4xx 400 是请求本身的问题，换上游无意义。
-func TestFailoverSkipsTransferOnPlain4xx(t *testing.T) {
+// TestFailoverTransfersOnPlain4xx 确认 400 等普通 4xx 也受全局故障转移配置控制。
+func TestFailoverTransfersOnPlain4xx(t *testing.T) {
 	var firstHits, secondHits atomic.Int32
 	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		firstHits.Add(1)
@@ -338,15 +338,15 @@ func TestFailoverSkipsTransferOnPlain4xx(t *testing.T) {
 	srv := newFailoverTestServer(providers, route, first.Client(), defaultTestFailover())
 
 	recorder := postInference(srv, "/v1/messages", `{"model":"client-model","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`)
-	if recorder.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, 期望 400 直接透传", recorder.Code)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, 期望转移后返回 200", recorder.Code)
 	}
-	if secondHits.Load() != 0 {
-		t.Fatalf("second 命中 %d 次, 普通 4xx 不应转移", secondHits.Load())
+	if firstHits.Load() != 1 || secondHits.Load() != 1 {
+		t.Fatalf("命中次数 first=%d second=%d, 期望各尝试一次", firstHits.Load(), secondHits.Load())
 	}
 }
 
-// TestFailoverAuthErrorRespectsSwitch 401 默认不转移，显式打开后才转移。
+// TestFailoverAuthErrorRespectsSwitch 401/403 的转移仍可用专属开关控制。
 func TestFailoverAuthErrorRespectsSwitch(t *testing.T) {
 	tests := []struct {
 		name           string
@@ -354,8 +354,8 @@ func TestFailoverAuthErrorRespectsSwitch(t *testing.T) {
 		wantStatus     int
 		wantSecondHits int32
 	}{
-		{name: "默认关闭时 401 终态", onAuthError: false, wantStatus: http.StatusUnauthorized, wantSecondHits: 0},
-		{name: "显式打开后 401 转移", onAuthError: true, wantStatus: http.StatusOK, wantSecondHits: 1},
+		{name: "显式关闭时 401 终态", onAuthError: false, wantStatus: http.StatusUnauthorized, wantSecondHits: 0},
+		{name: "开启时 401 转移", onAuthError: true, wantStatus: http.StatusOK, wantSecondHits: 1},
 	}
 
 	for _, tt := range tests {

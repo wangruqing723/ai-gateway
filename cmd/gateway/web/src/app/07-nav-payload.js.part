@@ -107,6 +107,7 @@
                         maxRetryAfterMs: this.numOrNull(f.maxRetryAfterMs),
                         onTransportError: !!f.onTransportError,
                         onServerError: !!f.onServerError,
+                        onClientError: !!f.onClientError,
                         onRateLimit: !!f.onRateLimit,
                         onQueueTimeout: !!f.onQueueTimeout,
                         onStreamHeaderTimeout: !!f.onStreamHeaderTimeout,

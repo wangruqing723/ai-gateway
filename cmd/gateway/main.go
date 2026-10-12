@@ -1632,12 +1632,12 @@ func classifyFailure(f *config.Failover, upstreamCode int, retryAfter time.Durat
 		}
 		return failoverDecision{reason: "429/ratelimit", transfer: true}
 	case upstreamCode == http.StatusUnauthorized || upstreamCode == http.StatusForbidden:
-		// 默认关闭：key 配错时转移只会连锁失败，且掩盖真实原因
 		return failoverDecision{reason: fmt.Sprintf("%d/auth", upstreamCode), transfer: f.TransferOnAuthError()}
-	case upstreamCode >= 500:
+	case upstreamCode >= 400 && upstreamCode < 500:
+		return failoverDecision{reason: fmt.Sprintf("%d/client", upstreamCode), transfer: f.TransferOnClientError()}
+	case upstreamCode >= 500 && upstreamCode < 600:
 		return failoverDecision{reason: fmt.Sprintf("%d/server", upstreamCode), transfer: f.TransferOnServerError()}
 	default:
-		// 4xx 业务错误（400 参数错、404 模型不存在等）换 provider 也是同样结果
 		return failoverDecision{}
 	}
 }
@@ -1646,8 +1646,7 @@ func classifyFailure(f *config.Failover, upstreamCode int, retryAfter time.Durat
 //
 // 计入失败：传输错误、超时、5xx、以及「拿到 2xx 响应头之后才失败」（流中途断开、
 // 流式活跃超时、响应体转换失败）。
-// 不计入：429（上游正常限流，判成故障比不熔断更糟）、401/403（配置问题，熔断修不了
-// 还会掩盖密钥过期）、客户端主动断开、普通 4xx（请求本身的问题）。
+// 不计入：所有 4xx（候选转移由 failover 单独控制）、客户端主动断开。
 //
 // err 在任何状态码下都要参与判定，不能只在 upstreamCode == 0 时看。
 func breakerOutcomeFor(upstreamCode int, err error) breaker.Outcome {
@@ -1690,7 +1689,7 @@ func breakerOutcomeFor(upstreamCode int, err error) breaker.Outcome {
 			return breaker.OutcomeSuccess
 		}
 	default:
-		// 普通 4xx：上游是健康的，只是这个请求它不接受
+		// 所有 4xx 都不作为上游故障计入熔断；故障转移由 failover 单独判断。
 		return breaker.OutcomeIgnored
 	}
 }

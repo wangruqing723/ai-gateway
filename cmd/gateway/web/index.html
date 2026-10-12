@@ -508,6 +508,10 @@
                                                 <span class="text-xs"><span class="font-bold text-text">上游 5xx</span><span class="mt-0.5 block text-muted">服务端错误</span></span>
                                             </label>
                                             <label class="flex cursor-pointer items-start gap-3 rounded-lg border border-line bg-ink px-3 py-2">
+                                                <input autocomplete="off" type="checkbox" x-model="config.failover.onClientError" class="mt-0.5 h-4 w-4 rounded border-line bg-panel text-cyan2 focus:ring-cyan2">
+                                                <span class="text-xs"><span class="font-bold text-text">其他上游 4xx</span><span class="mt-0.5 block text-muted">400 / 404 等状态码，默认允许转移</span></span>
+                                            </label>
+                                            <label class="flex cursor-pointer items-start gap-3 rounded-lg border border-line bg-ink px-3 py-2">
                                                 <input autocomplete="off" type="checkbox" x-model="config.failover.onRateLimit" class="mt-0.5 h-4 w-4 rounded border-line bg-panel text-cyan2 focus:ring-cyan2">
                                                 <span class="text-xs"><span class="font-bold text-text">上游 429</span><span class="mt-0.5 block text-muted">候选属不同厂商 / 账号时才有意义</span></span>
                                             </label>
@@ -525,7 +529,7 @@
                                             </label>
                                             <label class="flex cursor-pointer items-start gap-3 rounded-lg border border-line bg-ink px-3 py-2 sm:col-span-2">
                                                 <input autocomplete="off" type="checkbox" x-model="config.failover.onAuthError" class="mt-0.5 h-4 w-4 rounded border-line bg-panel text-cyan2 focus:ring-cyan2">
-                                                <span class="text-xs"><span class="font-bold text-warn">401 / 403</span><span class="mt-0.5 block text-muted">默认关闭：密钥配错时转移只会连锁失败，还会掩盖真实原因</span></span>
+                                                <span class="text-xs"><span class="font-bold text-text">上游 401 / 403</span><span class="mt-0.5 block text-muted">默认允许转移；可单独关闭认证错误转移</span></span>
                                             </label>
                                         </div>
                                         <p class="mt-2 text-xs text-muted">流式活跃超时不可配置转移：那时字节已经写给客户端，重发会污染流。</p>
@@ -551,7 +555,7 @@
                                     </div>
                                     <p class="mt-2 text-xs text-muted">
                                         计入失败：连接错误、超时、5xx，以及拿到 2xx 响应头之后才失败（流中途断开、活跃超时）。
-                                        429 与 401/403 不计入。状态见「监控」页，也可用 /health 的 breakers 字段查看。
+                                        4xx 不计入熔断，但可按上方开关触发候选转移。状态见「监控」页，也可用 /health 的 breakers 字段查看。
                                     </p>
                                 </div>
 
@@ -2350,11 +2354,12 @@
                         maxRetryAfterMs: null,
                         onTransportError: true,
                         onServerError: true,
+                        onClientError: true,
                         onRateLimit: true,
                         onQueueTimeout: true,
                         onStreamHeaderTimeout: true,
                         onRequestTimeout: false,
-                        onAuthError: false
+                        onAuthError: true
                     },
                     breaker: {
                         enabled: false,
@@ -2687,13 +2692,14 @@
                         maxRetryAfterMs: num(f.maxRetryAfterMs),
                         onTransportError: bool(f.onTransportError, true),
                         onServerError: bool(f.onServerError, true),
+                        onClientError: bool(f.onClientError, true),
                         onRateLimit: bool(f.onRateLimit, true),
                         onQueueTimeout: bool(f.onQueueTimeout, true),
                         onStreamHeaderTimeout: bool(f.onStreamHeaderTimeout, true),
                         // 默认 false：非流式整体超时转移会让总耗时接近翻倍
                         onRequestTimeout: bool(f.onRequestTimeout, false),
-                        // 默认 false：401/403 通常是配置问题，转移只会连锁失败并掩盖原因
-                        onAuthError: bool(f.onAuthError, false)
+                        // 4xx 默认均允许转移；认证失败仍可通过该开关单独关闭
+                        onAuthError: bool(f.onAuthError, true)
                     };
                 },
 
@@ -3228,6 +3234,7 @@
                         maxRetryAfterMs: this.numOrNull(f.maxRetryAfterMs),
                         onTransportError: !!f.onTransportError,
                         onServerError: !!f.onServerError,
+                        onClientError: !!f.onClientError,
                         onRateLimit: !!f.onRateLimit,
                         onQueueTimeout: !!f.onQueueTimeout,
                         onStreamHeaderTimeout: !!f.onStreamHeaderTimeout,
@@ -4219,6 +4226,7 @@
                     [
                         ['onTransportError', f.onTransportError],
                         ['onServerError', f.onServerError],
+                        ['onClientError', f.onClientError],
                         ['onRateLimit', f.onRateLimit],
                         ['onQueueTimeout', f.onQueueTimeout],
                         ['onStreamHeaderTimeout', f.onStreamHeaderTimeout],
