@@ -9,6 +9,7 @@
 - **多格式输入**：同时支持 Anthropic、OpenAI Chat、OpenAI Responses 三种格式
 - **模型名映射**：将客户端发来的模型名映射到实际 provider 模型
 - **多 Provider 路由**：不同模型走不同 provider，支持 Anthropic / OpenAI 兼容格式
+- **ChatGPT OAuth 账户**：通过 Codex OAuth 添加 ChatGPT 账户，安全保存并刷新令牌，可绑定到 Responses Provider
 - **故障转移**：一条路由可配多个候选 (provider, model)，前一个失败自动换下一个；只在尚未向客户端写出字节时转移
 - **熔断保护**：连续失败的 provider 暂时摘掉，后续请求直接跳过它，冷却结束后用真实请求做半开探测
 - **负载均衡**：多候选路由可选 `round-robin` 轮转或 `least-queue` 按在途量分流，并按可缓存前缀做会话粘性，避免上游侧 prompt cache 反复失效
@@ -145,6 +146,7 @@ http://127.0.0.1:7789/
 
 - 查看 Provider、路由数量、运行模式和超时概览
 - 在“提供商”中可视化编辑 Provider、上游地址、协议格式、并发、限速、队列等待、User-Agent 和独立代理；弹窗可用当前未保存的表单值检测上游
+- 在“提供商”中连接、查看和删除 ChatGPT OAuth 账户，并将账户绑定到 Responses Provider；Docker Compose 使用本机回环端口 1455/1457 接收 OAuth 回调
 - 在“路由”中可视化编辑路由规则、目标模型和视觉伴随模型
 - 在“全局设置”中可视化编辑监听、超时、缓存配置和直通模式
 - 在“全局设置”中使用 YAML 原文编辑完整配置
@@ -307,7 +309,7 @@ docker run -d \
 
 ### 本地安全边界
 
-本项目按个人本机使用设计，不新增强制 gateway token。默认 `docker-compose.yml` 只把端口发布到 `127.0.0.1:7789`；应用同时校验推理和配置接口的 HTTP method、浏览器 Origin、`Content-Type` 与请求体大小。
+本项目按个人本机使用设计，不新增强制 gateway token。默认 `docker-compose.yml` 把网关端口发布到 `127.0.0.1:7789`，并把 OAuth 回调端口 `1455`/`1457` 发布到宿主机 loopback；应用同时校验推理和配置接口的 HTTP method、浏览器 Origin、`Content-Type` 与请求体大小。
 
 不要直接把网关端口暴露到公网或不可信局域网。浏览器管理接口只接受 `localhost` 或 loopback IP 的同源请求，不支持通过远程域名反向代理后直接保存配置；跨机器使用时应通过 SSH 本地端口转发后仍以 `127.0.0.1` 访问。所有非静态请求还会校验 `Host`：只放行 loopback、配置中的 `host`；配置为 `0.0.0.0` 或 `::` 时放行 IP 字面量，以阻断 DNS rebinding。通过反向代理访问时请保留本机 Host，或把代理使用的域名写入 `host`。无 `Origin` 的非浏览器 API 客户端即使置于反向代理后，也仍需由代理提供认证、TLS、来源限制和访问日志；应用内这些本地防护不等价于公网鉴权。
 

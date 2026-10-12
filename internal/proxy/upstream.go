@@ -14,6 +14,9 @@ func buildUpstreamURL(p *config.Provider) (base, path string) {
 		base = "https://" + base
 	}
 	base = strings.TrimRight(base, "/")
+	if p.AuthType == "chatgptOAuth" {
+		return base, "/responses"
+	}
 	base = strings.TrimSuffix(base, "/v1")
 	switch p.Format {
 	case "anthropic":

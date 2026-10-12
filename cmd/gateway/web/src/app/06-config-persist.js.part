@@ -33,6 +33,7 @@
                         const result = await res.json();
                         this.showStatus((result.message || '配置已保存') + this.restartSuffix(result), 'success');
                         await this.loadConfig();
+                        await this.loadChatGPTAccounts();
                         if (this.editMode === 'yaml') await this.loadYamlConfig();
                         return true;
                     } catch (err) {
@@ -55,6 +56,7 @@
                         const result = await res.json();
                         this.showStatus((result.message || '配置已重载') + this.restartSuffix(result), 'success');
                         await this.loadConfig();
+                        await this.loadChatGPTAccounts();
                         if (this.editMode === 'yaml') await this.loadYamlConfig();
                     } catch (err) {
                         this.showStatus('重载失败: ' + err.message, 'error');

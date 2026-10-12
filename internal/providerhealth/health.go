@@ -428,6 +428,15 @@ func providerFingerprint(name string, provider *config.Provider) string {
 }
 
 func checkOne(parent context.Context, p *config.Provider, client *http.Client) Status {
+	if p != nil && p.AuthType == "chatgptOAuth" {
+		return Status{
+			Name:      p.Name,
+			Endpoint:  strings.TrimRight(p.BaseURL, "/") + "/responses",
+			Status:    "warn",
+			Message:   "ChatGPT OAuth 不支持 /v1/models 探测；账户状态由网关单独检查",
+			CheckedAt: time.Now().Format(time.RFC3339),
+		}
+	}
 	endpoint := modelsEndpoint(p.BaseURL)
 	ctx, cancel := context.WithTimeout(parent, checkTimeout)
 	defer cancel()

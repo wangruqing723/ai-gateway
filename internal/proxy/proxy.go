@@ -96,10 +96,13 @@ type StreamConversionErrorFunc func(raw []byte, truncated bool, convErr error)
 
 // Options 转发选项
 type Options struct {
-	ClientReq             *http.Request
-	ClientRes             http.ResponseWriter
-	UpstreamBody          []byte // 已转换好的上游请求体
-	Provider              *config.Provider
+	ClientReq    *http.Request
+	ClientRes    http.ResponseWriter
+	UpstreamBody []byte // 已转换好的上游请求体
+	Provider     *config.Provider
+	// OAuthAccessToken 与 ChatGPTAccountID 只在一次转发调用中存在，不写入配置或日志。
+	OAuthAccessToken      string
+	ChatGPTAccountID      string
 	ClientFormat          string // anthropic | openai-chat | openai-responses
 	OriginalModel         string
 	IsStreaming           bool
@@ -406,7 +409,7 @@ func Forward(opts *Options) error {
 		if opts.ClientReq != nil {
 			clientUserAgent = opts.ClientReq.Header.Get("User-Agent")
 		}
-		setUpstreamHeaders(req, opts.Provider, clientUserAgent)
+		setRequestHeaders(req, opts, clientUserAgent)
 
 		var headerTimedOut atomic.Bool
 		headerTimerDone := make(chan struct{})
@@ -483,7 +486,7 @@ func Forward(opts *Options) error {
 	if opts.ClientReq != nil {
 		clientUserAgent = opts.ClientReq.Header.Get("User-Agent")
 	}
-	setUpstreamHeaders(req, opts.Provider, clientUserAgent)
+	setRequestHeaders(req, opts, clientUserAgent)
 
 	resp, err := opts.HTTPClient.Do(req)
 	if err != nil {
@@ -546,7 +549,14 @@ func handleResponse(ctx context.Context, resp *http.Response, opts *Options) err
 	}
 
 	var data map[string]any
-	if err := json.Unmarshal(raw, &data); err != nil {
+	if opts.Provider.AuthType == "chatgptOAuth" {
+		data, err = chatGPTOAuthStreamResponse(raw)
+		if err != nil {
+			markResponseStarted(opts)
+			writeJSONError(opts.ClientRes, http.StatusBadGateway, "upstream_error", "ChatGPT Responses 流解析失败: "+err.Error())
+			return err
+		}
+	} else if err := json.Unmarshal(raw, &data); err != nil {
 		markResponseStarted(opts)
 		writeJSONError(opts.ClientRes, http.StatusBadGateway, "parse_error", "上游响应解析失败: "+err.Error())
 		return err
@@ -578,6 +588,53 @@ func handleResponse(ctx context.Context, resp *http.Response, opts *Options) err
 	out, _ := json.Marshal(result)
 	markResponseStarted(opts)
 	return writeResponseWithDeadline(ctx, opts.ClientRes, http.StatusOK, out)
+}
+
+// setRequestHeaders 在通用 provider 头基础上写入本次调用的 OAuth 凭据。
+func setRequestHeaders(req *http.Request, opts *Options, clientUserAgent string) {
+	setUpstreamHeaders(req, opts.Provider, clientUserAgent)
+	if opts.Provider.AuthType != "chatgptOAuth" {
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+opts.OAuthAccessToken)
+	req.Header.Set("ChatGPT-Account-Id", opts.ChatGPTAccountID)
+	req.Header.Set("originator", "codex_cli_rs")
+}
+
+// ChatGPT OAuth 的 Codex Responses 端点要求流式请求。此函数从上游 SSE 中取最终
+// response 对象，再交给现有 Responses 转换器生成非流式客户端响应。
+func chatGPTOAuthStreamResponse(raw []byte) (map[string]any, error) {
+	var completed map[string]any
+	for _, line := range bytes.Split(raw, []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		if !bytes.HasPrefix(line, []byte("data:")) {
+			continue
+		}
+		payload := bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:")))
+		if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) {
+			continue
+		}
+		var event map[string]any
+		if err := json.Unmarshal(payload, &event); err != nil {
+			continue
+		}
+		typeName, _ := event["type"].(string)
+		if typeName == "response.failed" {
+			return nil, errors.New("上游响应失败")
+		}
+		if typeName != "response.completed" && typeName != "response.incomplete" {
+			continue
+		}
+		response, ok := event["response"].(map[string]any)
+		if !ok {
+			return nil, errors.New("最终事件缺少 response 对象")
+		}
+		completed = response
+	}
+	if completed == nil {
+		return nil, errors.New("未收到 response.completed 事件")
+	}
+	return completed, nil
 }
 
 // handleStream 流式响应：核心改善点。

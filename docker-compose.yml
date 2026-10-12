@@ -21,6 +21,10 @@ services:
       # 需要跨机器管理时用 SSH 本地端口转发，仍以 127.0.0.1 访问：
       #   ssh -N -L 7789:127.0.0.1:7789 <user>@<host>
       - "127.0.0.1:7789:7789"
+      # Codex OAuth 回调固定使用 localhost 1455，1457 是占用时的备用端口。
+      # 仅发布到宿主机回环，授权回调不暴露给局域网。
+      - "127.0.0.1:1455:1455"
+      - "127.0.0.1:1457:1457"
     volumes:
       # 挂载配置文件；管理页面保存配置时需要写权限。
       - ./config.yaml:/app/config.yaml
@@ -38,6 +42,7 @@ services:
     environment:
       - TZ=Asia/Shanghai
       - AI_GATEWAY_WEB_DIR=/app/web
+      - AI_GATEWAY_OAUTH_CALLBACK_BIND=0.0.0.0
       # 出网代理：默认空 = 不走代理，与不设该变量等价。
       # 宿主机代理要写 host.docker.internal 而非 127.0.0.1，后者在容器里指容器自己。
       # 只在需要代理才能访问上游时才填（在 .env 里设置，见 .env.example）。

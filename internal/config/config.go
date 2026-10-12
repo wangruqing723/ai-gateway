@@ -168,6 +168,8 @@ type Provider struct {
 	BaseURL       string `yaml:"baseUrl" json:"baseUrl"`                         // 上游地址
 	APIKey        string `yaml:"apiKey" json:"apiKey"`                           // 密钥，留空则从客户端请求头提取
 	Format        string `yaml:"format" json:"format"`                           // anthropic | openai | openai-responses
+	AuthType      string `yaml:"authType,omitempty" json:"authType,omitempty"`   // 空值使用 API Key；chatgptOAuth 使用 ChatGPT OAuth 账户
+	AccountID     string `yaml:"accountId,omitempty" json:"accountId,omitempty"` // chatgptOAuth 账户管理器中的 ID
 	UserAgent     string `yaml:"userAgent,omitempty" json:"userAgent,omitempty"` // 上游请求 UA，留空则转发客户端值；两处 omitempty 见 validate 注释
 	Proxy         string `yaml:"proxy,omitempty" json:"proxy,omitempty"`         // 上游代理，留空继承全局代理；两处 omitempty 理由同 userAgent
 	MaxConcurrent int    `yaml:"maxConcurrent" json:"maxConcurrent"`             // 最大并发
@@ -1116,6 +1118,27 @@ func validateProvider(name string, p *Provider, validateLimits bool) error {
 	}
 	if p.Format != "anthropic" && p.Format != "openai" && p.Format != "openai-responses" {
 		return fmt.Errorf("providers.%s.format 须为 anthropic、openai 或 openai-responses", name)
+	}
+	switch p.AuthType {
+	case "":
+		if p.AccountID != "" {
+			return fmt.Errorf("providers.%s.accountId 仅可与 authType: chatgptOAuth 一起使用", name)
+		}
+	case "chatgptOAuth":
+		if p.Format != "openai-responses" {
+			return fmt.Errorf("providers.%s.format 必须为 openai-responses 才能使用 ChatGPT OAuth", name)
+		}
+		if p.APIKey != "" {
+			return fmt.Errorf("providers.%s 使用 ChatGPT OAuth 时不能同时配置 apiKey", name)
+		}
+		if strings.TrimSpace(p.AccountID) == "" {
+			return fmt.Errorf("providers.%s.accountId 不能为空", name)
+		}
+		if p.BaseURL != "https://chatgpt.com/backend-api/codex" {
+			return fmt.Errorf("providers.%s.baseUrl 使用 ChatGPT OAuth 时必须为 https://chatgpt.com/backend-api/codex", name)
+		}
+	default:
+		return fmt.Errorf("providers.%s.authType 须为空或 chatgptOAuth", name)
 	}
 	if validateLimits {
 		if p.MaxConcurrent < 1 || p.MaxConcurrent > 100 {

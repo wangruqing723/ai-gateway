@@ -1,4 +1,96 @@
 
+                async loadChatGPTAccounts(showError = false) {
+                    this.loadingChatGPTAccounts = true;
+                    try {
+                        const res = await fetch('/api/chatgpt/accounts');
+                        if (!res.ok) throw new Error(await this.errorText(res, '读取 ChatGPT 账户失败'));
+                        const data = await res.json();
+                        this.chatgptAccounts = Array.isArray(data.data) ? data.data : [];
+                    } catch (err) {
+                        if (showError) this.showStatus('读取 ChatGPT 账户失败: ' + err.message, 'error');
+                    } finally {
+                        this.loadingChatGPTAccounts = false;
+                    }
+                },
+
+                async startChatGPTOAuth() {
+                    if (this.startingChatGPTOAuth || this.oauthLoginSession) return;
+                    const popup = window.open('about:blank', 'ai-gateway-chatgpt-oauth', 'popup,width=640,height=760');
+                    if (!popup) {
+                        this.showStatus('浏览器拦截了授权窗口，请允许此页面打开弹窗后重试', 'error');
+                        return;
+                    }
+                    this.startingChatGPTOAuth = true;
+                    try {
+                        const res = await fetch('/api/chatgpt/oauth/start', { method: 'POST' });
+                        if (!res.ok) throw new Error(await this.errorText(res, '发起授权失败'));
+                        const data = await res.json();
+                        this.oauthLoginSession = data.sessionId;
+                        popup.location.href = data.authUrl;
+                        if (this._oauthPollTimer !== null) window.clearInterval(this._oauthPollTimer);
+                        const poll = async () => {
+                            if (!this.oauthLoginSession) return;
+                            try {
+                                const statusRes = await fetch(`/api/chatgpt/oauth/status?sessionId=${encodeURIComponent(this.oauthLoginSession)}`);
+                                if (!statusRes.ok) throw new Error(await this.errorText(statusRes, '查询授权状态失败'));
+                                const status = await statusRes.json();
+                                if (status.status === 'completed') {
+                                    window.clearInterval(this._oauthPollTimer);
+                                    this._oauthPollTimer = null;
+                                    this.oauthLoginSession = null;
+                                    popup.close();
+                                    await this.loadChatGPTAccounts();
+                                    this.showStatus(`ChatGPT 账户已连接${status.account?.email ? '：' + status.account.email : ''}`, 'success');
+                                } else if (status.status === 'error') {
+                                    window.clearInterval(this._oauthPollTimer);
+                                    this._oauthPollTimer = null;
+                                    this.oauthLoginSession = null;
+                                    popup.close();
+                                    this.showStatus(status.message || 'ChatGPT 授权失败，请重试', 'error');
+                                }
+                            } catch (err) {
+                                window.clearInterval(this._oauthPollTimer);
+                                this._oauthPollTimer = null;
+                                this.oauthLoginSession = null;
+                                popup.close();
+                                this.showStatus('ChatGPT 授权状态查询失败: ' + err.message, 'error');
+                            }
+                        };
+                        await poll();
+                        if (this.oauthLoginSession) this._oauthPollTimer = window.setInterval(poll, 1200);
+                    } catch (err) {
+                        popup.close();
+                        this.showStatus('发起 ChatGPT 授权失败: ' + err.message, 'error');
+                    } finally {
+                        this.startingChatGPTOAuth = false;
+                    }
+                },
+
+                async removeChatGPTAccount(account) {
+                    if (!account || account.providers?.length) return;
+                    if (!(await this.askConfirm(`删除账户 ${account.email || account.id} 后，本机保存的 OAuth 凭据将被清除。`, { title: '删除 ChatGPT 账户' }))) return;
+                    try {
+                        const res = await fetch(`/api/chatgpt/accounts/${encodeURIComponent(account.id)}`, { method: 'DELETE' });
+                        if (!res.ok) throw new Error(await this.errorText(res, '删除账户失败'));
+                        await this.loadChatGPTAccounts();
+                        this.showStatus('ChatGPT 账户已删除', 'success');
+                    } catch (err) {
+                        this.showStatus('删除 ChatGPT 账户失败: ' + err.message, 'error');
+                    }
+                },
+
+                providerAuthTypeChanged() {
+                    if (this.providerForm.authType === 'chatgptOAuth') {
+                        this.providerForm.baseUrl = 'https://chatgpt.com/backend-api/codex';
+                        this.providerForm.format = 'openai-responses';
+                        this.providerForm.apiKey = '';
+                        this.providerForm.apiKeyConfigured = false;
+                        this.providerForm.clearApiKey = false;
+                    } else if (this.providerForm.baseUrl === 'https://chatgpt.com/backend-api/codex') {
+                        this.providerForm.baseUrl = '';
+                    }
+                },
+
                 addProvider() {
                     this.editingProvider = null;
                     this.probingProvider = false;
@@ -8,6 +100,8 @@
                         baseUrl: '',
                         apiKey: '',
                         format: 'anthropic',
+                        authType: '',
+                        accountId: '',
                         maxConcurrent: 5,
                         maxPerSecond: 0,
                         maxQueueWait: 30000,
@@ -36,6 +130,8 @@
                         baseUrl: p.baseUrl,
                         apiKey: '',
                         format: p.format,
+                        authType: p.authType || '',
+                        accountId: p.accountId || '',
                         maxConcurrent: p.maxConcurrent,
                         maxPerSecond: p.maxPerSecond,
                         maxQueueWait: p.maxQueueWait,
@@ -72,6 +168,8 @@
                         baseUrl: p.baseUrl,
                         apiKey: '',
                         format: p.format,
+                        authType: p.authType || '',
+                        accountId: p.accountId || '',
                         maxConcurrent: p.maxConcurrent,
                         maxPerSecond: p.maxPerSecond,
                         maxQueueWait: p.maxQueueWait,
@@ -127,18 +225,26 @@
                         return;
                     }
 
+                    const oauth = this.providerForm.authType === 'chatgptOAuth';
+                    if (oauth && !this.providerForm.accountId) {
+                        this.showStatus('请选择已连接的 ChatGPT 账户，或先在 Provider 页连接账户', 'error');
+                        return;
+                    }
+
                     const existing = this.editingProvider ? this.config.providers[this.editingProvider] : null;
-                    let apiKey = this.providerForm.apiKey;
+                    let apiKey = oauth ? '' : this.providerForm.apiKey;
                     if (!apiKey && this.providerForm.apiKeyConfigured && !this.providerForm.clearApiKey) {
                         apiKey = existing?.apiKey || '';
                     }
                     if (this.providerForm.clearApiKey) apiKey = '';
                     const snapshot = this.snapshotConfig();
                     this.config.providers[this.providerForm.name] = {
-                        baseUrl: this.providerForm.baseUrl,
+                        baseUrl: oauth ? 'https://chatgpt.com/backend-api/codex' : this.providerForm.baseUrl,
                         apiKey,
                         apiKeyConfigured: apiKey !== '',
-                        format: this.providerForm.format,
+                        format: oauth ? 'openai-responses' : this.providerForm.format,
+                        authType: oauth ? 'chatgptOAuth' : undefined,
+                        accountId: oauth ? this.providerForm.accountId : undefined,
                         maxConcurrent: this.providerForm.maxConcurrent || 5,
                         maxPerSecond: this.providerForm.maxPerSecond || 0,
                         maxQueueWait: this.providerForm.maxQueueWait || 30000,
@@ -264,6 +370,10 @@
                 },
 
                 async probeProviderForm() {
+                    if (this.providerForm.authType === 'chatgptOAuth') {
+                        this.showStatus('ChatGPT OAuth 账户状态可在 Provider 页面查看', 'success');
+                        return;
+                    }
                     if (this.probingProvider) return;
                     if (!this.providerForm.name || !this.providerForm.baseUrl) {
                         this.showStatus('名称和 URL 不能为空', 'error');

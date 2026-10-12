@@ -9,6 +9,8 @@
                             apiKey: pick(p, 'apiKey', 'APIKey') || '',
                             apiKeyConfigured: !!pick(p, 'apiKeyConfigured', 'APIKeyConfigured'),
                             format: pick(p, 'format', 'Format') || 'anthropic',
+                            authType: pick(p, 'authType', 'AuthType') || '',
+                            accountId: pick(p, 'accountId', 'AccountID') || '',
                             maxConcurrent: pick(p, 'maxConcurrent', 'MaxConcurrent') || 5,
                             maxPerSecond: pick(p, 'maxPerSecond', 'MaxPerSecond') || 0,
                             maxQueueWait: pick(p, 'maxQueueWait', 'MaxQueueWait') || 30000,

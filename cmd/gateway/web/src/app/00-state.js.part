@@ -20,6 +20,11 @@
                 // 弹窗临时探测与首页已落盘 provider 的健康缓存隔离，绝不复用 checkingProvider。
                 probingProvider: false,
                 providerProbeStatus: null,
+                chatgptAccounts: [],
+                loadingChatGPTAccounts: false,
+                startingChatGPTOAuth: false,
+                oauthLoginSession: null,
+                _oauthPollTimer: null,
                 resettingBreakers: false,
                 // 同理：正在单独重置熔断器的 provider 名
                 resettingBreaker: null,
@@ -146,6 +151,8 @@
                     baseUrl: '',
                     apiKey: '',
                     format: 'anthropic',
+                    authType: '',
+                    accountId: '',
                     maxConcurrent: 5,
                     maxPerSecond: 0,
                     maxQueueWait: 30000,

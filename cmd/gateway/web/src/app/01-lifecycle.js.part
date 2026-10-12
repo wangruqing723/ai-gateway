@@ -1,5 +1,6 @@
                 async init() {
                     await this.loadConfig();
+                    await this.loadChatGPTAccounts();
                     if (this.monitorPollingAllowed()) await this.refreshMonitor();
                     this._monitorPollTimer = window.setInterval(() => {
                         if (this.monitorPollingAllowed()) this.refreshMonitor(false);
@@ -46,6 +47,7 @@
 
                 destroy() {
                     if (this._monitorPollTimer !== null) window.clearInterval(this._monitorPollTimer);
+                    if (this._oauthPollTimer !== null) window.clearInterval(this._oauthPollTimer);
                     if (this._monitorVisibilityHandler) {
                         document.removeEventListener('visibilitychange', this._monitorVisibilityHandler);
                     }

@@ -196,6 +196,10 @@
                 async fetchModelsFor(providerName) {
                     const provider = this.config.providers?.[providerName];
                     if (!provider) return null;
+                    if (provider.authType === 'chatgptOAuth') {
+                        this.showStatus('ChatGPT OAuth 不提供模型目录，请在模型框中手动填写模型名', 'success');
+                        return [];
+                    }
 
                     const cacheKey = 'gw.models|' + [providerName, provider.baseUrl, provider.format].join('|');
                     const cached = this.readModelCache(cacheKey);

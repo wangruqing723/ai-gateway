@@ -115,9 +115,11 @@
                         const lines = [
                             `  ${name}:`,
                             `    baseUrl: "${p.baseUrl || ''}"`,
-                            `    apiKey: "${p.apiKey || ''}"`,
+                            ...(p.authType === 'chatgptOAuth' ? [] : [`    apiKey: "${p.apiKey || ''}"`]),
                             `    format: ${p.format || 'anthropic'}`
                         ];
+                        if (p.authType) lines.push(`    authType: ${p.authType}`);
+                        if (p.accountId) lines.push(`    accountId: ${p.accountId}`);
                         // 只在配了时才输出，与后端 yaml omitempty 一致，避免预览里
                         // 给每个 provider 都摆一行空 userAgent；配了却不显示则是假预览。
                         if (p.userAgent) lines.push(`    userAgent: "${p.userAgent}"`);

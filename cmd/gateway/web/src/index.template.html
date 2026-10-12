@@ -647,14 +647,21 @@
                                                               tabindex="0" x-text="provider.baseUrl || ''"></span>
                                                     </td>
                                                     <td class="w-px whitespace-nowrap px-2 py-2.5 text-center">
-                                                        <span x-show="provider.apiKeyConfigured"
+                                                <span x-show="provider.authType === 'chatgptOAuth'"
+                                                      class="material-symbols-outlined text-[18px] text-cyan"
+                                                      @mouseenter="showTip('ChatGPT OAuth 账户', $event)"
+                                                      @mouseleave="hideTip()"
+                                                      @focus="showTip('ChatGPT OAuth 账户', $event)"
+                                                      @blur="hideTip()"
+                                                      tabindex="0">smart_toy</span>
+                                                <span x-show="provider.authType !== 'chatgptOAuth' && provider.apiKeyConfigured"
                                                               class="material-symbols-outlined text-[18px] text-good"
                                                               @mouseenter="showTip('已配置密钥', $event)"
                                                               @mouseleave="hideTip()"
                                                               @focus="showTip('已配置密钥', $event)"
                                                               @blur="hideTip()"
                                                               tabindex="0">key</span>
-                                                        <span x-show="!provider.apiKeyConfigured"
+                                                <span x-show="provider.authType !== 'chatgptOAuth' && !provider.apiKeyConfigured"
                                                               class="material-symbols-outlined text-[18px] text-muted"
                                                               @mouseenter="showTip('未配置，从客户端请求头读取', $event)"
                                                               @mouseleave="hideTip()"
@@ -695,6 +702,46 @@
                                             </tr>
                                         </tbody>
                                     </table>
+                                </div>
+                                <div class="border-t border-line p-4">
+                                    <div class="flex flex-wrap items-center justify-between gap-3">
+                                        <div>
+                                            <h3 class="text-sm font-bold text-white">ChatGPT OAuth 账户</h3>
+                                            <p class="mt-1 text-xs text-muted">通过 Codex OAuth 授权，令牌保存在本机 data 目录中。</p>
+                                        </div>
+                                        <div class="flex gap-2">
+                                            <button @click="loadChatGPTAccounts(true)" :disabled="loadingChatGPTAccounts" class="btn btn-secondary px-3 py-2">
+                                                <span class="material-symbols-outlined text-[18px]" :class="loadingChatGPTAccounts && 'gw-spin'">refresh</span>
+                                                刷新
+                                            </button>
+                                            <button @click="startChatGPTOAuth()" :disabled="startingChatGPTOAuth || oauthLoginSession" class="btn btn-primary px-3 py-2 disabled:opacity-60">
+                                                <span class="material-symbols-outlined text-[18px]" :class="startingChatGPTOAuth && 'gw-spin'">add</span>
+                                                <span x-text="startingChatGPTOAuth ? '正在连接…' : '连接账户'"></span>
+                                            </button>
+                                        </div>
+                                    </div>
+                                    <div x-show="chatgptAccounts.length === 0" x-cloak class="mt-3 rounded-lg border border-dashed border-line px-4 py-5 text-center text-sm text-muted">
+                                        尚未连接 ChatGPT 账户。连接后可在 Provider 配置中绑定。
+                                    </div>
+                                    <div class="mt-3 grid gap-2 sm:grid-cols-2">
+                                        <template x-for="account in chatgptAccounts" :key="account.id">
+                                            <article class="rounded-lg border border-line bg-panel2/50 p-3">
+                                                <div class="flex items-start justify-between gap-3">
+                                                    <div class="min-w-0">
+                                                        <div class="truncate text-sm font-bold text-white" x-text="account.email || account.id"></div>
+                                                        <div class="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted">
+                                                            <span x-show="account.plan" x-text="account.plan"></span>
+                                                            <span class="chip px-1.5 text-[10px]" :class="account.status === 'ready' ? 'border-good/40 bg-good/10 text-good' : 'border-danger/40 bg-danger/10 text-danger'" x-text="account.status === 'ready' ? '已授权' : '需重新授权'"></span>
+                                                        </div>
+                                                    </div>
+                                                    <button @click="removeChatGPTAccount(account)" :disabled="account.providers?.length" :title="account.providers?.length ? '先解除 Provider 绑定：' + account.providers.join(', ') : '删除账户'" class="btn btn-danger px-2 py-1.5 disabled:cursor-not-allowed disabled:opacity-40" aria-label="删除 ChatGPT 账户">
+                                                        <span class="material-symbols-outlined text-[18px]">delete</span>
+                                                    </button>
+                                                </div>
+                                                <div class="mt-2 truncate font-mono text-[10px] text-muted" x-text="account.providers?.length ? '绑定 Provider：' + account.providers.join(', ') : '未绑定 Provider'"></div>
+                                            </article>
+                                        </template>
+                                    </div>
                                 </div>
                             </section>
                         </div>
@@ -1718,9 +1765,17 @@
                             <span class="mt-1 block text-xs text-muted" x-show="!editingProvider" x-cloak
                                   x-text="`最多 ${maxProviderNameLen} 个字符，已用 ${[...(providerForm.name || '')].length}`"></span>
                         </label>
+                        <label class="block sm:col-span-2">
+                            <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">认证方式</span>
+                            <select autocomplete="off" x-model="providerForm.authType" @change="providerAuthTypeChanged()" class="field">
+                                <option value="">API Key / 客户端请求头</option>
+                                <option value="chatgptOAuth">ChatGPT OAuth（Codex）</option>
+                            </select>
+                            <span class="mt-1 block text-xs text-muted">ChatGPT OAuth 令牌由网关安全保存，Provider 只关联账户 ID。</span>
+                        </label>
                         <label class="block">
                             <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">格式</span>
-                            <select autocomplete="off" x-model="providerForm.format" class="field">
+                            <select autocomplete="off" x-model="providerForm.format" :disabled="providerForm.authType === 'chatgptOAuth'" class="field disabled:cursor-not-allowed disabled:opacity-60">
                                 <option value="anthropic">Anthropic</option>
                                 <option value="openai">OpenAI Chat Completions</option>
                                 <option value="openai-responses">OpenAI Responses</option>
@@ -1729,9 +1784,24 @@
                     </div>
                     <label class="mt-4 block">
                         <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">Base URL</span>
-                        <input autocomplete="off" type="text" x-model="providerForm.baseUrl" placeholder="https://api.example.com" class="field">
+                        <input autocomplete="off" type="text" x-model="providerForm.baseUrl" :disabled="providerForm.authType === 'chatgptOAuth'" placeholder="https://api.example.com" class="field disabled:cursor-not-allowed disabled:opacity-60">
                     </label>
-                    <div class="mt-4 block">
+                    <div x-show="providerForm.authType === 'chatgptOAuth'" x-cloak class="mt-4 rounded-lg border border-line bg-panel2/50 p-3">
+                        <label class="block">
+                            <span class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">ChatGPT 账户</span>
+                            <select autocomplete="off" x-model="providerForm.accountId" class="field">
+                                <option value="">选择已连接账户</option>
+                                <template x-for="account in chatgptAccounts" :key="account.id">
+                                    <option :value="account.id" :disabled="account.status !== 'ready'" x-text="(account.email || account.id) + (account.status === 'ready' ? '' : '（需重新授权）')"></option>
+                                </template>
+                            </select>
+                        </label>
+                        <div class="mt-2 flex flex-wrap items-center justify-between gap-2 text-xs text-muted">
+                            <span>上游地址和 Responses 格式由 OAuth 类型固定。</span>
+                            <button type="button" @click="startChatGPTOAuth()" class="text-cyan hover:text-white">+ 连接新账户</button>
+                        </div>
+                    </div>
+                    <div x-show="providerForm.authType !== 'chatgptOAuth'" class="mt-4 block">
                         <label for="provider-api-key" class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-muted">API Key</label>
                         <input autocomplete="off" id="provider-api-key" type="password" x-model="providerForm.apiKey"
                                :placeholder="providerForm.apiKeyConfigured ? '已配置，留空保持不变' : '留空则从客户端请求头提取'"
@@ -1861,7 +1931,7 @@
             </div>
             <div class="flex shrink-0 justify-end gap-3 border-t border-line p-5">
                 <button @click="showProviderModal = false" class="btn btn-secondary">取消</button>
-                <button @click="probeProviderForm()" :disabled="probingProvider" class="btn btn-secondary disabled:opacity-60">
+                <button x-show="providerForm.authType !== 'chatgptOAuth'" @click="probeProviderForm()" :disabled="probingProvider" class="btn btn-secondary disabled:opacity-60">
                     <span class="material-symbols-outlined" :class="probingProvider && 'gw-spin'" x-text="probingProvider ? 'progress_activity' : 'health_and_safety'"></span>
                     <span x-text="probingProvider ? '检测中…' : '检测'"></span>
                 </button>

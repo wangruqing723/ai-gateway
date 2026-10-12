@@ -101,6 +101,8 @@ metrics:
 
 # ── Provider 定义 ────────────────────────────────────────
 # format: anthropic | openai（Chat Completions）| openai-responses（Responses API）
+# ChatGPT OAuth Provider 使用 authType: chatgptOAuth 与 accountId，并固定 Responses 格式。
+# 账户需先在 Web 管理页「提供商」中连接；保存 Provider 时选择该账户。
 # apiKey 可选：留空则从客户端请求头中自动提取
 providers:
   mimo:
