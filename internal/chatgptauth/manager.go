@@ -432,6 +432,7 @@ func (m *Manager) processLoginCallback(ctx context.Context, callbackURI, state, 
 		"code_verifier": {session.Verifier},
 	})
 	if err != nil {
+		logOAuthCodeExchangeFailure(err)
 		m.finishLogin(sessionID, nil, "ChatGPT 令牌交换失败，请重新授权", false)
 		status, _ := m.Status(sessionID)
 		return status, nil
@@ -479,10 +480,38 @@ type tokenResponse struct {
 
 var errInvalidGrant = errors.New("invalid_grant")
 
+type oauthExchangeFailure struct {
+	category   string
+	httpStatus int
+	err        error
+}
+
+func (e *oauthExchangeFailure) Error() string { return e.err.Error() }
+
+func (e *oauthExchangeFailure) Unwrap() error { return e.err }
+
+func newOAuthExchangeFailure(category string, httpStatus int, err error) error {
+	return &oauthExchangeFailure{category: category, httpStatus: httpStatus, err: err}
+}
+
+// 只记录固定错误类别和 HTTP 状态，避免日志包含授权码、令牌、响应正文或代理细节。
+func logOAuthCodeExchangeFailure(err error) {
+	var failure *oauthExchangeFailure
+	if !errors.As(err, &failure) {
+		fmt.Fprintf(os.Stderr, "[system] ChatGPT OAuth authorization code exchange failed (category=unknown)\n")
+		return
+	}
+	if failure.httpStatus > 0 {
+		fmt.Fprintf(os.Stderr, "[system] ChatGPT OAuth authorization code exchange failed (category=%s, http_status=%d)\n", failure.category, failure.httpStatus)
+		return
+	}
+	fmt.Fprintf(os.Stderr, "[system] ChatGPT OAuth authorization code exchange failed (category=%s)\n", failure.category)
+}
+
 func (m *Manager) exchange(ctx context.Context, form url.Values, override ...*http.Client) (tokenResponse, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, oauthBaseURL+"/oauth/token", strings.NewReader(form.Encode()))
 	if err != nil {
-		return tokenResponse{}, errors.New("无法构建 OAuth 令牌请求")
+		return tokenResponse{}, newOAuthExchangeFailure("request_build", 0, errors.New("无法构建 OAuth 令牌请求"))
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
@@ -492,27 +521,41 @@ func (m *Manager) exchange(ctx context.Context, form url.Values, override ...*ht
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return tokenResponse{}, fmt.Errorf("连接 OAuth 服务失败: %w", err)
+		return tokenResponse{}, newOAuthExchangeFailure("transport", 0, fmt.Errorf("连接 OAuth 服务失败: %w", err))
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxOAuthBody))
 	if err != nil {
-		return tokenResponse{}, errors.New("读取 OAuth 响应失败")
+		return tokenResponse{}, newOAuthExchangeFailure("response_read", resp.StatusCode, errors.New("读取 OAuth 响应失败"))
 	}
 	var tokens tokenResponse
 	if err := json.Unmarshal(body, &tokens); err != nil {
-		return tokenResponse{}, fmt.Errorf("OAuth 服务返回了无法解析的响应（HTTP %d）", resp.StatusCode)
+		return tokenResponse{}, newOAuthExchangeFailure("invalid_response", resp.StatusCode, fmt.Errorf("OAuth 服务返回了无法解析的响应（HTTP %d）", resp.StatusCode))
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		if tokens.Error == "invalid_grant" {
-			return tokenResponse{}, errInvalidGrant
+			return tokenResponse{}, newOAuthExchangeFailure("invalid_grant", resp.StatusCode, errInvalidGrant)
 		}
-		return tokenResponse{}, fmt.Errorf("OAuth 服务返回 HTTP %d", resp.StatusCode)
+		if category := safeOAuthErrorCategory(tokens.Error); category != "" {
+			return tokenResponse{}, newOAuthExchangeFailure("oauth_"+category, resp.StatusCode, fmt.Errorf("OAuth 服务返回 HTTP %d", resp.StatusCode))
+		}
+		return tokenResponse{}, newOAuthExchangeFailure("http_error", resp.StatusCode, fmt.Errorf("OAuth 服务返回 HTTP %d", resp.StatusCode))
 	}
 	if tokens.AccessToken == "" || tokens.RefreshToken == "" || tokens.ExpiresIn <= 0 {
-		return tokenResponse{}, errors.New("OAuth 响应缺少 access_token、refresh_token 或有效期")
+		return tokenResponse{}, newOAuthExchangeFailure("missing_tokens", resp.StatusCode, errors.New("OAuth 响应缺少 access_token、refresh_token 或有效期"))
 	}
 	return tokens, nil
+}
+
+// 只允许输出标准 OAuth 错误码；服务端错误描述和响应正文不会进入日志。
+func safeOAuthErrorCategory(raw string) string {
+	switch raw {
+	case "invalid_request", "invalid_client", "unauthorized_client", "unsupported_grant_type",
+		"invalid_scope", "access_denied", "server_error", "temporarily_unavailable":
+		return raw
+	default:
+		return ""
+	}
 }
 
 type accountMetadata struct {
