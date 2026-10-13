@@ -1,16 +1,109 @@
 
-                async loadChatGPTAccounts(showError = false) {
+                async loadChatGPTAccounts(showError = false, checkUsage = true) {
                     this.loadingChatGPTAccounts = true;
+                    let loaded = false;
                     try {
                         const res = await fetch('/api/chatgpt/accounts');
                         if (!res.ok) throw new Error(await this.errorText(res, '读取 ChatGPT 账户失败'));
                         const data = await res.json();
                         this.chatgptAccounts = Array.isArray(data.data) ? data.data : [];
+                        loaded = true;
+                        if (checkUsage && this.chatgptAccounts.some(account => {
+                            const checkedAt = Date.parse(account.usage?.lastCheckedAt || '');
+                            return !Number.isFinite(checkedAt) || Date.now() - checkedAt >= 5 * 60 * 1000;
+                        })) {
+                            void this.refreshChatGPTUsage(false, false);
+                        }
                     } catch (err) {
                         if (showError) this.showStatus('读取 ChatGPT 账户失败: ' + err.message, 'error');
                     } finally {
                         this.loadingChatGPTAccounts = false;
                     }
+                    return loaded;
+                },
+
+                async refreshChatGPTAccounts() {
+                    if (this.loadingChatGPTAccounts || this.refreshingChatGPTUsage || this.refreshingChatGPTAccountId) return;
+                    const loaded = await this.loadChatGPTAccounts(true, false);
+                    if (loaded) await this.refreshChatGPTUsage(true, true);
+                },
+
+                async refreshChatGPTUsage(showError = false, force = false) {
+                    if (this.refreshingChatGPTUsage || this.refreshingChatGPTAccountId || this.chatgptAccounts.length === 0) return;
+                    this.refreshingChatGPTUsage = true;
+                    try {
+                        const url = '/api/chatgpt/accounts/usage/refresh' + (force ? '?force=true' : '');
+                        const res = await fetch(url, { method: 'POST' });
+                        if (!res.ok) throw new Error(await this.errorText(res, '刷新 ChatGPT 用量失败'));
+                        const data = await res.json();
+                        this.chatgptAccounts = Array.isArray(data.data) ? data.data : this.chatgptAccounts;
+                    } catch (err) {
+                        if (showError) this.showStatus('刷新 ChatGPT 用量失败: ' + err.message, 'error');
+                    } finally {
+                        this.refreshingChatGPTUsage = false;
+                    }
+                },
+
+                async refreshChatGPTAccountUsage(account) {
+                    if (!account?.id || this.refreshingChatGPTUsage || this.refreshingChatGPTAccountId) return;
+                    this.refreshingChatGPTAccountId = account.id;
+                    try {
+                        const res = await fetch(`/api/chatgpt/accounts/${encodeURIComponent(account.id)}/usage/refresh?force=true`, { method: 'POST' });
+                        if (!res.ok) throw new Error(await this.errorText(res, '刷新 ChatGPT 用量失败'));
+                        const data = await res.json();
+                        if (data.data) {
+                            this.chatgptAccounts = this.chatgptAccounts.map(item => item.id === account.id ? data.data : item);
+                        }
+                    } catch (err) {
+                        this.showStatus(`刷新 ${account.email || 'ChatGPT 账户'} 用量失败：${err.message}`, 'error');
+                    } finally {
+                        this.refreshingChatGPTAccountId = '';
+                    }
+                },
+
+                formatChatGPTDuration(value) {
+                    const authorized = Date.parse(value || '');
+                    if (!Number.isFinite(authorized)) return '未记录';
+                    const elapsed = Math.max(0, Date.now() - authorized);
+                    const days = Math.floor(elapsed / 86400000);
+                    const hours = Math.floor((elapsed % 86400000) / 3600000);
+                    if (days >= 365) {
+                        let years = Math.floor(days / 365);
+                        const restDays = days % 365;
+                        let months = Math.floor(restDays / 30);
+                        if (months >= 12) {
+                            years += 1;
+                            months = 0;
+                        }
+                        return `${years} 年 ${months} 个月`;
+                    }
+                    if (days > 0) return `${days} 天 ${hours} 小时`;
+                    if (hours > 0) return `${hours} 小时`;
+                    return `${Math.max(1, Math.floor(elapsed / 60000))} 分钟`;
+                },
+
+                formatChatGPTDate(value) {
+                    const date = new Date(value || '');
+                    return Number.isNaN(date.getTime()) ? '未记录' : date.toLocaleString();
+                },
+
+                formatUsageWindowName(window) {
+                    const parts = String(window?.name || '用量').trim().split(/\s+/);
+                    const kind = parts.pop();
+                    const prefix = parts.join(' ');
+                    const kindLabel = kind === 'primary' ? '主要窗口' : kind === 'secondary' ? '次要窗口' : kind;
+                    const label = prefix === 'code review' ? '代码审查' : prefix;
+                    const seconds = Number(window?.limitWindowSeconds) || 0;
+                    let duration = '';
+                    if (seconds >= 86400 && seconds % 86400 === 0) duration = `${seconds / 86400} 天`;
+                    else if (seconds >= 3600 && seconds % 3600 === 0) duration = `${seconds / 3600} 小时`;
+                    else if (seconds >= 60 && seconds % 60 === 0) duration = `${seconds / 60} 分钟`;
+                    else if (seconds > 0) duration = `${seconds} 秒`;
+                    return [label, kindLabel, duration].filter(Boolean).join(' · ');
+                },
+
+                formatUsageReset(value) {
+                    return value ? '重置 ' + this.formatChatGPTDate(value) : '重置时间未知';
                 },
 
                 openChatGPTOAuthDialog() {
@@ -216,7 +309,7 @@
                 },
 
                 async removeChatGPTAccount(account) {
-                    if (!account || account.providers?.length) return;
+                    if (!account || (Array.isArray(account.providers) && account.providers.length > 0)) return;
                     if (!(await this.askConfirm(`删除账户 ${account.email || account.id} 后，本机保存的 OAuth 凭据将被清除。`, { title: '删除 ChatGPT 账户' }))) return;
                     try {
                         const res = await fetch(`/api/chatgpt/accounts/${encodeURIComponent(account.id)}`, { method: 'DELETE' });

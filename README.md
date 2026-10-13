@@ -264,7 +264,7 @@ providers:
 
 仅支持 `http`、`https`、`socks5`、`socks5h` 代理 URL（`socks5h` 在 Go 的 `http.Transport` 里与 `socks5` 行为一致）。空值的语义是继承全局代理，不能表达「仅这个 Provider 强制直连」；需要排除某个目标时请用 `NO_PROXY`（或 Compose 的 `AI_GATEWAY_NO_PROXY`）按 host 排除。
 
-ChatGPT OAuth 可单独配置 `AI_GATEWAY_OAUTH_PROXY`。非空时，它只用于 OAuth 令牌交换和刷新，并优先于全局代理；未设置时仍使用全局 `HTTP_PROXY` / `HTTPS_PROXY` 与 `NO_PROXY`，保持现有行为。专用 OAuth 代理不改变 Provider 的代理选择，也不需要把各 Provider 加进 `NO_PROXY`。
+ChatGPT OAuth 可单独配置 `AI_GATEWAY_OAUTH_PROXY`。非空时，它用于 OAuth 授权码交换和账户用量查询，并优先于全局代理；用量查询若需先刷新令牌，也走该代理。网关转发 Provider 请求时若需刷新令牌，则使用该 Provider 的代理客户端。未设置专用代理时，OAuth 管理请求使用全局 `HTTP_PROXY` / `HTTPS_PROXY` 与 `NO_PROXY`。专用 OAuth 代理不改变 Provider 请求的代理选择，也不需要把各 Provider 加进 `NO_PROXY`。
 
 在 `.env` 里设置（模板见 `.env.example`），然后重建容器：
 
@@ -279,7 +279,7 @@ AI_GATEWAY_HTTP_PROXY=http://host.docker.internal:7897
 AI_GATEWAY_OAUTH_PROXY=http://host.docker.internal:7897
 ```
 
-`AI_GATEWAY_OAUTH_PROXY` 是显式代理设置，不读取 `NO_PROXY`；它只影响 OAuth 请求。Provider 请求仍使用自己的 `provider.proxy`，或按全局代理配置运行。
+`AI_GATEWAY_OAUTH_PROXY` 是显式代理设置，不读取 `NO_PROXY`；它影响授权码交换和账户额度查询。额度查询需要刷新令牌时也会使用该代理。Provider 请求及请求期间触发的令牌刷新仍使用自己的 `provider.proxy`，或按全局代理配置运行。
 
 ```bash
 docker compose up -d --force-recreate   # 单独 restart 不会更新环境变量

@@ -46,7 +46,8 @@ services:
       # 出网代理：默认空 = 不走代理，与不设该变量等价。
       # 宿主机代理要写 host.docker.internal 而非 127.0.0.1，后者在容器里指容器自己。
       # 只在需要代理才能访问上游时才填（在 .env 里设置，见 .env.example）。
-      # ChatGPT OAuth 可单独设置专用代理；非空时只代理 OAuth 令牌交换/刷新，且优先于全局代理。
+      # ChatGPT OAuth 可单独设置专用代理；用于授权码交换和用量查询（查询触发的令牌刷新也走此代理）。
+      # Provider 请求期间触发的令牌刷新仍使用当前 Provider 的代理。
       # 留空时 OAuth 继续使用下方全局代理设置，保持旧版行为。
       - AI_GATEWAY_OAUTH_PROXY=${AI_GATEWAY_OAUTH_PROXY:-}
       - HTTPS_PROXY=${AI_GATEWAY_HTTPS_PROXY:-}

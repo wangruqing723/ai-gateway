@@ -710,9 +710,9 @@
                                             <p class="mt-1 text-xs text-muted">通过 Codex OAuth 授权，令牌保存在本机 data 目录中。</p>
                                         </div>
                                         <div class="flex gap-2">
-                                            <button @click="loadChatGPTAccounts(true)" :disabled="loadingChatGPTAccounts" class="btn btn-secondary px-3 py-2">
-                                                <span class="material-symbols-outlined text-[18px]" :class="loadingChatGPTAccounts && 'gw-spin'">refresh</span>
-                                                刷新
+                                            <button @click="refreshChatGPTAccounts()" :disabled="loadingChatGPTAccounts || refreshingChatGPTUsage || refreshingChatGPTAccountId" class="btn btn-secondary px-3 py-2">
+                                                <span class="material-symbols-outlined text-[18px]" :class="(loadingChatGPTAccounts || refreshingChatGPTUsage) && 'gw-spin'">refresh</span>
+                                                刷新全部用量
                                             </button>
                                             <button @click="openChatGPTOAuthDialog()" :disabled="startingChatGPTOAuth" class="btn btn-primary px-3 py-2 disabled:opacity-60">
                                                 <span class="material-symbols-outlined text-[18px]" :class="startingChatGPTOAuth && 'gw-spin'">add</span>
@@ -723,22 +723,97 @@
                                     <div x-show="chatgptAccounts.length === 0" x-cloak class="mt-3 rounded-lg border border-dashed border-line px-4 py-5 text-center text-sm text-muted">
                                         尚未连接 ChatGPT 账户。连接后可在 Provider 配置中绑定。
                                     </div>
-                                    <div class="mt-3 grid gap-2 sm:grid-cols-2">
+                                    <div class="mt-3 grid gap-3 xl:grid-cols-2">
                                         <template x-for="account in chatgptAccounts" :key="account.id">
-                                            <article class="rounded-lg border border-line bg-panel2/50 p-3">
-                                                <div class="flex items-start justify-between gap-3">
-                                                    <div class="min-w-0">
-                                                        <div class="truncate text-sm font-bold text-white" x-text="account.email || account.id"></div>
-                                                        <div class="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted">
-                                                            <span x-show="account.plan" x-text="account.plan"></span>
-                                                            <span class="chip px-1.5 text-[10px]" :class="account.status === 'ready' ? 'border-good/40 bg-good/10 text-good' : 'border-danger/40 bg-danger/10 text-danger'" x-text="account.status === 'ready' ? '已授权' : '需重新授权'"></span>
+                                            <article class="rounded-xl border border-line bg-panel2/50 p-4">
+                                                <div class="grid items-start gap-3 2xl:grid-cols-[minmax(0,1.2fr)_minmax(0,1.4fr)]">
+                                                    <div class="flex min-w-0 flex-col gap-3">
+                                                        <div class="flex items-start justify-between gap-3">
+                                                            <div class="min-w-0">
+                                                                <div class="truncate text-sm font-semibold text-white" :title="account.email || account.id" x-text="account.email || account.id"></div>
+                                                                <div class="mt-1.5 flex flex-wrap items-center gap-1.5">
+                                                                    <span class="chip border-line px-2 text-[10px] text-muted" x-text="account.usage?.planType || account.plan || '类型未知'"></span>
+                                                                    <span class="chip px-2 text-[10px]" :class="account.status === 'ready' ? 'border-good/40 bg-good/10 text-good' : 'border-danger/40 bg-danger/10 text-danger'" :title="account.status === 'ready' ? '令牌尚未被判定失效；额度查询状态单独显示' : '令牌刷新已确认需要重新授权'" x-text="account.status === 'ready' ? '令牌未判失效' : '需重新授权'"></span>
+                                                                </div>
+                                                            </div>
+                                                            <button @click="removeChatGPTAccount(account)" :disabled="Array.isArray(account.providers) && account.providers.length > 0" :title="Array.isArray(account.providers) && account.providers.length > 0 ? '请先解除 Provider 绑定：' + account.providers.join(', ') : '删除账户'" class="btn btn-danger min-h-[44px] min-w-[44px] shrink-0 p-2 disabled:cursor-not-allowed disabled:opacity-40" aria-label="删除 ChatGPT 账户">
+                                                                <span class="material-symbols-outlined text-[18px]">delete</span>
+                                                            </button>
+                                                        </div>
+                                                        <div class="grid content-start gap-2">
+                                                            <div class="grid grid-cols-2 gap-2">
+                                                                <div class="min-w-0 rounded-lg bg-panel px-3 py-2">
+                                                                    <div class="text-[10px] text-muted">授权时长</div>
+                                                                    <div class="mt-1 truncate text-xs font-semibold text-white" :title="account.authorizedAt ? formatChatGPTDuration(account.authorizedAt) : '旧账户未记录首次授权时间'" x-text="formatChatGPTDuration(account.authorizedAt)"></div>
+                                                                </div>
+                                                                <div class="min-w-0 rounded-lg bg-panel px-3 py-2">
+                                                                    <div class="text-[10px] text-muted">首次授权</div>
+                                                                    <div class="mt-1 truncate text-xs font-semibold text-white" :title="formatChatGPTDate(account.authorizedAt)" x-text="formatChatGPTDate(account.authorizedAt)"></div>
+                                                                </div>
+                                                            </div>
+                                                            <template x-if="account.subscriptionActiveStart || account.subscriptionActiveUntil">
+                                                                <div class="rounded-lg bg-panel px-3 py-2 text-xs">
+                                                                    <div class="text-[10px] text-muted">订阅周期</div>
+                                                                    <div class="mt-1 truncate font-medium text-white" :title="(account.subscriptionActiveStart ? formatChatGPTDate(account.subscriptionActiveStart) : '未知') + ' — ' + (account.subscriptionActiveUntil ? formatChatGPTDate(account.subscriptionActiveUntil) : '未知')" x-text="(account.subscriptionActiveStart ? formatChatGPTDate(account.subscriptionActiveStart) : '未知') + ' — ' + (account.subscriptionActiveUntil ? formatChatGPTDate(account.subscriptionActiveUntil) : '未知')"></div>
+                                                                </div>
+                                                            </template>
+                                                            <details class="rounded-lg bg-panel px-3 py-2 text-xs">
+                                                                <summary class="cursor-pointer select-none font-medium text-muted">授权凭据详情</summary>
+                                                                <div class="mt-2 grid grid-cols-2 gap-2">
+                                                                    <div class="min-w-0">
+                                                                        <div class="text-[10px] text-muted">访问令牌到期</div>
+                                                                        <div class="mt-1 truncate font-medium text-white" :title="account.expiresAt ? formatChatGPTDate(account.expiresAt) : '未记录'" x-text="formatChatGPTDate(account.expiresAt)"></div>
+                                                                    </div>
+                                                                    <div class="min-w-0">
+                                                                        <div class="text-[10px] text-muted">凭据最近更新</div>
+                                                                        <div class="mt-1 truncate font-medium text-white" :title="account.lastRefresh ? formatChatGPTDate(account.lastRefresh) : '未记录'" x-text="formatChatGPTDate(account.lastRefresh)"></div>
+                                                                    </div>
+                                                                </div>
+                                                                <p class="mt-2 text-[10px] leading-relaxed text-muted">访问令牌会自动续期；此时间不代表 ChatGPT 订阅到期时间。</p>
+                                                            </details>
+                                                        </div>
+                                                        <div class="mt-auto flex min-w-0 items-center gap-2 border-t border-line pt-2.5 text-[11px] text-muted" :title="Array.isArray(account.providers) && account.providers.length > 0 ? '绑定 Provider：' + account.providers.join(', ') : '未绑定 Provider'">
+                                                            <span class="h-1.5 w-1.5 shrink-0 rounded-full" :class="Array.isArray(account.providers) && account.providers.length > 0 ? 'bg-good' : 'bg-line'"></span>
+                                                            <span class="min-w-0 truncate" x-text="Array.isArray(account.providers) && account.providers.length > 0 ? '绑定 Provider：' + account.providers.join(', ') : '未绑定 Provider'"></span>
                                                         </div>
                                                     </div>
-                                                    <button @click="removeChatGPTAccount(account)" :disabled="account.providers?.length" :title="account.providers?.length ? '先解除 Provider 绑定：' + account.providers.join(', ') : '删除账户'" class="btn btn-danger px-2 py-1.5 disabled:cursor-not-allowed disabled:opacity-40" aria-label="删除 ChatGPT 账户">
-                                                        <span class="material-symbols-outlined text-[18px]">delete</span>
-                                                    </button>
+                                                    <div class="min-w-0 rounded-lg border border-line bg-panel/60 p-3">
+                                                        <div class="mb-2.5 flex items-center justify-between gap-2">
+                                                            <span class="font-semibold text-white">剩余用量</span>
+                                                            <div class="flex min-w-0 items-center gap-2">
+                                                                <span x-show="refreshingChatGPTUsage || refreshingChatGPTAccountId === account.id" class="truncate text-right text-[10px] text-muted">正在刷新…</span>
+                                                                <span x-show="account.usage?.lastSuccessAt && !account.usage?.error" class="truncate text-right text-[10px] text-muted" x-text="'最近成功 ' + formatChatGPTDate(account.usage.lastSuccessAt)"></span>
+                                                                <span x-show="account.usage?.error && account.usage?.lastSuccessAt" class="truncate text-right text-[10px] text-amber-100" x-text="'最近成功 ' + formatChatGPTDate(account.usage.lastSuccessAt)"></span>
+                                                                <span x-show="account.usage?.error && !account.usage?.lastSuccessAt" class="truncate text-right text-[10px] text-amber-100">尚无成功记录</span>
+                                                                <button type="button" @click="refreshChatGPTAccountUsage(account)" :disabled="refreshingChatGPTUsage || !!refreshingChatGPTAccountId" :title="'刷新 ' + (account.email || '此账户') + ' 的额度'" class="btn btn-secondary min-h-[32px] min-w-[32px] shrink-0 px-1.5 py-1 disabled:cursor-not-allowed disabled:opacity-50" :aria-label="'刷新 ' + (account.email || '此账户') + ' 的额度'">
+                                                                    <span class="material-symbols-outlined text-[16px]" :class="refreshingChatGPTAccountId === account.id && 'gw-spin'">refresh</span>
+                                                                </button>
+                                                            </div>
+                                                        </div>
+                                                        <template x-for="window in (account.usage?.windows || [])" :key="window.name">
+                                                            <div class="mb-3 last:mb-0">
+                                                                <div class="mb-1.5 flex items-center justify-between gap-2 text-xs">
+                                                                    <span class="truncate text-muted" x-text="formatUsageWindowName(window)"></span>
+                                                                    <span class="shrink-0 font-medium" :class="window.remainingPercent <= 10 ? 'text-danger' : window.remainingPercent <= 30 ? 'text-amber-100' : 'text-good'" x-text="Math.round(window.remainingPercent) + '% 剩余'"></span>
+                                                                </div>
+                                                                <div class="h-1 overflow-hidden rounded-full bg-line">
+                                                                    <div class="h-full rounded-full transition-[width]" :class="window.remainingPercent <= 10 ? 'bg-danger' : window.remainingPercent <= 30 ? 'bg-warn' : 'bg-good'" :style="'width: ' + Math.max(0, Math.min(100, Number(window.remainingPercent) || 0)) + '%' "></div>
+                                                                </div>
+                                                                <div class="mt-1.5 flex justify-end text-[10px] text-muted" x-text="formatUsageReset(window.resetAt)"></div>
+                                                            </div>
+                                                        </template>
+                                                        <div x-show="account.usage?.credits" class="mt-2 flex justify-between text-xs">
+                                                            <span class="text-muted">Credits 余额</span>
+                                                            <span class="text-white" x-text="account.usage?.credits?.balance"></span>
+                                                        </div>
+                                                        <div x-show="account.usage?.error" class="mt-2 rounded border border-warn/30 bg-warn/10 px-2 py-1.5 text-[11px] text-amber-100">
+                                                            <div><span class="font-semibold">额度同步失败：</span><span x-text="account.usage?.error"></span></div>
+                                                            <div x-show="account.usage?.windows?.length || account.usage?.credits" class="mt-1 text-muted">上方额度为缓存数据，最后成功查询时间如右上所示。</div>
+                                                        </div>
+                                                        <div x-show="(account.usage?.lastAttemptAt || account.usage?.lastCheckedAt) && !account.usage?.windows?.length && !account.usage?.error" class="mt-1 text-[11px] text-muted">上游暂未返回可显示的额度窗口</div>
+                                                        <div x-show="!(account.usage?.lastAttemptAt || account.usage?.lastCheckedAt) && !refreshingChatGPTUsage && refreshingChatGPTAccountId !== account.id" class="mt-1 text-[11px] text-muted">尚未获取用量</div>
+                                                    </div>
                                                 </div>
-                                                <div class="mt-2 truncate font-mono text-[10px] text-muted" x-text="account.providers?.length ? '绑定 Provider：' + account.providers.join(', ') : '未绑定 Provider'"></div>
                                             </article>
                                         </template>
                                     </div>

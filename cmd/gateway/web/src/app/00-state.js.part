@@ -22,6 +22,8 @@
                 providerProbeStatus: null,
                 chatgptAccounts: [],
                 loadingChatGPTAccounts: false,
+                refreshingChatGPTUsage: false,
+                refreshingChatGPTAccountId: '',
                 showChatGPTOAuthDialog: false,
                 chatGPTOAuthAuthURL: '',
                 chatGPTOAuthReturnURL: '',

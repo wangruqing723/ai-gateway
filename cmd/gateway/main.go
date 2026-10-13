@@ -2114,6 +2114,18 @@ func (s *server) handleChatGPTAuthAPI(w http.ResponseWriter, r *http.Request, pa
 		refs := chatGPTAccountReferences(cfg)
 		s.cfgMu.RUnlock()
 		writeJSON(w, http.StatusOK, map[string]any{"data": s.chatgptAuth.List(refs)})
+	case "/api/chatgpt/accounts/usage/refresh":
+		if r.Method != http.MethodPost {
+			writeMethodNotAllowed(w, http.MethodPost)
+			return
+		}
+		s.cfgMu.RLock()
+		cfg := s.cfg
+		refs := chatGPTAccountReferences(cfg)
+		s.cfgMu.RUnlock()
+		force := strings.EqualFold(r.URL.Query().Get("force"), "true")
+		accounts := s.chatgptAuth.RefreshUsage(r.Context(), refs, force)
+		writeJSON(w, http.StatusOK, map[string]any{"data": accounts})
 	case "/api/chatgpt/oauth/callback":
 		if r.Method != http.MethodPost {
 			writeMethodNotAllowed(w, http.MethodPost)
@@ -2180,15 +2192,46 @@ func (s *server) handleChatGPTAuthAPI(w http.ResponseWriter, r *http.Request, pa
 		writeJSON(w, http.StatusOK, status)
 	default:
 		if strings.HasPrefix(path, "/api/chatgpt/accounts/") {
+			relativePath := strings.TrimPrefix(path, "/api/chatgpt/accounts/")
+			if strings.HasSuffix(relativePath, "/usage/refresh") {
+				accountID := strings.TrimSuffix(relativePath, "/usage/refresh")
+				s.handleRefreshChatGPTAccountUsage(w, r, accountID)
+				return
+			}
 			if r.Method != http.MethodDelete {
 				writeMethodNotAllowed(w, http.MethodDelete)
 				return
 			}
-			s.handleDeleteChatGPTAccount(w, r, strings.TrimPrefix(path, "/api/chatgpt/accounts/"))
+			s.handleDeleteChatGPTAccount(w, r, relativePath)
 			return
 		}
 		writeJSONError(w, http.StatusNotFound, "gateway_error", "未知的 ChatGPT OAuth API 端点")
 	}
+}
+
+func (s *server) handleRefreshChatGPTAccountUsage(w http.ResponseWriter, r *http.Request, escapedID string) {
+	if r.Method != http.MethodPost {
+		writeMethodNotAllowed(w, http.MethodPost)
+		return
+	}
+	id, err := url.PathUnescape(escapedID)
+	if err != nil || id == "" || strings.Contains(id, "/") {
+		writeJSONError(w, http.StatusBadRequest, "invalid_account_id", "账户 ID 无效")
+		return
+	}
+	account, err := s.chatgptAuth.RefreshAccountUsage(r.Context(), id, !strings.EqualFold(r.URL.Query().Get("force"), "false"))
+	if errors.Is(err, chatgptauth.ErrAccountNotFound) {
+		writeJSONError(w, http.StatusNotFound, "account_not_found", err.Error())
+		return
+	}
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "usage_refresh_failed", "刷新 ChatGPT 用量失败")
+		return
+	}
+	s.cfgMu.RLock()
+	account.Providers = append([]string(nil), chatGPTAccountReferences(s.cfg)[id]...)
+	s.cfgMu.RUnlock()
+	writeJSON(w, http.StatusOK, map[string]any{"data": account})
 }
 
 func (s *server) handleDeleteChatGPTAccount(w http.ResponseWriter, r *http.Request, escapedID string) {
