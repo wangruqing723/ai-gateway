@@ -55,6 +55,19 @@ type importRecord struct {
 	Index        int
 }
 
+// transferAccountSnapshot 只复制导入导出所需字段，避免复制含互斥锁的 account。
+type transferAccountSnapshot struct {
+	ID           string
+	Email        string
+	Plan         string
+	AccountID    string
+	IDToken      string
+	AccessToken  string
+	RefreshToken string
+	ExpiresAt    time.Time
+	LastRefresh  time.Time
+}
+
 // Import 解析并原子导入 JSON 或 ZIP 中的 ChatGPT OAuth 账户。
 func (m *Manager) Import(data []byte, archive bool) (ImportResult, error) {
 	if len(data) > maxAccountTransferBytes {
@@ -473,7 +486,7 @@ func (m *Manager) Export(format string, accountIDs []string) (ExportFile, error)
 	}
 
 	m.mu.RLock()
-	selected := make([]account, 0, len(accountIDs))
+	selected := make([]transferAccountSnapshot, 0, len(accountIDs))
 	seen := make(map[string]struct{}, len(accountIDs))
 	for _, id := range accountIDs {
 		if _, exists := seen[id]; exists {
@@ -486,7 +499,7 @@ func (m *Manager) Export(format string, accountIDs []string) (ExportFile, error)
 			m.mu.RUnlock()
 			return ExportFile{}, fmt.Errorf("%w: 所选账户不存在", ErrInvalidExport)
 		}
-		selected = append(selected, account{
+		selected = append(selected, transferAccountSnapshot{
 			ID: item.ID, Email: item.Email, Plan: item.Plan, AccountID: item.AccountID,
 			IDToken: item.IDToken, AccessToken: item.AccessToken, RefreshToken: item.RefreshToken,
 			ExpiresAt: item.ExpiresAt, LastRefresh: item.LastRefresh,
@@ -508,7 +521,7 @@ func (m *Manager) Export(format string, accountIDs []string) (ExportFile, error)
 	return exportJSON(format, selected)
 }
 
-func exportJSON(format string, accounts []account) (ExportFile, error) {
+func exportJSON(format string, accounts []transferAccountSnapshot) (ExportFile, error) {
 	var value any
 	name := "chatgpt-accounts.json"
 	contentType := "application/json"
@@ -551,7 +564,7 @@ func exportJSON(format string, accounts []account) (ExportFile, error) {
 	return ExportFile{Name: name, ContentType: contentType, Data: append(data, '\n')}, nil
 }
 
-func exportArchive(format string, accounts []account) (ExportFile, error) {
+func exportArchive(format string, accounts []transferAccountSnapshot) (ExportFile, error) {
 	var buffer bytes.Buffer
 	writer := zip.NewWriter(&buffer)
 	for _, item := range accounts {
@@ -591,7 +604,7 @@ func exportArchive(format string, accounts []account) (ExportFile, error) {
 	return ExportFile{Name: "chatgpt-accounts.zip", ContentType: "application/zip", Data: buffer.Bytes()}, nil
 }
 
-func portableFromAccount(item account) portableToken {
+func portableFromAccount(item transferAccountSnapshot) portableToken {
 	return portableToken{
 		IDToken: item.IDToken, AccessToken: item.AccessToken, RefreshToken: item.RefreshToken,
 		AccountID: item.AccountID, Email: item.Email, PlanType: item.Plan,
@@ -599,7 +612,7 @@ func portableFromAccount(item account) portableToken {
 	}
 }
 
-func cliProxyFromAccount(item account) cliProxyAuth {
+func cliProxyFromAccount(item transferAccountSnapshot) cliProxyAuth {
 	return cliProxyAuth{
 		Type: "codex", IDToken: item.IDToken, AccessToken: item.AccessToken,
 		RefreshToken: item.RefreshToken, AccountID: item.AccountID, Email: item.Email,
@@ -614,7 +627,7 @@ func timeString(value time.Time) string {
 	return value.UTC().Format(time.RFC3339)
 }
 
-func archiveSlug(item account) string {
+func archiveSlug(item transferAccountSnapshot) string {
 	base := strings.ToLower(strings.TrimSpace(item.Email))
 	if base == "" {
 		base = "chatgpt-account"
