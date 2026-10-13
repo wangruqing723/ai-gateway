@@ -264,12 +264,22 @@ providers:
 
 仅支持 `http`、`https`、`socks5`、`socks5h` 代理 URL（`socks5h` 在 Go 的 `http.Transport` 里与 `socks5` 行为一致）。空值的语义是继承全局代理，不能表达「仅这个 Provider 强制直连」；需要排除某个目标时请用 `NO_PROXY`（或 Compose 的 `AI_GATEWAY_NO_PROXY`）按 host 排除。
 
+ChatGPT OAuth 可单独配置 `AI_GATEWAY_OAUTH_PROXY`。非空时，它只用于 OAuth 令牌交换和刷新，并优先于全局代理；未设置时仍使用全局 `HTTP_PROXY` / `HTTPS_PROXY` 与 `NO_PROXY`，保持现有行为。专用 OAuth 代理不改变 Provider 的代理选择，也不需要把各 Provider 加进 `NO_PROXY`。
+
 在 `.env` 里设置（模板见 `.env.example`），然后重建容器：
 
 ```bash
 AI_GATEWAY_HTTPS_PROXY=http://host.docker.internal:7897
 AI_GATEWAY_HTTP_PROXY=http://host.docker.internal:7897
 ```
+
+如果只有 ChatGPT OAuth 需要代理，让全局代理留空，只设置专用变量：
+
+```bash
+AI_GATEWAY_OAUTH_PROXY=http://host.docker.internal:7897
+```
+
+`AI_GATEWAY_OAUTH_PROXY` 是显式代理设置，不读取 `NO_PROXY`；它只影响 OAuth 请求。Provider 请求仍使用自己的 `provider.proxy`，或按全局代理配置运行。
 
 ```bash
 docker compose up -d --force-recreate   # 单独 restart 不会更新环境变量
@@ -286,7 +296,7 @@ docker compose up -d --force-recreate   # 单独 restart 不会更新环境变�
     -s -m 6 -o /dev/null -w '%{http_code}\n' \
     -x http://host.docker.internal:7897 https://api.github.com
   ```
-- 全局环境代理只作用于未配置独立代理的 Provider，覆盖上游转发、vision 图片翻译、Provider 健康检测、上游模型列表查询。
+- 全局环境代理作用于未配置 `provider.proxy` 的 Provider（上游转发、vision 图片翻译、健康检测和模型列表查询）；未设置 `AI_GATEWAY_OAUTH_PROXY` 时，OAuth 也沿用全局代理。
 - 不想让某些目标走代理就用 `AI_GATEWAY_NO_PROXY`（逗号分隔）。**本机回环自动排除，但容器网络里的服务名不会** —— 若某个 provider 的 `baseUrl` 指向同一 docker 网络内的另一个容器（如 `http://my-llm:8000`），开代理后该请求会被送去代理并失败，必须把服务名写进 `NO_PROXY`。指向局域网 IP 的 provider 同理。
 - 变量留空等于不设置，与不走代理完全一致，不会因为「配了个空值」而出错。
 

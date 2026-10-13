@@ -89,7 +89,8 @@ func main() {
 	}
 
 	translator := vision.New(imgCache, qm, httpPool.For, cfg.DirectMode)
-	authHTTPClient, err := httpPool.For("")
+	// OAuth 优先使用专用代理；未设置时继续继承 HTTP(S)_PROXY 环境代理。
+	authHTTPClient, err := httpPool.For(os.Getenv("AI_GATEWAY_OAUTH_PROXY"))
 	if err != nil {
 		_ = imgCache.Close()
 		fmt.Fprintf(os.Stderr, "[gateway] OAuth HTTP 客户端初始化失败: %s\n", err)
@@ -2970,6 +2971,10 @@ func (s *server) applyRuntimeConfig(newCfg *config.Config, revision string) []st
 		if provider.Proxy != "" {
 			activeProxies[provider.Proxy] = struct{}{}
 		}
+	}
+	// OAuth 客户端也通过 httpPool 缓存；热重载回收连接池时保留其专用代理。
+	if oauthProxy := os.Getenv("AI_GATEWAY_OAUTH_PROXY"); oauthProxy != "" {
+		activeProxies[oauthProxy] = struct{}{}
 	}
 
 	s.cfgMu.Lock()
