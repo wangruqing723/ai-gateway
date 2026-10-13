@@ -101,6 +101,7 @@ type account struct {
 	Email                   string         `json:"email,omitempty"`
 	Plan                    string         `json:"plan,omitempty"`
 	AccountID               string         `json:"chatgptAccountId"`
+	IDToken                 string         `json:"idToken,omitempty"`
 	AccessToken             string         `json:"accessToken"`
 	RefreshToken            string         `json:"refreshToken"`
 	ExpiresAt               time.Time      `json:"expiresAt"`
@@ -167,7 +168,7 @@ func New(path string, client *http.Client) (*Manager, error) {
 			return nil, fmt.Errorf("解析 ChatGPT OAuth 账户文件失败: %w", err)
 		}
 		for _, item := range store.Accounts {
-			if item == nil || item.ID == "" || item.AccountID == "" || item.RefreshToken == "" {
+			if item == nil || item.ID == "" || item.AccountID == "" || (item.AccessToken == "" && item.RefreshToken == "") {
 				continue
 			}
 			m.accounts[item.ID] = item
@@ -658,8 +659,13 @@ func (m *Manager) AccessToken(ctx context.Context, id string, client *http.Clien
 	}
 	accessToken, refreshToken, accountID, expiresAt, needsReauth := item.AccessToken, item.RefreshToken, item.AccountID, item.ExpiresAt, item.NeedsReauth
 	m.mu.RUnlock()
-	if !needsReauth && accessToken != "" && time.Until(expiresAt) > refreshBefore {
-		return accessToken, accountID, nil
+	if !needsReauth && accessToken != "" {
+		if refreshToken == "" && time.Now().Before(expiresAt) {
+			return accessToken, accountID, nil
+		}
+		if refreshToken != "" && time.Until(expiresAt) > refreshBefore {
+			return accessToken, accountID, nil
+		}
 	}
 	if refreshToken == "" || needsReauth {
 		return "", "", errors.New("ChatGPT OAuth 账户需要重新授权")
@@ -695,6 +701,9 @@ func (m *Manager) AccessToken(ctx context.Context, id string, client *http.Clien
 		return "", "", ErrAccountNotFound
 	}
 	item.AccessToken = tokens.AccessToken
+	if tokens.IDToken != "" {
+		item.IDToken = tokens.IDToken
+	}
 	if tokens.RefreshToken != "" {
 		item.RefreshToken = tokens.RefreshToken
 	}
@@ -1006,7 +1015,7 @@ func (m *Manager) saveTokens(tokens tokenResponse, meta accountMetadata) (*accou
 	}
 	previous := account{
 		ID: item.ID, Email: item.Email, Plan: item.Plan, AccountID: item.AccountID,
-		AccessToken: item.AccessToken, RefreshToken: item.RefreshToken,
+		IDToken: item.IDToken, AccessToken: item.AccessToken, RefreshToken: item.RefreshToken,
 		ExpiresAt: item.ExpiresAt, LastRefresh: item.LastRefresh, AuthorizedAt: item.AuthorizedAt,
 		SubscriptionActiveStart: item.SubscriptionActiveStart, SubscriptionActiveUntil: item.SubscriptionActiveUntil,
 		NeedsReauth: item.NeedsReauth,
@@ -1029,6 +1038,9 @@ func (m *Manager) saveTokens(tokens tokenResponse, meta accountMetadata) (*accou
 		item.SubscriptionActiveUntil = &value
 	}
 	item.AccountID = meta.AccountID
+	if tokens.IDToken != "" {
+		item.IDToken = tokens.IDToken
+	}
 	item.AccessToken = tokens.AccessToken
 	item.RefreshToken = tokens.RefreshToken
 	item.ExpiresAt = now.Add(time.Duration(tokens.ExpiresIn) * time.Second)
@@ -1041,6 +1053,7 @@ func (m *Manager) saveTokens(tokens tokenResponse, meta accountMetadata) (*accou
 			item.Email = previous.Email
 			item.Plan = previous.Plan
 			item.AccountID = previous.AccountID
+			item.IDToken = previous.IDToken
 			item.AccessToken = previous.AccessToken
 			item.RefreshToken = previous.RefreshToken
 			item.ExpiresAt = previous.ExpiresAt
@@ -1127,7 +1140,7 @@ func (m *Manager) cleanupSessionsLocked(now time.Time) error {
 
 func viewOf(item *account) AccountView {
 	status := "ready"
-	if item.NeedsReauth {
+	if item.NeedsReauth || (item.RefreshToken == "" && (item.ExpiresAt.IsZero() || !item.ExpiresAt.After(time.Now()))) {
 		status = "reauthorization_required"
 	}
 	plan := item.Plan

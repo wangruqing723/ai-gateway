@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net"
 	"net/http"
 	"net/url"
@@ -2104,6 +2105,93 @@ func (s *server) handleChatGPTAuthAPI(w http.ResponseWriter, r *http.Request, pa
 		return
 	}
 	switch path {
+	case "/api/chatgpt/accounts/import":
+		if r.Method != http.MethodPost {
+			writeMethodNotAllowed(w, http.MethodPost)
+			return
+		}
+		mediaType := requestMediaType(r)
+		if mediaType != "application/json" && mediaType != "application/zip" {
+			writeJSONError(w, http.StatusUnsupportedMediaType, "unsupported_media_type", "导入文件须使用 application/json 或 application/zip")
+			return
+		}
+		body, err := readBodyLimited(r, 16<<20)
+		if err != nil {
+			if errors.Is(err, errRequestBodyTooLarge) {
+				writeJSONError(w, http.StatusRequestEntityTooLarge, "request_too_large", "导入文件超过 16 MiB 限制")
+				return
+			}
+			writeJSONError(w, http.StatusBadRequest, "invalid_import", "读取导入文件失败")
+			return
+		}
+		result, err := s.chatgptAuth.Import(body, mediaType == "application/zip")
+		if errors.Is(err, chatgptauth.ErrImportTooLarge) {
+			writeJSONError(w, http.StatusRequestEntityTooLarge, "request_too_large", "导入账户数量或 ZIP 解压大小超过限制")
+			return
+		}
+		if errors.Is(err, chatgptauth.ErrInvalidImport) {
+			writeJSONError(w, http.StatusBadRequest, "invalid_import", err.Error())
+			return
+		}
+		if errors.Is(err, chatgptauth.ErrAccountImportPersist) {
+			writeJSONError(w, http.StatusInternalServerError, "account_import_failed", "保存导入账户失败，未保留本批次变更")
+			return
+		}
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "account_import_failed", "导入 ChatGPT 账户失败")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"data": result})
+	case "/api/chatgpt/accounts/export":
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Pragma", "no-cache")
+		if r.Method != http.MethodPost {
+			writeMethodNotAllowed(w, http.MethodPost)
+			return
+		}
+		if requestMediaType(r) != "application/json" {
+			writeJSONError(w, http.StatusUnsupportedMediaType, "unsupported_media_type", "导出请求须使用 application/json")
+			return
+		}
+		body, err := readBodyLimited(r, 16<<10)
+		if err != nil {
+			if errors.Is(err, errRequestBodyTooLarge) {
+				writeJSONError(w, http.StatusRequestEntityTooLarge, "request_too_large", "导出请求超过大小限制")
+				return
+			}
+			writeJSONError(w, http.StatusBadRequest, "invalid_export", "读取导出请求失败")
+			return
+		}
+		var input struct {
+			Format     string   `json:"format"`
+			AccountIDs []string `json:"accountIds"`
+		}
+		decoder := json.NewDecoder(bytes.NewReader(body))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&input); err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid_export", "导出请求 JSON 无效")
+			return
+		}
+		var extra any
+		if err := decoder.Decode(&extra); err != io.EOF {
+			writeJSONError(w, http.StatusBadRequest, "invalid_export", "导出请求只能包含一个 JSON 对象")
+			return
+		}
+		file, err := s.chatgptAuth.Export(input.Format, input.AccountIDs)
+		if errors.Is(err, chatgptauth.ErrInvalidExport) {
+			writeJSONError(w, http.StatusBadRequest, "invalid_export", err.Error())
+			return
+		}
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "account_export_failed", "生成 ChatGPT 账户导出文件失败")
+			return
+		}
+		w.Header().Set("Content-Type", file.ContentType)
+		w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": file.Name}))
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Content-Length", strconv.Itoa(len(file.Data)))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(file.Data)
 	case "/api/chatgpt/accounts":
 		if r.Method != http.MethodGet {
 			writeMethodNotAllowed(w, http.MethodGet)

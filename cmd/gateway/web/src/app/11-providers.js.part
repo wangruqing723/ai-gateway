@@ -2,8 +2,10 @@
                 async loadChatGPTAccounts(showError = false, checkUsage = true) {
                     this.loadingChatGPTAccounts = true;
                     let loaded = false;
+                    const controller = new AbortController();
+                    const timeoutId = window.setTimeout(() => controller.abort(), 15_000);
                     try {
-                        const res = await fetch('/api/chatgpt/accounts');
+                        const res = await fetch('/api/chatgpt/accounts', { signal: controller.signal });
                         if (!res.ok) throw new Error(await this.errorText(res, '读取 ChatGPT 账户失败'));
                         const data = await res.json();
                         this.chatgptAccounts = Array.isArray(data.data) ? data.data : [];
@@ -15,11 +17,114 @@
                             void this.refreshChatGPTUsage(false, false);
                         }
                     } catch (err) {
-                        if (showError) this.showStatus('读取 ChatGPT 账户失败: ' + err.message, 'error');
+                        if (showError || controller.signal.aborted) {
+                            this.showStatus(controller.signal.aborted ? '读取 ChatGPT 账户超时，请重试' : '读取 ChatGPT 账户失败: ' + err.message, 'error');
+                        }
                     } finally {
+                        window.clearTimeout(timeoutId);
                         this.loadingChatGPTAccounts = false;
                     }
                     return loaded;
+                },
+
+                openChatGPTImportDialog() {
+                    this.chatGPTImportFile = null;
+                    this.chatGPTImportResult = null;
+                    this.showChatGPTImportDialog = true;
+                    this.$nextTick(() => {
+                        if (this.$refs.chatGPTImportFileInput) this.$refs.chatGPTImportFileInput.value = '';
+                    });
+                },
+
+                closeChatGPTImportDialog() {
+                    if (this.importingChatGPTAccounts) return;
+                    this.showChatGPTImportDialog = false;
+                    this.chatGPTImportFile = null;
+                    this.$nextTick(() => {
+                        if (this.$refs.chatGPTImportFileInput) this.$refs.chatGPTImportFileInput.value = '';
+                    });
+                },
+
+                async importChatGPTAccounts() {
+                    const file = this.chatGPTImportFile;
+                    if (!file || this.importingChatGPTAccounts) return;
+                    const isZip = /\.zip$/i.test(file.name || '') || /application\/(x-)?zip/i.test(file.type || '');
+                    this.importingChatGPTAccounts = true;
+                    this.chatGPTImportResult = null;
+                    try {
+                        const res = await fetch('/api/chatgpt/accounts/import', {
+                            method: 'POST',
+                            headers: { 'Content-Type': isZip ? 'application/zip' : 'application/json' },
+                            body: file
+                        });
+                        if (!res.ok) throw new Error(await this.errorText(res, '导入 ChatGPT 账户失败'));
+                        const response = await res.json();
+                        this.chatGPTImportResult = response.data || null;
+                        this.chatGPTImportFile = null;
+                        if (this.$refs.chatGPTImportFileInput) this.$refs.chatGPTImportFileInput.value = '';
+                        await this.loadChatGPTAccounts(false, true);
+                        const result = this.chatGPTImportResult || {};
+                        this.showStatus(`导入完成：新增 ${result.imported || 0} 个，重复跳过 ${result.skippedDuplicates || 0} 个`, 'success');
+                    } catch (err) {
+                        this.showStatus('导入 ChatGPT 账户失败：' + err.message, 'error');
+                    } finally {
+                        this.importingChatGPTAccounts = false;
+                        this.chatGPTImportFile = null;
+                        if (this.$refs.chatGPTImportFileInput) this.$refs.chatGPTImportFileInput.value = '';
+                    }
+                },
+
+                openChatGPTExportDialog() {
+                    this.chatGPTExportAccountIds = this.chatgptAccounts.map(account => account.id);
+                    this.showChatGPTExportDialog = true;
+                },
+
+                selectAllChatGPTExportAccounts() {
+                    this.chatGPTExportAccountIds = this.chatgptAccounts.map(account => account.id);
+                },
+
+                clearChatGPTExportAccounts() {
+                    this.chatGPTExportAccountIds = [];
+                },
+
+                async exportChatGPTAccount(account) {
+                    if (!account?.id) return;
+                    await this.exportChatGPTAccounts([account.id]);
+                },
+
+                async exportChatGPTAccounts(accountIds = this.chatGPTExportAccountIds) {
+                    if (this.exportingChatGPTAccounts) return;
+                    const ids = Array.isArray(accountIds) ? [...accountIds] : [];
+                    if (ids.length === 0) {
+                        this.showStatus('请至少选择一个 ChatGPT 账户', 'error');
+                        return;
+                    }
+                    this.exportingChatGPTAccounts = true;
+                    try {
+                        const res = await fetch('/api/chatgpt/accounts/export', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ format: this.chatGPTExportFormat, accountIds: ids })
+                        });
+                        if (!res.ok) throw new Error(await this.errorText(res, '导出 ChatGPT 账户失败'));
+                        const blob = await res.blob();
+                        const disposition = res.headers.get('Content-Disposition') || '';
+                        const filename = disposition.match(/filename\*?=(?:UTF-8''|\")?([^;\"]+)/i)?.[1] || 'chatgpt-accounts.json';
+                        const objectURL = URL.createObjectURL(blob);
+                        const link = document.createElement('a');
+                        link.href = objectURL;
+                        link.download = decodeURIComponent(filename.replace(/^\"|\"$/g, ''));
+                        document.body.appendChild(link);
+                        link.click();
+                        link.remove();
+                        window.setTimeout(() => URL.revokeObjectURL(objectURL), 0);
+                        this.showChatGPTExportDialog = false;
+                        this.showStatus(`已导出 ${ids.length} 个 ChatGPT 账户`, 'success');
+                    } catch (err) {
+                        this.showStatus('导出 ChatGPT 账户失败：' + err.message, 'error');
+                    } finally {
+                        this.exportingChatGPTAccounts = false;
+                    }
                 },
 
                 async refreshChatGPTAccounts() {
@@ -31,15 +136,25 @@
                 async refreshChatGPTUsage(showError = false, force = false) {
                     if (this.refreshingChatGPTUsage || this.refreshingChatGPTAccountId || this.chatgptAccounts.length === 0) return;
                     this.refreshingChatGPTUsage = true;
+                    // 后端最多并发查询 3 个账户，每个账户的上游请求有 15 秒超时。
+                    // 按账户数预留批次时间，并设置上限，避免网络异常时页面按钮永久锁定。
+                    const timeoutMs = Math.min(120_000, Math.max(30_000, Math.ceil(this.chatgptAccounts.length / 3) * 20_000));
+                    const controller = new AbortController();
+                    const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
                     try {
                         const url = '/api/chatgpt/accounts/usage/refresh' + (force ? '?force=true' : '');
-                        const res = await fetch(url, { method: 'POST' });
+                        const res = await fetch(url, { method: 'POST', signal: controller.signal });
                         if (!res.ok) throw new Error(await this.errorText(res, '刷新 ChatGPT 用量失败'));
                         const data = await res.json();
                         this.chatgptAccounts = Array.isArray(data.data) ? data.data : this.chatgptAccounts;
                     } catch (err) {
-                        if (showError) this.showStatus('刷新 ChatGPT 用量失败: ' + err.message, 'error');
+                        if (controller.signal.aborted) {
+                            this.showStatus('刷新 ChatGPT 用量超时，本次刷新已停止，可以稍后重试', 'error');
+                        } else if (showError) {
+                            this.showStatus('刷新 ChatGPT 用量失败: ' + err.message, 'error');
+                        }
                     } finally {
+                        window.clearTimeout(timeoutId);
                         this.refreshingChatGPTUsage = false;
                     }
                 },
@@ -47,16 +162,20 @@
                 async refreshChatGPTAccountUsage(account) {
                     if (!account?.id || this.refreshingChatGPTUsage || this.refreshingChatGPTAccountId) return;
                     this.refreshingChatGPTAccountId = account.id;
+                    const controller = new AbortController();
+                    const timeoutId = window.setTimeout(() => controller.abort(), 30_000);
                     try {
-                        const res = await fetch(`/api/chatgpt/accounts/${encodeURIComponent(account.id)}/usage/refresh?force=true`, { method: 'POST' });
+                        const res = await fetch(`/api/chatgpt/accounts/${encodeURIComponent(account.id)}/usage/refresh?force=true`, { method: 'POST', signal: controller.signal });
                         if (!res.ok) throw new Error(await this.errorText(res, '刷新 ChatGPT 用量失败'));
                         const data = await res.json();
                         if (data.data) {
                             this.chatgptAccounts = this.chatgptAccounts.map(item => item.id === account.id ? data.data : item);
                         }
                     } catch (err) {
-                        this.showStatus(`刷新 ${account.email || 'ChatGPT 账户'} 用量失败：${err.message}`, 'error');
+                        const message = controller.signal.aborted ? '请求超时，请稍后重试' : err.message;
+                        this.showStatus(`刷新 ${account.email || 'ChatGPT 账户'} 用量失败：${message}`, 'error');
                     } finally {
+                        window.clearTimeout(timeoutId);
                         this.refreshingChatGPTAccountId = '';
                     }
                 },
