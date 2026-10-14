@@ -1193,6 +1193,20 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 		// 收到 response.completed 后聚合成常规 JSON 响应。
 		upstreamMap["stream"] = true
 		upstreamMap["store"] = false
+		// 该端点对请求体做字段名白名单校验，标准 Responses 的多数可选字段会被 400
+		// 拒绝。配置校验已保证 authType=chatgptOAuth 必然是 openai-responses 且
+		// baseUrl 固定为 codex 端点，故此处无需再判 format。
+		//
+		// 位置必须在两条构造路径（透传浅拷贝 / 跨格式转换）汇合之后，也在 ApplyExtraBody
+		// 之后：透传路径不经过 converter 的字段放行名单，客户端原始字段会原样进 body。
+		dropped, stripErr := converter.StripUnsupportedCodexResponsesFields(upstreamMap)
+		if stripErr != nil {
+			setAttemptBuildError(in.detail, stripErr)
+			return forwardAttemptOutcome{buildErr: stripErr.Error()}
+		}
+		if len(dropped) > 0 {
+			logf(reqID, "  ChatGPT Codex 端点不接受 %s，已从上游请求体剔除", strings.Join(dropped, "、"))
+		}
 	}
 	upstreamBody, err := json.Marshal(upstreamMap)
 	if err != nil {

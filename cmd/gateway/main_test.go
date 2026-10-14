@@ -23,6 +23,7 @@ import (
 
 	"ai-gateway/internal/breaker"
 	"ai-gateway/internal/cache"
+	"ai-gateway/internal/chatgptauth"
 	"ai-gateway/internal/config"
 	"ai-gateway/internal/converter"
 	"ai-gateway/internal/httpclient"
@@ -3316,4 +3317,176 @@ func TestHandleDisabledVisionProviderDegradesSoftly(t *testing.T) {
 	if logs[0].VisionFailCategory != "other" || logs[0].VisionFailMessage == "" {
 		t.Errorf("失败分类/说明 = %q/%q", logs[0].VisionFailCategory, logs[0].VisionFailMessage)
 	}
+}
+
+// TestForwardAttemptStripsUnsupportedCodexFields 覆盖 authType=chatgptOAuth 候选的
+// 请求体裁剪，重点是**两条构造路径都要覆盖**：透传路径（客户端也是 openai-responses）
+// 直接浅拷贝 rawBody，完全不经过 converter 的字段放行名单，是最容易漏掉的一半。
+//
+// 用假 OAuth 账户 + 假上游，不接触真实 chatgpt.com，也不读 data/chatgpt-accounts.json。
+func TestForwardAttemptStripsUnsupportedCodexFields(t *testing.T) {
+	// setup 起一个记录请求体的假上游，并造一个带假账户的 OAuth 管理器。
+	setup := func(t *testing.T) (*server, *config.Provider, chan map[string]any) {
+		t.Helper()
+		bodies := make(chan map[string]any, 4)
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			raw, _ := io.ReadAll(r.Body)
+			var body map[string]any
+			_ = json.Unmarshal(raw, &body)
+			bodies <- body
+			w.Header().Set("content-type", "text/event-stream")
+			_, _ = io.WriteString(w, "event: response.completed\n"+
+				"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r\",\"status\":\"completed\",\"output\":[]}}\n\n")
+		}))
+		t.Cleanup(upstream.Close)
+
+		mgr, err := chatgptauth.New(filepath.Join(t.TempDir(), "accounts.json"), http.DefaultClient)
+		if err != nil {
+			t.Fatalf("新建账户管理器: %v", err)
+		}
+		// refresh_token 留空 + expires_at 在未来：AccessToken 直接返回，不发刷新请求。
+		if _, err := mgr.Import([]byte(`[{"access_token":"fake-token","account_id":"acc_fake",`+
+			`"expires_at":"2035-01-01T00:00:00Z"}]`), false); err != nil {
+			t.Fatalf("导入假账户: %v", err)
+		}
+		views := mgr.List(nil)
+		if len(views) != 1 {
+			t.Fatalf("假账户数 = %d，期望 1", len(views))
+		}
+
+		provider := &config.Provider{
+			Name: "codex", BaseURL: upstream.URL, Format: "openai-responses",
+			AuthType: "chatgptOAuth", AccountID: views[0].ID,
+		}
+		srv := &server{chatgptAuth: mgr, resolveHTTPClient: testClientResolver(http.DefaultClient)}
+		return srv, provider, bodies
+	}
+
+	// run 补全 forwardAttemptInput 的公共字段并执行一次尝试。
+	run := func(t *testing.T, srv *server, provider *config.Provider, in forwardAttemptInput) forwardAttemptOutcome {
+		t.Helper()
+		in.cfg = &config.Config{
+			DirectMode: true,
+			// DirectMode 下 timeoutMs 取 DirectTimeoutNoStream，为 0 会让 context 立即过期。
+			DirectTimeoutNoStream:     5000,
+			DirectTimeoutStreamHeader: 5000,
+			DirectTimeoutStreamActive: 5000,
+		}
+		in.start = time.Now()
+		in.reqID = "r-test"
+		in.originalModel = "gpt-6-luna"
+		in.candidate = router.Candidate{Provider: provider, TargetModel: "gpt-6-luna"}
+		in.attemptNo = 1
+		in.httpAttemptNo = 1
+		request := httptest.NewRequest(http.MethodPost, "http://client.test/v1/messages", nil)
+		return srv.forwardAttempt(httptest.NewRecorder(), request, in)
+	}
+
+	recvBody := func(t *testing.T, ch chan map[string]any) map[string]any {
+		t.Helper()
+		select {
+		case body := <-ch:
+			return body
+		case <-time.After(5 * time.Second):
+			t.Fatal("上游未收到请求")
+			return nil
+		}
+	}
+
+	assertStripped := func(t *testing.T, body map[string]any) {
+		t.Helper()
+		for _, key := range []string{"metadata", "temperature", "top_p", "safety_identifier", "background", "truncation"} {
+			if _, exists := body[key]; exists {
+				t.Fatalf("上游请求体不应含 %q: %#v", key, body)
+			}
+		}
+		if body["model"] != "gpt-6-luna" {
+			t.Fatalf("model 应保留，实际 %#v", body["model"])
+		}
+		if body["stream"] != true || body["store"] != false {
+			t.Fatalf("codex 端点应强制 stream=true / store=false，实际 %#v / %#v", body["stream"], body["store"])
+		}
+	}
+
+	t.Run("跨格式路径剔除被拒字段", func(t *testing.T) {
+		srv, provider, bodies := setup(t)
+		raw := map[string]any{
+			"model": "gpt-6-luna", "max_tokens": 64, "system": "sys",
+			"metadata":    map[string]any{"user_id": "u"},
+			"temperature": 0.7, "top_p": 0.9,
+			"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+		}
+		detail := metrics.AttemptDetail{}
+		reqLog := metrics.RequestLog{}
+		run(t, srv, provider, forwardAttemptInput{
+			clientFormat: "anthropic",
+			internal:     converter.FromAnthropic(raw),
+			rawBody:      raw,
+			reqLog:       &reqLog,
+			detail:       &detail,
+		})
+		assertStripped(t, recvBody(t, bodies))
+	})
+
+	t.Run("透传路径剔除被拒字段", func(t *testing.T) {
+		srv, provider, bodies := setup(t)
+		raw := map[string]any{
+			"model": "gpt-6-luna", "stream": false,
+			"input": []any{map[string]any{
+				"type": "message", "role": "user",
+				"content": []any{map[string]any{"type": "input_text", "text": "hi"}},
+			}},
+			"metadata":    map[string]any{"user_id": "u"},
+			"temperature": 0.7, "top_p": 0.9,
+		}
+		detail := metrics.AttemptDetail{}
+		reqLog := metrics.RequestLog{}
+		run(t, srv, provider, forwardAttemptInput{
+			clientFormat: "openai-responses",
+			internal:     converter.FromOpenAIResponses(raw),
+			rawBody:      raw,
+			reqLog:       &reqLog,
+			detail:       &detail,
+		})
+		assertStripped(t, recvBody(t, bodies))
+	})
+
+	t.Run("会话状态字段触发 build_error 且不发起请求", func(t *testing.T) {
+		for _, key := range []string{"previous_response_id", "conversation", "prompt"} {
+			t.Run(key, func(t *testing.T) {
+				srv, provider, bodies := setup(t)
+				raw := map[string]any{
+					"model": "gpt-6-luna", "stream": false,
+					"input": []any{map[string]any{
+						"type": "message", "role": "user",
+						"content": []any{map[string]any{"type": "input_text", "text": "hi"}},
+					}},
+					key: "sentinel",
+				}
+				detail := metrics.AttemptDetail{}
+				reqLog := metrics.RequestLog{}
+				outcome := run(t, srv, provider, forwardAttemptInput{
+					clientFormat: "openai-responses",
+					internal:     converter.FromOpenAIResponses(raw),
+					rawBody:      raw,
+					reqLog:       &reqLog,
+					detail:       &detail,
+				})
+				if outcome.buildErr == "" {
+					t.Fatalf("期望 build_error，实际 %#v", outcome)
+				}
+				if !strings.Contains(outcome.buildErr, key) {
+					t.Fatalf("build_error 应提到 %q，实际 %q", key, outcome.buildErr)
+				}
+				if detail.Outcome != "build_error" || detail.Reason != "conversion_error" {
+					t.Fatalf("明细 = %s/%s，期望 build_error/conversion_error", detail.Outcome, detail.Reason)
+				}
+				select {
+				case body := <-bodies:
+					t.Fatalf("不应发起上游请求，实际收到 %#v", body)
+				default:
+				}
+			})
+		}
+	})
 }

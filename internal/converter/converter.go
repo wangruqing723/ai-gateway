@@ -1287,6 +1287,56 @@ func copyResponsesCompatibleExtras(body, extra map[string]any) {
 	}
 }
 
+// codexResponsesSilentlyDropped 是 ChatGPT Codex Responses 端点会 400 拒绝、但删掉后
+// 不改变模型所见上下文的字段。
+//
+// chatgpt.com/backend-api/codex/responses 不是标准 Responses API：它只接受 Codex 自己
+// 那套字段（实测官方 codex CLI 只发 client_metadata / include / input / model /
+// parallel_tool_calls / prompt_cache_key / reasoning / service_tier / store / stream /
+// text / tool_choice）。而 copyResponsesCompatibleExtras 的放行名单有 14 个字段，其中 9 个
+// 在该端点实测返回 400 {"detail":"Unsupported parameter: X"}。
+//
+// 本名单是其中「不进模型输入」的一类：metadata 与 safety_identifier 按定义只是元数据；
+// background 是异步执行模式，网关同步转发本就不支持；truncation 管上游自动截断，网关
+// 自己用 contextWindow 裁决；temperature/top_p 是采样参数，该端点的推理模型本就不吃。
+var codexResponsesSilentlyDropped = []string{
+	"metadata", "safety_identifier", "background", "truncation", "temperature", "top_p",
+}
+
+// codexResponsesRejected 是决定「上下文从哪来」的字段：它们引用服务端保存的会话状态或
+// prompt 模板。静默删掉不会报错，但会让模型少看到内容——属于最难排查的一类静默降级。
+// 按本文件既有口径（宁可返回 conversion_error，也不静默丢掉会改变会话状态的字段）拒绝。
+var codexResponsesRejected = []string{
+	"previous_response_id", "conversation", "prompt",
+}
+
+// StripUnsupportedCodexResponsesFields 按 ChatGPT Codex 端点的能力裁剪上游请求体，原地
+// 删除不支持的字段，返回被删掉的字段名。
+//
+// 返回值供调用方记日志：否则「客户端配了 temperature，在 codex 路由上静默不生效」没有任何
+// 线索。命中 codexResponsesRejected 时返回错误且不做任何删除——让该候选以 build_error
+// 收场，比悄悄发出一个上下文不完整的请求安全。
+//
+// 只按字段名判断，不看取值：上游做的是字段名白名单校验，留一个 null 同样会被拒。
+func StripUnsupportedCodexResponsesFields(body map[string]any) ([]string, error) {
+	if body == nil {
+		return nil, nil
+	}
+	for _, key := range codexResponsesRejected {
+		if _, exists := body[key]; exists {
+			return nil, fmt.Errorf("ChatGPT Codex 端点不接受 %s：它会改变会话上下文的来源，拒绝静默丢弃", key)
+		}
+	}
+	var dropped []string
+	for _, key := range codexResponsesSilentlyDropped {
+		if _, exists := body[key]; exists {
+			delete(body, key)
+			dropped = append(dropped, key)
+		}
+	}
+	return dropped, nil
+}
+
 func toolChoiceToAnthropic(value any) (map[string]any, error) {
 	switch choice := value.(type) {
 	case string:

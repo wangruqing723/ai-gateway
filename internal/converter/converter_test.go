@@ -1357,3 +1357,112 @@ func TestLimitMaxTokensClampsOnlyWhenBudgetRequiresIt(t *testing.T) {
 		t.Fatalf("budget=0 不应改写请求体: %#v", body)
 	}
 }
+
+// TestStripUnsupportedCodexResponsesFields 覆盖 ChatGPT Codex 端点的字段裁剪：
+// 静默档按名单顺序删除并返回名称，会话状态档返回错误且不删任何字段。
+func TestStripUnsupportedCodexResponsesFields(t *testing.T) {
+	cases := []struct {
+		name        string
+		body        map[string]any
+		wantDropped []string
+		wantErrKey  string // 期望错误信息里包含的字段名，空表示不应报错
+	}{
+		{
+			name: "静默档全部剔除并按名单顺序返回",
+			body: map[string]any{
+				"model": "gpt-6-luna", "input": []any{}, "stream": true,
+				"temperature": 0.7, "top_p": 0.9, "metadata": map[string]any{"user_id": "u"},
+				"truncation": "auto", "background": false, "safety_identifier": "s",
+			},
+			wantDropped: []string{"metadata", "safety_identifier", "background", "truncation", "temperature", "top_p"},
+		},
+		{
+			name: "官方 Codex 字段与网关自有字段一律保留",
+			body: map[string]any{
+				"model": "gpt-6-luna", "input": []any{}, "stream": true, "store": false,
+				"include": []any{"reasoning.encrypted_content"}, "parallel_tool_calls": false,
+				"prompt_cache_key": "k", "reasoning": map[string]any{"effort": "low"},
+				"service_tier": "priority", "text": map[string]any{"verbosity": "low"},
+				"tool_choice": "auto", "client_metadata": map[string]any{},
+				"max_output_tokens": 1024, "instructions": "sys", "tools": []any{},
+			},
+		},
+		{
+			// 命中会话状态档时必须整体拒绝：连同静默档一起原样留在 body 里，
+			// 不能出现「删了一半然后报错」的中间态。
+			name:       "previous_response_id 报错且不删同一 body 里的静默档字段",
+			body:       map[string]any{"previous_response_id": "resp_1", "metadata": map[string]any{"a": "b"}},
+			wantErrKey: "previous_response_id",
+		},
+		{
+			name:       "conversation 报错",
+			body:       map[string]any{"conversation": "conv_1"},
+			wantErrKey: "conversation",
+		},
+		{
+			name:       "prompt 报错",
+			body:       map[string]any{"prompt": map[string]any{"id": "pmpt_1"}},
+			wantErrKey: "prompt",
+		},
+		{
+			name: "nil body 不做任何事",
+			body: nil,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			before := make(map[string]any, len(tc.body))
+			for k, v := range tc.body {
+				before[k] = v
+			}
+
+			dropped, err := StripUnsupportedCodexResponsesFields(tc.body)
+
+			if tc.wantErrKey != "" {
+				if err == nil {
+					t.Fatalf("期望报错并提到 %q，实际 nil", tc.wantErrKey)
+				}
+				if !strings.Contains(err.Error(), tc.wantErrKey) {
+					t.Fatalf("错误信息应含 %q，实际 %q", tc.wantErrKey, err.Error())
+				}
+				if !reflect.DeepEqual(tc.body, before) {
+					t.Fatalf("报错时不得改动 body：\n改动前 %#v\n改动后 %#v", before, tc.body)
+				}
+				if len(dropped) != 0 {
+					t.Fatalf("报错时不应返回被删字段，实际 %v", dropped)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("不应报错: %v", err)
+			}
+			if len(tc.wantDropped) != 0 && !reflect.DeepEqual(dropped, tc.wantDropped) {
+				t.Fatalf("被删字段 = %v，期望 %v", dropped, tc.wantDropped)
+			}
+			if len(tc.wantDropped) == 0 && len(dropped) != 0 {
+				t.Fatalf("不应删除任何字段，实际删了 %v", dropped)
+			}
+			for _, key := range tc.wantDropped {
+				if _, exists := tc.body[key]; exists {
+					t.Fatalf("字段 %q 应已删除", key)
+				}
+			}
+			for key := range before {
+				if _, gone := tc.body[key]; !gone {
+					found := false
+					for _, d := range tc.wantDropped {
+						if d == key {
+							found = true
+							break
+						}
+					}
+					if !found {
+						t.Fatalf("字段 %q 不应被删除", key)
+					}
+				}
+			}
+		})
+	}
+}
