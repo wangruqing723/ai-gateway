@@ -1366,6 +1366,41 @@ func TestWrongTypedToolArgumentsStillFailStream(t *testing.T) {
 	}
 }
 
+func TestResponsesMetadataEventIgnored(t *testing.T) {
+	for _, clientFormat := range []string{"anthropic", "openai-chat"} {
+		t.Run(clientFormat, func(t *testing.T) {
+			transformer := NewStreamTransformer("openai-responses", clientFormat)
+			metadata := `data: {"type":"response.metadata","response_id":"resp_1","sequence_number":7,"metadata":{"openai_chatgpt_moderation_metadata":{"flagged":false}}}`
+			if out := transformer.Transform(metadata); len(out) != 0 {
+				t.Fatalf("metadata event output = %#v, want ignored", out)
+			}
+			if err := StreamError(transformer); err != nil {
+				t.Fatalf("metadata event error = %v, want nil", err)
+			}
+
+			// 忽略元数据后仍要处理正文，并让真实成功终态完成转换。
+			lines := []string{
+				`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-up","status":"in_progress","output":[]}}`,
+				`data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","role":"assistant","content":[]}}`,
+				`data: {"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":"hello"}`,
+				metadata,
+				`data: {"type":"response.completed","response":{"id":"resp_1","model":"gpt-up","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1}}}`,
+			}
+			out := transformAll(t, transformer, lines...)
+			if err := StreamError(transformer); err != nil {
+				t.Fatalf("stream error after metadata = %v, want nil", err)
+			}
+			if !StreamCompleted(transformer) {
+				t.Fatal("真实 response.completed 未被处理")
+			}
+			joined := strings.Join(out, "")
+			if !strings.Contains(joined, "hello") {
+				t.Fatalf("output = %q, metadata 后正文未转换", joined)
+			}
+		})
+	}
+}
+
 func jsonQuote(s string) string {
 	b, _ := json.Marshal(s)
 	return string(b)

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"ai-gateway/internal/config"
+	"ai-gateway/internal/converter"
 )
 
 const (
@@ -904,5 +905,87 @@ func (w *trackingStreamWriter) Write(p []byte) (int, error) {
 func (w *trackingStreamWriter) Flush() {
 	if w.status == 0 {
 		w.status = http.StatusOK
+	}
+}
+
+// passthrough 路径不追踪源协议终态，上游 EOF 即正常结束，不应误报 unexpected EOF。
+// 这条路径覆盖 ChatGPT Codex 的 openai-responses 同格式透传：上游 SSE 未带
+// response.completed 直接断流时，StreamCompleted 恒为 false，旧逻辑会把它当作
+// 提前截断并写失败终态给客户端，Codex 收到后认为响应出错而报错。
+func TestForwardStreamPassthroughEOFIsNormal(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("content-type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher := w.(http.Flusher)
+		flusher.Flush()
+		// 故意只发增量事件、不发 response.completed 就关流，模拟 ChatGPT Codex 端点
+		// 在某些情况下直接断流的真实行为。
+		_, _ = io.WriteString(w, `data: {"type":"response.output_text.delta","delta":"hello"}`+"\n\n")
+		flusher.Flush()
+	}))
+	defer upstream.Close()
+
+	recorder := httptest.NewRecorder()
+	err := Forward(forwardTestOptions(upstream, recorder, "openai-responses", "openai-responses", true, 500, 500))
+	if err != nil {
+		t.Fatalf("Forward() error = %v, want nil for passthrough EOF", err)
+	}
+	body := recorder.Body.String()
+	if !strings.Contains(body, "hello") {
+		t.Fatalf("stream body = %q, want upstream delta forwarded", body)
+	}
+	// 不应写失败终态：passthrough 下 EOF 是上游关流的正常结束。
+	if strings.Contains(body, "response.failed") || strings.Contains(body, "unexpected EOF") {
+		t.Fatalf("stream body = %q, passthrough EOF must not produce failure terminal", body)
+	}
+}
+
+// passthrough 路径下真正的活跃超时仍须写超时失败终态，不能因「不追踪终态」就吞掉。
+func TestForwardStreamPassthroughTimeoutWritesFailure(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	}))
+	defer upstream.Close()
+
+	recorder := httptest.NewRecorder()
+	err := Forward(forwardTestOptions(upstream, recorder, "openai-responses", "openai-responses", true, 500, 50))
+	if err == nil || !strings.Contains(err.Error(), "流式传输活跃超时") {
+		t.Fatalf("Forward() error = %v, want activity timeout", err)
+	}
+	body := recorder.Body.String()
+	if !strings.Contains(body, "response.failed") || !strings.Contains(body, "timeout_error") {
+		t.Fatalf("stream body = %q, want timeout failure terminal", body)
+	}
+}
+
+// passthrough 被命名空间还原装饰器包装时，收尾判定同样不能误报 unexpected EOF。
+// ChatGPT Codex 带 namespace 工具时走的就是这条路径。
+func TestForwardStreamPassthroughWithNamespaceEOFIsNormal(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("content-type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher := w.(http.Flusher)
+		flusher.Flush()
+		_, _ = io.WriteString(w, `data: {"type":"response.output_text.delta","delta":"hi"}`+"\n\n")
+		flusher.Flush()
+	}))
+	defer upstream.Close()
+
+	recorder := httptest.NewRecorder()
+	opts := forwardTestOptions(upstream, recorder, "openai-responses", "openai-responses", true, 500, 500)
+	// 非空映射触发 namespaceRestorer 包装（isPassthrough 为 false，走逐行转换路径），
+	// 但事件里不含工具名，确保还原逻辑不改动事件、只验证收尾判定。
+	opts.ToolNamespaces = map[string]converter.NamespacedName{
+		"multi_agent_v1__close_agent": {Namespace: "multi_agent_v1", Name: "close_agent"},
+	}
+	if err := Forward(opts); err != nil {
+		t.Fatalf("Forward() error = %v, want nil for passthrough EOF with namespace", err)
+	}
+	body := recorder.Body.String()
+	if strings.Contains(body, "response.failed") || strings.Contains(body, "unexpected EOF") {
+		t.Fatalf("stream body = %q, passthrough+namespace EOF must not produce failure", body)
 	}
 }

@@ -133,6 +133,22 @@ func StreamCompleted(transformer StreamTransformer) bool {
 	return ok && reporter.Completed()
 }
 
+// IsPassthroughTransformer 报告 transformer 的最内层是否为无状态的 passthrough。
+//
+// passthrough 不解析协议事件、不追踪源协议的成功终态，其正常结束只能靠上游 EOF
+// 判定。proxy 据此区分「能追踪终态但没看到」（上游流提前截断，要补失败终态）与
+// 「根本不追踪」（EOF 即正常结束，不能报 unexpected EOF）。namespaceRestorer 等
+// 装饰器会被剥开后继续判断内层，使同格式 + namespace 还原路径也能正确收尾——
+// 该路径下 NewStreamTransformer 返回 passthrough{}，但被 namespaceRestorer 包装，
+// 而 namespaceRestorer.Completed() 委托给不实现该接口的 passthrough，恒返回 false。
+func IsPassthroughTransformer(transformer StreamTransformer) bool {
+	if restorer, ok := transformer.(*namespaceRestorer); ok {
+		return IsPassthroughTransformer(restorer.inner)
+	}
+	_, ok := transformer.(passthrough)
+	return ok
+}
+
 func (state *streamState) addError(err error) {
 	state.err = errors.Join(state.err, err)
 }
@@ -1493,6 +1509,9 @@ func (t *responsesToChat) Transform(line string) []string {
 		// reasoning item 的生命周期事件（summary part 增删、summary text 完成等）
 		// 没有目标协议等价物，但它们伴随 reasoning item 必然出现，报错等于任何带
 		// 推理的上游都用不了。正文已在上面的显式分支里取走。
+		if eventType == "response.metadata" {
+			return nil
+		}
 		if isResponsesReasoningEvent(eventType) {
 			return nil
 		}
@@ -1780,6 +1799,9 @@ func (t *responsesToAnthropic) Transform(line string) []string {
 		// reasoning item 的生命周期事件（summary part 增删、summary text 完成等）
 		// 没有目标协议等价物，但它们伴随 reasoning item 必然出现，报错等于任何带
 		// 推理的上游都用不了。正文已在上面的显式分支里取走。
+		if eventType == "response.metadata" {
+			return nil
+		}
 		if isResponsesReasoningEvent(eventType) {
 			return nil
 		}
