@@ -718,7 +718,7 @@
                                                 <span class="material-symbols-outlined text-[18px]">save</span>
                                                 导出账户
                                             </button>
-                                            <button @click="refreshChatGPTAccounts()" :disabled="loadingChatGPTAccounts || refreshingChatGPTUsage || refreshingChatGPTAccountId" class="btn btn-secondary px-3 py-2">
+                                            <button @click="refreshChatGPTAccounts()" :disabled="!!(loadingChatGPTAccounts || refreshingChatGPTUsage || refreshingChatGPTAccountId)" class="btn btn-secondary px-3 py-2">
                                                 <span class="material-symbols-outlined text-[18px]" :class="(loadingChatGPTAccounts || refreshingChatGPTUsage) && 'gw-spin'">refresh</span>
                                                 刷新全部用量
                                             </button>
