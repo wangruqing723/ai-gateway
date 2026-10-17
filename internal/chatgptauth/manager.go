@@ -22,24 +22,30 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 const (
-	oauthClientID = "app_EMoamEEZ73f0CkXaXp7hrann"
-	oauthBaseURL  = "https://auth.openai.com"
-	usageURL      = "https://chatgpt.com/backend-api/wham/usage"
-	chatGPTIssuer = "https://api.openai.com/auth"
-	loginTTL      = 10 * time.Minute
-	refreshBefore = 2 * time.Minute
-	maxOAuthBody  = 1 << 20
-	maxUsageBody  = 1 << 20
-	usageTimeout  = 15 * time.Second
-	usageCacheTTL = 5 * time.Minute
-	usageWorkers  = 3
+	oauthClientID        = "app_EMoamEEZ73f0CkXaXp7hrann"
+	oauthBaseURL         = "https://auth.openai.com"
+	usageURL             = "https://chatgpt.com/backend-api/wham/usage"
+	chatGPTIssuer        = "https://api.openai.com/auth"
+	loginTTL             = 10 * time.Minute
+	refreshBefore        = 2 * time.Minute
+	maxOAuthBody         = 1 << 20
+	maxUsageBody         = 1 << 20
+	usageTimeout         = 15 * time.Second
+	usageCacheTTL        = 30 * time.Minute
+	usageWorkers         = 3
+	maxAccountTags       = 20
+	maxAccountTagLength  = 32
+	maxAccountNoteLength = 2000
 )
 
 var ErrAccountNotFound = errors.New("ChatGPT OAuth 账户不存在")
 var ErrInvalidOAuthCallback = errors.New("ChatGPT OAuth 回调链接无效或与当前授权会话不匹配")
+var ErrInvalidAccountMetadata = errors.New("ChatGPT OAuth 账户标签或备注无效")
+var ErrAccountMetadataPersist = errors.New("ChatGPT OAuth 账户元数据保存失败")
 
 // AccountView 是不含任何令牌的账户管理视图。
 type AccountView struct {
@@ -52,8 +58,16 @@ type AccountView struct {
 	AuthorizedAt            string         `json:"authorizedAt,omitempty"`
 	SubscriptionActiveStart string         `json:"subscriptionActiveStart,omitempty"`
 	SubscriptionActiveUntil string         `json:"subscriptionActiveUntil,omitempty"`
+	Tags                    []string       `json:"tags,omitempty"`
+	Note                    string         `json:"note,omitempty"`
 	Usage                   *UsageSnapshot `json:"usage,omitempty"`
 	Providers               []string       `json:"providers,omitempty"`
+}
+
+// AccountMetadataPatch 是对账户本地标签与备注的部分更新。
+type AccountMetadataPatch struct {
+	Tags *[]string `json:"tags"`
+	Note *string   `json:"note"`
 }
 
 // UsageSnapshot 是 usage 接口返回的可公开额度快照，不含凭据或上游原始响应。
@@ -109,6 +123,8 @@ type account struct {
 	AuthorizedAt            *time.Time     `json:"authorizedAt,omitempty"`
 	SubscriptionActiveStart *time.Time     `json:"subscriptionActiveStart,omitempty"`
 	SubscriptionActiveUntil *time.Time     `json:"subscriptionActiveUntil,omitempty"`
+	Tags                    []string       `json:"tags,omitempty"`
+	Note                    string         `json:"note,omitempty"`
 	Usage                   *UsageSnapshot `json:"usage,omitempty"`
 	NeedsReauth             bool           `json:"needsReauth,omitempty"`
 	refreshMu               sync.Mutex
@@ -289,7 +305,7 @@ func (m *Manager) List(references map[string][]string) []AccountView {
 	return out
 }
 
-// RefreshUsage 刷新各账户的用量快照。force=false 时会复用五分钟内的结果。
+// RefreshUsage 刷新各账户的用量快照。force=false 时会复用半小时内的结果。
 func (m *Manager) RefreshUsage(ctx context.Context, references map[string][]string, force bool) []AccountView {
 	m.mu.RLock()
 	accounts := make([]*account, 0, len(m.accounts))
@@ -624,6 +640,75 @@ func (m *Manager) Account(id string) (AccountView, bool) {
 		return AccountView{}, false
 	}
 	return viewOf(item), true
+}
+
+// UpdateMetadata 修改账户标签和备注，并通过原子文件替换持久化。
+func (m *Manager) UpdateMetadata(id string, patch AccountMetadataPatch) (AccountView, error) {
+	if patch.Tags == nil && patch.Note == nil {
+		return AccountView{}, ErrInvalidAccountMetadata
+	}
+
+	var tags []string
+	if patch.Tags != nil {
+		var err error
+		tags, err = normalizeAccountTags(*patch.Tags)
+		if err != nil {
+			return AccountView{}, err
+		}
+	}
+	if patch.Note != nil && utf8.RuneCountInString(*patch.Note) > maxAccountNoteLength {
+		return AccountView{}, fmt.Errorf("%w: 备注最多 %d 个字符", ErrInvalidAccountMetadata, maxAccountNoteLength)
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	item := m.accounts[id]
+	if item == nil {
+		return AccountView{}, ErrAccountNotFound
+	}
+
+	previousTags := append([]string(nil), item.Tags...)
+	previousNote := item.Note
+	if patch.Tags != nil {
+		item.Tags = tags
+	}
+	if patch.Note != nil {
+		item.Note = *patch.Note
+	}
+	if err := m.persistLocked(); err != nil {
+		item.Tags = previousTags
+		item.Note = previousNote
+		return AccountView{}, fmt.Errorf("%w: %v", ErrAccountMetadataPersist, err)
+	}
+	return viewOf(item), nil
+}
+
+func normalizeAccountTags(input []string) ([]string, error) {
+	if len(input) > maxAccountTags {
+		return nil, fmt.Errorf("%w: 标签最多 %d 个", ErrInvalidAccountMetadata, maxAccountTags)
+	}
+
+	tags := make([]string, 0, len(input))
+	for _, tag := range input {
+		tag = strings.TrimSpace(tag)
+		if tag == "" {
+			continue
+		}
+		if utf8.RuneCountInString(tag) > maxAccountTagLength {
+			return nil, fmt.Errorf("%w: 每个标签最多 %d 个字符", ErrInvalidAccountMetadata, maxAccountTagLength)
+		}
+		duplicate := false
+		for _, existing := range tags {
+			if strings.EqualFold(existing, tag) {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			tags = append(tags, tag)
+		}
+	}
+	return tags, nil
 }
 
 // Delete 删除本地 OAuth 凭据。调用方负责先确认账户未被 Provider 引用。
@@ -1147,7 +1232,10 @@ func viewOf(item *account) AccountView {
 	if item.Usage != nil && item.Usage.PlanType != "" {
 		plan = item.Usage.PlanType
 	}
-	view := AccountView{ID: item.ID, Email: item.Email, Plan: plan, Status: status, Usage: cloneUsage(item.Usage)}
+	view := AccountView{
+		ID: item.ID, Email: item.Email, Plan: plan, Status: status,
+		Tags: append([]string(nil), item.Tags...), Note: item.Note, Usage: cloneUsage(item.Usage),
+	}
 	if !item.ExpiresAt.IsZero() {
 		view.ExpiresAt = item.ExpiresAt.UTC().Format(time.RFC3339)
 	}

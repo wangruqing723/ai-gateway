@@ -163,13 +163,13 @@ http://127.0.0.1:7789/
 AI_GATEWAY_WEB_DIR=cmd/gateway/web go run ./cmd/gateway
 ```
 
-默认 Compose 不挂载前端源码。需要热加载时使用开发 override：
+开发 Compose 可独立启动：
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
+docker compose -f docker-compose.dev.yml up -d
 ```
 
-启用后，修改 `cmd/gateway/web/index.html` 并保存，浏览器页面会自动刷新。若热加载代码是新加的，旧页面需要先手动刷新一次以建立 `/__dev/reload` SSE 连接。
+该配置使用本地源码构建 `ai-gateway:dev`，开发镜像使用内置 `scratch` 运行层，避免构建时访问 GCR；管理页监听 `127.0.0.1:7790`，并与默认远端 Compose 共用 `config.yaml` 和 `data/`。修改 `cmd/gateway/web` 中的页面文件后，浏览器会通过 SSE 自动刷新；若热加载代码是新加的，旧页面需要先手动刷新一次以建立 `/__dev/reload` SSE 连接。
 
 ## Docker 部署
 

@@ -154,6 +154,8 @@
                 expandedLogId: null,
                 // ChatGPT 账户列表一次只展开一行详情（同请求日志），存账户 id，'' 表示都收起。
                 expandedChatGPTAccountId: '',
+                chatGPTAccountMetadataDrafts: {},
+                savingChatGPTAccountMetadataId: '',
                 // 高级诊断筛选默认折叠：正常排查优先看请求最终结果；仅在定位
                 // failover / 上游失败时再展开 attempt 维度，避免和最终 Provider、状态混在一起。
                 logAdvancedFiltersOpen: false,
@@ -171,6 +173,8 @@
                 showProviderModal: false,
                 // 提供商列表的快速筛选词：按名称、Base URL、格式做包含匹配，纯界面状态，不落盘。
                 providerFilter: '',
+                // ChatGPT OAuth 账户列表筛选词：按邮箱、账户 ID、标签、备注和绑定 Provider 匹配。
+                chatGPTAccountFilter: '',
                 // Provider 抽屉「高级设置」的展开状态：打开抽屉时按是否已有高级配置决定（见 openProviderDrawer）。
                 providerAdvancedOpen: false,
                 // 抽屉防误丢：打开时记下表单指纹，关闭前比对，有差异才确认。

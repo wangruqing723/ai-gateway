@@ -261,14 +261,14 @@
                                                             <template x-for="(target, ti) in routeTargets(route)" :key="ti">
                                                                 <div class="flex min-w-0 items-center gap-1.5 whitespace-nowrap" :class="isInlineModel(index, ti) ? 'col-span-full' : ''" :data-inline-anchor="index + ':' + ti">
                                                                     <span class="font-mono text-[11px] text-muted" x-text="(ti + 1) + '.'"></span>
-                                                                    <span class="tag bg-white/[.06] text-text" x-text="target.provider"></span>
+                                                                    <span class="tag bg-white/[.06] text-text text-sm" x-text="target.provider"></span>
                                                                     <span class="text-[11px] text-muted">→</span>
                                                                     <!-- 模型名可就地改：只读态是文本，点一下才换成输入框。
                                                                          provider 不给就地改——换 provider 连带 apiKey / 格式 / 上限覆盖
                                                                          整套都变了，属结构性改动，仍走编辑弹窗。
                                                                          role=button + tabindex 让键盘也能进入编辑（Enter 触发）。 -->
                                                                     <template x-if="!isInlineModel(index, ti)">
-                                                                        <span class="min-w-0 truncate rounded px-1 py-0.5 font-mono text-xs text-emerald-200 transition hover:bg-cyan2/10 hover:text-cyan"
+                                                                        <span class="min-w-0 truncate rounded px-1 py-0.5 font-mono text-sm text-emerald-200 transition hover:bg-cyan2/10 hover:text-cyan"
                                                                               :class="target.model ? 'cursor-pointer' : 'cursor-pointer text-muted'"
                                                                               role="button" tabindex="0"
                                                                               @click="startInlineModel(index, ti)"
@@ -612,7 +612,7 @@
                                 </p>
                             </section>
 
-                            <section x-show="activeTab === 'providers'" x-transition class="glass rounded-lg">
+                            <section id="chatgpt-provider-list" x-ref="chatGPTProviderList" x-show="activeTab === 'providers'" x-transition class="glass rounded-lg">
                                 <div class="flex flex-col gap-3 border-b border-line p-4 sm:flex-row sm:items-center sm:justify-between">
                                     <div>
                                         <h2 class="text-lg font-bold text-white">Providers</h2>
@@ -643,13 +643,14 @@
                                 <!-- 表格而不是卡片网格：provider 的字段都是短标量，卡片把每个字段
                                      包成一个小方块后纵向占地是表格的几倍，数量一多就要来回滚动比对。
                                      表格同列对齐，扫一眼就能横向比较各上游的并发和限速。 -->
-                                <div class="overflow-x-auto">
+                                <!-- Provider 列表固定为 28rem，搜索结果变化时高度不变，超出内容在列表内滚动。 -->
+                                <div class="h-[28rem] overflow-x-auto overflow-y-auto">
                                     <!-- 历史布局备注：这块曾在 xl:col-span-8 里，右侧还有配置预览栏，
                                          因而把并发/限速/队列等待三个数值合并成一列「限流」，否则表格会宽到
                                          必须横向滚动、操作列被裁掉；当时表头和数值都 nowrap 以避免行高撑高。
                                          预览抽屉化后恢复三个独立列，窄屏仍由外层横向滚动容器承接。 -->
                                     <table class="w-full border-collapse text-left">
-                                        <thead class="bg-panel2 text-xs text-muted">
+                                        <thead class="sticky top-0 z-10 bg-panel2 text-xs text-muted">
                                             <tr>
                                                 <!-- 启用列放最前：它决定这一行的其余配置当下是否生效，
                                                      排在名称之后会让人先读完配置才发现整行是停用的。 -->
@@ -666,7 +667,7 @@
                                             </tr>
                                         </thead>
                                         <tbody class="divide-y divide-line">
-                                            <template x-for="(provider, name) in config.providers" :key="name">
+                                            <template x-for="(provider, name) in providersByEnabled()" :key="name">
                                                 <!-- 禁用行整体压暗但不改文字色：这一行的配置仍要能读（用户正是
                                                      要看它配了什么才决定要不要启用），只是不再生效。opacity 加在
                                                      tr 上会一并淡化开关本身，所以开关那格用 opacity-100 抵消。 -->
@@ -810,7 +811,21 @@
                                         <h2 class="text-lg font-bold text-white">ChatGPT OAuth 账户</h2>
                                         <p class="mt-1 text-xs text-muted">通过 Codex OAuth 授权，令牌保存在本机 data 目录中。</p>
                                     </div>
-                                    <div class="flex flex-wrap gap-2">
+                                    <div class="flex flex-wrap items-center gap-2">
+                                        <span x-show="chatGPTAccountFilter.trim()" x-cloak class="text-xs tabular-nums text-muted"
+                                              x-text="'匹配 ' + filteredChatGPTAccountCount() + ' / ' + chatgptAccounts.length"></span>
+                                        <div class="relative">
+                                            <span class="material-symbols-outlined pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-[18px] text-muted">search</span>
+                                            <input type="text" autocomplete="off" spellcheck="false" x-model="chatGPTAccountFilter"
+                                                   @keydown.escape.stop="chatGPTAccountFilter = ''"
+                                                   placeholder="筛选邮箱 / 标签 / 备注 / Provider" aria-label="筛选 ChatGPT OAuth 账户"
+                                                   class="field w-60 py-2 pl-9 pr-8 text-sm">
+                                            <button type="button" x-show="chatGPTAccountFilter" x-cloak @click="chatGPTAccountFilter = ''"
+                                                    class="absolute right-1.5 top-1/2 -translate-y-1/2 rounded p-0.5 text-muted transition hover:text-text"
+                                                    title="清空筛选" aria-label="清空 ChatGPT OAuth 账户筛选">
+                                                <span class="material-symbols-outlined text-[16px]">close</span>
+                                            </button>
+                                        </div>
                                         <button @click="openChatGPTImportDialog()" :disabled="importingChatGPTAccounts" class="btn btn-secondary px-3 py-2 disabled:cursor-not-allowed disabled:opacity-60">
                                             <span class="material-symbols-outlined text-[18px]">description</span>
                                             导入账户
@@ -832,11 +847,15 @@
                                 <div x-show="chatgptAccounts.length === 0" x-cloak class="m-4 rounded-lg border border-dashed border-line px-4 py-5 text-center text-sm text-muted">
                                     尚未连接 ChatGPT 账户。连接后可在 Provider 配置中绑定。
                                 </div>
-                                <!-- 紧凑列表：一个账户一行，账户多了在区域内滚动（约 8 行封顶），页面不再跟着账户数无限变长。
+                                <!-- 固定高度的账户列表区：筛选结果和账户数变化时高度不变，超出内容在区域内滚动。
                                      与请求日志同一套交互：点行展开低频详情（授权时间、令牌时间、额度同步错误），一次只展开一行。
+                                     展开内容拆成授权信息、凭据用量、标签备注三张卡片，随屏宽切换为三列、两列或单列。
                                      操作列 stop 掉冒泡：点按钮不会顺带展开 / 收起这一行。 -->
-                                <div x-show="chatgptAccounts.length > 0" class="max-h-[34rem] overflow-y-auto">
-                                    <table class="w-full table-fixed border-collapse text-left">
+                                <div x-show="chatgptAccounts.length > 0" class="h-[30rem] overflow-y-auto">
+                                    <div x-show="filteredChatGPTAccountCount() === 0" x-cloak class="m-4 rounded-lg border border-dashed border-line px-4 py-5 text-center text-sm text-muted">
+                                        没有匹配的 ChatGPT OAuth 账户。
+                                    </div>
+                                    <table x-show="filteredChatGPTAccountCount() > 0" class="w-full table-fixed border-collapse text-left">
                                         <colgroup>
                                             <col style="width:32%">
                                             <col style="width:40%">
@@ -851,7 +870,7 @@
                                                 <th scope="col" class="px-4 py-2.5 text-right font-bold">操作</th>
                                             </tr>
                                         </thead>
-                                        <template x-for="account in chatgptAccounts" :key="account.id">
+                                        <template x-for="account in filteredChatGPTAccounts()" :key="account.id">
                                             <tbody class="[&:not(:first-of-type)]:border-t border-line">
                                                 <tr @click="toggleChatGPTAccount(account)"
                                                     @keydown.enter.prevent="toggleChatGPTAccount(account)"
@@ -900,9 +919,10 @@
                                                         </div>
                                                     </td>
                                                     <td class="px-3 py-3">
-                                                        <div class="flex min-w-0 items-center gap-2 text-xs" :title="Array.isArray(account.providers) && account.providers.length > 0 ? '绑定 Provider：' + account.providers.join(', ') : '未绑定 Provider'">
+                                                        <div class="flex min-w-0 flex-wrap items-center gap-2 text-xs" :title="Array.isArray(account.providers) && account.providers.length > 0 ? '绑定 Provider：' + account.providers.join(', ') : '未绑定 Provider'">
                                                             <span class="h-1.5 w-1.5 shrink-0 rounded-full" :class="Array.isArray(account.providers) && account.providers.length > 0 ? 'bg-good' : 'bg-line'"></span>
                                                             <span class="min-w-0 truncate" :class="Array.isArray(account.providers) && account.providers.length > 0 ? 'font-mono text-text' : 'text-muted'" x-text="Array.isArray(account.providers) && account.providers.length > 0 ? account.providers.join(', ') : '未绑定'"></span>
+                                                            <button x-show="!Array.isArray(account.providers) || account.providers.length === 0" type="button" @click.stop="goToChatGPTProviderList()" class="shrink-0 cursor-pointer rounded text-cyan transition hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan2" title="跳转到 Provider 列表" aria-label="前往 Provider 列表绑定账户">去绑定</button>
                                                         </div>
                                                     </td>
                                                     <td class="px-4 py-2.5" @click.stop @keydown.stop>
@@ -921,39 +941,98 @@
                                                 </tr>
                                                 <tr x-show="isChatGPTAccountExpanded(account)" x-cloak class="bg-ink/50">
                                                     <td colspan="4" class="px-4 pb-4 pt-3">
-                                                        <dl class="grid grid-cols-2 gap-x-6 gap-y-3 text-xs lg:grid-cols-4">
-                                                            <div class="min-w-0">
-                                                                <dt class="text-muted">授权时长</dt>
-                                                                <dd class="mt-0.5 truncate text-sm font-semibold text-white" :title="account.authorizedAt ? formatChatGPTDuration(account.authorizedAt) : '旧账户未记录首次授权时间'" x-text="formatChatGPTDuration(account.authorizedAt)"></dd>
-                                                            </div>
-                                                            <div class="min-w-0">
-                                                                <dt class="text-muted">首次授权</dt>
-                                                                <dd class="mt-0.5 truncate text-sm font-semibold text-white" :title="formatChatGPTDate(account.authorizedAt)" x-text="formatChatGPTDate(account.authorizedAt)"></dd>
-                                                            </div>
-                                                            <div class="min-w-0">
-                                                                <dt class="text-muted">访问令牌到期</dt>
-                                                                <dd class="mt-0.5 truncate text-sm font-semibold text-white" :title="account.expiresAt ? formatChatGPTDate(account.expiresAt) : '未记录'" x-text="formatChatGPTDate(account.expiresAt)"></dd>
-                                                            </div>
-                                                            <div class="min-w-0">
-                                                                <dt class="text-muted">凭据最近更新</dt>
-                                                                <dd class="mt-0.5 truncate text-sm font-semibold text-white" :title="account.lastRefresh ? formatChatGPTDate(account.lastRefresh) : '未记录'" x-text="formatChatGPTDate(account.lastRefresh)"></dd>
-                                                            </div>
-                                                            <template x-if="account.subscriptionActiveStart || account.subscriptionActiveUntil">
-                                                                <div class="col-span-2 min-w-0">
-                                                                    <dt class="text-muted">订阅周期</dt>
-                                                                    <dd class="mt-0.5 truncate text-sm font-semibold text-white" :title="(account.subscriptionActiveStart ? formatChatGPTDate(account.subscriptionActiveStart) : '未知') + ' — ' + (account.subscriptionActiveUntil ? formatChatGPTDate(account.subscriptionActiveUntil) : '未知')" x-text="(account.subscriptionActiveStart ? formatChatGPTDate(account.subscriptionActiveStart) : '未知') + ' — ' + (account.subscriptionActiveUntil ? formatChatGPTDate(account.subscriptionActiveUntil) : '未知')"></dd>
+                                                        <div class="grid grid-cols-1 gap-3 md:grid-cols-2 lg:grid-cols-3">
+                                                            <section class="min-w-0 rounded-lg border border-line bg-panel/60 p-4">
+                                                                <h4 class="text-sm font-bold text-white">授权信息</h4>
+                                                                <dl class="mt-4 space-y-3 text-xs">
+                                                                    <div>
+                                                                        <dt class="text-muted">授权时长</dt>
+                                                                        <dd class="mt-1 text-sm font-semibold text-white" :title="account.authorizedAt ? formatChatGPTDuration(account.authorizedAt) : '旧账户未记录首次授权时间'" x-text="formatChatGPTDuration(account.authorizedAt)"></dd>
+                                                                    </div>
+                                                                    <div>
+                                                                        <dt class="text-muted">首次授权</dt>
+                                                                        <dd class="mt-1 break-words text-sm font-semibold text-white" :title="formatChatGPTDate(account.authorizedAt)" x-text="formatChatGPTDate(account.authorizedAt)"></dd>
+                                                                    </div>
+                                                                    <template x-if="account.subscriptionActiveStart || account.subscriptionActiveUntil">
+                                                                        <div>
+                                                                            <dt class="text-muted">订阅周期</dt>
+                                                                            <dd class="mt-1 break-words text-sm font-semibold text-white" :title="(account.subscriptionActiveStart ? formatChatGPTDate(account.subscriptionActiveStart) : '未知') + ' — ' + (account.subscriptionActiveUntil ? formatChatGPTDate(account.subscriptionActiveUntil) : '未知')" x-text="(account.subscriptionActiveStart ? formatChatGPTDate(account.subscriptionActiveStart) : '未知') + ' — ' + (account.subscriptionActiveUntil ? formatChatGPTDate(account.subscriptionActiveUntil) : '未知')"></dd>
+                                                                        </div>
+                                                                    </template>
+                                                                </dl>
+                                                            </section>
+                                                            <section class="min-w-0 rounded-lg border border-line bg-panel/60 p-4">
+                                                                <h4 class="text-sm font-bold text-white">凭据与用量</h4>
+                                                                <dl class="mt-4 space-y-3 text-xs">
+                                                                    <div>
+                                                                        <dt class="text-muted" title="访问令牌会自动续期；此时间不代表 ChatGPT 订阅到期时间。">访问令牌到期</dt>
+                                                                        <dd class="mt-1 flex flex-wrap items-center gap-2">
+                                                                            <span class="text-sm font-bold tabular-nums" :class="chatGPTExpiryInfo(account).valueClass" :title="formatChatGPTDate(account.expiresAt)" x-text="formatChatGPTDate(account.expiresAt)"></span>
+                                                                            <span x-show="chatGPTExpiryInfo(account).label" class="tag" :class="chatGPTExpiryInfo(account).badgeClass" x-text="chatGPTExpiryInfo(account).label"></span>
+                                                                        </dd>
+                                                                    </div>
+                                                                    <div>
+                                                                        <dt class="text-muted">凭据最近更新</dt>
+                                                                        <dd class="mt-1 break-words text-sm font-semibold text-white" :title="account.lastRefresh ? formatChatGPTDate(account.lastRefresh) : '未记录'" x-text="formatChatGPTDate(account.lastRefresh)"></dd>
+                                                                    </div>
+                                                                    <div x-show="account.usage?.credits">
+                                                                        <dt class="text-muted">Credits 余额</dt>
+                                                                        <dd class="mt-1 text-sm font-semibold text-white" x-text="account.usage?.credits?.balance"></dd>
+                                                                    </div>
+                                                                </dl>
+                                                                <div class="mt-4 flex items-start gap-2 rounded-lg border border-cyan2/40 bg-cyan2/10 px-3 py-2.5 text-xs leading-relaxed text-muted">
+                                                                    <span class="material-symbols-outlined shrink-0 text-[16px] text-cyan" aria-hidden="true">info</span>
+                                                                    <p>访问令牌会自动续期；到期时间不代表 ChatGPT 订阅到期时间。</p>
                                                                 </div>
-                                                            </template>
-                                                            <div x-show="account.usage?.credits" class="min-w-0">
-                                                                <dt class="text-muted">Credits 余额</dt>
-                                                                <dd class="mt-0.5 truncate text-sm font-semibold text-white" x-text="account.usage?.credits?.balance"></dd>
-                                                            </div>
-                                                        </dl>
-                                                        <div x-show="account.usage?.error" class="mt-3 rounded border border-warn/30 bg-warn/10 px-3 py-2 text-xs text-amber-100">
-                                                            <div><span class="font-semibold">额度同步失败：</span><span x-text="account.usage?.error"></span></div>
-                                                            <div x-show="account.usage?.windows?.length || account.usage?.credits" class="mt-1 text-muted">列表里的额度是缓存数据，最后一次成功查询的时间见「剩余用量」列。</div>
+                                                                <div x-show="account.usage?.error" class="mt-3 rounded border border-warn/30 bg-warn/10 px-3 py-2 text-xs text-amber-100">
+                                                                    <div><span class="font-semibold">额度同步失败：</span><span x-text="account.usage?.error"></span></div>
+                                                                    <div x-show="account.usage?.windows?.length || account.usage?.credits" class="mt-1 text-muted">列表里的额度是缓存数据，最后一次成功查询的时间见「剩余用量」列。</div>
+                                                                </div>
+                                                            </section>
+                                                            <section class="min-w-0 rounded-lg border border-line bg-panel/60 p-4" @click.stop>
+                                                                <div class="flex items-center justify-between gap-3">
+                                                                    <h4 class="text-sm font-bold text-white">标签与备注</h4>
+                                                                    <button x-show="!chatGPTAccountMetadataDrafts[account.id]" type="button" @click.stop="editChatGPTAccountMetadata(account)" class="btn btn-secondary shrink-0 px-2.5 py-1.5 text-xs">
+                                                                        <span class="material-symbols-outlined text-[16px]">edit</span>
+                                                                        编辑
+                                                                    </button>
+                                                                </div>
+                                                                <template x-if="chatGPTAccountMetadataDrafts[account.id]">
+                                                                    <div class="mt-4" @keydown="handleChatGPTAccountMetadataKeydown($event, account)">
+                                                                        <label class="mb-1.5 block text-xs font-bold text-muted" :for="'chatgpt-account-tags-' + account.id">标签</label>
+                                                                        <input :id="'chatgpt-account-tags-' + account.id" type="text" x-model="chatGPTAccountMetadataDrafts[account.id].tagsText" placeholder="例如：工作, 备用, 实验"
+                                                                               class="field w-full" :disabled="savingChatGPTAccountMetadataId === account.id">
+                                                                        <p class="mt-1 text-[11px] text-muted">用逗号分隔，最多 20 个标签，每个标签最多 32 个字符。</p>
+                                                                        <label class="mb-1.5 mt-3 block text-xs font-bold text-muted" :for="'chatgpt-account-note-' + account.id">备注</label>
+                                                                        <textarea :id="'chatgpt-account-note-' + account.id" rows="3" maxlength="2000" x-model="chatGPTAccountMetadataDrafts[account.id].note" placeholder="记录账户用途或其他说明"
+                                                                                  class="field max-h-48 w-full resize-y overflow-y-auto" :disabled="savingChatGPTAccountMetadataId === account.id"></textarea>
+                                                                        <p class="mt-1 text-[11px] text-muted">最多 2000 个字符；Ctrl/⌘ + Enter 快捷保存。</p>
+                                                                        <div class="mt-3 flex justify-end gap-2">
+                                                                            <button type="button" @click.stop="cancelChatGPTAccountMetadataEdit(account)" :disabled="savingChatGPTAccountMetadataId === account.id" class="btn btn-secondary px-3 py-2 disabled:opacity-50">取消</button>
+                                                                            <button type="button" @click.stop="saveChatGPTAccountMetadata(account)" :disabled="savingChatGPTAccountMetadataId === account.id" class="btn btn-primary px-3 py-2 disabled:cursor-wait disabled:opacity-60">
+                                                                                <span x-show="savingChatGPTAccountMetadataId === account.id" class="material-symbols-outlined gw-spin text-[16px]">progress_activity</span>
+                                                                                <span x-text="savingChatGPTAccountMetadataId === account.id ? '保存中…' : '保存'"></span>
+                                                                            </button>
+                                                                        </div>
+                                                                    </div>
+                                                                </template>
+                                                                <div x-show="!chatGPTAccountMetadataDrafts[account.id]" class="mt-4 space-y-4">
+                                                                    <div>
+                                                                        <div class="text-xs font-bold text-muted">标签</div>
+                                                                        <div class="mt-2 flex max-h-48 flex-wrap gap-1.5 overflow-y-auto pr-1">
+                                                                            <template x-for="tag in (Array.isArray(account.tags) ? account.tags : [])" :key="tag">
+                                                                                <span class="tag bg-cyan2/10 text-cyan2" x-text="tag"></span>
+                                                                            </template>
+                                                                            <span x-show="!Array.isArray(account.tags) || account.tags.length === 0" class="text-xs text-muted">尚未添加标签</span>
+                                                                        </div>
+                                                                    </div>
+                                                                    <div class="min-w-0">
+                                                                        <div class="text-xs font-bold text-muted">备注</div>
+                                                                        <p class="mt-2 max-h-48 overflow-y-auto whitespace-pre-wrap break-words pr-1 text-sm leading-relaxed text-text" x-text="account.note || '暂无备注'"></p>
+                                                                    </div>
+                                                                </div>
+                                                            </section>
                                                         </div>
-                                                        <p class="mt-3 text-xs leading-relaxed text-muted">访问令牌会自动续期；「访问令牌到期」不代表 ChatGPT 订阅到期时间。</p>
                                                     </td>
                                                 </tr>
                                             </tbody>
@@ -1950,10 +2029,10 @@
         </div>
     </div>
 
-    <!-- 不用 @click.away 关闭：表单填到一半点空白处就全丢了，代价和「点错一下」不对等。
-         关闭入口只留 ESC、右上角 X 和取消按钮，三者都走 requestCloseProviderModal：有未保存的修改先确认。 -->
+    <!-- 点击遮罩、ESC、右上角 X 和取消按钮都走 requestCloseProviderModal：有未保存的修改先确认。 -->
     <div x-show="showProviderModal" x-transition.opacity x-cloak
          @keydown.escape.window="escapeProviderModal($event)"
+         @click.self="requestCloseProviderModal()"
          class="fixed inset-0 z-50 flex justify-end bg-black/70">
         <!-- 右侧抽屉：占满高度，与配置预览抽屉同一交互语言。
              三段式滚动：外层 flex-col + h-full、表单区 min-h-0 flex-1 overflow-y-auto、头尾 shrink-0。
@@ -2201,9 +2280,10 @@
         </div>
     </div>
 
-    <!-- 同 Provider 弹窗：不用 @click.away，只留 ESC / X / 取消 三个关闭入口 -->
+    <!-- 点击遮罩、ESC、右上角 X 和取消按钮都走 requestCloseRouteModal：有未保存的修改先确认。 -->
     <div x-show="showRouteModal" x-transition.opacity x-cloak
          @keydown.escape.window="escapeRouteModal($event)"
+         @click.self="requestCloseRouteModal()"
          class="fixed inset-0 z-50 flex justify-end bg-black/70">
         <!-- 右侧抽屉：占满高度、三段式滚动，理由同 Provider 抽屉 -->
         <div x-ref="routeDrawer" role="dialog" aria-modal="true" aria-labelledby="route-drawer-title"
@@ -2954,6 +3034,8 @@
                 expandedLogId: null,
                 // ChatGPT 账户列表一次只展开一行详情（同请求日志），存账户 id，'' 表示都收起。
                 expandedChatGPTAccountId: '',
+                chatGPTAccountMetadataDrafts: {},
+                savingChatGPTAccountMetadataId: '',
                 // 高级诊断筛选默认折叠：正常排查优先看请求最终结果；仅在定位
                 // failover / 上游失败时再展开 attempt 维度，避免和最终 Provider、状态混在一起。
                 logAdvancedFiltersOpen: false,
@@ -2971,6 +3053,8 @@
                 showProviderModal: false,
                 // 提供商列表的快速筛选词：按名称、Base URL、格式做包含匹配，纯界面状态，不落盘。
                 providerFilter: '',
+                // ChatGPT OAuth 账户列表筛选词：按邮箱、账户 ID、标签、备注和绑定 Provider 匹配。
+                chatGPTAccountFilter: '',
                 // Provider 抽屉「高级设置」的展开状态：打开抽屉时按是否已有高级配置决定（见 openProviderDrawer）。
                 providerAdvancedOpen: false,
                 // 抽屉防误丢：打开时记下表单指纹，关闭前比对，有差异才确认。
@@ -3740,7 +3824,7 @@
                     return this.showRouteModal && this.routeFormFingerprint() !== this._routeFormBaseline;
                 },
 
-                // 抽屉防误丢：× / 取消 / Esc 都走这里，有未保存的修改先确认。
+                // 抽屉防误丢：遮罩 / × / 取消 / Esc 都走这里，有未保存的修改先确认。
                 // 保存成功的收起不走这里（saveProvider / saveRoute 直接收起）。
                 // 选择继续编辑时，把焦点还给关闭前所在的字段。
                 async requestCloseProviderModal() {
@@ -5158,7 +5242,7 @@
                         loaded = true;
                         if (checkUsage && this.chatgptAccounts.some(account => {
                             const checkedAt = Date.parse(account.usage?.lastCheckedAt || '');
-                            return !Number.isFinite(checkedAt) || Date.now() - checkedAt >= 5 * 60 * 1000;
+                            return !Number.isFinite(checkedAt) || Date.now() - checkedAt >= 30 * 60 * 1000;
                         })) {
                             void this.refreshChatGPTUsage(false, false);
                         }
@@ -5350,6 +5434,31 @@
                 formatChatGPTDate(value) {
                     const date = new Date(value || '');
                     return Number.isNaN(date.getTime()) ? '未记录' : date.toLocaleString();
+                },
+
+                chatGPTExpiryInfo(account) {
+                    const expiresAt = Date.parse(account?.expiresAt || '');
+                    if (!Number.isFinite(expiresAt)) {
+                        return { label: '', valueClass: 'text-muted', badgeClass: '' };
+                    }
+                    const remaining = expiresAt - Date.now();
+                    if (remaining <= 0) {
+                        return { label: '已过期', valueClass: 'text-danger', badgeClass: 'bg-danger/10 text-danger' };
+                    }
+                    if (remaining <= 24 * 60 * 60 * 1000) {
+                        return { label: '24 小时内到期', valueClass: 'text-danger', badgeClass: 'bg-danger/10 text-danger' };
+                    }
+                    if (remaining <= 72 * 60 * 60 * 1000) {
+                        return { label: '3 天内到期', valueClass: 'text-amber-100', badgeClass: 'bg-warn/10 text-amber-100' };
+                    }
+                    return { label: '', valueClass: 'text-white', badgeClass: '' };
+                },
+
+                goToChatGPTProviderList() {
+                    this.$nextTick(() => {
+                        const behavior = window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth';
+                        this.$refs.chatGPTProviderList?.scrollIntoView({ behavior, block: 'start' });
+                    });
                 },
 
                 formatUsageWindowName(window) {
@@ -5586,6 +5695,69 @@
                     }
                 },
 
+                editChatGPTAccountMetadata(account) {
+                    if (!account?.id) return;
+                    this.chatGPTAccountMetadataDrafts = {
+                        ...this.chatGPTAccountMetadataDrafts,
+                        [account.id]: {
+                            tagsText: Array.isArray(account.tags) ? account.tags.join(', ') : '',
+                            note: account.note || ''
+                        }
+                    };
+                },
+
+                cancelChatGPTAccountMetadataEdit(account) {
+                    if (!account?.id) return;
+                    const drafts = { ...this.chatGPTAccountMetadataDrafts };
+                    delete drafts[account.id];
+                    this.chatGPTAccountMetadataDrafts = drafts;
+                },
+
+                handleChatGPTAccountMetadataKeydown(event, account) {
+                    if (event.key !== 'Enter' || !(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey) return;
+                    event.preventDefault();
+                    event.stopPropagation();
+                    this.saveChatGPTAccountMetadata(account);
+                },
+
+                async saveChatGPTAccountMetadata(account) {
+                    if (!account?.id || this.savingChatGPTAccountMetadataId) return;
+                    const draft = this.chatGPTAccountMetadataDrafts[account.id];
+                    if (!draft) return;
+                    const tags = String(draft.tagsText || '').split(',').map(tag => tag.trim()).filter(Boolean);
+                    if (tags.length > 20) {
+                        this.showStatus('每个账户最多添加 20 个标签', 'error');
+                        return;
+                    }
+                    if (tags.some(tag => Array.from(tag).length > 32)) {
+                        this.showStatus('每个标签最多 32 个字符', 'error');
+                        return;
+                    }
+                    if (Array.from(String(draft.note || '')).length > 2000) {
+                        this.showStatus('备注最多 2000 个字符', 'error');
+                        return;
+                    }
+
+                    this.savingChatGPTAccountMetadataId = account.id;
+                    try {
+                        const res = await fetch(`/api/chatgpt/accounts/${encodeURIComponent(account.id)}`, {
+                            method: 'PATCH',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ tags, note: draft.note || '' })
+                        });
+                        if (!res.ok) throw new Error(await this.errorText(res, '保存账户标签和备注失败'));
+                        const response = await res.json();
+                        if (!response.data) throw new Error('服务器没有返回更新后的账户信息');
+                        this.chatgptAccounts = this.chatgptAccounts.map(item => item.id === account.id ? response.data : item);
+                        this.cancelChatGPTAccountMetadataEdit(account);
+                        this.showStatus('账户标签和备注已保存', 'success');
+                    } catch (err) {
+                        this.showStatus('保存账户标签和备注失败: ' + err.message, 'error');
+                    } finally {
+                        this.savingChatGPTAccountMetadataId = '';
+                    }
+                },
+
                 providerAuthTypeChanged() {
                     if (this.providerForm.authType === 'chatgptOAuth') {
                         this.providerForm.baseUrl = 'https://chatgpt.com/backend-api/codex';
@@ -5794,9 +5966,39 @@
                         .some((v) => String(v || '').toLowerCase().includes(q));
                 },
 
+                // 仅调整列表显示顺序：启用项在前、禁用项在后；各组内保留配置原有顺序。
+                providersByEnabled() {
+                    const entries = Object.entries(this.config.providers || {});
+                    entries.sort(([, a], [, b]) => Number(a?.enabled === false) - Number(b?.enabled === false));
+                    return Object.fromEntries(entries);
+                },
+
                 filteredProviderCount() {
                     return Object.entries(this.config.providers || {})
                         .filter(([name, p]) => this.providerMatchesFilter(name, p)).length;
+                },
+
+                chatGPTAccountMatchesFilter(account) {
+                    const q = (this.chatGPTAccountFilter || '').trim().toLowerCase();
+                    if (!q) return true;
+                    const values = [
+                        account?.email,
+                        account?.id,
+                        account?.plan,
+                        account?.usage?.planType,
+                        account?.note,
+                        ...(Array.isArray(account?.tags) ? account.tags : []),
+                        ...(Array.isArray(account?.providers) ? account.providers : [])
+                    ];
+                    return values.some(value => String(value || '').toLowerCase().includes(q));
+                },
+
+                filteredChatGPTAccountCount() {
+                    return this.chatgptAccounts.filter(account => this.chatGPTAccountMatchesFilter(account)).length;
+                },
+
+                filteredChatGPTAccounts() {
+                    return this.chatgptAccounts.filter(account => this.chatGPTAccountMatchesFilter(account));
                 },
 
                 // 列表里直接改格式：选完立即写盘，失败回滚，与路由模型就地编辑同一套语义。

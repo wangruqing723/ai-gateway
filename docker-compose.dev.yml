@@ -1,7 +1,30 @@
+# 本地开发验证配置，可直接运行：
+# docker compose -f docker-compose.dev.yml up -d
+# 继承基础服务的配置、环境变量与数据挂载；仅替换本地构建、容器名和管理端口。
+name: ai-gateway-dev
+
 services:
   gateway:
+    extends:
+      file: docker-compose.yml
+      service: gateway
+    # 从当前工作区构建独立的本地开发镜像，不覆盖远端 latest 镜像。
+    image: ai-gateway:dev
+    build:
+      context: .
+      # 本地 Go 二进制是静态构建；scratch 无需访问 GCR 拉取运行时底座。
+      args:
+        RUNTIME_IMAGE: scratch
+    # 保证简单执行 up -d 时也会按当前本地源码构建。
+    pull_policy: build
+    container_name: ai-gateway-dev
+    # 仅映射管理端口，避免与远端容器的 7789 及 OAuth 回调端口冲突。
+    # 账户数据目录 ./data 继承基础配置，因此两套容器看到同一份账户数据。
+    # 账户文件由单个进程协调写入；不要同时从两个实例更新账户或刷新用量，避免覆盖。
+    ports: !override
+      - "127.0.0.1:7790:7789"
+    # 开发模式挂载前端目录并启用 SSE 热加载。
     volumes:
-      # 仅开发模式挂载前端目录并启用 SSE 热加载。
       - ./cmd/gateway/web:/app/web:ro
     environment:
       - AI_GATEWAY_WEB_DIR=/app/web

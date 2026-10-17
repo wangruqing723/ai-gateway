@@ -92,6 +92,10 @@ func (c *Checker) Snapshot(cfg *config.Config) map[string]Status {
 		if provider != nil && !provider.IsEnabled() {
 			continue
 		}
+		// ChatGPT OAuth 的账户状态由网关账户管理器核验，不参与 /v1/models 健康检测。
+		if isChatGPTOAuth(provider) {
+			continue
+		}
 		fingerprint := providerFingerprint(name, provider)
 		if cached, ok := c.statuses[name]; ok && cached.fingerprint == fingerprint {
 			out[name] = cached.status
@@ -191,6 +195,10 @@ func (c *Checker) checkAll(ctx context.Context, cfg *config.Config, resolve Clie
 		if !p.IsEnabled() {
 			continue
 		}
+		// OAuth 账户状态由网关账户管理器核验，不生成通用健康探测结果或异常事件。
+		if isChatGPTOAuth(p) {
+			continue
+		}
 		pCopy := *p
 		if pCopy.Name == "" {
 			pCopy.Name = name
@@ -261,6 +269,12 @@ func (c *Checker) CheckProvider(ctx context.Context, cfg *config.Config, resolve
 	if !ok {
 		return Status{}, false
 	}
+	if isChatGPTOAuth(provider) {
+		c.mu.Lock()
+		delete(c.statuses, name)
+		c.mu.Unlock()
+		return uncheckedOAuthStatus(name), true
+	}
 
 	generation := c.generation.Load()
 	if provider == nil {
@@ -300,6 +314,9 @@ func (c *Checker) CheckProvider(ctx context.Context, cfg *config.Config, resolve
 func (c *Checker) ProbeAdHoc(ctx context.Context, p *config.Provider, resolve ClientResolver) (Status, bool) {
 	if p == nil {
 		return Status{}, false
+	}
+	if isChatGPTOAuth(p) {
+		return uncheckedOAuthStatus(p.Name), true
 	}
 	pCopy := *p
 	select {
@@ -421,21 +438,23 @@ func providerFingerprint(name string, provider *config.Provider) string {
 	if provider == nil {
 		fmt.Fprintf(h, "%s\x00<nil>", name)
 	} else {
-		// User-Agent 与代理都会改变 /v1/models 的实际出网请求，变更后旧缓存不能继续表示新配置。
-		fmt.Fprintf(h, "%s\x00%s\x00%s\x00%s\x00%s\x00%s", name, provider.BaseURL, provider.Format, provider.APIKey, provider.UserAgent, provider.Proxy)
+		// 认证类型、User-Agent 与代理会改变探测语义或实际出网请求，变更后旧缓存不能继续表示新配置。
+		fmt.Fprintf(h, "%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s", name, provider.AuthType, provider.BaseURL, provider.Format, provider.APIKey, provider.UserAgent, provider.Proxy)
 	}
 	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
+func isChatGPTOAuth(p *config.Provider) bool {
+	return p != nil && p.AuthType == "chatgptOAuth"
+}
+
+func uncheckedOAuthStatus(name string) Status {
+	return Status{Name: name, Status: "unchecked", Message: "ChatGPT OAuth 账户状态由网关单独检查"}
+}
+
 func checkOne(parent context.Context, p *config.Provider, client *http.Client) Status {
-	if p != nil && p.AuthType == "chatgptOAuth" {
-		return Status{
-			Name:      p.Name,
-			Endpoint:  strings.TrimRight(p.BaseURL, "/") + "/responses",
-			Status:    "warn",
-			Message:   "ChatGPT OAuth 不支持 /v1/models 探测；账户状态由网关单独检查",
-			CheckedAt: time.Now().Format(time.RFC3339),
-		}
+	if isChatGPTOAuth(p) {
+		return uncheckedOAuthStatus(p.Name)
 	}
 	endpoint := modelsEndpoint(p.BaseURL)
 	ctx, cancel := context.WithTimeout(parent, checkTimeout)

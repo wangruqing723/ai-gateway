@@ -12,7 +12,7 @@
                         loaded = true;
                         if (checkUsage && this.chatgptAccounts.some(account => {
                             const checkedAt = Date.parse(account.usage?.lastCheckedAt || '');
-                            return !Number.isFinite(checkedAt) || Date.now() - checkedAt >= 5 * 60 * 1000;
+                            return !Number.isFinite(checkedAt) || Date.now() - checkedAt >= 30 * 60 * 1000;
                         })) {
                             void this.refreshChatGPTUsage(false, false);
                         }
@@ -204,6 +204,31 @@
                 formatChatGPTDate(value) {
                     const date = new Date(value || '');
                     return Number.isNaN(date.getTime()) ? '未记录' : date.toLocaleString();
+                },
+
+                chatGPTExpiryInfo(account) {
+                    const expiresAt = Date.parse(account?.expiresAt || '');
+                    if (!Number.isFinite(expiresAt)) {
+                        return { label: '', valueClass: 'text-muted', badgeClass: '' };
+                    }
+                    const remaining = expiresAt - Date.now();
+                    if (remaining <= 0) {
+                        return { label: '已过期', valueClass: 'text-danger', badgeClass: 'bg-danger/10 text-danger' };
+                    }
+                    if (remaining <= 24 * 60 * 60 * 1000) {
+                        return { label: '24 小时内到期', valueClass: 'text-danger', badgeClass: 'bg-danger/10 text-danger' };
+                    }
+                    if (remaining <= 72 * 60 * 60 * 1000) {
+                        return { label: '3 天内到期', valueClass: 'text-amber-100', badgeClass: 'bg-warn/10 text-amber-100' };
+                    }
+                    return { label: '', valueClass: 'text-white', badgeClass: '' };
+                },
+
+                goToChatGPTProviderList() {
+                    this.$nextTick(() => {
+                        const behavior = window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth';
+                        this.$refs.chatGPTProviderList?.scrollIntoView({ behavior, block: 'start' });
+                    });
                 },
 
                 formatUsageWindowName(window) {
@@ -440,6 +465,69 @@
                     }
                 },
 
+                editChatGPTAccountMetadata(account) {
+                    if (!account?.id) return;
+                    this.chatGPTAccountMetadataDrafts = {
+                        ...this.chatGPTAccountMetadataDrafts,
+                        [account.id]: {
+                            tagsText: Array.isArray(account.tags) ? account.tags.join(', ') : '',
+                            note: account.note || ''
+                        }
+                    };
+                },
+
+                cancelChatGPTAccountMetadataEdit(account) {
+                    if (!account?.id) return;
+                    const drafts = { ...this.chatGPTAccountMetadataDrafts };
+                    delete drafts[account.id];
+                    this.chatGPTAccountMetadataDrafts = drafts;
+                },
+
+                handleChatGPTAccountMetadataKeydown(event, account) {
+                    if (event.key !== 'Enter' || !(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey) return;
+                    event.preventDefault();
+                    event.stopPropagation();
+                    this.saveChatGPTAccountMetadata(account);
+                },
+
+                async saveChatGPTAccountMetadata(account) {
+                    if (!account?.id || this.savingChatGPTAccountMetadataId) return;
+                    const draft = this.chatGPTAccountMetadataDrafts[account.id];
+                    if (!draft) return;
+                    const tags = String(draft.tagsText || '').split(',').map(tag => tag.trim()).filter(Boolean);
+                    if (tags.length > 20) {
+                        this.showStatus('每个账户最多添加 20 个标签', 'error');
+                        return;
+                    }
+                    if (tags.some(tag => Array.from(tag).length > 32)) {
+                        this.showStatus('每个标签最多 32 个字符', 'error');
+                        return;
+                    }
+                    if (Array.from(String(draft.note || '')).length > 2000) {
+                        this.showStatus('备注最多 2000 个字符', 'error');
+                        return;
+                    }
+
+                    this.savingChatGPTAccountMetadataId = account.id;
+                    try {
+                        const res = await fetch(`/api/chatgpt/accounts/${encodeURIComponent(account.id)}`, {
+                            method: 'PATCH',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ tags, note: draft.note || '' })
+                        });
+                        if (!res.ok) throw new Error(await this.errorText(res, '保存账户标签和备注失败'));
+                        const response = await res.json();
+                        if (!response.data) throw new Error('服务器没有返回更新后的账户信息');
+                        this.chatgptAccounts = this.chatgptAccounts.map(item => item.id === account.id ? response.data : item);
+                        this.cancelChatGPTAccountMetadataEdit(account);
+                        this.showStatus('账户标签和备注已保存', 'success');
+                    } catch (err) {
+                        this.showStatus('保存账户标签和备注失败: ' + err.message, 'error');
+                    } finally {
+                        this.savingChatGPTAccountMetadataId = '';
+                    }
+                },
+
                 providerAuthTypeChanged() {
                     if (this.providerForm.authType === 'chatgptOAuth') {
                         this.providerForm.baseUrl = 'https://chatgpt.com/backend-api/codex';
@@ -648,9 +736,39 @@
                         .some((v) => String(v || '').toLowerCase().includes(q));
                 },
 
+                // 仅调整列表显示顺序：启用项在前、禁用项在后；各组内保留配置原有顺序。
+                providersByEnabled() {
+                    const entries = Object.entries(this.config.providers || {});
+                    entries.sort(([, a], [, b]) => Number(a?.enabled === false) - Number(b?.enabled === false));
+                    return Object.fromEntries(entries);
+                },
+
                 filteredProviderCount() {
                     return Object.entries(this.config.providers || {})
                         .filter(([name, p]) => this.providerMatchesFilter(name, p)).length;
+                },
+
+                chatGPTAccountMatchesFilter(account) {
+                    const q = (this.chatGPTAccountFilter || '').trim().toLowerCase();
+                    if (!q) return true;
+                    const values = [
+                        account?.email,
+                        account?.id,
+                        account?.plan,
+                        account?.usage?.planType,
+                        account?.note,
+                        ...(Array.isArray(account?.tags) ? account.tags : []),
+                        ...(Array.isArray(account?.providers) ? account.providers : [])
+                    ];
+                    return values.some(value => String(value || '').toLowerCase().includes(q));
+                },
+
+                filteredChatGPTAccountCount() {
+                    return this.chatgptAccounts.filter(account => this.chatGPTAccountMatchesFilter(account)).length;
+                },
+
+                filteredChatGPTAccounts() {
+                    return this.chatgptAccounts.filter(account => this.chatGPTAccountMatchesFilter(account));
                 },
 
                 // 列表里直接改格式：选完立即写盘，失败回滚，与路由模型就地编辑同一套语义。

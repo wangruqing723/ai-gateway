@@ -2300,15 +2300,74 @@ func (s *server) handleChatGPTAuthAPI(w http.ResponseWriter, r *http.Request, pa
 				s.handleRefreshChatGPTAccountUsage(w, r, accountID)
 				return
 			}
-			if r.Method != http.MethodDelete {
-				writeMethodNotAllowed(w, http.MethodDelete)
-				return
+			switch r.Method {
+			case http.MethodPatch:
+				s.handleUpdateChatGPTAccountMetadata(w, r, relativePath)
+			case http.MethodDelete:
+				s.handleDeleteChatGPTAccount(w, r, relativePath)
+			default:
+				writeMethodNotAllowed(w, http.MethodPatch, http.MethodDelete)
 			}
-			s.handleDeleteChatGPTAccount(w, r, relativePath)
 			return
 		}
 		writeJSONError(w, http.StatusNotFound, "gateway_error", "未知的 ChatGPT OAuth API 端点")
 	}
+}
+
+func (s *server) handleUpdateChatGPTAccountMetadata(w http.ResponseWriter, r *http.Request, escapedID string) {
+	if requestMediaType(r) != "application/json" {
+		writeJSONError(w, http.StatusUnsupportedMediaType, "unsupported_media_type", "账户标签和备注须使用 application/json")
+		return
+	}
+	body, err := readBodyLimited(r, 16<<10)
+	if err != nil {
+		if errors.Is(err, errRequestBodyTooLarge) {
+			writeJSONError(w, http.StatusRequestEntityTooLarge, "request_too_large", "账户标签和备注请求超过 16 KiB 限制")
+			return
+		}
+		writeJSONError(w, http.StatusBadRequest, "invalid_account_metadata", "读取账户标签和备注失败")
+		return
+	}
+	var patch chatgptauth.AccountMetadataPatch
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&patch); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid_account_metadata", "账户标签和备注 JSON 无效")
+		return
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		writeJSONError(w, http.StatusBadRequest, "invalid_account_metadata", "账户标签和备注请求只能包含一个 JSON 对象")
+		return
+	}
+
+	id, err := url.PathUnescape(escapedID)
+	if err != nil || id == "" || strings.Contains(id, "/") {
+		writeJSONError(w, http.StatusBadRequest, "invalid_account_metadata", "账户 ID 无效")
+		return
+	}
+	view, err := s.chatgptAuth.UpdateMetadata(id, patch)
+	if errors.Is(err, chatgptauth.ErrInvalidAccountMetadata) {
+		writeJSONError(w, http.StatusBadRequest, "invalid_account_metadata", err.Error())
+		return
+	}
+	if errors.Is(err, chatgptauth.ErrAccountNotFound) {
+		writeJSONError(w, http.StatusNotFound, "account_not_found", "ChatGPT OAuth 账户不存在")
+		return
+	}
+	if errors.Is(err, chatgptauth.ErrAccountMetadataPersist) {
+		writeJSONError(w, http.StatusInternalServerError, "account_metadata_update_failed", "保存账户标签和备注失败，未保留本次变更")
+		return
+	}
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "account_metadata_update_failed", "更新 ChatGPT 账户信息失败")
+		return
+	}
+
+	s.cfgMu.RLock()
+	view.Providers = append([]string(nil), chatGPTAccountReferences(s.cfg)[id]...)
+	s.cfgMu.RUnlock()
+	writeJSON(w, http.StatusOK, map[string]any{"data": view})
 }
 
 func (s *server) handleRefreshChatGPTAccountUsage(w http.ResponseWriter, r *http.Request, escapedID string) {

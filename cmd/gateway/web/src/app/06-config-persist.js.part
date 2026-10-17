@@ -164,7 +164,7 @@
                     return this.showRouteModal && this.routeFormFingerprint() !== this._routeFormBaseline;
                 },
 
-                // 抽屉防误丢：× / 取消 / Esc 都走这里，有未保存的修改先确认。
+                // 抽屉防误丢：遮罩 / × / 取消 / Esc 都走这里，有未保存的修改先确认。
                 // 保存成功的收起不走这里（saveProvider / saveRoute 直接收起）。
                 // 选择继续编辑时，把焦点还给关闭前所在的字段。
                 async requestCloseProviderModal() {
