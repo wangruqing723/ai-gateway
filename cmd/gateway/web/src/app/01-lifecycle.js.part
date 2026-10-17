@@ -1,4 +1,11 @@
                 async init() {
+                    // 先按地址栏落到对应页签再加载数据：放在 loadConfig 之后，首屏会先闪一下监控页。
+                    const initialTab = this.tabFromHash();
+                    if (initialTab) this.selectNav(initialTab, false, true);
+                    window.addEventListener('popstate', () => {
+                        const tab = this.tabFromHash() || 'monitor';
+                        if (tab !== this.activeTab) this.selectNav(tab, false, true);
+                    });
                     await this.loadConfig();
                     await this.loadChatGPTAccounts();
                     if (this.monitorPollingAllowed()) await this.refreshMonitor();
@@ -16,6 +23,10 @@
                     window.addEventListener('beforeunload', (e) => {
                         if (this.canSave()) e.preventDefault();
                     });
+                    window.addEventListener('keydown', (e) => this.onSaveShortcut(e));
+                    // 抽屉无论从哪条路径关闭（保存成功、取消、Esc、放弃修改），焦点都还给打开它的按钮
+                    this.$watch('showProviderModal', (open) => { if (!open) this.restoreDrawerOpener(); });
+                    this.$watch('showRouteModal', (open) => { if (!open) this.restoreDrawerOpener(); });
                     // 软刷新（F5）时浏览器会把刷新前的表单值恢复进 DOM，x-model 的
                     // input/change 监听再把它们写回 config。若这一步落在 loadConfig()
                     // 之后，config 就和 originalConfig 对不上，未保存浮层会在刚打开页面时

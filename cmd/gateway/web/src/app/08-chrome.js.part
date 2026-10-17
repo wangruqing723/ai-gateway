@@ -74,6 +74,62 @@
                     this.tip.show = false;
                 },
 
+                // 点击复制：成功后在原位置弹「已复制」气泡，不发 toast——复制是高频小动作，
+                // 每次一条 5 秒的 toast 只会刷屏。currentTarget 必须在 await 之前取：
+                // 事件派发结束后它就变成 null。
+                async copyText(text, event) {
+                    const value = String(text ?? '').trim();
+                    if (!value) return;
+                    const anchor = event?.currentTarget || null;
+                    let ok = false;
+                    try {
+                        if (navigator.clipboard?.writeText) {
+                            await navigator.clipboard.writeText(value);
+                            ok = true;
+                        }
+                    } catch (_) {
+                        ok = false;
+                    }
+                    if (!ok) ok = this.copyTextFallback(value);
+                    if (!anchor) {
+                        if (!ok) this.showStatus('复制失败，请手动选中复制', 'error');
+                        return;
+                    }
+                    const rect = anchor.getBoundingClientRect();
+                    this.tip = {
+                        show: true,
+                        text: ok ? '已复制' : '复制失败，请手动选中复制',
+                        x: rect.left + rect.width / 2,
+                        y: rect.top - 8
+                    };
+                    window.clearTimeout(this._copyTipTimer);
+                    this._copyTipTimer = window.setTimeout(() => { this.tip.show = false; }, 1200);
+                },
+
+                // 经局域网 IP 用 http 访问时不是安全上下文，没有 navigator.clipboard，退回 execCommand。
+                copyTextFallback(value) {
+                    try {
+                        const area = document.createElement('textarea');
+                        area.value = value;
+                        area.setAttribute('readonly', '');
+                        area.style.position = 'fixed';
+                        area.style.opacity = '0';
+                        document.body.appendChild(area);
+                        area.select();
+                        const ok = document.execCommand('copy');
+                        area.remove();
+                        return ok;
+                    } catch (_) {
+                        return false;
+                    }
+                },
+
+                // 只有 http/https 地址才渲染成可点击链接：配置里若写了 javascript: 之类的值，
+                // 绑进 href 就成了点一下就执行的脚本。
+                isHttpUrl(value) {
+                    return /^https?:\/\/\S+$/i.test(String(value || '').trim());
+                },
+
                 // ── 自定义确认弹窗 ──────────────────────────────────
                 // 返回 Promise<boolean>，调用方 await 即可，语义和 confirm 一致。
 

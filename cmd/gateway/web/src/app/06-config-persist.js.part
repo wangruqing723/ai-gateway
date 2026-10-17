@@ -72,24 +72,147 @@
 
                 // ESC 逐层退出，不一次关穿。确认弹窗或 OAuth 授权弹窗叠在编辑弹窗之上时，
                 // 高层弹窗自己的 escape 监听负责关它，这里必须让路，不能顺手关闭编辑表单。
-                escapeProviderModal() {
+                escapeProviderModal(e) {
                     if (this.confirmDialog.open || this.showChatGPTOAuthDialog) return;
+                    // 先截断当前 ESC。若抽屉有未保存修改，下一轮事件队列再开确认框，
+                    // 确认框的 window 监听就不会把触发关闭的这次 ESC 当成取消。
+                    e?.preventDefault();
+                    e?.stopImmediatePropagation();
+                    window.setTimeout(() => this.requestCloseProviderModal(), 0);
+                },
+
+                // 路由弹窗多一层：模型下拉展开时，ESC 先收下拉，再按才关弹窗。
+                // 候选行与视觉字段共用一份下拉状态（modelPicker），收它就够了。
+                escapeRouteModal(e) {
+                    if (this.confirmDialog.open) return;
+                    if (this.modelPicker.open) {
+                        e?.preventDefault();
+                        e?.stopImmediatePropagation();
+                        this.closeModelPicker();
+                        return;
+                    }
+                    // 延后一轮再请求关闭，避免刚打开的确认框接收当前 ESC 并立即消失。
+                    e?.preventDefault();
+                    e?.stopImmediatePropagation();
+                    window.setTimeout(() => this.requestCloseRouteModal(), 0);
+                },
+
+                // ── 编辑抽屉：打开 / 关闭 / 防误丢 / 焦点 ──────────────
+                // 打开前记下触发按钮，关闭后把焦点还回去；打开后聚焦第一个可编辑字段，
+                // 键盘用户不必从页面开头一路 Tab 进抽屉。
+                openProviderDrawer() {
+                    this._drawerOpener = document.activeElement;
+                    this.providerAdvancedOpen = this.providerAdvancedCount() > 0;
+                    this._providerFormBaseline = this.providerFormFingerprint();
+                    this.showProviderModal = true;
+                    this.focusDrawerField('providerDrawer');
+                },
+
+                openRouteDrawer() {
+                    this._drawerOpener = document.activeElement;
+                    this.closeModelPicker();
+                    this._routeFormBaseline = this.routeFormFingerprint();
+                    this.showRouteModal = true;
+                    this.focusDrawerField('routeDrawer');
+                },
+
+                // x-show 要等这一轮渲染把抽屉变成可见，再下一帧才能聚焦；
+                // 复选框（启用开关）不算「要填的字段」，跳过。
+                focusDrawerField(ref) {
+                    this.$nextTick(() => window.requestAnimationFrame(() => {
+                        const root = this.$refs[ref];
+                        const field = root?.querySelector('input:not([type=checkbox]):not([type=hidden]):not([disabled]), select:not([disabled]), textarea:not([disabled])');
+                        field?.focus();
+                    }));
+                },
+
+                restoreDrawerOpener() {
+                    const el = this._drawerOpener;
+                    this._drawerOpener = null;
+                    if (el && el.isConnected && typeof el.focus === 'function') el.focus();
+                },
+
+                // 表单指纹：抽屉打开时与关闭前各算一次，不同就说明有未保存的修改。
+                // 路由表单要剥掉瞬态字段（候选设置的展开状态、拖拽用的 _id、旧版模型下拉状态），
+                // 否则只是点开一下候选设置也会被当成「改过」。
+                providerFormFingerprint() {
+                    return JSON.stringify(this.providerForm);
+                },
+
+                routeFormFingerprint() {
+                    const f = this.routeForm || {};
+                    const targets = (f.targets || []).map((t) => {
+                        const { _id, limitsOpen, models, modelsLoading, ...rest } = t || {};
+                        return rest;
+                    });
+                    const { routeAdvancedOpen, visionModels, visionModelsLoading, ...rest } = f;
+                    return JSON.stringify({ ...rest, targets });
+                },
+
+                providerFormDirty() {
+                    return this.showProviderModal && this.providerFormFingerprint() !== this._providerFormBaseline;
+                },
+
+                routeFormDirty() {
+                    return this.showRouteModal && this.routeFormFingerprint() !== this._routeFormBaseline;
+                },
+
+                // 抽屉防误丢：× / 取消 / Esc 都走这里，有未保存的修改先确认。
+                // 保存成功的收起不走这里（saveProvider / saveRoute 直接收起）。
+                // 选择继续编辑时，把焦点还给关闭前所在的字段。
+                async requestCloseProviderModal() {
+                    if (this.providerFormDirty()) {
+                        const back = document.activeElement;
+                        const ok = await this.askConfirm('抽屉里的修改还没有保存，关闭后会丢失。',
+                            { title: '放弃未保存的修改？', confirmText: '放弃修改' });
+                        if (!ok) {
+                            back?.focus?.();
+                            return;
+                        }
+                    }
                     this.showProviderModal = false;
                 },
 
-                // 路由弹窗多一层：上游模型下拉展开时，ESC 先收下拉，再按才关弹窗。
-                // 候选行与视觉字段的下拉一起算——只收候选那批的话，视觉下拉开着按 ESC
-                // 会直接关掉整个弹窗，填了一半的表单跟着丢。
-                escapeRouteModal() {
-                    if (this.confirmDialog.open) return;
-                    const open = (this.routeForm.targets || []).filter((t) => t.models && t.models.length);
-                    const visionOpen = (this.routeForm.visionModels || []).length > 0;
-                    if (open.length || visionOpen) {
-                        open.forEach((t) => { t.models = []; });
-                        if (visionOpen) this.routeForm.visionModels = [];
-                        return;
+                async requestCloseRouteModal() {
+                    if (this.routeFormDirty()) {
+                        const back = document.activeElement;
+                        const ok = await this.askConfirm('抽屉里的修改还没有保存，关闭后会丢失。',
+                            { title: '放弃未保存的修改？', confirmText: '放弃修改' });
+                        if (!ok) {
+                            back?.focus?.();
+                            return;
+                        }
                     }
                     this.showRouteModal = false;
+                },
+
+                // Ctrl/⌘+S：等同点当前语境里的「保存」。
+                // 抽屉开着 → 保存抽屉；路由列表正在就地改模型 → 提交这一格；
+                // 配置三页 → 有可保存的改动才走顶部保存。监控、日志页不拦截，保留浏览器默认行为。
+                // 叠在最上层的对话框（确认框、ChatGPT 导入 / 导出 / 授权）没有「保存」语义，只吞掉按键。
+                onSaveShortcut(e) {
+                    if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey) return;
+                    if ((e.key || '').toLowerCase() !== 's') return;
+                    if (this.confirmDialog.open || this.showChatGPTImportDialog
+                        || this.showChatGPTExportDialog || this.showChatGPTOAuthDialog) {
+                        e.preventDefault();
+                        return;
+                    }
+                    if (this.showProviderModal || this.showRouteModal) {
+                        e.preventDefault();
+                        if (this.loading) return;
+                        if (this.showProviderModal) this.saveProvider();
+                        else this.saveRoute();
+                        return;
+                    }
+                    if (this.inlineModel.routeIndex >= 0) {
+                        e.preventDefault();
+                        if (!this.loading) this.commitInlineModel();
+                        return;
+                    }
+                    if (!this.isConfigTab()) return;
+                    e.preventDefault();
+                    if (!this.loading && this.canSave()) this.saveConfig();
                 },
 
                 // formatMs 把毫秒压成人读的短写法：30000 → 30s、90000 → 1.5m。

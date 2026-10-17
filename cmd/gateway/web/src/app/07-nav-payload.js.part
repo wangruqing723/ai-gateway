@@ -1,7 +1,19 @@
-                selectNav(tab, closeMobile = false) {
+                // 页签同步进地址栏（#providers 这类）：刷新、开发模式热加载后停在原页签，
+                // 浏览器前进 / 后退也能切换。fromHistory 表示这次切换来自前进 / 后退或初始地址，
+                // 此时不能再 pushState，否则后退会原地打转。
+                selectNav(tab, closeMobile = false, fromHistory = false) {
                     this.activeTab = tab;
                     if (tab === 'providers' || tab === 'routes') this.editMode = 'visual';
                     if (closeMobile) this.mobileNavOpen = false;
+                    if (!fromHistory && window.location.hash !== '#' + tab) {
+                        window.history.pushState(null, '', '#' + tab);
+                    }
+                },
+
+                // 地址栏里的页签名；不是已知页签（手输错了、旧书签）时返回 null，由调用方回落。
+                tabFromHash() {
+                    const id = (window.location.hash || '').replace(/^#/, '');
+                    return this.navItems.some((item) => item.id === id) ? id : null;
                 },
 
                 pageTitle() {

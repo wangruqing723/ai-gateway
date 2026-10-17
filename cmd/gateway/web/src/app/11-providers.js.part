@@ -478,7 +478,7 @@
                         apiKeyConfigured: false,
                         clearApiKey: false
                     };
-                    this.showProviderModal = true;
+                    this.openProviderDrawer();
                 },
 
                 editProvider(name) {
@@ -509,7 +509,7 @@
                         apiKeyConfigured: !!p.apiKeyConfigured,
                         clearApiKey: false
                     };
-                    this.showProviderModal = true;
+                    this.openProviderDrawer();
                 },
 
                 // duplicateProvider 以现有 provider 为模板新建一个。
@@ -549,7 +549,7 @@
                         apiKeyConfigured: false,
                         clearApiKey: false
                     };
-                    this.showProviderModal = true;
+                    this.openProviderDrawer();
                     if (p.apiKeyConfigured) {
                         this.showStatus(`已按「${name}」预填，API Key 需重新填写`, 'success');
                     }
@@ -638,6 +638,70 @@
                     } else {
                         this.restoreConfig(snapshot);
                     }
+                },
+
+                // 提供商快速筛选：按名称、Base URL、格式做不区分大小写的包含匹配。
+                providerMatchesFilter(name, provider) {
+                    const q = (this.providerFilter || '').trim().toLowerCase();
+                    if (!q) return true;
+                    return [name, provider?.baseUrl, provider?.format]
+                        .some((v) => String(v || '').toLowerCase().includes(q));
+                },
+
+                filteredProviderCount() {
+                    return Object.entries(this.config.providers || {})
+                        .filter(([name, p]) => this.providerMatchesFilter(name, p)).length;
+                },
+
+                // 列表里直接改格式：选完立即写盘，失败回滚，与路由模型就地编辑同一套语义。
+                // 不用 x-model：x-model 会抢在 change 回调之前改掉内存，快照拍到的已经是新值，回滚无从谈起。
+                // 与其他保存路径一样，这次写盘会带上内存里其他尚未保存的改动。
+                async commitProviderFormat(name, event) {
+                    const select = event?.target;
+                    const provider = this.config.providers?.[name];
+                    const format = select?.value;
+                    if (!provider || !format || provider.format === format) return;
+                    const previous = provider.format;
+                    const snapshot = this.snapshotConfig();
+                    provider.format = format;
+                    if (!(await this.persistConfig())) {
+                        this.restoreConfig(snapshot);
+                        if (select) select.value = previous;
+                    }
+                },
+
+                // Provider 抽屉「高级设置」已配置项计数，口径同 routeAdvancedCount：会落盘的才算。
+                providerAdvancedCount() {
+                    const f = this.providerForm;
+                    if (!f) return 0;
+                    let n = 0;
+                    if (this.numOrNull(f.maxTokens) !== null) n++;
+                    if (this.numOrNull(f.contextWindow) !== null) n++;
+                    if (this.localRetryHasValue(f.localRetry)) n++;
+                    if (f.oneMContext) n++;
+                    if ((f.userAgent || '').trim()) n++;
+                    if ((f.proxy || '').trim()) n++;
+                    if ((f.extraHeaders || []).some((r) => (r?.key || '').trim())) n++;
+                    if ((f.extraBody || []).some((r) => (r?.key || '').trim())) n++;
+                    return n;
+                },
+
+                // ChatGPT 账户列表：点行展开详情，一次只展开一行（同请求日志）。
+                toggleChatGPTAccount(account) {
+                    if (!account?.id) return;
+                    this.expandedChatGPTAccountId = this.expandedChatGPTAccountId === account.id ? '' : account.id;
+                },
+
+                isChatGPTAccountExpanded(account) {
+                    return !!account?.id && this.expandedChatGPTAccountId === account.id;
+                },
+
+                // 列表行里的重置时间只要「月/日 时:分」：完整日期时间挤在一行里太长，详情区仍给全量。
+                formatUsageResetShort(value) {
+                    const date = new Date(value || '');
+                    if (Number.isNaN(date.getTime())) return '重置时间未知';
+                    const pad = (n) => String(n).padStart(2, '0');
+                    return `重置 ${date.getMonth() + 1}/${date.getDate()} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
                 },
 
                 // extraHeaders 在配置里是 map，在表单里是有序行数组：map 没有稳定顺序，

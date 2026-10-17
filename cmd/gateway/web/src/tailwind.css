@@ -89,6 +89,16 @@
     ::-webkit-scrollbar-track { background: #0b0e14; }
     ::-webkit-scrollbar-thumb { background: #2d3650; border: 2px solid #0b0e14; border-radius: 999px; }
     ::-webkit-scrollbar-thumb:hover { background: #3f4a63; }
+    /* 浏览器自带表面也要跟着设计走：原生复选框、下拉弹层、选区、光标、键盘焦点环。
+       color-scheme 让原生控件与下拉弹层走深色；accent-color 把勾选态从系统亮蓝换成主色。 */
+    :root { color-scheme: dark; }
+    ::selection { background: rgba(34, 211, 238, .28); color: #fff; }
+    input, textarea, select { caret-color: #38bdf8; }
+    input[type="checkbox"], input[type="radio"] { accent-color: #22d3ee; }
+    button:focus-visible, a:focus-visible, summary:focus-visible, [role="button"]:focus-visible, [role="tab"]:focus-visible {
+        outline: 2px solid rgba(56, 189, 248, .75);
+        outline-offset: 2px;
+    }
 }
 
 @layer components {
@@ -166,6 +176,62 @@
         font-size: .75rem;
         font-weight: 700;
     }
+    /* 表格行内操作用幽灵按钮：无底无框，悬停才显形。行内按钮一多（路由每行 5 个），
+       描边按钮会把视觉重心从数据抢走。不做悬停上浮：密集表格里逐个跳动只是噪声。 */
+    .btn-ghost {
+        background: transparent;
+        border-color: transparent;
+        color: #94a3b8;
+        padding: .375rem;
+    }
+    .btn-ghost:hover { background: rgba(148, 163, 184, .12); color: #e8edf5; transform: none; }
+    .btn-ghost-danger:hover { background: rgba(251, 113, 133, .14); color: #fecdd3; }
+    /* 表格内的状态标签：无边框的浅底小标签，与工具栏/摘要里的描边 .chip 区分。
+       配色仍由各处 :class 给出（border-* 在无边框时自然失效，不必改 JS）。 */
+    .tag {
+        display: inline-flex;
+        align-items: center;
+        gap: .375rem;
+        border-radius: 6px;
+        padding: .125rem .45rem;
+        font-size: 11px;
+        font-weight: 600;
+        line-height: 1.125rem;
+        white-space: nowrap;
+    }
+    /* 圆点 + 文字形态：去掉底色只留同色圆点，用于健康/熔断这类逐行状态。 */
+    .tag-dot { background: transparent !important; padding-left: 0; padding-right: 0; }
+    .tag-dot::before {
+        content: '';
+        width: .4rem;
+        height: .4rem;
+        border-radius: 999px;
+        background: currentColor;
+        flex-shrink: 0;
+    }
+    /* 表格里可直接修改的标签（提供商的「格式」）：外观同 .tag，右侧小箭头表明可选。
+       箭头是 data URI 的 SVG：CSP 的 img-src 已放行 data:，不引外部资源。 */
+    .tag-select {
+        appearance: none;
+        -webkit-appearance: none;
+        cursor: pointer;
+        border: 0;
+        border-radius: 6px;
+        padding: .125rem 1.25rem .125rem .45rem;
+        font-size: 11px;
+        font-weight: 600;
+        line-height: 1.125rem;
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%2394a3b8' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+        background-repeat: no-repeat;
+        background-position: right .4rem center;
+        background-size: .55rem;
+        outline: none;
+        transition: box-shadow .15s ease, filter .15s ease;
+    }
+    .tag-select:hover { filter: brightness(1.2); }
+    .tag-select:focus-visible { box-shadow: 0 0 0 2px rgba(56, 189, 248, .6); }
+    .tag-select:disabled { cursor: default; background-image: none; padding-right: .45rem; filter: none; }
+    .tag-select option { background: #1b2130; color: #e8edf5; }
 }
 
 /* 以下三个类保持手写 CSS 而不是换用 animate-spin / cursor-grab / cursor-grabbing select-none。

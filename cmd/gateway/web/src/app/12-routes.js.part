@@ -18,11 +18,10 @@
                         enableVision: false,
                         visionProvider: providers[0] || '',
                         visionModel: '',
-                        ...this.newVisionModelState(),
                         // 新建路由没有任何高级配置，收起
                         routeAdvancedOpen: false
                     };
-                    this.showRouteModal = true;
+                    this.openRouteDrawer();
                 },
 
                 editRoute(index) {
@@ -41,12 +40,11 @@
                         enableVision: !!route.vision,
                         visionProvider: route.vision?.provider || '',
                         visionModel: route.vision?.model || '',
-                        ...this.newVisionModelState(),
                         routeAdvancedOpen: false
                     };
                     // routeAdvancedOpenFor 读的是 this.routeForm，必须在赋值之后调用
                     this.routeForm.routeAdvancedOpen = this.routeAdvancedOpenFor();
-                    this.showRouteModal = true;
+                    this.openRouteDrawer();
                 },
 
                 // duplicateRoute 以现有路由为模板新建一条，全部字段可改。
@@ -68,17 +66,15 @@
                         enableVision: !!route.vision,
                         visionProvider: route.vision?.provider || '',
                         visionModel: route.vision?.model || '',
-                        ...this.newVisionModelState(),
                         routeAdvancedOpen: false
                     };
                     this.routeForm.routeAdvancedOpen = this.routeAdvancedOpenFor();
-                    this.showRouteModal = true;
+                    this.openRouteDrawer();
                     this.showStatus(`已按「${route.match || '(空)'}」预填，记得改匹配模式`, 'success');
                 },
 
                 // 候选 target 的运行时形状：provider/model/maxTokens/contextWindow/localRetry 是落盘字段，
-                // models/modelsLoading（查询远程模型列表）与 limitsOpen（行内上限展开区）
-                // 是瞬态状态，saveRoute 不读它们。
+                // limitsOpen（行内上限展开区）是瞬态状态，saveRoute 不读它；模型下拉的状态在 modelPicker 里。
                 // limitsOpen 初值恒为 false：候选设置一律默认折叠，不论是否已配。
                 // 已配的候选不会被藏没——模板里 tune 按钮会因 targetLimitCount>0 高亮并显示已设项数，
                 // 用户一眼能看出哪条候选有覆盖，需要改再点开。
@@ -89,13 +85,7 @@
                 // 同源问题），表现就是拖完两行的 provider 串了。
                 newRouteTarget(provider, model = '', maxTokens = null, contextWindow = null, extraBody = [], localRetry = null) {
                     const retryForm = this.localRetryForm(localRetry);
-                    return { _id: ++this._routeTargetSeq, provider, model, maxTokens, contextWindow, localRetry: retryForm, extraBody: Array.isArray(extraBody) ? extraBody : [], models: [], modelsLoading: false, limitsOpen: false };
-                },
-
-                // 视觉字段的瞬态查询状态。三处 routeForm 重建（addRoute / editRoute /
-                // duplicateRoute）都要带上，漏一处那处的浮层就不响应式。
-                newVisionModelState() {
-                    return { visionModels: [], visionModelsLoading: false };
+                    return { _id: ++this._routeTargetSeq, provider, model, maxTokens, contextWindow, localRetry: retryForm, extraBody: Array.isArray(extraBody) ? extraBody : [], limitsOpen: false };
                 },
 
                 // 高级设置区已配置项计数，给折叠条上的徽标用（同请求日志的高级诊断）。
@@ -136,21 +126,22 @@
                     return this.routeAdvancedCount() > 0;
                 },
 
-                // 切换候选的 provider 后清掉已拉的模型列表：列表是上一个上游的，
+                // 切换候选的 provider 后作废已拉的模型列表：列表是上一个上游的，
                 // 留着只会让人选错模型。已填的 model 不清——那是用户意图。
                 onRouteTargetProviderChange(ti) {
-                    this.routeForm.targets[ti].models = [];
+                    const target = this.routeForm.targets[ti];
+                    if (target && this.modelPicker.key === 't:' + target._id) this.resetModelPicker();
                 },
 
                 // 同 onRouteTargetProviderChange 的理由，作用于视觉字段。
                 onRouteVisionProviderChange() {
-                    this.routeForm.visionModels = [];
+                    if (this.modelPicker.key === 'vision') this.resetModelPicker();
                 },
 
-                // 关掉视觉时一并收起浮层：整块被 x-show 隐藏后列表还挂在状态里，
+                // 关掉视觉时一并收起下拉：整块被 x-show 隐藏后列表还挂在状态里，
                 // 下次勾开会闪一下上一次的结果。
                 onRouteEnableVisionChange() {
-                    if (!this.routeForm.enableVision) this.routeForm.visionModels = [];
+                    if (!this.routeForm.enableVision && this.modelPicker.key === 'vision') this.resetModelPicker();
                 },
 
                 addRouteTarget() {
@@ -190,20 +181,21 @@
                 // 同一上游反复查不重复打上游；改了 baseUrl/format 自动换 key 失效。
                 //
                 // 只负责「按 provider 名拿模型列表」，loading 态与结果落点交给调用方——
-                // 候选行和视觉字段两处共用它，缓存与错误处理因此只有一份，
-                // 各写一遍迟早漂移（一边改了 TTL 另一边没改这类）。
-                // 返回 null 表示失败或 provider 不存在，调用方据此不动已有列表。
+                // 路由列表就地编辑与编辑抽屉两处共用它，缓存与错误口径因此只有一份。
+                // 返回 { models, message }：models 为 null 表示失败；message 是给下拉里显示的说明
+                // （失败原因、空列表、OAuth 没有模型目录）。不弹 toast：下拉一聚焦就会自动查询，
+                // 每失败一次弹一条 20 秒的报错只会刷屏，原因写在下拉里更贴近操作位置。
                 async fetchModelsFor(providerName) {
                     const provider = this.config.providers?.[providerName];
-                    if (!provider) return null;
+                    if (!provider) return { models: null, message: '找不到这个 Provider，请先保存配置' };
                     if (provider.authType === 'chatgptOAuth') {
-                        this.showStatus('ChatGPT OAuth 不提供模型目录，请在模型框中手动填写模型名', 'success');
-                        return [];
+                        return { models: [], message: 'ChatGPT OAuth 不提供模型目录，请直接输入模型名' };
                     }
+                    const empty = '上游返回了空的模型列表，可直接输入模型名';
 
                     const cacheKey = 'gw.models|' + [providerName, provider.baseUrl, provider.format].join('|');
                     const cached = this.readModelCache(cacheKey);
-                    if (cached) return cached;
+                    if (cached) return { models: cached, message: cached.length ? '' : empty };
 
                     try {
                         const res = await fetch(`/api/providers/models?provider=${encodeURIComponent(providerName)}`);
@@ -211,44 +203,140 @@
                         const data = await res.json();
                         const models = Array.isArray(data.models) ? data.models : [];
                         this.writeModelCache(cacheKey, models);
-                        if (!models.length) {
-                            this.showStatus('上游返回了空的模型列表', 'error');
-                        }
-                        return models;
+                        return { models, message: models.length ? '' : empty };
                     } catch (err) {
-                        this.showStatus('查询模型列表失败: ' + err.message, 'error');
-                        return null;
+                        return { models: null, message: '查询模型列表失败：' + err.message + '。可直接输入模型名' };
                     }
                 },
 
-                async fetchProviderModels(ti) {
-                    const target = this.routeForm.targets[ti];
-                    if (!target || !target.provider) return;
+                // ── 模型下拉：路由列表就地编辑与编辑抽屉共用的组合框行为 ─────────
+                // 打开时列出完整清单并定位到当前模型；开始输入后按包含关系过滤（不区分大小写）。
+                // 没开始输入时不过滤：输入框里预填的是当前模型全名，按它过滤只会剩下它自己。
+                modelOptions(models, value, typed) {
+                    const list = Array.isArray(models) ? models : [];
+                    const q = typed ? String(value || '').trim().toLowerCase() : '';
+                    return q ? list.filter((m) => String(m).toLowerCase().includes(q)) : list;
+                },
 
-                    target.modelsLoading = true;
-                    target.models = [];
-                    try {
-                        const models = await this.fetchModelsFor(target.provider);
-                        if (models) target.models = models;
-                    } finally {
-                        target.modelsLoading = false;
+                // 方向键在选项间移动，到头回绕；从「未选中」出发时 ↓ 落到第一项、↑ 落到最后一项。
+                stepOption(active, count, delta) {
+                    if (!count) return -1;
+                    if (active < 0) return delta > 0 ? 0 : count - 1;
+                    return (active + delta + count) % count;
+                },
+
+                // 键盘移动高亮后把那一项滚进可视区，长列表里高亮不会跑到视野外。
+                scrollOptionIntoView(id) {
+                    this.$nextTick(() => document.getElementById(id)?.scrollIntoView({ block: 'nearest' }));
+                },
+
+                // ── 编辑抽屉里的模型下拉 ────────────────────────────
+                // 与路由列表的就地编辑同一套组合框行为：聚焦即查询、输入过滤、↓ ↑ 选择。
+                // 差别在回车：这里回车只把高亮项填进输入框，不保存整个抽屉
+                // （抽屉有自己的保存按钮与 Ctrl/⌘+S）。
+                isModelPickerOpen(key) {
+                    return this.modelPicker.open && this.modelPicker.key === key;
+                },
+
+                modelPickerOptions(value) {
+                    return this.modelOptions(this.modelPicker.models, value, this.modelPicker.typed);
+                },
+
+                async openModelPicker(key, provider, value) {
+                    const current = this.modelPicker;
+                    if (current.key !== key || current.provider !== provider) {
+                        this.modelPicker = { key, provider, models: [], loading: false, message: '', open: true, active: -1, typed: false, token: current.token + 1 };
+                    } else {
+                        current.open = true;
+                    }
+                    const picker = this.modelPicker;
+                    if (!provider) {
+                        picker.message = '请先选择 Provider';
+                        return;
+                    }
+                    if (!picker.models.length && !picker.loading) {
+                        const token = picker.token;
+                        picker.loading = true;
+                        picker.message = '';
+                        try {
+                            const { models, message } = await this.fetchModelsFor(provider);
+                            if (this.modelPicker.token !== token) return;
+                            this.modelPicker.models = models || [];
+                            this.modelPicker.message = message;
+                        } finally {
+                            if (this.modelPicker.token === token) this.modelPicker.loading = false;
+                        }
+                    }
+                    const p = this.modelPicker;
+                    if (p.key !== key || p.typed) return;
+                    p.active = p.models.indexOf(value);
+                    if (p.active >= 0) this.scrollOptionIntoView('model-picker-opt-' + p.active);
+                },
+
+                // 输入框里的放大镜：收起 / 展开下拉。按钮用 mousedown.prevent，焦点留在输入框里。
+                toggleModelPicker(key, provider, value, inputId) {
+                    if (this.isModelPickerOpen(key)) {
+                        this.closeModelPicker();
+                        return;
+                    }
+                    document.getElementById(inputId)?.focus();
+                    this.openModelPicker(key, provider, value);
+                },
+
+                closeModelPicker() {
+                    this.modelPicker.open = false;
+                    this.modelPicker.active = -1;
+                },
+
+                // Provider 换了，已拉的列表就作废：列表是上一个上游的，留着只会让人选错模型。
+                resetModelPicker() {
+                    this.modelPicker = { key: '', provider: '', models: [], loading: false, message: '', open: false, active: -1, typed: false, token: this.modelPicker.token + 1 };
+                },
+
+                onModelPickerInput(key, provider, value) {
+                    if (!this.isModelPickerOpen(key)) this.openModelPicker(key, provider, value);
+                    // 开始输入就按输入过滤，且不预选任何一项，理由同 onInlineModelInput
+                    this.modelPicker.typed = true;
+                    this.modelPicker.active = -1;
+                },
+
+                // 键盘：↓ ↑ 选择，回车把高亮项填入；Esc 在下拉开着时只收下拉，不关抽屉。
+                // 输入法组字中的回车是在确认候选字，不能当成选择。
+                onModelPickerKeydown(e, key, provider, value, setValue) {
+                    if (e.isComposing || e.keyCode === 229) return;
+                    const open = this.isModelPickerOpen(key);
+                    const p = this.modelPicker;
+                    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+                        e.preventDefault();
+                        if (!open) {
+                            this.openModelPicker(key, provider, value);
+                            return;
+                        }
+                        p.active = this.stepOption(p.active, this.modelPickerOptions(value).length, e.key === 'ArrowDown' ? 1 : -1);
+                        if (p.active >= 0) this.scrollOptionIntoView('model-picker-opt-' + p.active);
+                        return;
+                    }
+                    if (e.key === 'Enter') {
+                        if (!open) return;
+                        e.preventDefault();
+                        const options = this.modelPickerOptions(value);
+                        if (p.active >= 0 && p.active < options.length) setValue(options[p.active]);
+                        p.typed = false;
+                        this.closeModelPicker();
+                        return;
+                    }
+                    if (e.key === 'Escape' && open) {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        this.closeModelPicker();
                     }
                 },
 
-                // 视觉字段的查询，与 fetchProviderModels 同一套行为，
-                // 查的 provider 换成 visionProvider。
-                async fetchVisionModels() {
-                    const form = this.routeForm;
-                    if (!form.visionProvider) return;
-
-                    form.visionModelsLoading = true;
-                    form.visionModels = [];
-                    try {
-                        const models = await this.fetchModelsFor(form.visionProvider);
-                        if (models) form.visionModels = models;
-                    } finally {
-                        form.visionModelsLoading = false;
-                    }
+                // 鼠标点选：选项用 mousedown.prevent 触发，输入框不失焦，选完可以继续用键盘。
+                pickModel(model, setValue) {
+                    setValue(model);
+                    this.modelPicker.typed = false;
+                    this.closeModelPicker();
                 },
 
                 // 模型列表缓存读写：1 天 TTL，结构 {at: 时间戳, models: [...]}。
@@ -434,12 +522,28 @@
                     const route = this.config.routes?.[routeIndex];
                     const target = route ? this.routeTargets(route)[targetIndex] : null;
                     if (!target) return;
+                    this.beginInlineEdit(routeIndex, targetIndex, target.model || '');
+                },
+
+                // 视觉模型就地编辑：只改模型名。视觉 Provider 与开关仍在编辑抽屉里改——
+                // 换 Provider 意味着那一侧的格式与密钥都换了，属于结构性改动。
+                startInlineVision(routeIndex) {
+                    const route = this.config.routes?.[routeIndex];
+                    if (!route?.vision) return;
+                    this.beginInlineEdit(routeIndex, 'v', route.vision.model || '');
+                },
+
+                beginInlineEdit(routeIndex, targetIndex, value) {
                     this.inlineModel = {
                         routeIndex,
                         targetIndex,
-                        value: target.model || '',
+                        value,
                         models: [],
                         modelsLoading: false,
+                        message: '',
+                        open: false,
+                        active: -1,
+                        typed: false,
                         listPos: null,
                         // token 自增即「上一次编辑作废」，在飞的模型查询回来时据此丢弃结果
                         token: this.inlineModel.token + 1
@@ -454,20 +558,25 @@
                         window.addEventListener('scroll', this._inlineScrollHandler, true);
                         window.addEventListener('resize', this._inlineScrollHandler);
                     }
-                    // 输入框是 x-if 渲染的，本轮还不存在，聚焦要等下一帧
+                    // 输入框是 x-if 渲染的，本轮还不存在，聚焦要等下一帧；
+                    // 换成输入框后这一格变宽了，浮层位置也跟着重算一次
                     this.$nextTick(() => {
                         const input = document.getElementById('inline-model-input');
                         if (input) {
                             input.focus();
                             input.select();
                         }
+                        this.positionInlineList();
                     });
+                    // 点开就查，不必再去找放大镜。查询走 1 天缓存，同一上游不会反复打上游。
+                    this.openInlineModelList();
                 },
 
                 cancelInlineModel() {
                     this.inlineModel = {
                         routeIndex: -1, targetIndex: -1, value: '',
-                        models: [], modelsLoading: false, listPos: null,
+                        models: [], modelsLoading: false, message: '',
+                        open: false, active: -1, typed: false, listPos: null,
                         token: this.inlineModel.token + 1
                     };
                     if (this._inlineScrollHandler) {
@@ -500,31 +609,122 @@
                     };
                 },
 
-                // 复用候选行那套查询：缓存、错误提示、空列表提醒都在 fetchModelsFor 里，
-                // 这里只负责 loading 态与结果落点。
-                async fetchInlineModels() {
+                // 就地编辑对应的上游 Provider：候选取该候选的 provider，视觉取 vision.provider。
+                inlineModelProvider() {
                     const state = this.inlineModel;
                     const route = this.config.routes?.[state.routeIndex];
-                    const target = route ? this.routeTargets(route)[state.targetIndex] : null;
-                    if (!target?.provider) return;
+                    if (!route) return '';
+                    if (state.targetIndex === 'v') return route.vision?.provider || '';
+                    return this.routeTargets(route)[state.targetIndex]?.provider || '';
+                },
 
-                    const token = state.token;
-                    state.modelsLoading = true;
-                    state.models = [];
+                inlineModelOptions() {
+                    const s = this.inlineModel;
+                    return this.modelOptions(s.models, s.value, s.typed);
+                },
+
+                // 展开下拉；列表还没取过就先查（失败、空列表的说明直接写在下拉里）。
+                // 还没开始输入时把高亮放在当前模型上，↓ ↑ 从它开始移动。
+                async openInlineModelList() {
+                    const state = this.inlineModel;
+                    if (state.routeIndex < 0) return;
+                    state.open = true;
+                    this.positionInlineList();
+                    if (!state.models.length && !state.modelsLoading) await this.loadInlineModels();
+                    const s = this.inlineModel;
+                    if (s.routeIndex < 0 || s.typed) return;
+                    s.active = s.models.indexOf(s.value);
+                    if (s.active >= 0) this.scrollOptionIntoView('inline-model-opt-' + s.active);
+                },
+
+                // 复用 fetchModelsFor：缓存与错误口径只有一份，这里只管 loading 态与结果落点。
+                async loadInlineModels() {
+                    const provider = this.inlineModelProvider();
+                    if (!provider) return;
+                    const token = this.inlineModel.token;
+                    this.inlineModel.modelsLoading = true;
+                    this.inlineModel.message = '';
                     try {
-                        const models = await this.fetchModelsFor(target.provider);
+                        const { models, message } = await this.fetchModelsFor(provider);
                         // 查询期间可能已经关掉或换去编辑别的格子，回来的结果就不该再落进去
-                        if (models && this.inlineModel.token === token) {
-                            this.inlineModel.models = models;
-                            this.positionInlineList();
-                        }
+                        if (this.inlineModel.token !== token) return;
+                        this.inlineModel.models = models || [];
+                        this.inlineModel.message = message;
+                        this.positionInlineList();
                     } finally {
                         if (this.inlineModel.token === token) this.inlineModel.modelsLoading = false;
                     }
                 },
 
+                // 输入框里的放大镜：收起 / 展开下拉。按钮用 mousedown.prevent，焦点留在输入框里。
+                toggleInlineModelList() {
+                    const s = this.inlineModel;
+                    if (s.open) {
+                        s.open = false;
+                        s.active = -1;
+                        return;
+                    }
+                    this.openInlineModelList();
+                },
+
+                onInlineModelInput() {
+                    const s = this.inlineModel;
+                    // 一旦开始输入就按输入过滤，且不再预选任何一项：
+                    // 否则回车会提交被高亮的那一项，而不是用户刚敲的名字（上游清单里可能还没有它）。
+                    s.typed = true;
+                    s.active = -1;
+                    if (!s.open) this.openInlineModelList();
+                },
+
+                // 键盘：↓ ↑ 选择，回车保存（有高亮项就保存高亮项），Esc 先收起下拉、再按一次取消编辑。
+                // 输入法组字中的回车是在确认候选字，不能当成保存。
+                onInlineModelKeydown(e) {
+                    if (e.isComposing || e.keyCode === 229) return;
+                    const s = this.inlineModel;
+                    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+                        e.preventDefault();
+                        if (!s.open) {
+                            this.openInlineModelList();
+                            return;
+                        }
+                        s.active = this.stepOption(s.active, this.inlineModelOptions().length, e.key === 'ArrowDown' ? 1 : -1);
+                        if (s.active >= 0) this.scrollOptionIntoView('inline-model-opt-' + s.active);
+                        return;
+                    }
+                    if (e.key === 'Enter') {
+                        e.preventDefault();
+                        const options = this.inlineModelOptions();
+                        if (s.open && s.active >= 0 && s.active < options.length) s.value = options[s.active];
+                        this.commitInlineModel();
+                        return;
+                    }
+                    if (e.key === 'Escape') {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        if (s.open) {
+                            s.open = false;
+                            s.active = -1;
+                            return;
+                        }
+                        this.cancelInlineModel();
+                    }
+                },
+
+                // 鼠标点选：填进输入框并保持焦点，再按回车（或点对勾）保存。
+                // 选项用 mousedown.prevent 触发：若等到 click，输入框在 mousedown 时就已失焦，
+                // 之后的回车落不到输入框上——这正是此前「下拉选中后回车保存不了」的原因。
+                pickInlineModel(model) {
+                    const s = this.inlineModel;
+                    s.value = model;
+                    s.typed = false;
+                    s.open = false;
+                    s.active = -1;
+                    document.getElementById('inline-model-input')?.focus();
+                },
+
                 async commitInlineModel() {
                     const state = this.inlineModel;
+                    if (state.targetIndex === 'v') return this.commitInlineVision();
                     const routeIndex = state.routeIndex;
                     const targetIndex = state.targetIndex;
                     const route = this.config.routes?.[routeIndex];
@@ -564,6 +764,33 @@
                     this.writeTargetModel(routeIndex, targetIndex, model);
                     // 与 saveRoute 同一套语义：落盘成功才收起，失败回滚并留着输入框，
                     // 让用户能就着错误提示改，而不是把刚敲的值弄丢。
+                    if (await this.persistConfig()) {
+                        this.cancelInlineModel();
+                    } else {
+                        this.restoreConfig(snapshot);
+                    }
+                },
+
+                // 视觉模型就地保存：口径同 saveRoute——启用视觉时模型名不能为空；
+                // 要关掉视觉伴随请在编辑抽屉里取消勾选，不该由「清空输入框」顺手完成。
+                async commitInlineVision() {
+                    const state = this.inlineModel;
+                    const route = this.config.routes?.[state.routeIndex];
+                    if (!route?.vision) {
+                        this.cancelInlineModel();
+                        return;
+                    }
+                    const model = (state.value || '').trim();
+                    if (model === (route.vision.model || '')) {
+                        this.cancelInlineModel();
+                        return;
+                    }
+                    if (!model) {
+                        this.showStatus('视觉模型不能为空，如需关闭视觉伴随请在编辑抽屉里取消勾选', 'error');
+                        return;
+                    }
+                    const snapshot = this.snapshotConfig();
+                    route.vision.model = model;
                     if (await this.persistConfig()) {
                         this.cancelInlineModel();
                     } else {
