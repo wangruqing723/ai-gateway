@@ -214,7 +214,7 @@
                 editingRouteIndex: -1,
                 routeForm: {
                     match: '',
-                    // 目标候选列表，按顺序作为故障转移的尝试顺序；至少 1 个，最多 5 个
+                    // 目标候选列表，按顺序作为故障转移的尝试顺序；至少 1 个，最多 6 个
                     // limitsOpen（行内上限展开区）是瞬态状态，初始占位保证响应式，saveRoute 不读它；
                     // 模型下拉的状态统一放在 modelPicker 里，不再挂在每个候选上
                     // _id 是 x-for 的稳定 key（见 _routeTargetSeq）；这份初始占位在
@@ -233,7 +233,7 @@
                     // 打开弹窗时按「这条路由是否已带高级配置」决定初始值（见 routeAdvancedOpenFor）。
                     routeAdvancedOpen: false
                 },
-                maxRouteTargets: 5,
+                maxRouteTargets: 6,
                 // 与后端 balancer 的取值表对应。
                 // failover 必须写成真实枚举值、不能用空字符串当哨兵：Alpine 对
                 // :value="''" 会把 value 属性整个移除，而没有 value 属性的 <option>

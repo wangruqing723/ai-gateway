@@ -32,7 +32,7 @@ const (
 	maxQueueWaitMs  = 600_000
 
 	// maxRouteTargets 单条路由的候选上限，避免最坏耗时不可控。
-	maxRouteTargets = 5
+	maxRouteTargets = 6
 	// ContextWindowCeiling 是 contextWindow 配置项的上限，用于拦住手误多打几个 0。
 	ContextWindowCeiling = 10_000_000
 	// DefaultContextSafetyMargin 是 contextSafetyMargin 未配置时的估算误差补偿。
@@ -41,7 +41,7 @@ const (
 	// 真实上限由上游模型决定，网关无从得知，写超了由上游报错更准确。
 	MaxOutputTokensCeiling = 1_000_000
 	// maxFailoverAttempts failover.maxAttempts 上限。
-	maxFailoverAttempts = 5
+	maxFailoverAttempts = 6
 	// maxRetryAfterCapMs Retry-After 阈值上限，借 Portkey 的 60 秒。
 	maxRetryAfterCapMs = 60_000
 
@@ -303,7 +303,7 @@ func (r *Route) TargetList() []Target {
 // 对应的下界检查变成永不触发的死代码，用户手误写 0 得不到任何提示。
 type Failover struct {
 	Enabled bool `yaml:"enabled" json:"enabled"`
-	// MaxAttempts 含首次尝试的总次数上限，1-5。默认 2。
+	// MaxAttempts 含首次尝试的总次数上限，1-6。默认 2。
 	MaxAttempts *int `yaml:"maxAttempts,omitempty" json:"maxAttempts,omitempty"`
 	// OnTransportError 连接失败 / DNS / TLS 错误时转移。默认 true。
 	OnTransportError *bool `yaml:"onTransportError" json:"onTransportError,omitempty"`

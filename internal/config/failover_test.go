@@ -180,8 +180,10 @@ func TestRouteTargetsValidation(t *testing.T) {
         model: m5
       - provider: primary
         model: m6
+      - provider: primary
+        model: m7
 `,
-			wantErr: "最多 5 个候选",
+			wantErr: "最多 6 个候选",
 		},
 		{
 			name: "targets 内未知字段被拒绝",
@@ -221,6 +223,34 @@ func TestRouteTargetsSameProviderDifferentModel(t *testing.T) {
 `
 	if _, err := DecodeAndValidate([]byte(failoverConfigYAML(routes, ""))); err != nil {
 		t.Fatalf("同 provider 不同 model 应合法: %v", err)
+	}
+}
+
+// 候选数恰好等于上限（6）合法；超过上限的拒绝分支见 TestRouteTargetsValidation。
+// 与 maxAttempts 上限同值：failover 下每个候选都要有机会被试到。
+func TestRouteTargetsAcceptsExactLimit(t *testing.T) {
+	const routes = `routes:
+  - match: "*"
+    targets:
+      - provider: primary
+        model: m1
+      - provider: primary
+        model: m2
+      - provider: primary
+        model: m3
+      - provider: primary
+        model: m4
+      - provider: primary
+        model: m5
+      - provider: primary
+        model: m6
+`
+	c, err := DecodeAndValidate([]byte(failoverConfigYAML(routes, "failover:\n  enabled: true\n  maxAttempts: 6\n")))
+	if err != nil {
+		t.Fatalf("6 个候选 + maxAttempts 6 应合法: %v", err)
+	}
+	if got := len(c.Routes[0].Targets); got != 6 {
+		t.Fatalf("候选数 = %d, 期望 6", got)
 	}
 }
 
@@ -343,7 +373,7 @@ func TestFailoverNumericBounds(t *testing.T) {
 		wantErr string
 	}{
 		{"maxAttempts 为负", "failover:\n  maxAttempts: -1\n", "maxAttempts"},
-		{"maxAttempts 超上限", "failover:\n  maxAttempts: 6\n", "maxAttempts"},
+		{"maxAttempts 超上限", "failover:\n  maxAttempts: 7\n", "maxAttempts"},
 		{"maxRetryAfterMs 为负", "failover:\n  maxRetryAfterMs: -1\n", "maxRetryAfterMs"},
 		{"maxRetryAfterMs 超上限", "failover:\n  maxRetryAfterMs: 60001\n", "maxRetryAfterMs"},
 		{"未知字段", "failover:\n  onFooError: true\n", "onFooError"},
@@ -364,7 +394,7 @@ func TestFailoverNumericBounds(t *testing.T) {
 func TestFailoverAcceptsExactBounds(t *testing.T) {
 	for _, body := range []string{
 		"failover:\n  maxAttempts: 1\n  maxRetryAfterMs: 60000\n",
-		"failover:\n  maxAttempts: 5\n  maxRetryAfterMs: 1\n",
+		"failover:\n  maxAttempts: 6\n  maxRetryAfterMs: 1\n",
 	} {
 		if _, err := DecodeAndValidate([]byte(failoverConfigYAML(singleRoute, body))); err != nil {
 			t.Fatalf("边界值应合法 (%s): %v", body, err)

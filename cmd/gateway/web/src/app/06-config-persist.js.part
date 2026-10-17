@@ -72,7 +72,13 @@
 
                 // ESC 逐层退出，不一次关穿。确认弹窗或 OAuth 授权弹窗叠在编辑弹窗之上时，
                 // 高层弹窗自己的 escape 监听负责关它，这里必须让路，不能顺手关闭编辑表单。
+                //
+                // 多个 .window escape 监听按 DOM 顺序触发：Provider 抽屉在路由抽屉之前注册。
+                // 若本函数在「Provider 抽屉根本没开」时仍 stopImmediatePropagation，排在后面的
+                // 路由抽屉监听就永远收不到 ESC——表现为路由抽屉里按 ESC 毫无反应。
+                // 所以先判自己是否打开：没开就直接 return，把事件让给真正开着的那个抽屉。
                 escapeProviderModal(e) {
+                    if (!this.showProviderModal) return;
                     if (this.confirmDialog.open || this.showChatGPTOAuthDialog) return;
                     // 先截断当前 ESC。若抽屉有未保存修改，下一轮事件队列再开确认框，
                     // 确认框的 window 监听就不会把触发关闭的这次 ESC 当成取消。
@@ -84,6 +90,7 @@
                 // 路由弹窗多一层：模型下拉展开时，ESC 先收下拉，再按才关弹窗。
                 // 候选行与视觉字段共用一份下拉状态（modelPicker），收它就够了。
                 escapeRouteModal(e) {
+                    if (!this.showRouteModal) return;
                     if (this.confirmDialog.open) return;
                     if (this.modelPicker.open) {
                         e?.preventDefault();

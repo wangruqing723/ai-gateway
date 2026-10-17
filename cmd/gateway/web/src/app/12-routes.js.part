@@ -510,7 +510,7 @@
                 // 上游格式、上限覆盖整套都换了，那是结构性改动；模型名是同一上游内部的
                 // 平移，单独改语义自洽，也不会让这条路由的其他字段失去意义。
                 //
-                // 输入框不常驻：路由列表是「看配置」的地方，11 行 × 每行最多 5 个候选
+                // 输入框不常驻：路由列表是「看配置」的地方，11 行 × 每行最多 6 个候选
                 // 全摆成输入框，只读浏览会变成一整片表单。点击才展开，读的时候仍是文本。
 
                 // 当前是否正在编辑这一格，模板用它切换只读态 / 编辑态。
@@ -594,11 +594,18 @@
                     return document.querySelector(`[data-inline-anchor="${state.routeIndex}:${state.targetIndex}"]`);
                 },
 
-                // 浮层贴着候选项的下缘展开。宽度至少 220px：上游模型名普遍比列表里
+                // 浮层贴着输入框的下缘展开。宽度至少 220px：上游模型名普遍比列表里
                 // 显示的那一小段长，按锚点宽度会挤成竖排单字。
+                //
+                // 量的是锚点里的输入框，不是锚点本身：候选格进入编辑态会加 col-span-full
+                // 横跨整行（输入框 + 两个按钮塞不进 17rem 的格子），按锚点量浮层就被拉成
+                // 整张表那么宽，左缘也落在序号「1.」下面而不是输入框下面。
+                // 输入框是 x-if 渲染的，beginInlineEdit 同步调用这里时它还不存在，
+                // 此时退回量锚点；$nextTick 里会再调一次，届时就量到输入框了。
                 positionInlineList() {
-                    const el = this.inlineAnchorEl();
-                    if (!el) return;
+                    const anchor = this.inlineAnchorEl();
+                    if (!anchor) return;
+                    const el = anchor.querySelector('#inline-model-input') || anchor;
                     const rect = el.getBoundingClientRect();
                     const width = Math.max(rect.width, 220);
                     this.inlineModel.listPos = {

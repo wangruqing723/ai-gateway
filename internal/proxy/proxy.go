@@ -846,6 +846,25 @@ func finishTransformedStream(transform converter.StreamTransformer, err error, t
 		return nil
 	}
 
+	// passthrough（含被 namespaceRestorer 包装的 passthrough）不解析协议事件、
+	// 不追踪源协议终态，其正常结束只能靠上游 EOF 判定。此时 EOF 是上游关流的
+	// 正常终态而非截断，不应报 unexpected EOF、也不写失败终态给客户端；但真正
+	// 的活跃超时仍须按超时处理（timedOut 优先级高于 EOF）。这条路径覆盖 ChatGPT
+	// Codex 的 openai-responses 同格式透传：上游 SSE 未带 response.completed 直接
+	// 断流会让 transformer.StreamCompleted 恒为 false，误报为提前截断。
+	if !timedOut && converter.IsPassthroughTransformer(transform) {
+		if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) {
+			msg := "上游响应流错误: " + err.Error()
+			opts.Log("%s", msg)
+			if writeErr := writeStreamFailure(opts.ClientRes, flusher, time.Duration(opts.StreamActivityTimeout)*time.Millisecond, opts.ClientFormat, "upstream_error", msg); writeErr != nil {
+				return writeErr
+			}
+			return err
+		}
+		opts.Log("上游流式响应结束")
+		return nil
+	}
+
 	errType := "upstream_error"
 	message := "上游流式响应在协议终态前结束"
 	resultErr := err

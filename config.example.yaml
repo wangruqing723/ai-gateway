@@ -37,7 +37,7 @@ contextSafetyMargin: 4096      # 估算误差补偿，默认 4096；允许写 0
 # 就不再转移（已发出的字节无法回收），中途失败仍补合规收尾事件。
 failover:
   enabled: false          # 总开关，默认 false
-  maxAttempts: 2          # 单个请求最多尝试几个候选（1-5，默认 2）
+  maxAttempts: 2          # 单个请求最多尝试几个候选（1-6，默认 2）
   # 429 的 Retry-After 超过此值时，该候选「不消耗尝试额度」——
   # 上游明确说了这段时间不可用，那这次失败不该占掉 maxAttempts 里的一格，
   # 否则一个自曝限流的上游会挤掉本来还能试的健康候选（与熔断跳过同等待遇）。
@@ -194,7 +194,7 @@ routes:
 
   # 多目标写法：与上面的 provider/model 单目标写法互斥，二者只能选一种。
   # 需要 failover.enabled: true 才会在首个候选失败时往下试；否则只用第一个。
-  # 候选按顺序尝试，最多 5 个；同 provider 换不同 model 也合法（降级到便宜模型）。
+  # 候选按顺序尝试，最多 6 个；同 provider 换不同 model 也合法（降级到便宜模型）。
   #
   # strategy 可选，决定「先试谁」，与 failover 的「失败了还能试谁」正交：
   #   failover（默认）  按 targets 配置顺序，永远先试第一个

@@ -534,8 +534,8 @@
                                     <div class="grid grid-cols-1 gap-4 md:grid-cols-2">
                                         <label class="block">
                                             <span class="mb-1.5 block text-xs font-bold text-muted">最大尝试次数</span>
-                                            <input autocomplete="off" type="number" min="1" max="5" x-model.number="config.failover.maxAttempts" class="field" placeholder="留空用默认值 2">
-                                            <span class="mt-1.5 block text-xs text-muted">含首次尝试，1-5。熔断跳过和下面的限流跳过都不消耗额度。</span>
+                                            <input autocomplete="off" type="number" min="1" max="6" x-model.number="config.failover.maxAttempts" class="field" placeholder="留空用默认值 2">
+                                            <span class="mt-1.5 block text-xs text-muted">含首次尝试，1-6。熔断跳过和下面的限流跳过都不消耗额度。</span>
                                         </label>
                                         <label class="block">
                                             <span class="mb-1.5 block text-xs font-bold text-muted">Retry-After 上限 ms</span>
@@ -890,6 +890,13 @@
                                                             <span x-show="account.usage?.error" class="tag bg-warn/10 text-amber-100" :title="account.usage?.error">额度同步失败，展开查看原因</span>
                                                             <div x-show="(account.usage?.lastAttemptAt || account.usage?.lastCheckedAt) && !account.usage?.windows?.length && !account.usage?.error" class="text-xs text-muted">上游暂未返回可显示的额度窗口</div>
                                                             <div x-show="!(account.usage?.lastAttemptAt || account.usage?.lastCheckedAt) && !refreshingChatGPTUsage && refreshingChatGPTAccountId !== account.id" class="text-xs text-muted">尚未获取用量</div>
+                                                            <!-- 最近成功查询额度：从折叠区提到行上常驻，一眼看清额度是什么时候拉的，不必展开。 -->
+                                                            <div class="flex min-w-0 items-center gap-1.5 text-xs"
+                                                                 :title="account.usage?.lastSuccessAt ? '最近成功查询额度：' + formatChatGPTDate(account.usage.lastSuccessAt) : '尚无成功查询记录'">
+                                                                <span class="material-symbols-outlined shrink-0 text-[14px]" :class="account.usage?.error ? 'text-amber-100' : 'text-muted'">schedule</span>
+                                                                <span class="min-w-0 truncate tabular-nums" :class="account.usage?.error ? 'text-amber-100' : 'text-muted'"
+                                                                      x-text="account.usage?.lastSuccessAt ? '最近成功查询 ' + formatChatGPTDate(account.usage.lastSuccessAt) : '尚无成功记录'"></span>
+                                                            </div>
                                                         </div>
                                                     </td>
                                                     <td class="px-3 py-3">
@@ -937,10 +944,6 @@
                                                                     <dd class="mt-0.5 truncate text-sm font-semibold text-white" :title="(account.subscriptionActiveStart ? formatChatGPTDate(account.subscriptionActiveStart) : '未知') + ' — ' + (account.subscriptionActiveUntil ? formatChatGPTDate(account.subscriptionActiveUntil) : '未知')" x-text="(account.subscriptionActiveStart ? formatChatGPTDate(account.subscriptionActiveStart) : '未知') + ' — ' + (account.subscriptionActiveUntil ? formatChatGPTDate(account.subscriptionActiveUntil) : '未知')"></dd>
                                                                 </div>
                                                             </template>
-                                                            <div class="min-w-0">
-                                                                <dt class="text-muted">最近成功查询额度</dt>
-                                                                <dd class="mt-0.5 truncate text-sm font-semibold" :class="account.usage?.error ? 'text-amber-100' : 'text-white'" x-text="account.usage?.lastSuccessAt ? formatChatGPTDate(account.usage.lastSuccessAt) : '尚无成功记录'"></dd>
-                                                            </div>
                                                             <div x-show="account.usage?.credits" class="min-w-0">
                                                                 <dt class="text-muted">Credits 余额</dt>
                                                                 <dd class="mt-0.5 truncate text-sm font-semibold text-white" x-text="account.usage?.credits?.balance"></dd>
@@ -948,7 +951,7 @@
                                                         </dl>
                                                         <div x-show="account.usage?.error" class="mt-3 rounded border border-warn/30 bg-warn/10 px-3 py-2 text-xs text-amber-100">
                                                             <div><span class="font-semibold">额度同步失败：</span><span x-text="account.usage?.error"></span></div>
-                                                            <div x-show="account.usage?.windows?.length || account.usage?.credits" class="mt-1 text-muted">列表里的额度是缓存数据，最后一次成功查询的时间见上方。</div>
+                                                            <div x-show="account.usage?.windows?.length || account.usage?.credits" class="mt-1 text-muted">列表里的额度是缓存数据，最后一次成功查询的时间见「剩余用量」列。</div>
                                                         </div>
                                                         <p class="mt-3 text-xs leading-relaxed text-muted">访问令牌会自动续期；「访问令牌到期」不代表 ChatGPT 订阅到期时间。</p>
                                                     </td>
@@ -1725,10 +1728,19 @@
                                         <td class="whitespace-nowrap px-1.5 py-2.5">
                                             <span class="tag" :class="log.stream ? 'bg-cyan2/10 text-cyan' : 'bg-white/[.05] text-muted'" x-text="log.stream ? '流式' : '非流式'"></span>
                                         </td>
-                                        <!-- 着色仍按总耗时：首字快但总耗时很长的请求同样该标红。 -->
-                                        <td class="whitespace-nowrap px-4 py-2.5 text-right font-mono text-xs"
-                                            :class="slowClass(log.durationMs || log.latencyMs)"
-                                            x-text="durationCell(log)"></td>
+                                        <!-- 一格双值：流式显示「首字 / 总计」，非流式只显示总计。
+                                             两个数各按 slowClass 的 10s / 30s 阈值单独着色：首字慢说明上游迟迟不出字，
+                                             总计慢可能只是输出长，混成一个颜色就分不清是哪一段慢。
+                                             不另开一列：这张表是 table-fixed + colgroup 按百分比分宽，加列会把最小宽度继续顶高。
+                                             非流式不补「--」占位：首字耗时对它不存在，画占位会让人以为数据丢了；
+                                             流式但没取到首字（一个内容块都没写出就失败）同样只显示总计。 -->
+                                        <td class="whitespace-nowrap px-4 py-2.5 text-right font-mono text-xs">
+                                            <span x-show="log.stream && hasLogValue(log.firstByteMs)"
+                                                  :class="slowClass(log.firstByteMs)" x-text="durationText(log.firstByteMs)"></span>
+                                            <span x-show="log.stream && hasLogValue(log.firstByteMs)" class="text-muted"> / </span>
+                                            <span :class="slowClass(log.durationMs || log.latencyMs)"
+                                                  x-text="durationText(log.durationMs ?? log.latencyMs)"></span>
+                                        </td>
                                         <td class="truncate px-4 py-2.5 font-mono text-[11px]"
                                             :class="log.attemptTrail ? 'text-warn' : 'text-muted'"
                                             @mouseenter="showTip(log.attemptTrail || '', $event)"
@@ -2220,7 +2232,7 @@
 
                 <!-- 目标候选 = 表格式紧凑列表，与路由/Provider 主列表同一族语言：
                      一行表头 + divide-y 分隔的数据行，行本身不再套「卡中卡」的边框盒子。
-                     行高由 field 控件高度决定 ≈ 44px，5 个候选全展开也不到 250px。 -->
+                     行高由 field 控件高度决定 ≈ 44px，6 个候选全展开也不到 300px。 -->
                 <section class="mt-6 border-t border-line pt-5">
                     <div class="mb-3 flex flex-wrap items-baseline justify-between gap-3">
                         <h4 class="text-sm font-semibold text-white">目标候选</h4>
@@ -3002,7 +3014,7 @@
                 editingRouteIndex: -1,
                 routeForm: {
                     match: '',
-                    // 目标候选列表，按顺序作为故障转移的尝试顺序；至少 1 个，最多 5 个
+                    // 目标候选列表，按顺序作为故障转移的尝试顺序；至少 1 个，最多 6 个
                     // limitsOpen（行内上限展开区）是瞬态状态，初始占位保证响应式，saveRoute 不读它；
                     // 模型下拉的状态统一放在 modelPicker 里，不再挂在每个候选上
                     // _id 是 x-for 的稳定 key（见 _routeTargetSeq）；这份初始占位在
@@ -3021,7 +3033,7 @@
                     // 打开弹窗时按「这条路由是否已带高级配置」决定初始值（见 routeAdvancedOpenFor）。
                     routeAdvancedOpen: false
                 },
-                maxRouteTargets: 5,
+                maxRouteTargets: 6,
                 // 与后端 balancer 的取值表对应。
                 // failover 必须写成真实枚举值、不能用空字符串当哨兵：Alpine 对
                 // :value="''" 会把 value 属性整个移除，而没有 value 属性的 <option>
@@ -3636,7 +3648,13 @@
 
                 // ESC 逐层退出，不一次关穿。确认弹窗或 OAuth 授权弹窗叠在编辑弹窗之上时，
                 // 高层弹窗自己的 escape 监听负责关它，这里必须让路，不能顺手关闭编辑表单。
+                //
+                // 多个 .window escape 监听按 DOM 顺序触发：Provider 抽屉在路由抽屉之前注册。
+                // 若本函数在「Provider 抽屉根本没开」时仍 stopImmediatePropagation，排在后面的
+                // 路由抽屉监听就永远收不到 ESC——表现为路由抽屉里按 ESC 毫无反应。
+                // 所以先判自己是否打开：没开就直接 return，把事件让给真正开着的那个抽屉。
                 escapeProviderModal(e) {
+                    if (!this.showProviderModal) return;
                     if (this.confirmDialog.open || this.showChatGPTOAuthDialog) return;
                     // 先截断当前 ESC。若抽屉有未保存修改，下一轮事件队列再开确认框，
                     // 确认框的 window 监听就不会把触发关闭的这次 ESC 当成取消。
@@ -3648,6 +3666,7 @@
                 // 路由弹窗多一层：模型下拉展开时，ESC 先收下拉，再按才关弹窗。
                 // 候选行与视觉字段共用一份下拉状态（modelPicker），收它就够了。
                 escapeRouteModal(e) {
+                    if (!this.showRouteModal) return;
                     if (this.confirmDialog.open) return;
                     if (this.modelPicker.open) {
                         e?.preventDefault();
@@ -4298,21 +4317,6 @@
                     if (ms >= 30000) return 'text-danger';
                     if (ms >= 10000) return 'text-warn';
                     return 'text-text';
-                },
-
-                // durationCell 日志列表「耗时」列的一格双值：流式显示「首字 / 总计」，
-                // 非流式只显示总计。
-                //
-                // 不另开一列：这张表是 table-fixed + colgroup 九列按百分比分宽，
-                // 加第十列要把 min-w-[930px] 继续顶高，窄屏横向滚动更严重。
-                //
-                // 非流式不补破折号占位：首字耗时对它不存在（见后端 FirstByteMs 注释），
-                // 画一个「--」会让人以为数据丢了，而不是这个量本就不适用。
-                // 流式但没取到首字（响应头之后才失败、一个内容块都没写出）同样退回单值。
-                durationCell(log) {
-                    const total = this.durationText(log?.durationMs ?? log?.latencyMs);
-                    if (!log?.stream || !this.hasLogValue(log?.firstByteMs)) return total;
-                    return `${this.durationText(log.firstByteMs)} / ${total}`;
                 },
 
                 // logClock 只取时分秒。列表里整屏都是同一天，重复 100 遍日期没有信息量，
@@ -6517,7 +6521,7 @@
                 // 上游格式、上限覆盖整套都换了，那是结构性改动；模型名是同一上游内部的
                 // 平移，单独改语义自洽，也不会让这条路由的其他字段失去意义。
                 //
-                // 输入框不常驻：路由列表是「看配置」的地方，11 行 × 每行最多 5 个候选
+                // 输入框不常驻：路由列表是「看配置」的地方，11 行 × 每行最多 6 个候选
                 // 全摆成输入框，只读浏览会变成一整片表单。点击才展开，读的时候仍是文本。
 
                 // 当前是否正在编辑这一格，模板用它切换只读态 / 编辑态。
@@ -6601,11 +6605,18 @@
                     return document.querySelector(`[data-inline-anchor="${state.routeIndex}:${state.targetIndex}"]`);
                 },
 
-                // 浮层贴着候选项的下缘展开。宽度至少 220px：上游模型名普遍比列表里
+                // 浮层贴着输入框的下缘展开。宽度至少 220px：上游模型名普遍比列表里
                 // 显示的那一小段长，按锚点宽度会挤成竖排单字。
+                //
+                // 量的是锚点里的输入框，不是锚点本身：候选格进入编辑态会加 col-span-full
+                // 横跨整行（输入框 + 两个按钮塞不进 17rem 的格子），按锚点量浮层就被拉成
+                // 整张表那么宽，左缘也落在序号「1.」下面而不是输入框下面。
+                // 输入框是 x-if 渲染的，beginInlineEdit 同步调用这里时它还不存在，
+                // 此时退回量锚点；$nextTick 里会再调一次，届时就量到输入框了。
                 positionInlineList() {
-                    const el = this.inlineAnchorEl();
-                    if (!el) return;
+                    const anchor = this.inlineAnchorEl();
+                    if (!anchor) return;
+                    const el = anchor.querySelector('#inline-model-input') || anchor;
                     const rect = el.getBoundingClientRect();
                     const width = Math.max(rect.width, 220);
                     this.inlineModel.listPos = {
