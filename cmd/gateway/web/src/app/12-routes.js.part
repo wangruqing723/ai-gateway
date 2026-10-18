@@ -1334,15 +1334,21 @@
                     const providerDisabled = this.config.providers?.[providerName]?.enabled === false;
                     const breakerActive = !!breaker && (breaker.state === 'open' || breaker.state === 'half_open');
                     const healthValue = health || { status: 'unchecked', message: '尚未检测' };
+                    const healthLabel = healthValue.status === 'ok' ? '正常'
+                        : healthValue.status === 'error' ? '异常'
+                            : healthValue.status === 'warn' ? '可达（有提示）' : '尚未检测';
                     const details = [
-                        providerDisabled ? 'Provider 已停用，路由会跳过此目标' : `健康检测：${this.providerHealthLabel(healthValue)}`,
-                        this.providerHealthTitle(healthValue),
+                        providerDisabled ? 'Provider 已停用，路由会跳过此目标' : `健康状态：${healthLabel}`,
+                        hasHealth ? this.providerHealthTitle(healthValue) : '',
                         breakerActive ? `熔断：${this.breakerLabel(breaker)}` : ''
                     ].filter(Boolean).join(' · ');
+                    const healthTextClass = providerDisabled ? 'text-muted'
+                        : healthValue.status === 'ok' ? 'text-good'
+                            : healthValue.status === 'error' ? 'text-danger'
+                                : healthValue.status === 'warn' ? 'text-warn'
+                                    : 'text-violet';
                     return {
-                        visible: providerDisabled || hasHealth || breakerActive,
-                        healthLabel: providerDisabled ? 'Provider 停用' : this.providerHealthLabel(healthValue),
-                        healthClass: providerDisabled ? 'bg-white/[.05] text-muted' : this.providerHealthClass(healthValue.status),
+                        healthTextClass,
                         healthTitle: details,
                         breakerActive,
                         breakerLabel: breakerActive ? this.breakerLabel(breaker) : '',

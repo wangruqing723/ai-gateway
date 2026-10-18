@@ -437,8 +437,16 @@
                                                         </div>
                                                     </div>
 
-                                                    <!-- 右侧操作栏：启停规则、编辑与低频复制/删除 -->
+                                                    <!-- 右侧操作栏：添加候选、启停规则、编辑与低频复制/删除 -->
                                                     <div class="flex shrink-0 items-center gap-1.5">
+                                                        <button type="button"
+                                                                @click="startInlineCandidateAdd(index)"
+                                                                :disabled="loading || inlineModel.routeIndex >= 0 || routeTargets(route).length >= maxRouteTargets"
+                                                                :title="routeTargets(route).length >= maxRouteTargets ? '每条路由最多 ' + maxRouteTargets + ' 个候选' : '在列表中添加候选模型'"
+                                                                class="inline-flex items-center gap-1 rounded-md border border-dashed border-line/60 px-2 py-1 text-xs text-muted transition hover:border-cyan/45 hover:bg-cyan/5 hover:text-cyan disabled:cursor-not-allowed disabled:opacity-40">
+                                                            <span class="material-symbols-outlined text-[14px]" aria-hidden="true">add</span>
+                                                            添加候选
+                                                        </button>
                                                         <button type="button" @click="toggleRouteEnabled(index)" :disabled="loading"
                                                                 class="rounded px-2 py-1 text-xs font-semibold transition disabled:cursor-wait disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan2"
                                                                 :class="routeEnabled(route) ? 'text-muted hover:bg-warn/10 hover:text-warn' : 'text-good hover:bg-white/10'"
@@ -493,14 +501,22 @@
                                                                       :class="ti === 0 ? 'font-bold text-cyan' : 'text-muted/60'"
                                                                       x-text="routeTargetLabel(route, ti)"></span>
 
-                                                                <!-- 提供商 (淡紫罗兰色) -->
-                                                                <span class="font-semibold text-violet" x-text="target.provider"></span>
+                                                                <!-- Provider 名称按健康状态着色；悬停查看状态详情。 -->
+                                                                <span class="text-xs font-semibold leading-none"
+                                                                      :class="routeTargetStatus(target.provider).healthTextClass"
+                                                                      @mouseenter="showTip(routeTargetStatus(target.provider).healthTitle, $event)"
+                                                                      @mouseleave="hideTip()"
+                                                                      @focus="showTip(routeTargetStatus(target.provider).healthTitle, $event)"
+                                                                      @blur="hideTip()"
+                                                                      :aria-label="target.provider + '；' + routeTargetStatus(target.provider).healthTitle"
+                                                                      role="img" tabindex="0" aria-describedby="immediate-tooltip"
+                                                                      x-text="target.provider"></span>
 
                                                                 <span class="text-muted/30">/</span>
 
-                                                                <!-- 模型名称 (翡翠绿色，支持就地修改) -->
+                                                                <!-- 模型名称（青色，与 Provider 健康状态颜色区分；支持就地修改） -->
                                                                 <template x-if="!isInlineModel(index, ti)">
-                                                                    <span class="cursor-pointer font-mono text-good transition hover:underline"
+                                                                    <span class="cursor-pointer font-mono text-cyan transition hover:underline"
                                                                           role="button" tabindex="0"
                                                                           @click="startInlineModel(index, ti)"
                                                                           @keydown.enter.prevent="startInlineModel(index, ti)"
@@ -548,11 +564,6 @@
                                                                     <span class="material-symbols-outlined text-[13px] leading-none" aria-hidden="true">close</span>
                                                                 </button>
                                                             </div>
-                                                            <span x-show="routeTargetStatus(target.provider).visible" x-cloak
-                                                                  class="rounded border px-1.5 py-0.5 text-[10px] font-semibold leading-none"
-                                                                  :class="routeTargetStatus(target.provider).healthClass"
-                                                                  :title="routeTargetStatus(target.provider).healthTitle"
-                                                                  x-text="routeTargetStatus(target.provider).healthLabel"></span>
                                                             <span x-show="routeTargetStatus(target.provider).breakerActive" x-cloak
                                                                   class="rounded border px-1.5 py-0.5 text-[10px] font-semibold leading-none"
                                                                   :class="routeTargetStatus(target.provider).breakerClass"
@@ -611,14 +622,6 @@
                                                             </button>
                                                         </div>
                                                     </template>
-                                                    <button type="button"
-                                                            @click="startInlineCandidateAdd(index)"
-                                                            :disabled="loading || inlineModel.routeIndex >= 0 || routeTargets(route).length >= maxRouteTargets"
-                                                            :title="routeTargets(route).length >= maxRouteTargets ? '每条路由最多 ' + maxRouteTargets + ' 个候选' : '在列表中添加候选模型'"
-                                                            class="inline-flex items-center gap-1 rounded-md border border-dashed border-line/60 px-2 py-1 text-xs text-muted transition hover:border-cyan/45 hover:bg-cyan/5 hover:text-cyan disabled:cursor-not-allowed disabled:opacity-40">
-                                                        <span class="material-symbols-outlined text-[14px]" aria-hidden="true">add</span>
-                                                        添加候选
-                                                    </button>
                                                 </div>
                                             </div>
 
