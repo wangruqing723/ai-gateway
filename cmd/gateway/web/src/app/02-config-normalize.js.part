@@ -51,6 +51,8 @@
                             provider: pick(r, 'provider', 'Provider') || '',
                             model: pick(r, 'model', 'Model') || ''
                         };
+                        const enabled = pick(r, 'enabled', 'Enabled');
+                        if (enabled === false) route.enabled = false;
                         // strategy 必须读出来：漏读会让手写的策略在下次保存时被静默抹掉
                         if (strategy) route.strategy = strategy;
                         // route 级 maxTokens，同 provider 级：*int 未配时为 null，不用 || 兜底。

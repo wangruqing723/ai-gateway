@@ -250,12 +250,14 @@ type Target struct {
 	ExtraBody map[string]any `yaml:"extraBody,omitempty" json:"extraBody,omitempty"`
 }
 
-// Route 路由规则，按顺序匹配，首条命中生效。
+// Route 路由规则，按顺序匹配，首条启用且命中的规则生效；停用规则会跳过。
 //
 // 目标有两种写法，互斥：
 //   - 单目标（存量写法）：provider + model
-//   - 多目标：targets 列表，按顺序作为故障转移候选
+//   - 多目标：targets 列表，按所选策略参与分配；按序策略使用配置顺序
 type Route struct {
+	// Enabled 控制该规则是否参与匹配。nil 表示启用，便于兼容既有配置。
+	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
 	// yaml tag 一律带 omitempty：落盘走 yaml.Marshal，缺了它每次保存都会给单目标路由
 	// 塞进 targets: []，给多目标路由塞进 provider: ""，把两种互斥写法混在同一条路由上。
 	Match    string   `yaml:"match" json:"match"`
@@ -280,6 +282,11 @@ type Route struct {
 	// ExtraBody 覆盖该路由转发时合并进请求体的自定义字段，nil 表示不覆盖。
 	// 按键叠加，优先级 target > route > provider，语义见 Target.ExtraBody。
 	ExtraBody map[string]any `yaml:"extraBody,omitempty" json:"extraBody,omitempty"`
+}
+
+// IsEnabled 返回路由是否参与匹配。未配置时默认启用，false 时跳过该规则继续向下匹配。
+func (r *Route) IsEnabled() bool {
+	return r != nil && BoolOr(r.Enabled, true)
 }
 
 // TargetList 返回统一形态的候选列表。

@@ -199,228 +199,440 @@
                          预览现在是默认折叠的浮动抽屉，不再参与分栏，配置表格占满可用宽度。 -->
                     <div x-show="editMode === 'visual'" x-transition class="lg:flex lg:min-h-0 lg:flex-1 lg:overflow-hidden">
                         <div class="flex flex-col gap-5 lg:min-h-0 lg:flex-1 lg:overflow-y-auto lg:overscroll-contain lg:pr-2">
-                            <section x-show="activeTab === 'routes'" x-transition class="glass rounded-lg">
-                                <div class="flex flex-col gap-3 border-b border-line p-4 sm:flex-row sm:items-center sm:justify-between">
+                            <section x-show="activeTab === 'routes'" x-transition class="glass rounded-xl p-4 sm:p-5">
+                                <!-- 顶部工具栏：标题、副标题、右上角紧凑匹配测试框 + 添加按钮 -->
+                                <div class="mb-4 flex flex-col gap-3 border-b border-line pb-4 sm:flex-row sm:items-center sm:justify-between">
                                     <div>
-                                        <h2 class="text-lg font-bold text-white">路由规则</h2>
-                                        <p class="mt-1 text-xs text-muted">越靠前优先级越高，支持通配符 * 和 ?</p>
+                                        <div class="flex items-center gap-2.5">
+                                            <h2 class="text-base font-bold text-white sm:text-lg">路由规则</h2>
+                                            <span class="rounded-full bg-white/[.07] px-2 py-0.5 font-mono text-xs text-muted" x-text="(config.routes?.length || 0) + ' 条'"></span>
+                                        </div>
+                                        <p class="mt-0.5 text-xs text-muted">按列表顺序匹配，仅首条启用且匹配的规则生效；拖动左侧把手调整顺序</p>
                                     </div>
-                                    <button @click="addRoute()" class="btn btn-secondary">
-                                        <span class="material-symbols-outlined">add</span>
-                                        添加路由
-                                    </button>
+                                    <div class="flex flex-wrap items-center gap-2">
+                                        <!-- 视图切换：紧凑模式每条规则只展示首个目标，可按需展开其余候选 -->
+                                        <div class="inline-flex rounded-lg border border-line bg-panel/70 p-0.5" role="group" aria-label="路由列表视图">
+                                            <button type="button" @click="setRouteCompactView(false)"
+                                                    class="cursor-pointer rounded-md px-2 py-1 text-xs transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan2"
+                                                    :class="routeCompactView ? 'text-muted hover:text-text' : 'bg-panel3 text-text'"
+                                                    :aria-pressed="String(!routeCompactView)">详细</button>
+                                            <button type="button" @click="setRouteCompactView(true)"
+                                                    class="cursor-pointer rounded-md px-2 py-1 text-xs transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan2"
+                                                    :class="routeCompactView ? 'bg-panel3 text-text' : 'text-muted hover:text-text'"
+                                                    :aria-pressed="String(routeCompactView)">紧凑</button>
+                                        </div>
+                                        <!-- 输入具体模型名，预览首条命中与被前序规则遮蔽的规则 -->
+                                        <div class="relative w-52 sm:w-60">
+                                            <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+                                                 class="absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted">
+                                                <circle cx="12" cy="12" r="8.5"></circle><circle cx="12" cy="12" r="3"></circle>
+                                                <path d="M12 2v3M22 12h-3M12 22v-3M2 12h3"></path>
+                                            </svg>
+                                            <input autocomplete="off" type="text" x-model="routeTesterQuery"
+                                                   @keydown.escape.stop.prevent="routeTesterQuery = ''"
+                                                   aria-label="输入模型名测试路由匹配"
+                                                   placeholder="输入模型名测试匹配..."
+                                                   class="field h-8 py-1 pl-8 pr-7 font-mono text-xs"
+                                                   title="输入具体模型名可预览首条命中；同样匹配但排在后面的规则会标为“被拦截”">
+                                            <button type="button" x-show="routeTesterQuery" @click="routeTesterQuery = ''"
+                                                    x-cloak class="absolute right-2 top-1/2 -translate-y-1/2 cursor-pointer text-muted hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan2"
+                                                    title="清空模型测试" aria-label="清空模型测试">
+                                                <span aria-hidden="true">×</span>
+                                            </button>
+                                        </div>
+                                        <!-- 添加路由按钮 -->
+                                        <button @click="addRoute()" class="btn btn-secondary h-8 px-3 text-xs">
+                                            <span class="material-symbols-outlined text-[16px]">add</span>
+                                            添加路由
+                                        </button>
+                                    </div>
                                 </div>
-                                <div class="overflow-x-auto">
-                                    <table class="w-full min-w-[560px] border-collapse text-left">
-                                        <thead class="bg-panel2 text-xs text-muted">
-                                            <tr>
-                                                <th scope="col" class="whitespace-nowrap px-3 py-3 font-bold">#</th>
-                                                <th scope="col" class="whitespace-nowrap px-3 py-3 font-bold">匹配模式</th>
-                                                <th scope="col" class="whitespace-nowrap px-3 py-3 font-bold">候选（按尝试顺序）</th>
-                                                <th scope="col" class="whitespace-nowrap px-3 py-3 font-bold">视觉</th>
-                                                <th scope="col" class="whitespace-nowrap px-3 py-3 text-right font-bold">操作</th>
-                                            </tr>
-                                        </thead>
-                                        <tbody class="divide-y divide-line" x-ref="routeRows" :class="isDragging('route') ? 'gw-dragging' : ''">
-                                            <template x-for="(route, index) in config.routes" :key="index">
-                                                <!-- data-drag-row 是 dropIndexAt 找行的锚点，不依赖 tbody>tr 结构假设。
-                                                     落点指示线画在 tr 上（规则同时覆盖 > td，见 tailwind.css 的说明）。 -->
-                                                <tr data-drag-row class="group bg-panel/35 transition hover:bg-white/[.04]"
-                                                    :class="[isRowDragSource('route', index) ? 'gw-drag-source' : '', rowDropClass('route', index, config.routes.length)]">
-                                                    <!-- 序号列兼作拖拽把手：序号本身就是「第几条」的视觉锚点，
-                                                         把手贴着它最不占宽度。只有 2 条以上才可拖（1 条没有顺序可言）。 -->
-                                                    <td class="w-px whitespace-nowrap px-3 py-2.5 align-top">
-                                                        <div class="flex items-center gap-1"
-                                                             :class="config.routes.length > 1 ? 'gw-drag-handle' : ''"
-                                                             @pointerdown="config.routes.length > 1 && startRowDrag('route', index, $event)">
-                                                            <span x-show="config.routes.length > 1" x-cloak
-                                                                  class="material-symbols-outlined text-[16px] text-muted/70 transition group-hover:text-muted"
-                                                                  title="按住拖动可调整顺序" aria-hidden="true">drag_indicator</span>
-                                                            <span class="font-mono text-xs text-muted" x-text="index + 1"></span>
-                                                        </div>
-                                                    </td>
-                                                    <td class="w-px px-3 py-2.5 align-top">
-                                                        <span class="whitespace-nowrap font-mono text-sm font-bold text-cyan" x-text="route.match"></span>
-                                                        <!-- 策略只在多候选时有意义，单候选写非 failover 后端会直接报错 -->
-                                                        <span x-show="routeTargets(route).length > 1" x-cloak
-                                                              class="mt-0.5 block whitespace-nowrap text-xs text-muted"
-                                                              x-text="(route.strategy || 'failover') + ' · ' + routeTargets(route).length + ' 个候选'"></span>
-                                                    </td>
-                                                    <!-- Provider 和目标模型合成一列；候选用 auto-fill 网格排列：列宽一致、按尝试顺序从左到右，
-                                                         1440px 下单列就是一条整齐的序列，宽屏自动并排多列、不撑高行。此前用 flex-wrap，
-                                                         条目宽度不一时有的独占一行、有的两个挤一行，尝试顺序很难扫读。
-                                                         就地编辑中的那一项占满整行（col-span-full），输入框不会压到相邻候选上。 -->
-                                                    <!-- 历史布局使用 w-full + max-w-0 让这一列吃掉剩余宽度并允许收缩到 0：
-                                                         不加的话候选内容会把 table 撑出容器、横向滚动条回来、操作列被裁。
-                                                         内层再套一个 min-w-0 的容器——td 的 max-w-0 不会自动传导给
-                                                         flex 子项，缺了它 flex-wrap 在某些宽度（实测 1600px）算出的
-                                                         可用宽度仍是内容宽度，于是排成一行把表撑到 1039px。
-                                                         预览抽屉不再占用主栏宽度，但多个长 Provider / 模型仍需要保留这层收缩保护。 -->
-                                                    <td class="w-full max-w-0 px-3 py-2.5 align-top">
-                                                        <div class="grid min-w-0 grid-cols-[repeat(auto-fill,minmax(17rem,1fr))] items-center gap-x-4 gap-y-1.5">
-                                                            <template x-for="(target, ti) in routeTargets(route)" :key="ti">
-                                                                <div class="flex min-w-0 items-center gap-1.5 whitespace-nowrap" :class="isInlineModel(index, ti) ? 'col-span-full' : ''" :data-inline-anchor="index + ':' + ti">
-                                                                    <span class="font-mono text-[11px] text-muted" x-text="(ti + 1) + '.'"></span>
-                                                                    <span class="tag bg-white/[.06] text-text text-sm" x-text="target.provider"></span>
-                                                                    <span class="text-[11px] text-muted">→</span>
-                                                                    <!-- 模型名可就地改：只读态是文本，点一下才换成输入框。
-                                                                         provider 不给就地改——换 provider 连带 apiKey / 格式 / 上限覆盖
-                                                                         整套都变了，属结构性改动，仍走编辑弹窗。
-                                                                         role=button + tabindex 让键盘也能进入编辑（Enter 触发）。 -->
-                                                                    <template x-if="!isInlineModel(index, ti)">
-                                                                        <span class="min-w-0 truncate rounded px-1 py-0.5 font-mono text-sm text-emerald-200 transition hover:bg-cyan2/10 hover:text-cyan"
-                                                                              :class="target.model ? 'cursor-pointer' : 'cursor-pointer text-muted'"
-                                                                              role="button" tabindex="0"
-                                                                              @click="startInlineModel(index, ti)"
-                                                                              @keydown.enter.prevent="startInlineModel(index, ti)"
-                                                                              @keydown.space.prevent="startInlineModel(index, ti)"
-                                                                              :title="'点击修改模型名（当前: ' + (target.model || '沿用请求模型') + '）'"
-                                                                              :aria-label="'修改候选 ' + (ti + 1) + ' 的模型名'"
-                                                                              x-text="target.model || '(沿用请求模型)'"></span>
-                                                                    </template>
-                                                                    <!-- 编辑态用 x-if 而不是 x-show：输入框带固定 id 供聚焦，
-                                                                         x-show 会让每一行都渲染一个同 id 的输入框。
 
-                                                                         控件量级刻意压到与只读态相当：这是表格行内的就地编辑，
-                                                                         不是弹窗表单。查询按钮内嵌进输入框（同弹窗候选行的写法），
-                                                                         确认 / 取消不套 .btn —— .btn 的 .625rem 纵向 padding
-                                                                         加边框是给独立操作按钮的量级，三个并排会把整行顶高一截。 -->
-                                                                    <template x-if="isInlineModel(index, ti)">
-                                                                        <span class="inline-flex items-center gap-0.5">
-                                                                            <!-- relative 是内嵌查询按钮的定位上下文。
-                                                                                 inline-flex 而不是 inline-block：inline-block 会让内部
-                                                                                 输入框参与行盒基线对齐，下方多出一截 descender 空间，
-                                                                                 与旁边的裸图标按钮就对不齐了。 -->
-                                                                            <span class="relative inline-flex items-center">
-                                                                                <!-- Enter 提交、Esc 取消；不做 blur 提交：提交会立刻写盘并
-                                                                                     热重载，误触失焦就落一次盘代价太大，改用显式按钮。 -->
-                                                                                <input id="inline-model-input" type="text" autocomplete="off" spellcheck="false"
-                                                                                       x-model="inlineModel.value"
-                                                                                       role="combobox" aria-autocomplete="list" aria-controls="inline-model-list"
-                                                                                       :aria-expanded="inlineModel.open"
-                                                                                       :aria-activedescendant="inlineModel.active >= 0 ? 'inline-model-opt-' + inlineModel.active : null"
-                                                                                       @keydown="onInlineModelKeydown($event)"
-                                                                                       @input="onInlineModelInput()"
-                                                                                       @click="inlineModel.open || openInlineModelList()"
-                                                                                       :aria-label="'候选 ' + (ti + 1) + ' 模型名'"
-                                                                                       placeholder="上游模型名"
-                                                                                       class="field w-52 py-0.5 pl-2 pr-7 font-mono text-xs">
-                                                                                <button type="button" @mousedown.prevent @click="toggleInlineModelList()"
-                                                                                        class="absolute right-1 top-1/2 -translate-y-1/2 rounded text-muted transition hover:text-cyan"
-                                                                                        :title="inlineModel.open ? '收起模型列表' : '展开上游模型列表'"
-                                                                                        :aria-label="inlineModel.open ? '收起模型列表' : '展开上游模型列表'">
-                                                                                    <span class="material-symbols-outlined text-[15px]" x-show="!inlineModel.modelsLoading">search</span>
-                                                                                    <span class="material-symbols-outlined gw-spin text-[15px]" x-show="inlineModel.modelsLoading" x-cloak>progress_activity</span>
-                                                                                </button>
-                                                                            </span>
-                                                                            <!-- 图标名必须在 vendor 的字体子集内，否则连字字体会把名字
-                                                                                 原样渲染成英文单词（见 vendor/README.md）。
-                                                                                 子集里没有 check，用同为对勾语义的 task_alt。 -->
-                                                                            <button type="button" @click="commitInlineModel()" :disabled="loading"
-                                                                                    class="inline-flex items-center rounded p-0.5 text-cyan transition hover:bg-cyan2/15 disabled:opacity-40"
-                                                                                    title="保存（Enter）" aria-label="保存模型名">
-                                                                                <span class="material-symbols-outlined text-[17px] leading-none">task_alt</span>
-                                                                            </button>
-                                                                            <button type="button" @click="cancelInlineModel()"
-                                                                                    class="inline-flex items-center rounded p-0.5 text-muted transition hover:bg-white/10 hover:text-text"
-                                                                                    title="取消（Esc）" aria-label="取消编辑">
-                                                                                <span class="material-symbols-outlined text-[17px] leading-none">close</span>
-                                                                            </button>
-                                                                        </span>
-                                                                    </template>
-                                                                </div>
-                                                            </template>
+                                <!-- 固定高度结果区：测试态替换提示文案，避免插入横幅导致列表跳动 -->
+                                <div style="min-height:36px" class="route-match-slot mb-3.5 flex items-center rounded-lg border px-3 py-1.5 text-xs"
+                                     :style="!routeTesterQuery ? 'border-color:transparent;background:transparent' : ''"
+                                     :class="!routeTesterQuery ? 'border-transparent text-muted' : (matchedRouteIndex() >= 0 ? 'border-good/40 bg-good/10 text-good' : 'border-warn/40 bg-warn/10 text-warn')">
+                                    <div x-show="routeTesterQuery" x-cloak class="flex w-full items-center justify-between gap-3">
+                                        <div class="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+                                            <template x-if="matchedRouteIndex() >= 0">
+                                                <svg aria-hidden="true" viewBox="0 0 20 20" fill="none" class="h-4 w-4 shrink-0">
+                                                    <circle cx="10" cy="10" r="8" stroke="currentColor" stroke-width="1.5"></circle>
+                                                    <path d="m6 10 2.5 2.5L14 7" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"></path>
+                                                </svg>
+                                            </template>
+                                            <template x-if="matchedRouteIndex() < 0">
+                                                <svg aria-hidden="true" viewBox="0 0 20 20" fill="none" class="h-4 w-4 shrink-0">
+                                                    <path d="M10 2.5 18 17H2L10 2.5Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"></path>
+                                                    <path d="M10 7v4m0 2.5v.1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"></path>
+                                                </svg>
+                                            </template>
+                                            <span x-show="matchedRouteIndex() >= 0" class="min-w-0">
+                                                模型「<strong class="font-mono" x-text="routeTesterQuery"></strong>」首条命中
+                                                <button type="button" @click="scrollToMatchedRoute()" class="cursor-pointer rounded-sm font-bold underline underline-offset-2 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan2"
+                                                        :title="'定位到第 ' + (matchedRouteIndex() + 1) + ' 条规则'">
+                                                    #<span x-text="matchedRouteIndex() + 1"></span>
+                                                </button>
+                                                「<strong class="font-mono" x-text="matchedTargetInfo()?.routeMatch"></strong>」·
+                                                <span x-text="routeStrategySummary()"></span>
+                                                <span x-show="matchedRouteIndexes().length > 1" class="ml-1 inline-flex rounded border border-warn/40 bg-warn/10 px-1.5 py-0.5 font-medium text-warn"
+                                                      x-text="'另有 ' + (matchedRouteIndexes().length - 1) + ' 条匹配但被前序规则拦截'"></span>
+                                            </span>
+                                            <span x-show="matchedRouteIndex() < 0">模型「<strong class="font-mono" x-text="routeTesterQuery"></strong>」未匹配任何已启用规则</span>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <!-- 极简流线路由列表 (Streamlined Route Rows) -->
+                                <div class="flex flex-col gap-3" x-ref="routeRows" :class="isDragging('route') ? 'gw-dragging' : ''">
+                                    <template x-for="(route, index) in config.routes" :key="index">
+                                        <div data-drag-row :data-route-index="index"
+                                             class="group relative rounded-xl border transition-all duration-150"
+                                             :class="[
+                                                 isRowDragSource('route', index) ? 'gw-drag-source' : '',
+                                                 rowDropClass('route', index, config.routes.length),
+                                                 !routeEnabled(route)
+                                                     ? 'border-line/40 bg-panel/35 opacity-50 hover:border-good/45 hover:ring-1 hover:ring-inset hover:ring-good/25'
+                                                     : (matchedRouteIndex() === index
+                                                         ? 'border-good/70 bg-good/[.06] shadow-[0_0_20px_rgba(52,211,153,.12)] ring-1 ring-good/40'
+                                                         : (isShadowedRoute(index)
+                                                             ? 'border-warn/40 bg-warn/5 hover:border-good/45 hover:ring-1 hover:ring-inset hover:ring-good/25'
+                                                             : (routeTesterQuery
+                                                                 ? 'border-line/40 bg-panel/20 opacity-35 hover:opacity-100 hover:border-good/45 hover:ring-1 hover:ring-inset hover:ring-good/25'
+                                                                 : 'border-line/60 bg-panel/35 hover:border-good/45 hover:ring-1 hover:ring-inset hover:ring-good/25 hover:bg-good/[.02]')))
+                                             ]">
+                                            <div class="px-4 py-3 sm:px-5">
+                                                <!-- 第一行：把手 + 序号 + 候选名称(突出) + | 策略 + 视觉模型(弱化) + 操作按钮 -->
+                                                <div class="flex items-center justify-between gap-x-4">
+                                                    <div class="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1.5">
+                                                        <!-- 拖拽把手与序号 -->
+                                                        <div data-route-handle class="flex items-center gap-1.5"
+                                                             :class="config.routes.length > 1 ? 'gw-drag-handle cursor-grab active:cursor-grabbing' : ''"
+                                                             @pointerdown="config.routes.length > 1 && startRowDrag('route', index, $event)"
+                                                             @keydown.arrow-up.prevent="config.routes.length > 1 && moveRoute(index, -1)"
+                                                             @keydown.arrow-down.prevent="config.routes.length > 1 && moveRoute(index, 1)"
+                                                             :role="config.routes.length > 1 ? 'group' : null"
+                                                             :tabindex="config.routes.length > 1 ? 0 : -1"
+                                                             :aria-label="'规则 ' + (index + 1) + '，使用上下箭头键调整顺序'"
+                                                             :title="config.routes.length > 1 ? '按住拖动或使用 ↑ / ↓ 键调整顺序' : ''">
+                                                            <span x-show="config.routes.length > 1" x-cloak
+                                                                  class="material-symbols-outlined text-[17px] text-muted/50 transition group-hover:text-cyan"
+                                                                  aria-hidden="true">drag_indicator</span>
+                                                            <span class="font-mono text-xs font-bold text-muted/70" x-text="'#' + (index + 1)"></span>
                                                         </div>
-                                                    </td>
-                                                    <td class="w-px px-3 py-2.5 align-top">
-                                                        <!-- 视觉模型可就地改：点标签进入与候选模型相同的编辑态（自动查询、↓ ↑ 选择、回车保存），
-                                                             只改模型名；视觉 Provider 与开关仍在编辑抽屉里改。 -->
-                                                        <div x-show="route.vision" class="inline-flex" :data-inline-anchor="index + ':v'">
-                                                            <template x-if="!isInlineModel(index, 'v')">
-                                                                <span class="tag cursor-pointer bg-cyan2/10 text-cyan transition hover:bg-cyan2/20"
-                                                                      role="button" tabindex="0"
-                                                                      @click="hideTip(); startInlineVision(index)"
-                                                                      @keydown.enter.prevent="hideTip(); startInlineVision(index)"
-                                                                      @keydown.space.prevent="hideTip(); startInlineVision(index)"
-                                                                      @mouseenter="showTip('视觉伴随: ' + route.vision?.provider + ' / ' + route.vision?.model + '\n点击修改视觉模型', $event)"
-                                                                      @mouseleave="hideTip()"
-                                                                      @focus="showTip('视觉伴随: ' + route.vision?.provider + ' / ' + route.vision?.model + '\n点击修改视觉模型', $event)"
-                                                                      @blur="hideTip()" aria-describedby="immediate-tooltip"
-                                                                      :aria-label="'修改视觉模型（当前: ' + (route.vision?.model || '') + '）'">
-                                                                    <span class="material-symbols-outlined text-[16px]">visibility</span>
-                                                                    <span class="font-mono text-[11px]" x-text="route.vision?.model"></span>
-                                                                </span>
+
+                                                        <!-- 匹配规则 Pattern（突出醒目，大号加粗） -->
+                                                        <span class="font-mono text-base font-extrabold tracking-tight text-white" x-text="route.match"></span>
+
+                                                        <span x-show="!routeEnabled(route)" x-cloak
+                                                              class="rounded border border-line px-1.5 py-0.5 text-[10px] font-semibold text-muted"
+                                                              title="此规则已停用，不参与模型匹配">已停用</span>
+
+                                                        <!-- 命中指示器（测试态） -->
+                                                        <span x-show="matchedRouteIndex() === index" x-cloak
+                                                              class="inline-flex items-center gap-1 rounded bg-good/20 px-1.5 py-0.5 text-[10px] font-bold text-good">
+                                                            <span aria-hidden="true" class="font-sans text-[12px] leading-none">✓</span>首条命中
+                                                        </span>
+                                                        <span x-show="isShadowedRoute(index)" x-cloak
+                                                              class="rounded border border-warn/40 bg-warn/10 px-1.5 py-0.5 text-[10px] font-semibold text-warn"
+                                                              :title="'该规则也匹配，但被第 ' + (matchedRouteIndex() + 1) + ' 条规则优先命中'">
+                                                            匹配但被拦截
+                                                        </span>
+
+                                                        <!-- 候选策略选择器（多候选时，用竖线隔开跟在名称后） -->
+                                                        <template x-if="routeTargets(route).length > 1">
+                                                            <select :value="route.strategy || 'failover'"
+                                                                    @change="saveRouteStrategy(index, $event.target.value)"
+                                                                    :disabled="loading"
+                                                                    class="tag-select rounded-full border py-0.5 pl-2 pr-6 text-[11px] font-semibold"
+                                                                    :class="strategyBadge(route.strategy).cls"
+                                                                    :title="strategyBadge(route.strategy).title + '；选择以修改候选策略'"
+                                                                    :aria-label="'候选策略：' + strategyBadge(route.strategy).label">
+                                                                <option value="failover">按序选择</option>
+                                                                <option value="round-robin">轮询分流</option>
+                                                                <option value="least-queue">最少在途</option>
+                                                            </select>
+                                                        </template>
+
+                                                        <!-- 视觉伴随模型（弱化展示，跟在策略后面） -->
+                                                        <div class="inline-flex items-center gap-1.5 text-xs opacity-75 transition hover:opacity-100"
+                                                             :data-inline-anchor="index + ':v'">
+                                                            <span class="text-line">|</span>
+                                                            <span class="text-[10px] text-muted">视觉</span>
+                                                            <span x-show="route.vision && (route.vision.provider || route.vision.model)"
+                                                                  class="material-symbols-outlined text-[13px] text-muted" title="视觉伴随模型">visibility</span>
+                                                            <template x-if="route.vision && (route.vision.provider || route.vision.model) && !isInlineModel(index, 'v')">
+                                                                <button type="button"
+                                                                        class="cursor-pointer border-0 bg-transparent p-0 text-left font-mono text-muted transition hover:text-cyan hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan2"
+                                                                        @click="hideTip(); startInlineVision(index)"
+                                                                        @mouseenter="showTip('视觉伴随: ' + route.vision?.provider + ' / ' + (route.vision?.model || '未指定') + '\n点击修改 Provider 与模型', $event)"
+                                                                        @mouseleave="hideTip()"
+                                                                        title="点击修改视觉 Provider 与模型名"
+                                                                        x-text="(route.vision?.provider || '') + ' / ' + (route.vision?.model || '未指定')"></button>
                                                             </template>
+                                                            <button x-show="route.vision && (route.vision.provider || route.vision.model) && !isInlineModel(index, 'v')"
+                                                                    type="button" @click="disableRouteVision(index)" :disabled="loading"
+                                                                    class="inline-flex items-center gap-0.5 rounded px-1 py-0.5 text-[10px] text-muted transition-colors hover:bg-warn/10 hover:text-warn disabled:cursor-wait disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-warn"
+                                                                    title="关闭此路由的视觉模型" aria-label="关闭视觉模型">
+                                                                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+                                                                    <path d="M3 3l18 18"></path>
+                                                                    <path d="M10.6 10.6a2 2 0 0 0 2.8 2.8"></path>
+                                                                    <path d="M9.9 5.2A10.8 10.8 0 0 1 12 5c5 0 9 4.5 10 7a12.6 12.6 0 0 1-2.2 3.3"></path>
+                                                                    <path d="M6.2 6.2C3.9 7.7 2.4 9.7 2 12c1 2.5 5 7 10 7 1.6 0 3-.4 4.2-1"></path>
+                                                                </svg>
+                                                                关闭
+                                                            </button>
+                                                            <template x-if="!(route.vision && (route.vision.provider || route.vision.model)) && !isInlineModel(index, 'v')">
+                                                                <button type="button"
+                                                                        :disabled="loading || !Object.keys(config.providers || {}).length"
+                                                                        @click="hideTip(); startInlineVision(index)"
+                                                                        :title="Object.keys(config.providers || {}).length ? '点击设置视觉 Provider 与模型' : '请先添加 Provider，再配置视觉模型'"
+                                                                        :aria-label="Object.keys(config.providers || {}).length ? '添加视觉模型' : '请先添加 Provider，再配置视觉模型'"
+                                                                        class="inline-flex cursor-pointer items-center gap-0.5 rounded border border-dashed border-cyan/35 bg-cyan/5 px-1.5 py-0.5 text-[11px] font-medium text-cyan transition-colors hover:border-cyan/65 hover:bg-cyan/10 disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan2">
+                                                                    <span class="material-symbols-outlined text-[13px]" aria-hidden="true">add</span>
+                                                                    添加视觉模型
+                                                                </button>
+                                                            </template>
+                                                            <!-- 视觉模型就地编辑态 -->
                                                             <template x-if="isInlineModel(index, 'v')">
-                                                                <span class="inline-flex items-center gap-0.5">
+                                                                <span class="inline-flex flex-wrap items-center gap-1">
+                                                                    <select x-model="inlineModel.provider"
+                                                                            @change="onInlineProviderChange()"
+                                                                            :disabled="loading"
+                                                                            aria-label="视觉模型 Provider"
+                                                                            title="选择视觉模型 Provider"
+                                                                            class="field w-32 py-0.5 pl-2 pr-6 font-mono text-xs">
+                                                                        <template x-for="(provider, name) in config.providers" :key="name">
+                                                                            <option :value="name" :selected="name === inlineModel.provider"
+                                                                                    x-text="name + (provider.enabled === false ? '（已禁用）' : '')"></option>
+                                                                        </template>
+                                                                    </select>
                                                                     <span class="relative inline-flex items-center">
                                                                         <input id="inline-model-input" type="text" autocomplete="off" spellcheck="false"
                                                                                x-model="inlineModel.value"
                                                                                role="combobox" aria-autocomplete="list" aria-controls="inline-model-list"
                                                                                :aria-expanded="inlineModel.open"
-                                                                               :aria-activedescendant="inlineModel.active >= 0 ? 'inline-model-opt-' + inlineModel.active : null"
                                                                                @keydown="onInlineModelKeydown($event)"
                                                                                @input="onInlineModelInput()"
                                                                                @click="inlineModel.open || openInlineModelList()"
-                                                                               aria-label="视觉模型名" placeholder="视觉模型名"
-                                                                               class="field w-52 py-0.5 pl-2 pr-7 font-mono text-xs">
+                                                                               placeholder="视觉模型名"
+                                                                               class="field w-36 py-0.5 pl-2 pr-6 font-mono text-xs">
                                                                         <button type="button" @mousedown.prevent @click="toggleInlineModelList()"
-                                                                                class="absolute right-1 top-1/2 -translate-y-1/2 rounded text-muted transition hover:text-cyan"
-                                                                                :title="inlineModel.open ? '收起模型列表' : '展开上游模型列表'"
-                                                                                :aria-label="inlineModel.open ? '收起模型列表' : '展开上游模型列表'">
-                                                                            <span class="material-symbols-outlined text-[15px]" x-show="!inlineModel.modelsLoading">search</span>
-                                                                            <span class="material-symbols-outlined gw-spin text-[15px]" x-show="inlineModel.modelsLoading" x-cloak>progress_activity</span>
+                                                                                class="absolute right-1 top-1/2 -translate-y-1/2 rounded text-muted transition hover:text-cyan">
+                                                                            <span class="material-symbols-outlined text-[13px]" x-show="!inlineModel.modelsLoading">search</span>
+                                                                            <span class="material-symbols-outlined gw-spin text-[13px]" x-show="inlineModel.modelsLoading" x-cloak>progress_activity</span>
                                                                         </button>
                                                                     </span>
                                                                     <button type="button" @click="commitInlineModel()" :disabled="loading"
-                                                                            class="inline-flex items-center rounded p-0.5 text-cyan transition hover:bg-cyan2/15 disabled:opacity-40"
-                                                                            title="保存（Enter）" aria-label="保存视觉模型名">
-                                                                        <span class="material-symbols-outlined text-[17px] leading-none">task_alt</span>
+                                                                            class="p-0.5 text-cyan hover:bg-cyan/15 disabled:opacity-40"
+                                                                            title="保存（Enter）">
+                                                                        <span class="material-symbols-outlined text-[15px] leading-none">task_alt</span>
                                                                     </button>
                                                                     <button type="button" @click="cancelInlineModel()"
-                                                                            class="inline-flex items-center rounded p-0.5 text-muted transition hover:bg-white/10 hover:text-text"
-                                                                            title="取消（Esc）" aria-label="取消编辑">
-                                                                        <span class="material-symbols-outlined text-[17px] leading-none">close</span>
+                                                                            class="p-0.5 text-muted hover:text-white"
+                                                                            title="取消（Esc）">
+                                                                        <span class="material-symbols-outlined text-[15px] leading-none">close</span>
                                                                     </button>
                                                                 </span>
                                                             </template>
                                                         </div>
-                                                        <!-- 未启用用短横线：11 行里重复 11 遍「未启用」是纯噪声，一眼扫下来只需要知道「这里没配」 -->
-                                                        <span x-show="!route.vision" class="text-sm text-muted"
-                                                              @mouseenter="showTip('未启用视觉伴随', $event)"
-                                                              @mouseleave="hideTip()"
-                                                              @focus="showTip('未启用视觉伴随', $event)"
-                                                              @blur="hideTip()" tabindex="0">—</span>
-                                                    </td>
-                                                    <!-- 历史布局中 w-px 让这列收缩到内容宽度：不限制的话它会连同 w-full 一起
-                                                         抢剩余空间（实测吃到 726px），把候选列挤到 92px 反而溢出。
-                                                         预览抽屉化后主表已有完整宽度，仍按按钮内容取宽以避免操作列抢走候选区。 -->
-                                                    <td class="w-px whitespace-nowrap px-3 py-2.5 align-top">
-                                                        <div class="flex justify-end gap-0.5">
-                                                            <button @click="moveRoute(index, -1)" :disabled="index === 0" class="btn btn-ghost" title="上移" aria-label="上移">
-                                                                <span class="material-symbols-outlined text-[18px]">keyboard_arrow_up</span>
+                                                    </div>
+
+                                                    <!-- 右侧操作栏：启停规则、编辑与低频复制/删除 -->
+                                                    <div class="flex shrink-0 items-center gap-1.5">
+                                                        <button type="button" @click="toggleRouteEnabled(index)" :disabled="loading"
+                                                                class="rounded px-2 py-1 text-xs font-semibold transition disabled:cursor-wait disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan2"
+                                                                :class="routeEnabled(route) ? 'text-muted hover:bg-warn/10 hover:text-warn' : 'text-good hover:bg-white/10'"
+                                                                :title="routeEnabled(route) ? '停用此规则' : '启用此规则'"
+                                                                :aria-label="routeEnabled(route) ? '停用此规则' : '启用此规则'"
+                                                                x-text="routeEnabled(route) ? '停用' : '启用'"></button>
+                                                        <button @click="editRoute(index)"
+                                                                class="rounded px-2 py-1 text-xs font-semibold text-text hover:bg-white/10 hover:text-white"
+                                                                title="编辑此规则">
+                                                            编辑
+                                                        </button>
+                                                        <button @click="duplicateRoute(index)"
+                                                                class="rounded p-1 text-muted/40 transition hover:text-white focus:opacity-100 group-hover:opacity-100"
+                                                                title="复制为新规则" aria-label="复制">
+                                                            <span class="material-symbols-outlined text-[15px]">content_copy</span>
+                                                        </button>
+                                                        <button @click="removeRoute(index)"
+                                                                class="rounded p-1 text-muted/40 transition hover:text-danger focus:opacity-100 group-hover:opacity-100"
+                                                                title="删除" aria-label="删除">
+                                                            <span class="material-symbols-outlined text-[15px]">delete</span>
+                                                        </button>
+                                                    </div>
+                                                </div>
+
+                                                <!-- 候选目标：按序策略显示数字顺序；负载策略显示并列候选 -->
+                                                <div class="mt-2 flex flex-wrap items-center gap-x-2.5 gap-y-2 pl-7 text-sm">
+                                                    <template x-for="(target, ti) in routeTargets(route)" :key="ti">
+                                                        <div data-route-target-row :data-route-target-index="ti"
+                                                             x-show="!routeCompactView || ti === 0 || isRouteExpanded(index) || (routeTesterQuery && matchedRouteIndex() === index && (route.strategy || 'failover') !== 'failover')"
+                                                             class="inline-flex items-center gap-1.5"
+                                                             :class="[isRouteTargetDragSource(index, ti) ? 'gw-drag-source' : '', routeTargetDropClass(index, ti, routeTargets(route).length)]">
+                                                            <span x-show="ti > 0" class="text-muted/35"
+                                                                  x-text="routeUsesOrderedTargets(route) ? '→' : '·'"></span>
+
+                                                            <!-- 候选胶囊 -->
+                                                            <div class="inline-flex items-center gap-1.5 rounded-md border border-line/40 bg-panel2/50 px-2.5 py-1"
+                                                                 :data-inline-anchor="index + ':' + ti"
+                                                                 :class="routeTargetClass(route, index, ti)">
+                                                                <button type="button" x-show="canDragRouteTargets(index)" x-cloak
+                                                                        @pointerdown="startRouteTargetDrag(index, ti, $event)"
+                                                                        @keydown.arrow-up.prevent="moveRouteTargetInList(index, ti, -1)"
+                                                                        @keydown.arrow-down.prevent="moveRouteTargetInList(index, ti, 1)"
+                                                                        :disabled="loading || inlineModel.routeIndex >= 0"
+                                                                        :tabindex="canDragRouteTargets(index) ? 0 : -1"
+                                                                        data-route-target-handle
+                                                                        :aria-label="'调整第 ' + (ti + 1) + ' 个候选顺序'"
+                                                                        :title="routeTargetDragTitle(index)"
+                                                                        class="gw-drag-handle cursor-grab rounded text-muted/50 transition hover:text-cyan active:cursor-grabbing disabled:cursor-not-allowed disabled:opacity-40">
+                                                                    <span class="material-symbols-outlined text-[14px]" aria-hidden="true">drag_indicator</span>
+                                                                </button>
+                                                                <span x-show="routeUsesOrderedTargets(route)" class="font-mono text-[10px]"
+                                                                      :class="ti === 0 ? 'font-bold text-cyan' : 'text-muted/60'"
+                                                                      x-text="routeTargetLabel(route, ti)"></span>
+
+                                                                <!-- 提供商 (淡紫罗兰色) -->
+                                                                <span class="font-semibold text-violet" x-text="target.provider"></span>
+
+                                                                <span class="text-muted/30">/</span>
+
+                                                                <!-- 模型名称 (翡翠绿色，支持就地修改) -->
+                                                                <template x-if="!isInlineModel(index, ti)">
+                                                                    <span class="cursor-pointer font-mono text-good transition hover:underline"
+                                                                          role="button" tabindex="0"
+                                                                          @click="startInlineModel(index, ti)"
+                                                                          @keydown.enter.prevent="startInlineModel(index, ti)"
+                                                                          :title="'点击修改模型名（当前: ' + (target.model || '沿用请求模型') + '）'"
+                                                                          x-text="target.model || '(沿用)'"></span>
+                                                                </template>
+
+                                                                <!-- 模型就地编辑态 -->
+                                                                <template x-if="isInlineModel(index, ti)">
+                                                                    <span class="inline-flex items-center gap-1">
+                                                                        <span class="relative inline-flex items-center">
+                                                                            <input id="inline-model-input" type="text" autocomplete="off" spellcheck="false"
+                                                                                   x-model="inlineModel.value"
+                                                                                   role="combobox" aria-autocomplete="list" aria-controls="inline-model-list"
+                                                                                   :aria-expanded="inlineModel.open"
+                                                                                   @keydown="onInlineModelKeydown($event)"
+                                                                                   @input="onInlineModelInput()"
+                                                                                   @click="inlineModel.open || openInlineModelList()"
+                                                                                   placeholder="上游模型名"
+                                                                                   class="field w-40 py-0.5 pl-2 pr-6 font-mono text-sm">
+                                                                            <button type="button" @mousedown.prevent @click="toggleInlineModelList()"
+                                                                                    class="absolute right-1 top-1/2 -translate-y-1/2 rounded text-muted transition hover:text-cyan">
+                                                                                <span class="material-symbols-outlined text-[14px]" x-show="!inlineModel.modelsLoading">search</span>
+                                                                                <span class="material-symbols-outlined gw-spin text-[14px]" x-show="inlineModel.modelsLoading" x-cloak>progress_activity</span>
+                                                                            </button>
+                                                                        </span>
+                                                                        <button type="button" @click="commitInlineModel()" :disabled="loading"
+                                                                                class="p-0.5 text-cyan hover:bg-cyan/15 disabled:opacity-40"
+                                                                                title="保存（Enter）">
+                                                                            <span class="material-symbols-outlined text-[16px] leading-none">task_alt</span>
+                                                                        </button>
+                                                                        <button type="button" @click="cancelInlineModel()"
+                                                                                class="p-0.5 text-muted hover:text-white"
+                                                                                title="取消（Esc）">
+                                                                            <span class="material-symbols-outlined text-[16px] leading-none">close</span>
+                                                                        </button>
+                                                                    </span>
+                                                                </template>
+                                                                <button type="button" x-show="route.targets?.length > 1" x-cloak
+                                                                        @click.stop="removeRouteTargetFromList(index, ti)"
+                                                                        :disabled="loading || inlineModel.routeIndex >= 0"
+                                                                        :title="'删除 ' + target.provider + ' / ' + (target.model || '沿用请求模型')"
+                                                                        :aria-label="'删除候选 ' + target.provider + ' / ' + (target.model || '沿用请求模型')"
+                                                                        class="ml-0.5 rounded p-0.5 text-muted/35 transition hover:bg-danger/10 hover:text-danger focus-visible:text-danger disabled:cursor-wait disabled:opacity-40">
+                                                                    <span class="material-symbols-outlined text-[13px] leading-none" aria-hidden="true">close</span>
+                                                                </button>
+                                                            </div>
+                                                            <span x-show="routeTargetStatus(target.provider).visible" x-cloak
+                                                                  class="rounded border px-1.5 py-0.5 text-[10px] font-semibold leading-none"
+                                                                  :class="routeTargetStatus(target.provider).healthClass"
+                                                                  :title="routeTargetStatus(target.provider).healthTitle"
+                                                                  x-text="routeTargetStatus(target.provider).healthLabel"></span>
+                                                            <span x-show="routeTargetStatus(target.provider).breakerActive" x-cloak
+                                                                  class="rounded border px-1.5 py-0.5 text-[10px] font-semibold leading-none"
+                                                                  :class="routeTargetStatus(target.provider).breakerClass"
+                                                                  :title="routeTargetStatus(target.provider).healthTitle"
+                                                                  x-text="routeTargetStatus(target.provider).breakerLabel"></span>
+                                                        </div>
+                                                    </template>
+                                                    <button type="button" x-show="hiddenRouteTargetCount(route, index) > 0" x-cloak
+                                                            @click="toggleRouteExpanded(index)"
+                                                            class="inline-flex cursor-pointer items-center rounded-md border border-line/50 bg-panel2/40 px-2.5 py-1 text-xs text-muted transition hover:border-cyan/35 hover:text-cyan focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan2"
+                                                            :aria-expanded="String(isRouteExpanded(index))"
+                                                            x-text="'+ ' + hiddenRouteTargetCount(route, index) + ' 个候选'"></button>
+                                                    <button type="button" x-show="routeCompactView && isRouteExpanded(index) && routeTargets(route).length > 1" x-cloak
+                                                            @click="toggleRouteExpanded(index)"
+                                                            class="inline-flex cursor-pointer items-center rounded-md px-2 py-1 text-xs text-muted transition hover:text-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan2"
+                                                            :aria-expanded="String(isRouteExpanded(index))">
+                                                        收起备用
+                                                    </button>
+                                                    <template x-if="isAddingRouteTarget(index)">
+                                                        <div class="inline-flex flex-wrap items-center gap-1.5 rounded-md border border-dashed border-cyan/40 bg-cyan/5 px-2 py-1"
+                                                             :data-inline-anchor="index + ':new'">
+                                                            <span class="text-[10px] font-semibold text-cyan">新增</span>
+                                                            <select x-model="inlineModel.provider" @change="onInlineProviderChange()"
+                                                                    :disabled="loading"
+                                                                    aria-label="候选 Provider"
+                                                                    class="field w-32 py-0.5 pl-2 pr-6 font-mono text-xs">
+                                                                <template x-for="(provider, name) in config.providers" :key="name">
+                                                                    <option :value="name" x-text="name + (provider.enabled === false ? '（已禁用）' : '')"></option>
+                                                                </template>
+                                                            </select>
+                                                            <span class="relative inline-flex items-center">
+                                                                <input id="inline-model-input" type="text" autocomplete="off" spellcheck="false"
+                                                                       x-model="inlineModel.value"
+                                                                       role="combobox" aria-autocomplete="list" aria-controls="inline-model-list"
+                                                                       :aria-expanded="inlineModel.open"
+                                                                       @keydown="onInlineModelKeydown($event)"
+                                                                       @input="onInlineModelInput()"
+                                                                       @click="inlineModel.open || openInlineModelList()"
+                                                                       placeholder="上游模型名"
+                                                                       class="field w-40 py-0.5 pl-2 pr-6 font-mono text-sm">
+                                                                <button type="button" @mousedown.prevent @click="toggleInlineModelList()"
+                                                                        class="absolute right-1 top-1/2 -translate-y-1/2 rounded text-muted transition hover:text-cyan">
+                                                                    <span class="material-symbols-outlined text-[14px]" x-show="!inlineModel.modelsLoading">search</span>
+                                                                    <span class="material-symbols-outlined gw-spin text-[14px]" x-show="inlineModel.modelsLoading" x-cloak>progress_activity</span>
+                                                                </button>
+                                                            </span>
+                                                            <button type="button" @click="commitInlineModel()"
+                                                                    :disabled="loading || !inlineModel.provider"
+                                                                    class="p-0.5 text-cyan hover:bg-cyan/15 disabled:opacity-40"
+                                                                    title="添加候选（Enter）">
+                                                                <span class="material-symbols-outlined text-[16px] leading-none">task_alt</span>
                                                             </button>
-                                                            <button @click="moveRoute(index, 1)" :disabled="index === config.routes.length - 1" class="btn btn-ghost" title="下移" aria-label="下移">
-                                                                <span class="material-symbols-outlined text-[18px]">keyboard_arrow_down</span>
-                                                            </button>
-                                                            <button @click="editRoute(index)" class="btn btn-ghost" title="编辑" aria-label="编辑">
-                                                                <span class="material-symbols-outlined text-[18px]">edit</span>
-                                                            </button>
-                                                            <button @click="duplicateRoute(index)" class="btn btn-ghost" title="复制为新路由" aria-label="复制为新路由">
-                                                                <span class="material-symbols-outlined text-[18px]">content_copy</span>
-                                                            </button>
-                                                            <button @click="removeRoute(index)" class="btn btn-ghost btn-ghost-danger" title="删除" aria-label="删除">
-                                                                <span class="material-symbols-outlined text-[18px]">delete</span>
+                                                            <button type="button" @click="cancelInlineModel()"
+                                                                    class="p-0.5 text-muted hover:text-white" title="取消（Esc）">
+                                                                <span class="material-symbols-outlined text-[16px] leading-none">close</span>
                                                             </button>
                                                         </div>
-                                                    </td>
-                                                </tr>
-                                            </template>
-                                            <tr x-show="!config.routes || config.routes.length === 0">
-                                                <td colspan="5" class="px-3 py-10 text-center text-sm text-muted">还没有路由规则</td>
-                                            </tr>
-                                        </tbody>
-                                    </table>
+                                                    </template>
+                                                    <button type="button"
+                                                            @click="startInlineCandidateAdd(index)"
+                                                            :disabled="loading || inlineModel.routeIndex >= 0 || routeTargets(route).length >= maxRouteTargets"
+                                                            :title="routeTargets(route).length >= maxRouteTargets ? '每条路由最多 ' + maxRouteTargets + ' 个候选' : '在列表中添加候选模型'"
+                                                            class="inline-flex items-center gap-1 rounded-md border border-dashed border-line/60 px-2 py-1 text-xs text-muted transition hover:border-cyan/45 hover:bg-cyan/5 hover:text-cyan disabled:cursor-not-allowed disabled:opacity-40">
+                                                        <span class="material-symbols-outlined text-[14px]" aria-hidden="true">add</span>
+                                                        添加候选
+                                                    </button>
+                                                </div>
+                                            </div>
+
+
+                                            </div>
+                                        </div>
+                                    </template>
+
+                                    <!-- 空状态 -->
+                                    <div x-show="!config.routes || config.routes.length === 0" class="rounded-xl border border-dashed border-line p-10 text-center">
+                                        <span class="material-symbols-outlined text-4xl text-muted/40">alt_route</span>
+                                        <p class="mt-2 text-sm text-muted">还没有配置任何路由规则</p>
+                                        <button @click="addRoute()" class="btn btn-secondary mt-4">添加第一条路由</button>
+                                    </div>
                                 </div>
                             </section>
 
@@ -2299,8 +2511,8 @@
                 </button>
             </div>
             <!-- 分层简化：首屏只留「匹配 → 用哪个模型」这两件必填的事。
-                 候选级上限由每个候选行自己的开关就地展开（见下方），候选策略 /
-                 路由级默认值 / 视觉伴随仍是低频配置，收进下方默认折叠的高级设置区。
+                 候选策略与视觉伴随模型直接显示在候选列表附近；候选级上限由每行开关就地展开，
+                 路由级默认值与调优作为低频配置收进下方折叠区。
                  分区形态与 Provider 抽屉统一：标题 + 分隔线，不再套方框。 -->
             <div class="min-h-0 flex-1 overflow-y-auto px-5 py-5">
                 <section>
@@ -2310,331 +2522,325 @@
                     </label>
                 </section>
 
-                <!-- 目标候选 = 表格式紧凑列表，与路由/Provider 主列表同一族语言：
-                     一行表头 + divide-y 分隔的数据行，行本身不再套「卡中卡」的边框盒子。
-                     行高由 field 控件高度决定 ≈ 44px，6 个候选全展开也不到 300px。 -->
+                <!-- 目标候选区：结构重构为卡片流与直观的策略选择器 -->
                 <section class="mt-6 border-t border-line pt-5">
                     <div class="mb-3 flex flex-wrap items-baseline justify-between gap-3">
-                        <h4 class="text-sm font-semibold text-white">目标候选</h4>
-                        <span class="text-xs text-muted">按顺序尝试，第一个为主目标</span>
-                    </div>
-                    <div class="divide-y divide-line" x-ref="targetRows" :class="isDragging('target') ? 'gw-dragging' : ''">
-                        <!-- 表头：text-[11px] 一行，列宽与数据行 flex 结构对位。
-                             表头不带 data-drag-row，所以 dropIndexAt 不会把它算成一行。 -->
-                        <div class="flex items-center gap-2 pb-1.5 text-[11px] font-bold text-muted">
-                            <span class="w-10 shrink-0"></span>
-                            <span class="w-36 shrink-0">Provider</span>
-                            <span class="min-w-0 flex-1">模型</span>
-                            <span class="shrink-0 pr-0.5">操作</span>
+                        <div class="flex items-center gap-2">
+                            <h4 class="text-sm font-semibold text-white">目标候选</h4>
+                            <span class="rounded-full bg-white/[.06] px-2 py-0.5 font-mono text-[11px] text-muted"
+                                  x-text="routeForm.targets.length + ' 个候选'"></span>
                         </div>
-                        <!-- :key 用 target._id 而不是下标 ti：拖拽换位后下标指向的是另一条
-                             数据，Alpine 会保留原位 DOM 只改绑定，而行内 <select> 的选中态
-                             在 options 已渲染时不会被重新认领（同下方 :selected 那段注释的
-                             成因），表现是拖完两行 provider 串了。_id 跟着数据走，
-                             Alpine 于是移动节点而不是复用错行。 -->
+                        <span class="text-xs text-muted" x-text="routeForm.strategy === 'failover' ? '按配置顺序选择首选与备用' : '多个候选共同参与分流'"></span>
+                    </div>
+
+                    <!-- 候选策略置顶分段选择器（仅多候选时呈现） -->
+                    <div x-show="routeForm.targets.length > 1" x-transition class="mb-4 rounded-xl border border-line bg-panel2/60 p-3">
+                        <div class="mb-2 flex items-center justify-between">
+                            <span class="text-xs font-bold text-muted">候选选择策略</span>
+                            <span class="text-[11px] text-cyan" x-text="routeForm.strategy === 'round-robin' ? '轮询分流' : (routeForm.strategy === 'least-queue' ? '最少在途' : '按序选择')"></span>
+                        </div>
+                        <div class="grid grid-cols-3 gap-1 rounded-lg bg-ink/80 p-1">
+                            <button type="button" @click="routeForm.strategy = 'failover'"
+                                    class="rounded-md py-1.5 text-xs font-semibold transition"
+                                    :class="routeForm.strategy === 'failover' ? 'border border-cyan/40 bg-cyan/20 text-cyan shadow-sm' : 'text-muted hover:text-white'">
+                                按序选择
+                            </button>
+                            <button type="button" @click="routeForm.strategy = 'round-robin'"
+                                    class="rounded-md py-1.5 text-xs font-semibold transition"
+                                    :class="routeForm.strategy === 'round-robin' ? 'border border-violet/40 bg-violet/20 text-violet shadow-sm' : 'text-muted hover:text-white'">
+                                轮询负载
+                            </button>
+                            <button type="button" @click="routeForm.strategy = 'least-queue'"
+                                    class="rounded-md py-1.5 text-xs font-semibold transition"
+                                    :class="routeForm.strategy === 'least-queue' ? 'border border-good/40 bg-good/20 text-good shadow-sm' : 'text-muted hover:text-white'">
+                                最少队列
+                            </button>
+                        </div>
+                        <p class="mt-2 text-[11px] leading-relaxed text-muted">
+                            <span x-show="routeForm.strategy === 'failover'">按配置顺序优先选择首个候选。开启全局故障转移后，符合转移条件的失败才会尝试后续候选。</span>
+                            <span x-show="routeForm.strategy === 'round-robin'">候选共同参与轮询；具体目标还可能受会话粘性影响。此策略不表示主备顺序。</span>
+                            <span x-show="routeForm.strategy === 'least-queue'">优先选择排队与在途请求最少的 Provider 目标，自动平滑负载峰值。</span>
+                        </p>
+                        <p x-show="routeForm.strategy === 'least-queue' && config.directMode" x-cloak class="mt-1 text-[11px] text-amber-300">
+                            直通模式下无本地队列，最少队列策略将自然退化为轮询。
+                        </p>
+                    </div>
+
+                    <!-- 候选列表容器：采用轻量卡片流替代原单行挤压 -->
+                    <div class="flex flex-col gap-2.5" x-ref="targetRows" :class="isDragging('target') ? 'gw-dragging' : ''">
                         <template x-for="(target, ti) in routeForm.targets" :key="target._id">
-                            <div data-drag-row class="py-1.5 transition hover:bg-white/[.04]"
-                                 :class="[isRowDragSource('target', ti) ? 'gw-drag-source' : '', rowDropClass('target', ti, routeForm.targets.length)]">
-                                <div class="flex flex-wrap items-center gap-2 sm:flex-nowrap">
-                                <!-- 把手在序号左侧、与序号同属一个 flex 盒：序号列只有 w-6，
-                                     再塞图标会把「主」徽标挤变形，所以把手单独占一格。
-                                     只有 2 个以上候选才可拖（1 个没有顺序可言）。 -->
-                                <span x-show="routeForm.targets.length > 1" x-cloak
-                                      class="material-symbols-outlined shrink-0 text-[16px] text-muted/70 transition hover:text-muted gw-drag-handle"
-                                      @pointerdown="startRowDrag('target', ti, $event)"
-                                      title="按住拖动可调整尝试顺序" aria-hidden="true">drag_indicator</span>
-                                <!-- 序号列：第 1 个是主目标小徽标（文本「主」+cyan，不止靠颜色），
-                                     其余是数字。完整语义在分区头「按顺序尝试，第一个为主目标」。 -->
-                                <span x-show="ti === 0" x-cloak class="flex w-6 shrink-0 items-center justify-center">
-                                    <span class="flex h-5 w-5 items-center justify-center rounded border border-cyan2/40 bg-cyan2/10 text-[11px] font-bold leading-none text-cyan" title="主目标" aria-label="候选 1，主目标">主</span>
-                                </span>
-                                <span x-show="ti > 0" x-cloak class="flex w-6 shrink-0 items-center justify-center font-mono text-xs leading-none text-muted" :aria-label="'候选 ' + (ti + 1)" x-text="ti + 1"></span>
-                                <!-- :selected 不能省：弹窗是 x-show、DOM 常驻，外层 x-for 为新增候选
-                                     建好 <select> 并让 x-model 写 select.value 时，内层 x-for 的 <option>
-                                     还没渲染出来，赋值落空、浏览器回落到第一项（看起来就是「每行都是同一个
-                                     provider」），options 补齐后 x-model 也不会再回写一次。让每个 option
-                                     自己认领选中态，才与 model 无条件一致。 -->
-                                <select autocomplete="off" :id="'route-target-provider-' + ti" x-model="target.provider" @change="onRouteTargetProviderChange(ti)" :aria-label="'候选 ' + (ti + 1) + ' Provider'" class="field w-36 shrink-0 text-sm sm:w-40">
-                                    <template x-for="(provider, name) in config.providers" :key="name">
-                                        <!-- 已禁用 provider 仍可选：路由可能预先配好等待恢复的目标，
-                                             但要让用户一眼看到这个候选当前不会被转发。 -->
-                                        <option :value="name" :selected="name === target.provider"
-                                                x-text="name + (provider.enabled === false ? '（已禁用）' : '')"></option>
-                                    </template>
-                                </select>
-                                <!-- relative 是模型下拉浮层的定位上下文。
-                                     与路由列表的行内编辑共用一套组合框行为：聚焦即查询上游模型目录，
-                                     输入即过滤，↓ ↑ 选择，回车填入；查询失败的原因显示在下拉里。
-                                     这里回车只填值、不保存整个抽屉（抽屉有自己的保存按钮与 Ctrl/⌘+S）。 -->
-                                <div class="relative min-w-0 flex-1 basis-40"
-                                     @click.away="isModelPickerOpen('t:' + target._id) && closeModelPicker()">
-                                    <input autocomplete="off" :id="'route-target-model-' + ti" type="text" x-model="target.model"
-                                           @input="onModelPickerInput('t:' + target._id, target.provider, target.model)"
-                                           @keydown="onModelPickerKeydown($event, 't:' + target._id, target.provider, target.model, (v) => target.model = v)"
-                                           @click="openModelPicker('t:' + target._id, target.provider, target.model)"
-                                           :aria-label="'候选 ' + (ti + 1) + ' 模型'" placeholder="上游模型名"
-                                           role="combobox" aria-autocomplete="list" :aria-controls="'model-picker-list-' + ti"
-                                           :aria-expanded="String(isModelPickerOpen('t:' + target._id))"
-                                           :aria-activedescendant="isModelPickerOpen('t:' + target._id) && modelPicker.active >= 0 ? 'model-picker-opt-' + modelPicker.active : null"
-                                           class="field pr-9 font-mono text-sm">
-                                    <!-- mousedown.prevent：按钮不抢走输入框焦点，按完还能继续用键盘。 -->
-                                    <button type="button" @mousedown.prevent="toggleModelPicker('t:' + target._id, target.provider, target.model, 'route-target-model-' + ti)"
-                                            :disabled="!target.provider"
-                                            :title="target.provider ? '查询该 Provider 的上游模型列表' : '请先选择 Provider'"
-                                            :aria-label="target.provider ? '查询该 Provider 的上游模型列表' : '请先选择 Provider'"
-                                            class="absolute right-1 top-1/2 -translate-y-1/2 rounded p-1 text-muted hover:text-cyan disabled:opacity-40">
-                                        <span class="material-symbols-outlined text-[16px]" x-show="!isModelPickerOpen('t:' + target._id)">search</span>
-                                        <span class="material-symbols-outlined text-[16px]" x-show="isModelPickerOpen('t:' + target._id)" x-cloak>keyboard_arrow_up</span>
-                                    </button>
-                                    <!-- 浮层改成 x-if 而不是 x-show：option 的 id 由 JS 按
-                                         'model-picker-opt-' + 下标 拼出，DOM 常驻时隐藏的那几行会
-                                         留下同名 id，getElementById 拿到第一个就可能是看不见的那个，
-                                         键盘高亮滚不动。只渲染当前打开的那一个，id 才唯一。
-                                         绝对定位覆盖在输入框下方，展开时不把后面的候选推下去。 -->
-                                    <template x-if="isModelPickerOpen('t:' + target._id)">
-                                        <ul :id="'model-picker-list-' + ti" role="listbox" aria-label="上游模型列表" x-transition
-                                            class="absolute left-0 right-0 top-[calc(100%+4px)] z-30 max-h-44 overflow-y-auto rounded-lg border border-line bg-panel3 py-1 text-xs shadow-glow">
-                                            <div x-show="modelPicker.loading" class="flex items-center gap-2 px-3 py-1.5 text-muted">
-                                                <span class="material-symbols-outlined gw-spin text-[14px]">progress_activity</span>正在查询上游模型列表…
-                                            </div>
-                                            <div x-show="!modelPicker.loading && modelPicker.message" class="px-3 py-1.5 leading-relaxed text-muted" x-text="modelPicker.message"></div>
-                                            <div x-show="!modelPicker.loading && modelPicker.models.length && !modelPickerOptions(target.model).length"
-                                                 class="px-3 py-1.5 leading-relaxed text-muted"
-                                                 x-text="'没有包含「' + String(target.model || '').trim() + '」的模型，回车直接使用输入的名字'"></div>
-                                            <template x-for="(m, mi) in modelPickerOptions(target.model)" :key="m">
-                                                <li :id="'model-picker-opt-' + mi" role="option" :aria-selected="mi === modelPicker.active"
-                                                    @mousedown.prevent="pickModel(m, (v) => target.model = v)"
-                                                    @mouseenter="modelPicker.active = mi"
-                                                    :class="mi === modelPicker.active ? 'bg-cyan2/15 text-white' : (m === target.model ? 'text-cyan' : 'text-text')"
-                                                    class="cursor-pointer truncate px-3 py-1.5 font-mono" :title="m" x-text="m"></li>
-                                            </template>
-                                        </ul>
-                                    </template>
-                                </div>
-                                <!-- 操作列：上限开关（tune + 已配置计数徽标，与底部高级设置
-                                     同一套交互语言）+ 上移 / 下移 / 删除。列表行同款紧凑档。 -->
-                                <div class="flex shrink-0 items-center gap-1">
-                                    <button type="button" @click="target.limitsOpen = !target.limitsOpen"
-                                            :aria-expanded="String(target.limitsOpen)" :aria-controls="'route-target-limits-' + ti"
-                                            :title="targetLimitCount(ti) ? '候选设置（已设 ' + targetLimitCount(ti) + ' 项）' : '候选设置'"
-                                            :aria-label="'候选 ' + (ti + 1) + ' 设置'"
-                                            class="btn btn-ghost"
-                                            :class="target.limitsOpen || targetLimitCount(ti) ? 'border-cyan2/50 bg-cyan2/10 text-cyan' : ''">
-                                        <span class="material-symbols-outlined text-[16px]">tune</span>
-                                        <span x-show="targetLimitCount(ti)" x-cloak class="chip bg-cyan2/15 px-1.5 py-0 text-[11px] leading-none text-cyan" x-text="targetLimitCount(ti)"></span>
-                                    </button>
-                                    <button @click="moveRouteTarget(ti, -1)" :disabled="ti === 0" class="btn btn-ghost" title="上移" :aria-label="'候选 ' + (ti + 1) + ' 上移'">
-                                        <span class="material-symbols-outlined text-[16px]">keyboard_arrow_up</span>
-                                    </button>
-                                    <button @click="moveRouteTarget(ti, 1)" :disabled="ti === routeForm.targets.length - 1" class="btn btn-ghost" title="下移" :aria-label="'候选 ' + (ti + 1) + ' 下移'">
-                                        <span class="material-symbols-outlined text-[16px]">keyboard_arrow_down</span>
-                                    </button>
-                                    <button @click="removeRouteTarget(ti)" :disabled="routeForm.targets.length <= 1" class="btn btn-ghost" title="删除该候选" :aria-label="'删除候选 ' + (ti + 1)">
-                                        <span class="material-symbols-outlined text-[16px]">delete</span>
-                                    </button>
-                                </div>
-                                </div>
-                                <!-- 候选级上限：就地展开在该行正下方，占满整行宽度（序号列右侧起），
-                                     由该候选自己的 limitsOpen 控制。四个字段排成两列，与 Provider 抽屉
-                                     的高级设置同一套栅格，标签都点得到输入框（:for 指向 :id）。 -->
-                                <div x-show="target.limitsOpen" x-transition x-cloak :id="'route-target-limits-' + ti"
-                                     class="min-w-0 pb-2 pl-8 pr-4 pt-3">
-                                    <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                                        <label :for="'route-target-max-tokens-' + ti" class="block">
-                                            <span class="mb-1.5 block text-xs text-muted">最大输出 tokens</span>
-                                            <input autocomplete="off" :id="'route-target-max-tokens-' + ti" type="number" x-model.number="target.maxTokens"
-                                                   placeholder="跟随路由/上游" class="field py-1 text-sm">
-                                        </label>
-                                        <label :for="'route-target-context-window-' + ti" class="block">
-                                            <span class="mb-1.5 block text-xs text-muted">上下文窗口 tokens</span>
-                                            <input autocomplete="off" :id="'route-target-context-window-' + ti" type="number" min="1" max="10000000" x-model.number="target.contextWindow"
-                                                   placeholder="不启用预算" class="field py-1 text-sm">
-                                        </label>
-                                        <label :for="'route-target-local-retries-' + ti" class="block">
-                                            <span class="mb-1.5 block text-xs text-muted">最大重试次数</span>
-                                            <input autocomplete="off" :id="'route-target-local-retries-' + ti" type="number" min="0" max="10" step="1" x-model.number="target.localRetry.maxRetries"
-                                                   placeholder="继承；0 = 关闭" class="field py-1 text-sm">
-                                        </label>
-                                        <label :for="'route-target-local-interval-' + ti" class="block">
-                                            <span class="mb-1.5 block text-xs text-muted">重试间隔 ms</span>
-                                            <input autocomplete="off" :id="'route-target-local-interval-' + ti" type="number" min="0" max="60000" step="1" x-model.number="target.localRetry.intervalMs"
-                                                   placeholder="默认 1000" class="field py-1 text-sm">
-                                        </label>
-                                    </div>
-                                    <span class="mt-2 block text-[11px] text-muted">留空的字段继承路由或上游配置；tokens 留空用默认，区间的下界与外层一致。</span>
-                                    <!-- 候选级 extraBody：整行铺开，按键叠加在上游 / 路由之上，只覆盖该候选。 -->
-                                    <div class="mt-3">
-                                        <div class="mb-1.5 flex items-center justify-between">
-                                            <span class="text-[11px] font-bold text-muted">自定义请求体字段</span>
-                                            <button type="button" @click="addRouteTargetBodyRow(ti)" class="rounded border border-line px-2 py-0.5 text-[11px] text-muted hover:text-white">+ 添加</button>
+                            <div data-drag-row
+                                 class="rounded-xl border transition-all duration-150"
+                                 :class="[
+                                     isRowDragSource('target', ti) ? 'gw-drag-source' : '',
+                                     rowDropClass('target', ti, routeForm.targets.length),
+                                     ti === 0 ? 'border-cyan/35 bg-cyan/[.04]' : 'border-line/80 bg-panel2/50'
+                                 ]">
+                                <div class="p-3">
+                                    <!-- 候选卡片主操作栏：自适应布局 -->
+                                    <div class="flex flex-wrap items-center gap-2 sm:flex-nowrap">
+                                        <!-- 拖拽把手与序号 -->
+                                        <div class="flex shrink-0 items-center gap-1.5">
+                                            <span x-show="routeForm.targets.length > 1" x-cloak
+                                                  class="material-symbols-outlined gw-drag-handle cursor-grab text-[18px] text-muted/60 transition hover:text-cyan"
+                                                  @pointerdown="startRowDrag('target', ti, $event)"
+                                                  title="按住拖动可调整尝试顺序" aria-hidden="true">drag_indicator</span>
+                                            <!-- 序号角标 -->
+                                            <span class="flex h-5 items-center justify-center rounded border px-1 font-mono text-[10px] font-bold"
+                                                  :class="routeForm.strategy === 'failover' && ti === 0 ? 'border-cyan/40 bg-cyan/15 text-cyan' : 'border-line bg-white/[.06] text-muted'"
+                                                  :title="routeForm.strategy === 'failover' ? (ti === 0 ? '按序优先候选' : '按序备用候选') : '共同参与负载选择'"
+                                                  x-text="routeForm.strategy === 'failover' ? (ti + 1) : '#' + (ti + 1)"></span>
                                         </div>
-                                        <template x-for="(row, bi) in (target.extraBody || [])" :key="bi">
-                                            <div class="mb-1.5 flex items-center gap-2">
-                                                <input autocomplete="off" type="text" x-model="row.key" placeholder="字段名"
-                                                       class="field flex-1 py-1 text-sm" :class="extraBodyBlocked(row.key) ? 'border-danger' : ''">
-                                                <input autocomplete="off" type="text" x-model="row.value" placeholder="值（true / 20 / &quot;文本&quot;）" class="field flex-1 py-1 text-sm">
-                                                <button type="button" @click="removeRouteTargetBodyRow(ti, bi)" class="btn btn-ghost btn-ghost-danger shrink-0" title="删除这一行" aria-label="删除这一行请求体字段">
-                                                    <span class="material-symbols-outlined text-[16px]">delete</span>
-                                                </button>
+
+                                        <!-- Provider 下拉选择器 -->
+                                        <div class="w-32 shrink-0 sm:w-36">
+                                            <select autocomplete="off" :id="'route-target-provider-' + ti" x-model="target.provider"
+                                                    @change="onRouteTargetProviderChange(ti)"
+                                                    :aria-label="'候选 ' + (ti + 1) + ' Provider'"
+                                                    class="field py-1 text-xs">
+                                                <template x-for="(provider, name) in config.providers" :key="name">
+                                                    <option :value="name" :selected="name === target.provider"
+                                                            x-text="name + (provider.enabled === false ? '（已禁用）' : '')"></option>
+                                                </template>
+                                            </select>
+                                        </div>
+
+                                        <!-- 目标模型输入框与下拉组合框 -->
+                                        <div class="relative min-w-0 flex-1"
+                                             @click.away="isModelPickerOpen('t:' + target._id) && closeModelPicker()">
+                                            <input autocomplete="off" :id="'route-target-model-' + ti" type="text" x-model="target.model"
+                                                   @input="onModelPickerInput('t:' + target._id, target.provider, target.model)"
+                                                   @keydown="onModelPickerKeydown($event, 't:' + target._id, target.provider, target.model, (v) => target.model = v)"
+                                                   @click="openModelPicker('t:' + target._id, target.provider, target.model)"
+                                                   :aria-label="'候选 ' + (ti + 1) + ' 模型'" placeholder="上游模型名"
+                                                   role="combobox" aria-autocomplete="list" :aria-controls="'model-picker-list-' + ti"
+                                                   :aria-expanded="String(isModelPickerOpen('t:' + target._id))"
+                                                   class="field py-1 pr-7 font-mono text-xs">
+                                            <button type="button" @mousedown.prevent="toggleModelPicker('t:' + target._id, target.provider, target.model, 'route-target-model-' + ti)"
+                                                    :disabled="!target.provider"
+                                                    :title="target.provider ? '查询该 Provider 的上游模型列表' : '请先选择 Provider'"
+                                                    class="absolute right-1 top-1/2 -translate-y-1/2 rounded p-0.5 text-muted hover:text-cyan disabled:opacity-40">
+                                                <span class="material-symbols-outlined text-[15px]" x-show="!isModelPickerOpen('t:' + target._id)">search</span>
+                                                <span class="material-symbols-outlined text-[15px]" x-show="isModelPickerOpen('t:' + target._id)" x-cloak>keyboard_arrow_up</span>
+                                            </button>
+                                            <!-- 模型下拉弹层 -->
+                                            <template x-if="isModelPickerOpen('t:' + target._id)">
+                                                <ul :id="'model-picker-list-' + ti" role="listbox" aria-label="上游模型列表" x-transition
+                                                    class="absolute left-0 right-0 top-[calc(100%+4px)] z-30 max-h-48 overflow-y-auto rounded-lg border border-line bg-panel3 py-1 text-xs shadow-glow">
+                                                    <div x-show="modelPicker.loading" class="flex items-center gap-2 px-3 py-1.5 text-muted">
+                                                        <span class="material-symbols-outlined gw-spin text-[14px]">progress_activity</span>正在查询上游模型列表…
+                                                    </div>
+                                                    <div x-show="!modelPicker.loading && modelPicker.message" class="px-3 py-1.5 leading-relaxed text-muted" x-text="modelPicker.message"></div>
+                                                    <div x-show="!modelPicker.loading && modelPicker.models.length && !modelPickerOptions(target.model).length"
+                                                         class="px-3 py-1.5 leading-relaxed text-muted"
+                                                         x-text="'没有包含「' + String(target.model || '').trim() + '」的模型，回车直接使用输入的名字'"></div>
+                                                    <template x-for="(m, mi) in modelPickerOptions(target.model)" :key="m">
+                                                        <li :id="'model-picker-opt-' + mi" role="option" :aria-selected="mi === modelPicker.active"
+                                                            @mousedown.prevent="pickModel(m, (v) => target.model = v)"
+                                                            @mouseenter="modelPicker.active = mi"
+                                                            :class="mi === modelPicker.active ? 'bg-cyan2/15 text-white' : (m === target.model ? 'text-cyan' : 'text-text')"
+                                                            class="cursor-pointer truncate px-3 py-1.5 font-mono" :title="m" x-text="m"></li>
+                                                    </template>
+                                                </ul>
+                                            </template>
+                                        </div>
+
+                                        <!-- 右侧紧凑操作组：tune 调优设置 + 删除 -->
+                                        <div class="flex shrink-0 items-center gap-1">
+                                            <button type="button" @click="target.limitsOpen = !target.limitsOpen"
+                                                    :aria-expanded="String(target.limitsOpen)" :aria-controls="'route-target-limits-' + ti"
+                                                    :title="targetLimitCount(ti) ? '候选调优（已设 ' + targetLimitCount(ti) + ' 项）' : '候选调优设置'"
+                                                    class="btn btn-ghost px-2 py-1 text-xs"
+                                                    :class="target.limitsOpen || targetLimitCount(ti) ? 'border-cyan2/50 bg-cyan2/10 text-cyan' : 'text-muted'">
+                                                <span class="material-symbols-outlined text-[15px]">tune</span>
+                                                <span x-show="targetLimitCount(ti)" x-cloak class="chip bg-cyan2/15 px-1 py-0 text-[10px] leading-none text-cyan" x-text="targetLimitCount(ti)"></span>
+                                            </button>
+                                            <button @click="removeRouteTarget(ti)" :disabled="routeForm.targets.length <= 1"
+                                                    class="btn btn-ghost btn-ghost-danger px-1.5 py-1 disabled:opacity-20"
+                                                    title="删除该候选">
+                                                <span class="material-symbols-outlined text-[15px]">delete</span>
+                                            </button>
+                                        </div>
+                                    </div>
+
+                                    <!-- 候选级参数调优展开区 (Limits Open) -->
+                                    <div x-show="target.limitsOpen" x-transition x-cloak :id="'route-target-limits-' + ti"
+                                         class="mt-3 border-t border-line/60 pt-3">
+                                        <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                                            <label :for="'route-target-max-tokens-' + ti" class="block">
+                                                <span class="mb-1 block text-xs text-muted">最大输出 tokens</span>
+                                                <input autocomplete="off" :id="'route-target-max-tokens-' + ti" type="number" x-model.number="target.maxTokens"
+                                                       placeholder="留空跟随路由/上游" class="field py-1 text-xs">
+                                            </label>
+                                            <label :for="'route-target-context-window-' + ti" class="block">
+                                                <span class="mb-1 block text-xs text-muted">上下文窗口 tokens</span>
+                                                <input autocomplete="off" :id="'route-target-context-window-' + ti" type="number" min="1" max="10000000" x-model.number="target.contextWindow"
+                                                       placeholder="留空不启用预算" class="field py-1 text-xs">
+                                            </label>
+                                            <label :for="'route-target-local-retries-' + ti" class="block">
+                                                <span class="mb-1 block text-xs text-muted">最大本地重试次数</span>
+                                                <input autocomplete="off" :id="'route-target-local-retries-' + ti" type="number" min="0" max="10" step="1" x-model.number="target.localRetry.maxRetries"
+                                                       placeholder="继承；0 = 关闭" class="field py-1 text-xs">
+                                            </label>
+                                            <label :for="'route-target-local-interval-' + ti" class="block">
+                                                <span class="mb-1 block text-xs text-muted">重试间隔 ms</span>
+                                                <input autocomplete="off" :id="'route-target-local-interval-' + ti" type="number" min="0" max="60000" step="1" x-model.number="target.localRetry.intervalMs"
+                                                       placeholder="默认 1000" class="field py-1 text-xs">
+                                            </label>
+                                        </div>
+
+                                        <!-- 候选级 extraBody 字段 -->
+                                        <div class="mt-3 border-t border-line/40 pt-2.5">
+                                            <div class="mb-1.5 flex items-center justify-between">
+                                                <span class="text-[11px] font-bold text-muted">自定义请求体字段（按键叠加覆盖）</span>
+                                                <button type="button" @click="addRouteTargetBodyRow(ti)" class="rounded border border-line px-2 py-0.5 text-[10px] text-muted hover:text-white">+ 添加字段</button>
                                             </div>
-                                        </template>
-                                        <span class="block text-[11px] text-muted">值按 JSON 解析（true 是布尔 / 20 是数字 / 裸词按字符串），只覆盖该候选，叠加在上游与路由的同名字段之上。</span>
+                                            <template x-for="(row, bi) in (target.extraBody || [])" :key="bi">
+                                                <div class="mb-1.5 flex items-center gap-2">
+                                                    <input autocomplete="off" type="text" x-model="row.key" placeholder="字段名"
+                                                           class="field flex-1 py-0.5 font-mono text-xs" :class="extraBodyBlocked(row.key) ? 'border-danger' : ''">
+                                                    <input autocomplete="off" type="text" x-model="row.value" placeholder="值（true / 20 / &quot;文本&quot;）" class="field flex-1 py-0.5 font-mono text-xs">
+                                                    <button type="button" @click="removeRouteTargetBodyRow(ti, bi)" class="btn btn-ghost btn-ghost-danger shrink-0 p-1" title="删除这一行">
+                                                        <span class="material-symbols-outlined text-[15px]">delete</span>
+                                                    </button>
+                                                </div>
+                                            </template>
+                                        </div>
                                     </div>
                                 </div>
                             </div>
                         </template>
                     </div>
+
                     <button @click="addRouteTarget()" :disabled="routeForm.targets.length >= maxRouteTargets" class="btn btn-secondary mt-3 text-xs">
                         <span class="material-symbols-outlined text-[16px]">add</span>
                         <span x-text="'添加候选（最多 ' + maxRouteTargets + ' 个）'"></span>
                     </button>
                     <p x-show="routeForm.targets.length > 1" x-cloak class="mt-2 text-xs text-muted">
-                        多候选需在「全局设置 → 故障转移与熔断」开启 failover 才会真正转移，否则只用第一个候选。
+                        选择策略决定初始候选；失败后是否尝试其他候选，由「全局设置 → 故障转移与熔断」控制。
                     </p>
                 </section>
 
-                <!-- 高级设置：默认折叠。路由级低频配置（策略 / 路由默认值 / 视觉 / 请求体字段）
-                     收在这里，首屏只剩必填项；候选级上限不在此列，由每个候选行自己的开关就地展开。
-                     折叠条与 Provider 抽屉、请求日志「高级诊断」同一套交互语言。编辑一条已带
-                     高级配置的路由时自动展开：值已经在了，藏起来反而危险。 -->
+                <!-- 视觉伴随模型独立分区 (Vision Companion Panel) -->
+                <section class="mt-6 border-t border-line pt-5">
+                    <div class="rounded-xl border border-line/80 bg-panel2/40 p-3.5">
+                        <label class="flex cursor-pointer items-center justify-between">
+                            <div class="flex items-center gap-2">
+                                <span class="material-symbols-outlined text-[18px] text-cyan2">visibility</span>
+                                <div>
+                                    <span class="text-xs font-bold text-white">视觉伴随模型 (Vision Companion)</span>
+                                    <p class="mt-0.5 text-[11px] text-muted">当请求含有图片时自动调用此视觉模型将图片转译为文字描述</p>
+                                </div>
+                            </div>
+                            <input autocomplete="off" type="checkbox" x-model="routeForm.enableVision" @change="onRouteEnableVisionChange()"
+                                   class="h-4 w-4 rounded border-line bg-panel text-cyan2 focus:ring-cyan2">
+                        </label>
+
+                        <div x-show="routeForm.enableVision" x-transition x-cloak class="mt-3.5 grid grid-cols-1 gap-3.5 border-t border-line/60 pt-3 sm:grid-cols-2">
+                            <div>
+                                <label for="route-vision-provider" class="mb-1 block text-xs text-muted">视觉 Provider</label>
+                                <select autocomplete="off" id="route-vision-provider" x-model="routeForm.visionProvider" @change="onRouteVisionProviderChange()" class="field py-1 text-xs">
+                                    <template x-for="(provider, name) in config.providers" :key="name">
+                                        <option :value="name" :selected="name === routeForm.visionProvider" x-text="name"></option>
+                                    </template>
+                                </select>
+                            </div>
+                            <div>
+                                <label for="route-vision-model" class="mb-1 block text-xs text-muted">视觉模型名</label>
+                                <div class="relative" @click.away="isModelPickerOpen('vision') && closeModelPicker()">
+                                    <input autocomplete="off" id="route-vision-model" type="text" x-model="routeForm.visionModel"
+                                           @input="onModelPickerInput('vision', routeForm.visionProvider, routeForm.visionModel)"
+                                           @keydown="onModelPickerKeydown($event, 'vision', routeForm.visionProvider, routeForm.visionModel, (v) => routeForm.visionModel = v)"
+                                           @click="openModelPicker('vision', routeForm.visionProvider, routeForm.visionModel)"
+                                           role="combobox" aria-autocomplete="list" aria-controls="model-picker-list-vision"
+                                           placeholder="例如: Qwen/Qwen3.5-4B" class="field py-1 pr-7 font-mono text-xs">
+                                    <button type="button" @mousedown.prevent="toggleModelPicker('vision', routeForm.visionProvider, routeForm.visionModel, 'route-vision-model')"
+                                            :disabled="!routeForm.visionProvider"
+                                            :title="routeForm.visionProvider ? '查询该 Provider 的上游模型列表' : '请先选择 Provider'"
+                                            class="absolute right-1 top-1/2 -translate-y-1/2 rounded p-0.5 text-muted hover:text-cyan disabled:opacity-40">
+                                        <span class="material-symbols-outlined text-[15px]" x-show="!isModelPickerOpen('vision')">search</span>
+                                        <span class="material-symbols-outlined text-[15px]" x-show="isModelPickerOpen('vision')" x-cloak>keyboard_arrow_up</span>
+                                    </button>
+                                    <template x-if="isModelPickerOpen('vision')">
+                                        <ul id="model-picker-list-vision" role="listbox" aria-label="上游模型列表" x-transition
+                                            class="absolute left-0 right-0 top-[calc(100%+4px)] z-30 max-h-44 overflow-y-auto rounded-lg border border-line bg-panel3 py-1 text-xs shadow-glow">
+                                            <div x-show="modelPicker.loading" class="flex items-center gap-2 px-3 py-1.5 text-muted">
+                                                <span class="material-symbols-outlined gw-spin text-[14px]">progress_activity</span>正在查询上游模型列表…
+                                            </div>
+                                            <div x-show="!modelPicker.loading && modelPicker.message" class="px-3 py-1.5 leading-relaxed text-muted" x-text="modelPicker.message"></div>
+                                            <template x-for="(m, mi) in modelPickerOptions(routeForm.visionModel)" :key="m">
+                                                <li :id="'model-picker-opt-' + mi" role="option" :aria-selected="mi === modelPicker.active"
+                                                    @mousedown.prevent="pickModel(m, (v) => routeForm.visionModel = v)"
+                                                    @mouseenter="modelPicker.active = mi"
+                                                    :class="mi === modelPicker.active ? 'bg-cyan2/15 text-white' : (m === routeForm.visionModel ? 'text-cyan' : 'text-text')"
+                                                    class="cursor-pointer truncate px-3 py-1.5 font-mono" :title="m" x-text="m"></li>
+                                            </template>
+                                        </ul>
+                                    </template>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- 路由级高级默认值（默认折叠）：maxTokens、窗口、重试与公共 extraBody -->
                 <div class="mt-6 border-t border-line pt-5">
                     <button type="button" @click="routeForm.routeAdvancedOpen = !routeForm.routeAdvancedOpen"
                             :aria-expanded="String(routeForm.routeAdvancedOpen)" aria-controls="route-advanced"
                             class="btn btn-secondary w-full px-3" :class="routeAdvancedCount() ? 'border-cyan2/50 bg-cyan2/10 text-cyan' : ''">
                         <span class="material-symbols-outlined text-[18px]">tune</span>
-                        <span class="flex-1 text-left">高级设置</span>
-                        <span class="hidden text-xs font-normal text-muted sm:inline">策略 · 默认值 · 请求体字段 · 视觉伴随</span>
+                        <span class="flex-1 text-left">路由级默认值与调优</span>
+                        <span class="hidden text-xs font-normal text-muted sm:inline">默认上限 · 窗口 · 重试 · 公共请求体</span>
                         <span x-show="routeAdvancedCount()" x-cloak class="chip ml-0.5 bg-cyan2/15 px-1.5 py-0 text-[11px] text-cyan" x-text="routeAdvancedCount()"></span>
                         <span class="material-symbols-outlined text-[18px]" x-text="routeForm.routeAdvancedOpen ? 'keyboard_arrow_up' : 'keyboard_arrow_down'"></span>
                     </button>
                     <div id="route-advanced" x-show="routeForm.routeAdvancedOpen" x-transition x-cloak>
-                        <!-- 策略只在多候选时才有意义，单候选时整段隐藏。 -->
-                        <section x-show="routeForm.targets.length > 1" x-transition x-cloak class="pt-5">
-                            <label for="route-strategy" class="mb-1.5 block text-xs font-bold text-muted">候选选择策略</label>
-                            <select autocomplete="off" id="route-strategy" x-model="routeForm.strategy" class="field">
-                                <template x-for="option in routeStrategies" :key="option.value">
-                                    <option :value="option.value" :selected="option.value === routeForm.strategy" x-text="option.label"></option>
-                                </template>
-                            </select>
-                            <p class="mt-2 text-xs text-muted">
-                                策略决定「先试谁」，failover 决定「失败了还能试谁」，两者互不影响。
-                                round-robin / least-queue 会按会话前缀做粘性，尽量让同一会话固定在一个上游。
-                            </p>
-                            <p x-show="routeForm.strategy === 'least-queue' && config.directMode" x-cloak class="mt-1 text-xs text-amber-300/90">
-                                直通模式下没有队列，在途量恒为 0，least-queue 会退化成 round-robin。
-                            </p>
-                        </section>
-                        <!-- 路由级默认值成组。优先级链在分区头讲一次，两字段并排，
-                             候选行里的同名字段才有明确的比较对象。 -->
-                        <section class="mt-6 border-t border-line pt-5">
+                        <!-- 路由级默认值成组 -->
+                        <section class="mt-4 border-t border-line/60 pt-4">
                             <div class="mb-3 flex flex-wrap items-baseline justify-between gap-3">
-                                <h4 class="text-sm font-semibold text-white">本路由默认值</h4>
-                                <span class="whitespace-nowrap text-xs text-muted">优先级：候选 &gt; 路由 &gt; 上游 &gt; 客户端 &gt; 默认 32768</span>
+                                <h4 class="text-xs font-bold text-white">本路由默认值</h4>
+                                <span class="whitespace-nowrap text-[11px] text-muted">优先级：候选 &gt; 路由 &gt; 上游 &gt; 客户端 &gt; 默认 32768</span>
                             </div>
-                            <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                            <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
                                 <label class="block">
-                                    <span class="mb-1.5 block text-xs font-bold text-muted">最大输出 tokens</span>
-                                    <input autocomplete="off" type="number" x-model.number="routeForm.maxTokens" placeholder="留空 = 跟随上游设置 / 客户端值 / 默认 32768" class="field">
-                                    <span class="mt-1 block text-xs text-muted">多候选且各自上限不同时，请改用上面每个候选自己的设置。</span>
+                                    <span class="mb-1 block text-xs text-muted">最大输出 tokens</span>
+                                    <input autocomplete="off" type="number" x-model.number="routeForm.maxTokens" placeholder="留空 = 跟随上游设置 / 默认 32768" class="field py-1 text-xs">
                                 </label>
                                 <label class="block">
-                                    <span class="mb-1.5 block text-xs font-bold text-muted">上下文窗口 tokens</span>
-                                    <input autocomplete="off" type="number" min="1" max="10000000" x-model.number="routeForm.contextWindow" placeholder="留空 = 不启用窗口预算裁决" class="field">
-                                    <span class="mt-1 block text-xs text-muted">作为本路由所有候选的默认窗口；候选级设置优先级更高。留空时继续查找 Provider 窗口。</span>
+                                    <span class="mb-1 block text-xs text-muted">上下文窗口 tokens</span>
+                                    <input autocomplete="off" type="number" min="1" max="10000000" x-model.number="routeForm.contextWindow" placeholder="留空 = 不启用窗口预算" class="field py-1 text-xs">
                                 </label>
                             </div>
                         </section>
-                        <section class="mt-6 border-t border-line pt-5">
-                            <h4 class="mb-3 text-sm font-semibold text-white">路由本地重试默认值</h4>
-                            <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                        <section class="mt-4 border-t border-line/60 pt-4">
+                            <h4 class="mb-2 text-xs font-bold text-white">路由本地重试默认值</h4>
+                            <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
                                 <label class="block">
-                                    <span class="mb-1.5 block text-xs font-bold text-muted">最大重试次数</span>
-                                    <input autocomplete="off" type="number" min="0" max="10" step="1" x-model.number="routeForm.localRetry.maxRetries" placeholder="留空 = 继承上游；0 = 关闭" class="field">
+                                    <span class="mb-1 block text-xs text-muted">最大重试次数</span>
+                                    <input autocomplete="off" type="number" min="0" max="10" step="1" x-model.number="routeForm.localRetry.maxRetries" placeholder="留空 = 继承上游；0 = 关闭" class="field py-1 text-xs">
                                 </label>
                                 <label class="block">
-                                    <span class="mb-1.5 block text-xs font-bold text-muted">重试间隔 ms</span>
-                                    <input autocomplete="off" type="number" min="0" max="60000" step="1" x-model.number="routeForm.localRetry.intervalMs" placeholder="留空 = 默认 1000 ms" class="field">
+                                    <span class="mb-1 block text-xs text-muted">重试间隔 ms</span>
+                                    <input autocomplete="off" type="number" min="0" max="60000" step="1" x-model.number="routeForm.localRetry.intervalMs" placeholder="留空 = 默认 1000 ms" class="field py-1 text-xs">
                                 </label>
                             </div>
-                            <span class="mt-2 block text-xs text-muted">同一候选失败后再试；留空的字段继承 Provider 配置。候选级字段优先级更高。</span>
                         </section>
-                        <!-- 路由级 extraBody：作为本路由所有候选的默认自定义请求体字段。
-                             按键叠加，优先级 候选 > 路由 > 上游；候选级在上面每个候选行内单独覆盖。 -->
-                        <section class="mt-6 border-t border-line pt-5">
-                            <div class="mb-3 flex items-center justify-between">
-                                <h4 class="text-sm font-semibold text-white">自定义请求体字段</h4>
-                                <button type="button" @click="addRouteBodyRow()" class="rounded border border-line px-2 py-0.5 text-xs text-muted hover:text-white">+ 添加</button>
+                        <section class="mt-4 border-t border-line/60 pt-4">
+                            <div class="mb-2 flex items-center justify-between">
+                                <h4 class="text-xs font-bold text-white">公共自定义请求体字段</h4>
+                                <button type="button" @click="addRouteBodyRow()" class="rounded border border-line px-2 py-0.5 text-[11px] text-muted hover:text-white">+ 添加</button>
                             </div>
                             <template x-for="(row, bi) in (routeForm.extraBody || [])" :key="bi">
-                                <div class="mb-2 flex items-center gap-2">
+                                <div class="mb-1.5 flex items-center gap-2">
                                     <input autocomplete="off" type="text" x-model="row.key" placeholder="字段名"
-                                           class="field flex-1" :class="extraBodyBlocked(row.key) ? 'border-danger' : ''">
-                                    <input autocomplete="off" type="text" x-model="row.value" placeholder="值（如 true / 20 / &quot;文本&quot;）" class="field flex-1">
-                                    <button type="button" @click="removeRouteBodyRow(bi)" class="btn btn-ghost btn-ghost-danger shrink-0" title="删除这一行" aria-label="删除这一行请求体字段">
-                                        <span class="material-symbols-outlined text-[18px]">delete</span>
+                                           class="field flex-1 py-1 font-mono text-xs" :class="extraBodyBlocked(row.key) ? 'border-danger' : ''">
+                                    <input autocomplete="off" type="text" x-model="row.value" placeholder="值（如 true / 20 / &quot;文本&quot;）" class="field flex-1 py-1 font-mono text-xs">
+                                    <button type="button" @click="removeRouteBodyRow(bi)" class="btn btn-ghost btn-ghost-danger shrink-0 p-1" title="删除这一行">
+                                        <span class="material-symbols-outlined text-[16px]">delete</span>
                                     </button>
                                 </div>
                             </template>
-                            <span class="mt-1 block text-xs text-muted">合并进转发请求体，用于上游要求而标准格式不产出的私有字段，如 enable_thinking 填 true。值按 JSON 解析：true 是布尔、20 是数字、裸词按字符串。</span>
-                            <span class="mt-1 block text-xs text-warn">model / messages / input / stream / max_tokens 系列由网关维护，填了会被忽略。按键叠加，候选级覆盖路由级、路由级覆盖上游级。</span>
-                        </section>
-                        <!-- 保留 cyan 色调把它与其他分区区分开（它是可选功能开关，不是必填项），
-                             但分区形态与其他分区统一。视觉模型与候选行同一个组合框。 -->
-                        <section class="mt-6 border-t border-line pt-5">
-                            <label class="mb-3 flex cursor-pointer items-center gap-3">
-                                <input autocomplete="off" type="checkbox" x-model="routeForm.enableVision" @change="onRouteEnableVisionChange()" class="h-4 w-4 rounded border-line bg-panel text-cyan2 focus:ring-cyan2">
-                                <span class="text-sm font-semibold text-cyan">启用视觉伴随模型</span>
-                            </label>
-                            <div x-show="routeForm.enableVision" x-transition x-cloak class="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                                <div>
-                                    <label for="route-vision-provider" class="mb-1.5 block text-xs font-bold text-muted">视觉 Provider</label>
-                                    <select autocomplete="off" id="route-vision-provider" x-model="routeForm.visionProvider" @change="onRouteVisionProviderChange()" class="field">
-                                        <template x-for="(provider, name) in config.providers" :key="name">
-                                            <option :value="name" :selected="name === routeForm.visionProvider" x-text="name"></option>
-                                        </template>
-                                    </select>
-                                </div>
-                                <div>
-                                    <label for="route-vision-model" class="mb-1.5 block text-xs font-bold text-muted">视觉模型</label>
-                                    <div class="relative" @click.away="isModelPickerOpen('vision') && closeModelPicker()">
-                                        <input autocomplete="off" id="route-vision-model" type="text" x-model="routeForm.visionModel"
-                                               @input="onModelPickerInput('vision', routeForm.visionProvider, routeForm.visionModel)"
-                                               @keydown="onModelPickerKeydown($event, 'vision', routeForm.visionProvider, routeForm.visionModel, (v) => routeForm.visionModel = v)"
-                                               @click="openModelPicker('vision', routeForm.visionProvider, routeForm.visionModel)"
-                                               role="combobox" aria-autocomplete="list" aria-controls="model-picker-list-vision"
-                                               :aria-expanded="String(isModelPickerOpen('vision'))"
-                                               :aria-activedescendant="isModelPickerOpen('vision') && modelPicker.active >= 0 ? 'model-picker-opt-' + modelPicker.active : null"
-                                               placeholder="例如: gpt-4o-mini" class="field pr-9 font-mono">
-                                        <button type="button" @mousedown.prevent="toggleModelPicker('vision', routeForm.visionProvider, routeForm.visionModel, 'route-vision-model')"
-                                                :disabled="!routeForm.visionProvider"
-                                                :title="routeForm.visionProvider ? '查询该 Provider 的上游模型列表' : '请先选择 Provider'"
-                                                :aria-label="routeForm.visionProvider ? '查询该 Provider 的上游模型列表' : '请先选择 Provider'"
-                                                class="absolute right-1 top-1/2 -translate-y-1/2 rounded p-1 text-muted hover:text-cyan disabled:opacity-40">
-                                            <span class="material-symbols-outlined text-[18px]" x-show="!isModelPickerOpen('vision')">search</span>
-                                            <span class="material-symbols-outlined text-[18px]" x-show="isModelPickerOpen('vision')" x-cloak>keyboard_arrow_up</span>
-                                        </button>
-                                        <template x-if="isModelPickerOpen('vision')">
-                                            <ul id="model-picker-list-vision" role="listbox" aria-label="上游模型列表" x-transition
-                                                class="absolute left-0 right-0 top-[calc(100%+4px)] z-30 max-h-44 overflow-y-auto rounded-lg border border-line bg-panel3 py-1 text-xs shadow-glow">
-                                                <div x-show="modelPicker.loading" class="flex items-center gap-2 px-3 py-1.5 text-muted">
-                                                    <span class="material-symbols-outlined gw-spin text-[14px]">progress_activity</span>正在查询上游模型列表…
-                                                </div>
-                                                <div x-show="!modelPicker.loading && modelPicker.message" class="px-3 py-1.5 leading-relaxed text-muted" x-text="modelPicker.message"></div>
-                                                <div x-show="!modelPicker.loading && modelPicker.models.length && !modelPickerOptions(routeForm.visionModel).length"
-                                                     class="px-3 py-1.5 leading-relaxed text-muted"
-                                                     x-text="'没有包含「' + String(routeForm.visionModel || '').trim() + '」的模型，回车直接使用输入的名字'"></div>
-                                                <template x-for="(m, mi) in modelPickerOptions(routeForm.visionModel)" :key="m">
-                                                    <li :id="'model-picker-opt-' + mi" role="option" :aria-selected="mi === modelPicker.active"
-                                                        @mousedown.prevent="pickModel(m, (v) => routeForm.visionModel = v)"
-                                                        @mouseenter="modelPicker.active = mi"
-                                                        :class="mi === modelPicker.active ? 'bg-cyan2/15 text-white' : (m === routeForm.visionModel ? 'text-cyan' : 'text-text')"
-                                                        class="cursor-pointer truncate px-3 py-1.5 font-mono" :title="m" x-text="m"></li>
-                                                </template>
-                                            </ul>
-                                        </template>
-                                    </div>
-                                </div>
-                            </div>
+                            <span class="mt-1 block text-[11px] text-muted">合并进转发请求体，按键叠加覆盖。如 enable_thinking 填 true。</span>
                         </section>
                     </div>
                 </div>

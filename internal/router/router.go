@@ -44,10 +44,13 @@ type Match struct {
 	VisionDisabled bool
 }
 
-// MatchRoute 根据模型名匹配路由规则，首条命中生效（对齐 minimatch nocase）。
+// MatchRoute 根据模型名匹配路由规则，首条启用且命中规则生效（对齐 minimatch nocase）。
 func MatchRoute(model string, cfg *config.Config) *Match {
 	upstreamModel, oneMMarker, hasOneM := SplitOneMSuffix(model)
 	for _, route := range cfg.Routes {
+		if !route.IsEnabled() {
+			continue
+		}
 		if !globMatch(strings.ToLower(route.Match), strings.ToLower(upstreamModel)) {
 			continue
 		}

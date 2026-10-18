@@ -152,6 +152,7 @@
                 routesYaml() {
                     return (this.config.routes || []).map((r) => {
                         const base = [`  - match: "${r.match || ''}"`];
+                        if (r.enabled === false) base.push('    enabled: false');
                         if (Array.isArray(r.targets) && r.targets.length) {
                             base.push('    targets:');
                             r.targets.forEach((t) => {
