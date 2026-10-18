@@ -824,10 +824,17 @@
                                 </p>
                             </section>
 
-                            <section id="chatgpt-provider-list" x-ref="chatGPTProviderList" x-show="activeTab === 'providers'" x-transition class="glass rounded-lg">
+                            <section id="chatgpt-provider-list" x-ref="chatGPTProviderList" x-data="{ providerListExpanded: true }" x-show="activeTab === 'providers'" x-transition class="glass rounded-lg">
                                 <div class="flex flex-col gap-3 border-b border-line p-4 sm:flex-row sm:items-center sm:justify-between">
                                     <div>
-                                        <h2 class="text-lg font-bold text-white">Providers</h2>
+                                        <div class="flex flex-wrap items-center gap-2">
+                                            <h2 class="text-lg font-bold text-white">Providers</h2>
+                                            <div role="group" aria-label="Provider 数量" class="flex flex-wrap items-center gap-1.5">
+                                                <span class="tag bg-white/[.06] text-text"><span x-text="providerCount()"></span> 总计</span>
+                                                <span class="tag bg-good/10 text-good"><span x-text="enabledProviderCount()"></span> 启用</span>
+                                                <span class="tag bg-white/[.06] text-muted"><span x-text="disabledProviderCount()"></span> 禁用</span>
+                                            </div>
+                                        </div>
                                         <p class="mt-1 text-xs text-muted">配置上游地址、协议格式、并发和限速</p>
                                     </div>
                                     <div class="flex flex-wrap items-center gap-2">
@@ -846,6 +853,16 @@
                                                 <span class="material-symbols-outlined text-[16px]">close</span>
                                             </button>
                                         </div>
+                                        <button type="button" @click="providerListExpanded = !providerListExpanded"
+                                                class="btn btn-secondary px-3 py-2" :aria-expanded="providerListExpanded"
+                                                aria-controls="provider-table-content"
+                                                :title="providerListExpanded ? '折叠 Providers 列表' : '展开 Providers 列表'">
+                                            <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"
+                                                 class="h-4 w-4 shrink-0 transition-transform" :class="providerListExpanded ? 'rotate-180' : ''">
+                                                <path d="m6 9 6 6 6-6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path>
+                                            </svg>
+                                            <span x-text="providerListExpanded ? '收起列表' : '展开列表'"></span>
+                                        </button>
                                         <button @click="addProvider()" class="btn btn-secondary">
                                             <span class="material-symbols-outlined">add</span>
                                             添加 Provider
@@ -855,8 +872,8 @@
                                 <!-- 表格而不是卡片网格：provider 的字段都是短标量，卡片把每个字段
                                      包成一个小方块后纵向占地是表格的几倍，数量一多就要来回滚动比对。
                                      表格同列对齐，扫一眼就能横向比较各上游的并发和限速。 -->
-                                <!-- Provider 列表固定为 28rem，搜索结果变化时高度不变，超出内容在列表内滚动。 -->
-                                <div class="h-[28rem] overflow-x-auto overflow-y-auto">
+                                <!-- 列表固定为 40rem，筛选时高度不变；折叠只隐藏表格，标题统计始终可见。 -->
+                                <div id="provider-table-content" x-show="providerListExpanded" x-transition x-cloak class="h-[40rem] overflow-x-auto overflow-y-auto">
                                     <!-- 历史布局备注：这块曾在 xl:col-span-8 里，右侧还有配置预览栏，
                                          因而把并发/限速/队列等待三个数值合并成一列「限流」，否则表格会宽到
                                          必须横向滚动、操作列被裁掉；当时表头和数值都 nowrap 以避免行高撑高。
@@ -1060,10 +1077,9 @@
                                     尚未连接 ChatGPT 账户。连接后可在 Provider 配置中绑定。
                                 </div>
                                 <!-- 固定高度的账户列表区：筛选结果和账户数变化时高度不变，超出内容在区域内滚动。
-                                     与请求日志同一套交互：点行展开低频详情（授权时间、令牌时间、额度同步错误），一次只展开一行。
-                                     展开内容拆成授权信息、凭据用量、标签备注三张卡片，随屏宽切换为三列、两列或单列。
+                                     点行展开低频信息，一次只展开一行；账户信息与标签备注分区呈现。
                                      操作列 stop 掉冒泡：点按钮不会顺带展开 / 收起这一行。 -->
-                                <div x-show="chatgptAccounts.length > 0" class="h-[30rem] overflow-y-auto">
+                                <div x-show="chatgptAccounts.length > 0" class="h-[47rem] overflow-y-auto">
                                     <div x-show="filteredChatGPTAccountCount() === 0" x-cloak class="m-4 rounded-lg border border-dashed border-line px-4 py-5 text-center text-sm text-muted">
                                         没有匹配的 ChatGPT OAuth 账户。
                                     </div>
@@ -1101,6 +1117,11 @@
                                                                 <div class="mt-1 flex flex-wrap items-center gap-1.5">
                                                                     <span class="tag bg-white/[.06] text-muted" x-text="account.usage?.planType || account.plan || '类型未知'"></span>
                                                                     <span class="tag" :class="account.status === 'ready' ? 'bg-good/10 text-good' : 'bg-danger/10 text-danger'" :title="account.status === 'ready' ? '令牌尚未被判定失效；额度查询状态单独显示' : '令牌刷新已确认需要重新授权'" x-text="account.status === 'ready' ? '令牌未判失效' : '需重新授权'"></span>
+                                                                </div>
+                                                                <div x-show="Array.isArray(account.tags) && account.tags.length > 0" class="mt-1 flex min-w-0 flex-wrap items-center gap-1">
+                                                                    <template x-for="tag in (Array.isArray(account.tags) ? account.tags : [])" :key="tag">
+                                                                        <span class="tag max-w-full whitespace-normal break-all bg-cyan2/10 text-cyan2" x-text="tag"></span>
+                                                                    </template>
                                                                 </div>
                                                             </div>
                                                         </div>
@@ -1153,55 +1174,47 @@
                                                 </tr>
                                                 <tr x-show="isChatGPTAccountExpanded(account)" x-cloak class="bg-ink/50">
                                                     <td colspan="4" class="px-4 pb-4 pt-3">
-                                                        <div class="grid grid-cols-1 gap-3 md:grid-cols-2 lg:grid-cols-3">
-                                                            <section class="min-w-0 rounded-lg border border-line bg-panel/60 p-4">
-                                                                <h4 class="text-sm font-bold text-white">授权信息</h4>
-                                                                <dl class="mt-4 space-y-3 text-xs">
-                                                                    <div>
+                                                        <div class="grid grid-cols-1 gap-3 md:grid-cols-5">
+                                                            <section class="min-w-0 rounded-lg border border-line bg-panel/60 p-4 md:col-span-3">
+                                                                <h4 class="text-sm font-bold text-white">账户信息</h4>
+                                                                <dl class="mt-3 grid grid-cols-1 gap-x-6 gap-y-3 text-xs sm:grid-cols-2">
+                                                                    <div class="min-w-0">
                                                                         <dt class="text-muted">授权时长</dt>
-                                                                        <dd class="mt-1 text-sm font-semibold text-white" :title="account.authorizedAt ? formatChatGPTDuration(account.authorizedAt) : '旧账户未记录首次授权时间'" x-text="formatChatGPTDuration(account.authorizedAt)"></dd>
+                                                                        <dd class="mt-1 break-words text-sm font-semibold text-white" :title="account.authorizedAt ? formatChatGPTDuration(account.authorizedAt) : '旧账户未记录首次授权时间'" x-text="formatChatGPTDuration(account.authorizedAt)"></dd>
                                                                     </div>
-                                                                    <div>
+                                                                    <div class="min-w-0">
                                                                         <dt class="text-muted">首次授权</dt>
                                                                         <dd class="mt-1 break-words text-sm font-semibold text-white" :title="formatChatGPTDate(account.authorizedAt)" x-text="formatChatGPTDate(account.authorizedAt)"></dd>
                                                                     </div>
+                                                                    <div class="min-w-0">
+                                                                        <dt class="text-muted" title="访问令牌会自动续期；此时间不代表 ChatGPT 订阅到期时间。">访问令牌到期</dt>
+                                                                        <dd class="mt-1 flex flex-wrap items-center gap-2">
+                                                                            <span class="break-words text-sm font-bold tabular-nums" :class="chatGPTExpiryInfo(account).valueClass" :title="formatChatGPTDate(account.expiresAt)" x-text="formatChatGPTDate(account.expiresAt)"></span>
+                                                                            <span x-show="chatGPTExpiryInfo(account).label" class="tag" :class="chatGPTExpiryInfo(account).badgeClass" x-text="chatGPTExpiryInfo(account).label"></span>
+                                                                        </dd>
+                                                                    </div>
+                                                                    <div class="min-w-0">
+                                                                        <dt class="text-muted">凭据最近更新</dt>
+                                                                        <dd class="mt-1 break-words text-sm font-semibold text-white" :title="account.lastRefresh ? formatChatGPTDate(account.lastRefresh) : '未记录'" x-text="formatChatGPTDate(account.lastRefresh)"></dd>
+                                                                    </div>
                                                                     <template x-if="account.subscriptionActiveStart || account.subscriptionActiveUntil">
-                                                                        <div>
+                                                                        <div class="min-w-0">
                                                                             <dt class="text-muted">订阅周期</dt>
                                                                             <dd class="mt-1 break-words text-sm font-semibold text-white" :title="(account.subscriptionActiveStart ? formatChatGPTDate(account.subscriptionActiveStart) : '未知') + ' — ' + (account.subscriptionActiveUntil ? formatChatGPTDate(account.subscriptionActiveUntil) : '未知')" x-text="(account.subscriptionActiveStart ? formatChatGPTDate(account.subscriptionActiveStart) : '未知') + ' — ' + (account.subscriptionActiveUntil ? formatChatGPTDate(account.subscriptionActiveUntil) : '未知')"></dd>
                                                                         </div>
                                                                     </template>
-                                                                </dl>
-                                                            </section>
-                                                            <section class="min-w-0 rounded-lg border border-line bg-panel/60 p-4">
-                                                                <h4 class="text-sm font-bold text-white">凭据与用量</h4>
-                                                                <dl class="mt-4 space-y-3 text-xs">
-                                                                    <div>
-                                                                        <dt class="text-muted" title="访问令牌会自动续期；此时间不代表 ChatGPT 订阅到期时间。">访问令牌到期</dt>
-                                                                        <dd class="mt-1 flex flex-wrap items-center gap-2">
-                                                                            <span class="text-sm font-bold tabular-nums" :class="chatGPTExpiryInfo(account).valueClass" :title="formatChatGPTDate(account.expiresAt)" x-text="formatChatGPTDate(account.expiresAt)"></span>
-                                                                            <span x-show="chatGPTExpiryInfo(account).label" class="tag" :class="chatGPTExpiryInfo(account).badgeClass" x-text="chatGPTExpiryInfo(account).label"></span>
-                                                                        </dd>
-                                                                    </div>
-                                                                    <div>
-                                                                        <dt class="text-muted">凭据最近更新</dt>
-                                                                        <dd class="mt-1 break-words text-sm font-semibold text-white" :title="account.lastRefresh ? formatChatGPTDate(account.lastRefresh) : '未记录'" x-text="formatChatGPTDate(account.lastRefresh)"></dd>
-                                                                    </div>
-                                                                    <div x-show="account.usage?.credits">
+                                                                    <div x-show="account.usage?.credits" class="min-w-0">
                                                                         <dt class="text-muted">Credits 余额</dt>
-                                                                        <dd class="mt-1 text-sm font-semibold text-white" x-text="account.usage?.credits?.balance"></dd>
+                                                                        <dd class="mt-1 break-words text-sm font-semibold text-white" x-text="account.usage?.credits?.balance"></dd>
                                                                     </div>
                                                                 </dl>
-                                                                <div class="mt-4 flex items-start gap-2 rounded-lg border border-cyan2/40 bg-cyan2/10 px-3 py-2.5 text-xs leading-relaxed text-muted">
-                                                                    <span class="material-symbols-outlined shrink-0 text-[16px] text-cyan" aria-hidden="true">info</span>
-                                                                    <p>访问令牌会自动续期；到期时间不代表 ChatGPT 订阅到期时间。</p>
-                                                                </div>
+                                                                <p class="mt-3 border-t border-line pt-3 text-[11px] leading-relaxed text-muted">访问令牌会自动续期；显示的到期时间不代表 ChatGPT 订阅到期时间。</p>
                                                                 <div x-show="account.usage?.error" class="mt-3 rounded border border-warn/30 bg-warn/10 px-3 py-2 text-xs text-amber-100">
                                                                     <div><span class="font-semibold">额度同步失败：</span><span x-text="account.usage?.error"></span></div>
                                                                     <div x-show="account.usage?.windows?.length || account.usage?.credits" class="mt-1 text-muted">列表里的额度是缓存数据，最后一次成功查询的时间见「剩余用量」列。</div>
                                                                 </div>
                                                             </section>
-                                                            <section class="min-w-0 rounded-lg border border-line bg-panel/60 p-4" @click.stop>
+                                                            <section class="min-w-0 rounded-lg border border-line bg-panel/60 p-4 md:col-span-2" @click.stop>
                                                                 <div class="flex items-center justify-between gap-3">
                                                                     <h4 class="text-sm font-bold text-white">标签与备注</h4>
                                                                     <button x-show="!chatGPTAccountMetadataDrafts[account.id]" type="button" @click.stop="editChatGPTAccountMetadata(account)" class="btn btn-secondary shrink-0 px-2.5 py-1.5 text-xs">
@@ -4564,6 +4577,16 @@
                     return Object.keys(this.config.providers || {}).length;
                 },
 
+                enabledProviderCount() {
+                    return Object.values(this.config.providers || {})
+                        .filter((provider) => provider?.enabled !== false).length;
+                },
+
+                disabledProviderCount() {
+                    return Object.values(this.config.providers || {})
+                        .filter((provider) => provider?.enabled === false).length;
+                },
+
                 routeCount() {
                     return (this.config.routes || []).length;
                 },
@@ -4852,7 +4875,7 @@
                     // 熔断未启用时后端返回 breakers: null，和「全部闭合」是两种语义，
                     // 这里保留 null 往下传，由 breakerLabel 区分展示。
                     const breakers = this.health?.breakers || null;
-                    return Object.entries(this.config.providers || {}).map(([name, provider]) => {
+                    return Object.entries(this.providersByEnabled()).map(([name, provider]) => {
                         const q = queues[name] || {};
                         const h = health[name] || { status: 'unchecked', message: '未检测' };
                         // 已启用但该 provider 还没被记录过，等价于闭合。

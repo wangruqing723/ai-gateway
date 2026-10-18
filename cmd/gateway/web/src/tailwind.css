@@ -89,6 +89,15 @@
     ::-webkit-scrollbar-track { background: #0b0e14; }
     ::-webkit-scrollbar-thumb { background: #2d3650; border: 2px solid #0b0e14; border-radius: 999px; }
     ::-webkit-scrollbar-thumb:hover { background: #3f4a63; }
+    /* 页面内使用 overflow 工具类的滚动区默认隐藏滚动条，悬停滚动区时显示。
+       滚动条槽位宽度保持不变，避免悬停时内容横向跳动。 */
+    [class*="overflow-"] { scrollbar-width: none; scrollbar-color: transparent transparent; }
+    [class*="overflow-"]:hover { scrollbar-width: thin; scrollbar-color: #2d3650 #0b0e14; }
+    [class*="overflow-"]::-webkit-scrollbar { width: 10px; height: 10px; }
+    [class*="overflow-"]::-webkit-scrollbar-track { background: transparent; }
+    [class*="overflow-"]::-webkit-scrollbar-thumb { background: transparent; border: 2px solid transparent; border-radius: 999px; }
+    [class*="overflow-"]:hover::-webkit-scrollbar-track { background: #0b0e14; }
+    [class*="overflow-"]:hover::-webkit-scrollbar-thumb { background: #2d3650; border-color: #0b0e14; }
     /* 浏览器自带表面也要跟着设计走：原生复选框、下拉弹层、选区、光标、键盘焦点环。
        color-scheme 让原生控件与下拉弹层走深色；accent-color 把勾选态从系统亮蓝换成主色。 */
     :root { color-scheme: dark; }

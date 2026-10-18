@@ -12,6 +12,16 @@
                     return Object.keys(this.config.providers || {}).length;
                 },
 
+                enabledProviderCount() {
+                    return Object.values(this.config.providers || {})
+                        .filter((provider) => provider?.enabled !== false).length;
+                },
+
+                disabledProviderCount() {
+                    return Object.values(this.config.providers || {})
+                        .filter((provider) => provider?.enabled === false).length;
+                },
+
                 routeCount() {
                     return (this.config.routes || []).length;
                 },
@@ -300,7 +310,7 @@
                     // 熔断未启用时后端返回 breakers: null，和「全部闭合」是两种语义，
                     // 这里保留 null 往下传，由 breakerLabel 区分展示。
                     const breakers = this.health?.breakers || null;
-                    return Object.entries(this.config.providers || {}).map(([name, provider]) => {
+                    return Object.entries(this.providersByEnabled()).map(([name, provider]) => {
                         const q = queues[name] || {};
                         const h = health[name] || { status: 'unchecked', message: '未检测' };
                         // 已启用但该 provider 还没被记录过，等价于闭合。
