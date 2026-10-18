@@ -210,16 +210,34 @@
                                         <p class="mt-0.5 text-xs text-muted">按列表顺序匹配，仅首条启用且匹配的规则生效；拖动左侧把手调整顺序</p>
                                     </div>
                                     <div class="flex flex-wrap items-center gap-2">
-                                        <!-- 视图切换：紧凑模式每条规则只展示首个目标，可按需展开其余候选 -->
-                                        <div class="inline-flex rounded-lg border border-line bg-panel/70 p-0.5" role="group" aria-label="路由列表视图">
-                                            <button type="button" @click="setRouteCompactView(false)"
-                                                    class="cursor-pointer rounded-md px-2 py-1 text-xs transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan2"
-                                                    :class="routeCompactView ? 'text-muted hover:text-text' : 'bg-panel3 text-text'"
-                                                    :aria-pressed="String(!routeCompactView)">详细</button>
-                                            <button type="button" @click="setRouteCompactView(true)"
-                                                    class="cursor-pointer rounded-md px-2 py-1 text-xs transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan2"
-                                                    :class="routeCompactView ? 'bg-panel3 text-text' : 'text-muted hover:text-text'"
-                                                    :aria-pressed="String(routeCompactView)">紧凑</button>
+                                        <div x-show="routeTesterQuery" x-cloak role="status" aria-live="polite"
+                                             class="flex min-w-0 max-w-2xl flex-nowrap items-center gap-x-2 rounded-lg border px-2.5 py-1.5 text-xs"
+                                             :class="matchedRouteIndex() >= 0 ? 'border-good/40 bg-good/10 text-good' : 'border-warn/40 bg-warn/10 text-warn'"
+                                             :title="matchedRouteIndex() >= 0 ? '首条命中 #' + (matchedRouteIndex() + 1) + ' ' + (matchedTargetInfo()?.routeMatch || '') + ' · ' + routeStrategySummary() + (matchedRouteIndexes().length > 1 ? ' · 另有 ' + (matchedRouteIndexes().length - 1) + ' 条匹配但被拦截' : '') : '未匹配任何已启用规则'">
+                                            <template x-if="matchedRouteIndex() >= 0">
+                                                <svg aria-hidden="true" viewBox="0 0 20 20" fill="none" class="h-4 w-4 shrink-0">
+                                                    <circle cx="10" cy="10" r="8" stroke="currentColor" stroke-width="1.5"></circle>
+                                                    <path d="m6 10 2.5 2.5L14 7" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"></path>
+                                                </svg>
+                                            </template>
+                                            <template x-if="matchedRouteIndex() < 0">
+                                                <svg aria-hidden="true" viewBox="0 0 20 20" fill="none" class="h-4 w-4 shrink-0">
+                                                    <path d="M10 2.5 18 17H2L10 2.5Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"></path>
+                                                    <path d="M10 7v4m0 2.5v.1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"></path>
+                                                </svg>
+                                            </template>
+                                            <span x-show="matchedRouteIndex() >= 0" class="block min-w-0 truncate">
+                                                首条命中
+                                                <button type="button" @click="scrollToMatchedRoute()" class="cursor-pointer rounded-sm font-bold underline underline-offset-2 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan2"
+                                                        :title="'定位到第 ' + (matchedRouteIndex() + 1) + ' 条规则'">
+                                                    #<span x-text="matchedRouteIndex() + 1"></span>
+                                                </button>
+                                                <strong class="font-mono" x-text="matchedTargetInfo()?.routeMatch"></strong>
+                                                · <span x-text="routeStrategySummary()"></span>
+                                                <span x-show="matchedRouteIndexes().length > 1" class="ml-1 inline-flex rounded border border-warn/40 bg-warn/10 px-1.5 py-0.5 font-medium text-warn"
+                                                      x-text="'另有 ' + (matchedRouteIndexes().length - 1) + ' 条匹配但被拦截'"></span>
+                                            </span>
+                                            <span x-show="matchedRouteIndex() < 0" class="block min-w-0 truncate">未匹配任何已启用规则</span>
                                         </div>
                                         <!-- 输入具体模型名，预览首条命中与被前序规则遮蔽的规则 -->
                                         <div class="relative w-52 sm:w-60">
@@ -240,45 +258,22 @@
                                                 <span aria-hidden="true">×</span>
                                             </button>
                                         </div>
+                                        <!-- 视图切换：紧凑模式每条规则只展示首个目标，可按需展开其余候选 -->
+                                        <div class="inline-flex rounded-lg border border-line bg-panel/70 p-0.5" role="group" aria-label="路由列表视图">
+                                            <button type="button" @click="setRouteCompactView(false)"
+                                                    class="cursor-pointer rounded-md px-2 py-1 text-xs transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan2"
+                                                    :class="routeCompactView ? 'text-muted hover:text-text' : 'bg-panel3 text-text'"
+                                                    :aria-pressed="String(!routeCompactView)">详细</button>
+                                            <button type="button" @click="setRouteCompactView(true)"
+                                                    class="cursor-pointer rounded-md px-2 py-1 text-xs transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan2"
+                                                    :class="routeCompactView ? 'bg-panel3 text-text' : 'text-muted hover:text-text'"
+                                                    :aria-pressed="String(routeCompactView)">紧凑</button>
+                                        </div>
                                         <!-- 添加路由按钮 -->
                                         <button @click="addRoute()" class="btn btn-secondary h-8 px-3 text-xs">
                                             <span class="material-symbols-outlined text-[16px]">add</span>
                                             添加路由
                                         </button>
-                                    </div>
-                                </div>
-
-                                <!-- 固定高度结果区：测试态替换提示文案，避免插入横幅导致列表跳动 -->
-                                <div style="min-height:36px" class="route-match-slot mb-3.5 flex items-center rounded-lg border px-3 py-1.5 text-xs"
-                                     :style="!routeTesterQuery ? 'border-color:transparent;background:transparent' : ''"
-                                     :class="!routeTesterQuery ? 'border-transparent text-muted' : (matchedRouteIndex() >= 0 ? 'border-good/40 bg-good/10 text-good' : 'border-warn/40 bg-warn/10 text-warn')">
-                                    <div x-show="routeTesterQuery" x-cloak class="flex w-full items-center justify-between gap-3">
-                                        <div class="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-                                            <template x-if="matchedRouteIndex() >= 0">
-                                                <svg aria-hidden="true" viewBox="0 0 20 20" fill="none" class="h-4 w-4 shrink-0">
-                                                    <circle cx="10" cy="10" r="8" stroke="currentColor" stroke-width="1.5"></circle>
-                                                    <path d="m6 10 2.5 2.5L14 7" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"></path>
-                                                </svg>
-                                            </template>
-                                            <template x-if="matchedRouteIndex() < 0">
-                                                <svg aria-hidden="true" viewBox="0 0 20 20" fill="none" class="h-4 w-4 shrink-0">
-                                                    <path d="M10 2.5 18 17H2L10 2.5Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"></path>
-                                                    <path d="M10 7v4m0 2.5v.1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"></path>
-                                                </svg>
-                                            </template>
-                                            <span x-show="matchedRouteIndex() >= 0" class="min-w-0">
-                                                模型「<strong class="font-mono" x-text="routeTesterQuery"></strong>」首条命中
-                                                <button type="button" @click="scrollToMatchedRoute()" class="cursor-pointer rounded-sm font-bold underline underline-offset-2 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan2"
-                                                        :title="'定位到第 ' + (matchedRouteIndex() + 1) + ' 条规则'">
-                                                    #<span x-text="matchedRouteIndex() + 1"></span>
-                                                </button>
-                                                「<strong class="font-mono" x-text="matchedTargetInfo()?.routeMatch"></strong>」·
-                                                <span x-text="routeStrategySummary()"></span>
-                                                <span x-show="matchedRouteIndexes().length > 1" class="ml-1 inline-flex rounded border border-warn/40 bg-warn/10 px-1.5 py-0.5 font-medium text-warn"
-                                                      x-text="'另有 ' + (matchedRouteIndexes().length - 1) + ' 条匹配但被前序规则拦截'"></span>
-                                            </span>
-                                            <span x-show="matchedRouteIndex() < 0">模型「<strong class="font-mono" x-text="routeTesterQuery"></strong>」未匹配任何已启用规则</span>
-                                        </div>
                                     </div>
                                 </div>
 
