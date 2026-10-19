@@ -801,6 +801,12 @@ func responsesContentFromCanonical(content any, role string) []any {
 			if image := canonicalImageToResponses(block); image != nil {
 				out = append(out, image)
 			}
+		case "tool_reference", "tool-reference":
+			// 与 OpenAI Chat 路径的 toOpenAIContent 同口径：工具搜索（Tool Search /
+			// MCP 工具发现）场景的客户端会在 tool_result.content 里回放这种占位块，
+			// 只引用工具定义、不承载结果文本。responses 侧没有等价 part，降级成文本；
+			// 不降级的话这里会静默丢弃，tool_result 变成空内容，比报错更难查。
+			out = append(out, responsesTextPart(toolReferenceText(block), role))
 		}
 	}
 	return out
@@ -1125,6 +1131,10 @@ func validateResponsesToolResultContent(content any) error {
 			if source == nil || (getString(source, "url") == "" && getString(source, "data") == "") {
 				return fmt.Errorf("image content requires URL or base64 source")
 			}
+		case "tool_reference", "tool-reference":
+			// 与 validateOpenAIChatToolResultContent 同口径：responsesContentFromCanonical
+			// 会把它降级成 text，转换得出来就不该在这里拦。工具搜索场景的客户端会在
+			// tool_result.content 里回放这种占位块。
 		default:
 			return fmt.Errorf("tool_result %s content is unsupported", getString(block, "type"))
 		}

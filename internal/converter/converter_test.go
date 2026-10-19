@@ -864,6 +864,98 @@ func TestToolResultUnknownBlockStillRejected(t *testing.T) {
 	}
 }
 
+// responsesToolReferenceInput 构造一段含 tool_reference 占位块的 Responses 目标历史。
+// assistant 先发 ToolSearch，user 侧回放 tool_result——与真实 Claude Code 工具搜索
+// 会话的结构一致。
+func responsesToolReferenceInput(blocks []any) *Internal {
+	return &Internal{
+		Model: "any",
+		Messages: []any{
+			map[string]any{"role": "assistant", "content": []any{
+				map[string]any{"type": "tool_use", "id": "call_search", "name": "ToolSearch", "input": map[string]any{}},
+			}},
+			map[string]any{"role": "user", "content": []any{
+				map[string]any{"type": "tool_result", "tool_use_id": "call_search", "content": blocks},
+			}},
+		},
+	}
+}
+
+// TestResponsesToolResultToolReferenceDegradesToText 锁定 responses 路径与 Chat 路径
+// 同口径：工具搜索场景的 tool_reference 占位块降级成一行文本，不再让整条请求失败。
+// 修复前这里会报 "tool_result tool_reference content is unsupported" 并跳过候选
+// （实测命中 ar-ld / shangtang 这类 openai-responses 上游）。
+func TestResponsesToolResultToolReferenceDegradesToText(t *testing.T) {
+	tests := []struct {
+		name  string
+		block map[string]any
+		want  string
+	}{
+		{"toolName", map[string]any{"type": "tool_reference", "toolName": "get_weather"}, "[tool_reference: get_weather]"},
+		{"tool_name", map[string]any{"type": "tool_reference", "tool_name": "get_forecast"}, "[tool_reference: get_forecast]"},
+		{"name", map[string]any{"type": "tool_reference", "name": "get_temp"}, "[tool_reference: get_temp]"},
+		{"hyphenated", map[string]any{"type": "tool-reference", "toolName": "hyphen_tool"}, "[tool_reference: hyphen_tool]"},
+		{"no name field", map[string]any{"type": "tool_reference"}, "[tool_reference]"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body, err := ToOpenAIResponsesBodyChecked(responsesToolReferenceInput([]any{tt.block}), "responses-upstream")
+			if err != nil {
+				t.Fatalf("checked body error = %v, want nil", err)
+			}
+			input, _ := body["input"].([]any)
+			var output string
+			for _, item := range input {
+				entry, ok := item.(map[string]any)
+				if !ok || getString(entry, "type") != "function_call_output" {
+					continue
+				}
+				output, _ = entry["output"].(string)
+			}
+			if output != tt.want {
+				t.Fatalf("function_call_output.output = %q, want %q", output, tt.want)
+			}
+		})
+	}
+}
+
+// TestResponsesToolResultToolReferenceMixedWithText 覆盖 tool_reference 与真实文本
+// 混排：两者都保留，顺序不变，降级后仍以结构化的 input_text part 数组输出。
+func TestResponsesToolResultToolReferenceMixedWithText(t *testing.T) {
+	body, err := ToOpenAIResponsesBodyChecked(responsesToolReferenceInput([]any{
+		map[string]any{"type": "text", "text": "found 2 tools"},
+		map[string]any{"type": "tool_reference", "toolName": "get_weather"},
+	}), "responses-upstream")
+	if err != nil {
+		t.Fatalf("checked body error = %v, want nil", err)
+	}
+	input, _ := body["input"].([]any)
+	var parts []any
+	for _, item := range input {
+		entry, ok := item.(map[string]any)
+		if !ok || getString(entry, "type") != "function_call_output" {
+			continue
+		}
+		parts, _ = entry["output"].([]any)
+	}
+	requireJSONEqual(t, []any{
+		map[string]any{"type": "input_text", "text": "found 2 tools"},
+		map[string]any{"type": "input_text", "text": "[tool_reference: get_weather]"},
+	}, parts)
+}
+
+// TestResponsesToolResultUnknownBlockStillRejected 确认 responses 路径的放行同样
+// 只针对 tool_reference，其他不认识的 block 仍要在构建前报错。
+func TestResponsesToolResultUnknownBlockStillRejected(t *testing.T) {
+	_, err := ToOpenAIResponsesBodyChecked(responsesToolReferenceInput([]any{
+		map[string]any{"type": "some_future_block"},
+	}), "responses-upstream")
+	if err == nil || !strings.Contains(err.Error(), "some_future_block") {
+		t.Fatalf("checked body error = %v, want unsupported some_future_block", err)
+	}
+}
+
 // TestAnthropicThinkingBlocksDroppedForNonAnthropicTargets 覆盖 Claude Code 多轮历史里的
 // thinking / redacted_thinking 块：转 Chat 与 Responses 时必须丢掉（signature 是 Anthropic
 // 专有加密签名，跨厂商无法验签），同时 text 与 tool_use 必须完整保留。
