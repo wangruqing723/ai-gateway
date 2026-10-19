@@ -7,7 +7,17 @@ This file provides guidance to AI coding assistants (Claude Code, Codex, and oth
 ---
 ## 工作模式
 
-**默认**：Claude 直接处理任务，无需走协作流程，Codex 不适用该工作模式，直接处理即可。
+**默认**：直接模式——Claude 直接处理任务，不落地文档；任务命中下方触发条件时，先三选一询问处理模式。Codex 不适用该工作模式，直接处理即可。
+
+### 三种处理模式
+
+| 模式 | 落地文档（`docs/<日期>-<slug>/`） | 实现方 |
+|------|------|------|
+| 1. 文档模式 | ✅ | Claude |
+| 2. 协作模式 | ✅ | Codex |
+| 3. 直接模式 | ❌ | Claude |
+
+没有「协作但不落地文档」：`TASKS.md` 是委托 Codex 的任务依据，协作模式必须落地文档。
 
 ### 模式切换口令
 
@@ -15,16 +25,17 @@ This file provides guidance to AI coding assistants (Claude Code, Codex, and oth
 
 | 口令（用户说） | 行为 |
 |------|------|
-| `!collab` / "协作模式" / "交给 Codex"  | 强制启用协作模式：Claude 规划 → Codex 实现 |
-| `!solo` / "你来实现" / "直接写" / "不用Codex"| 强制独立模式：Claude 直接实现，不委托 Codex |
-| `!plan` / "只给我方案" / "不写代码" / "先规划"| 纯规划模式：只输出文档，不写任何代码 |
+| `!docs` / "落地文档" / "先出文档" | 强制文档模式：先落地文档，确认后 Claude 实现 |
+| `!collab` / "协作模式" / "交给 Codex"  | 强制协作模式：Claude 规划 → Codex 实现 |
+| `!solo` / "你来实现" / "直接写" / "不用Codex"| 强制直接模式：Claude 直接实现，不落地文档、不委托 Codex |
+| `!plan` / "只给我方案" / "不写代码" / "先规划"| 纯规划模式：只落地文档（建需求目录 + 出文档），不写任何代码 |
 | `!quick` / "快速给我" / "简单说"  | 快速模式：跳过分析直接给出答案或代码 |
 
 ---
 
-### 协作模式自动触发条件
+### 模式询问触发条件
 
-当任务满足以下**任意一条**时，Claude 必须先询问用户是否启用协作模式，再开始任何实质性工作：
+当任务满足以下**任意一条**时，Claude 必须先询问用户选择处理模式，再开始任何实质性工作：
 
 - 需要新建 3 个以上文件
 - 涉及多个模块、目录或架构分层的改动（如跨多个相对独立的代码单元）
@@ -34,31 +45,55 @@ This file provides guidance to AI coding assistants (Claude Code, Codex, and oth
 
 **询问格式**（固定使用以下格式，不要自由发挥）：
 
-> 这个任务比较复杂（[一句话说明原因]）。
-> 是否启用协作模式？（Claude 规划 → Codex 实现）
-> - **是**：我先输出 DESIGN.md + TASKS.md，再委托 Codex
-> - **否**：我直接处理
+> 这个任务比较复杂（[一句话说明原因]）。请选择处理方式：
+> - **1. 文档模式**：先在 `docs/<日期>-<slug>/` 落地 TASKS.md（按需 DESIGN.md），确认后我来实现
+> - **2. 协作模式**：落地文档后委托 Codex 实现（Claude 规划 → Codex 实现）
+> - **3. 直接模式**：不落地文档，我直接实现
 
 **用户回复处理规则**：
-- 回复"是"或"协作" → 进入协作模式，先输出规划文档
-- 回复"否"或"直接" → Claude 直接实现，不走委托流程
-- 未明确回复 → 再问一次，不要自行假设
+- 回复"1"或"文档" → 进入文档模式
+- 回复"2"或"协作" → 进入协作模式
+- 回复"3"或"直接" → 直接模式：Claude 直接实现，不落地文档
+- 其他回复（含旧习惯的"是 / 否"，三选一下有歧义）→ 再问一次，不要自行假设
 
 ---
 
-### 协作模式执行细节 → 见 skill
+### 不触发询问的例外（强制 · 优先于触发条件）
 
-一旦进入协作模式，**调用 skill `delegating-to-codex`**（位于 `~/.claude/skills/`）执行完整流程。
-该 skill 涵盖：架构师 / 实现工程师的职责边界、`TASKS.md` / `DESIGN.md` / `API_SPEC.md` 产出规范、
-委托前置检查、委托前确认、`/codex:rescue` 委托内容要求、`KNOWN_ISSUES.md` 格式。
+下列情况一律**禁止反问「选择处理模式」**（被委托方再问即自指递归，且委托任务必然命中触发条件）：
+
+- **被委托方 → 直接实现**：输入来自其他 agent 的委托（`codex-rescue` 子代理、任何 Agent/Task 子代理、Codex CLI 侧），或 prompt 含 `[DELEGATED]`。有设计疑问就先做能做的、疑问记 `KNOWN_ISSUES.md`，不改架构。
+- **主会话续做已有需求**（用户让按已有 `docs/<日期>-<slug>/` 继续实现）→ 按 `TASKS.md` 头部记录的实现方继续，规则见 skill。
+- **本会话已用口令选定模式**：说过 `!solo` / `!docs` / `!quick` / `!plan`。
+
+---
+
+### 文档模式 / 协作模式 / `!plan` 执行细节 → 见 skill
+
+进入文档模式、协作模式、`!plan`，或续做已有需求时，**调用 skill `delegating-to-codex`**（位于 `~/.claude/skills/`；目录名沿用旧称，现覆盖所有落地文档的流程）。
+该 skill 涵盖：需求目录与文档规范、`TASKS.md` 头部实现方、各模式流程与续做规则、
+委托前置检查、委托前确认、`/codex:rescue` 委托内容要求、`KNOWN_ISSUES.md` 格式、归档。
 
 常驻关键约束（摘要，细节以 skill 为准）：
 
+**共同（文档模式 / 协作模式 / `!plan`）**
+- 一需求一目录 `docs/<日期>-<slug>/`，不往旧文档里堆新需求。
+- `TASKS.md` **必出**，头部记录实现方；`DESIGN.md` / `API_SPEC.md` 按任务复杂度按需产出。
+- 归档由 Claude 提议、等用户确认后执行。
+
+**文档模式（Claude 实现）**
+- 落地后展示 `TASKS.md` 摘要，**等用户明确确认**才开始实现。
+- 实现中逐条勾选 `TASKS.md`；设计要调整就直接改 `DESIGN.md` 并在 `TASKS.md` 注明，不写 `KNOWN_ISSUES.md`（那是给 Codex 用的）。
+- 代码变更完成后走全局「提交确认」规则，由用户拍板 `git commit`。
+
+**协作模式（Codex 实现）**
 - Claude 只做规划与评审，**不写业务实现代码**；由 Codex 落地为可运行代码。
-- `TASKS.md` **必出**；`DESIGN.md` / `API_SPEC.md` 按任务复杂度按需产出。
 - 委托前必须先用 `/codex:setup` 检查 Codex 可用性；缺失/未认证则**停下询问用户**，不擅自实现、不重试。
-- 展示 `TASKS.md` 摘要并**等用户明确确认**后，才用 `/codex:rescue` 委托。
+- 首次委托前展示 `TASKS.md` 摘要并**等用户明确确认**，才用 `/codex:rescue` 委托；续做时用户说「继续」即视为确认（仍须先 `/codex:setup`）。
+- 委托 prompt 开头必须写：`[DELEGATED] 你是被委托的实现方，规划已完成，直接按 TASKS.md 实现，勿反问协作模式、勿重新规划`。漏写会被反问卡住。
+- 验收通过的条目由 Claude 在 `TASKS.md` 勾选（续做时据此判断剩余条目）。
 - 默认**不自动提交**；Codex 产出后走全局「提交确认」规则，由用户拍板 `git commit`。
+- 未用 worktree 时提交即止，不 cherry-pick / merge / push（详见全局「开发与提交规范」）。
 - **验收不信自述，只信实跑输出**：Codex 自报「测试全绿」不作为验收依据，Claude 必须自己在容器内跑一遍并贴出完整输出。改了 `cmd/gateway/web/src/` 的任务，还要单独确认 `webbuild -check` exit=0 —— 已连续两轮出现「改了前端源码、忘了重建 `index.html` 产物」却自报全绿的情况，`TestRepoArtifactMatchesSources` 会失败但不会被自述暴露。
 
 
