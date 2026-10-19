@@ -1,6 +1,21 @@
 # 本地开发验证配置，可直接运行：
 # docker compose -f docker-compose.dev.yml up -d
 # 继承基础服务的配置、环境变量与数据挂载；仅替换本地构建、容器名和管理端口。
+#
+# ── 与线上（docker-compose.yml / ghcr.io/...:latest）的区别 ──
+#   镜像      : ai-gateway:dev（本地构建）      vs  ghcr.io/wangruqing723/ai-gateway:latest
+#   容器名    : ai-gateway-dev                  vs  ai-gateway
+#   管理端口  : 宿主 7790                       vs  宿主 7789
+#   compose 项目名: ai-gateway-dev              vs  默认（目录名）
+#   前端      : 挂载 ./cmd/gateway/web 热加载    vs  镜像内 go:embed
+#   调试落盘  : ./data/dev（隔离，可自动清理）    vs  沿用 ./data
+#   账户数据  : ./data（与线上共享，见下）        vs  ./data
+#
+# 两套容器可同时运行：镜像、容器名、端口、compose 项目都不同，互不覆盖。
+# 唯一共享的是 ./data 里的 ChatGPT OAuth 账户数据——这是有意设计，见下方说明。
+#
+# 调试日志清理：./scripts/dev.sh down（停容器并清空 ./data/dev/*.jsonl）
+#              ./scripts/dev.sh clean（只清日志）
 name: ai-gateway-dev
 
 services:
@@ -24,7 +39,22 @@ services:
     ports: !override
       - "127.0.0.1:7790:7789"
     # 开发模式挂载前端目录并启用 SSE 热加载。
+    #
+    # 调试落盘单独走 ./data/dev，与线上共用账户数据的 ./data 分开：
+    # 两套容器共写同一个 JSONL 会互相污染，且 reqID 各自从 r00001 计数、会重复，
+    # 按 reqID 对照样本会拿到另一个容器的请求体（实测踩过）。
+    # 注意 ./data:/app/data 仍由基础配置继承，账户数据照旧共享，这里只隔离调试产物。
     volumes:
       - ./cmd/gateway/web:/app/web:ro
+      - ./data/dev:/app/data-dev
     environment:
       - AI_GATEWAY_WEB_DIR=/app/web
+      # 三个调试落盘变量都指向 ./data/dev，一个都不能漏：
+      # 基础配置里的 AI_GATEWAY_DEBUG_UPSTREAM_BODY 指向 /app/data（线上共享目录），
+      # 不改的话 dev 的 4xx/5xx 仍会写进线上那份 upstream_debug.jsonl。
+      - AI_GATEWAY_DEBUG_UPSTREAM_BODY=/app/data-dev/upstream_debug.jsonl
+      - AI_GATEWAY_DEBUG_UPSTREAM_STREAM=/app/data-dev/upstream_stream.jsonl
+      # ALL 开关会把**所有**转发尝试的请求体落盘（含 2xx），用于构造成功/失败样本对照。
+      # 体积增长很快（实测约 2 GB/小时级），用完必须关闭——
+      # 用 ./scripts/dev.sh down / clean 可自动清理 ./data/dev/*.jsonl。
+      - AI_GATEWAY_DEBUG_UPSTREAM_BODY_ALL=/app/data-dev/upstream_debug.jsonl
