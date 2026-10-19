@@ -92,10 +92,9 @@ This file provides guidance to AI coding assistants (Claude Code, Codex, and oth
 - 首次委托前展示 `TASKS.md` 摘要并**等用户明确确认**，才用 `/codex:rescue` 委托；续做时用户说「继续」即视为确认（仍须先 `/codex:setup`）。
 - 委托 prompt 开头必须写：`[DELEGATED] 你是被委托的实现方，规划已完成，直接按 TASKS.md 实现，勿反问协作模式、勿重新规划`。漏写会被反问卡住。
 - 验收通过的条目由 Claude 在 `TASKS.md` 勾选（续做时据此判断剩余条目）。
+- **验收不信自述，只信实跑输出**：Codex 自报「测试全绿」不作为验收依据，Claude 必须自己在容器内跑一遍并贴出完整输出。改了 `cmd/gateway/web/src/` 的任务，还要单独确认 `webbuild -check` exit=0 —— 已连续两轮出现「改了前端源码、忘了重建 `index.html` 产物」却自报全绿的情况，`TestRepoArtifactMatchesSources` 会失败但不会被自述暴露。
 - 默认**不自动提交**；Codex 产出后走全局「提交确认」规则，由用户拍板 `git commit`。
 - 未用 worktree 时提交即止，不 cherry-pick / merge / push（详见全局「开发与提交规范」）。
-- **验收不信自述，只信实跑输出**：Codex 自报「测试全绿」不作为验收依据，Claude 必须自己在容器内跑一遍并贴出完整输出。改了 `cmd/gateway/web/src/` 的任务，还要单独确认 `webbuild -check` exit=0 —— 已连续两轮出现「改了前端源码、忘了重建 `index.html` 产物」却自报全绿的情况，`TestRepoArtifactMatchesSources` 会失败但不会被自述暴露。
-
 
 ---
 
