@@ -1448,7 +1448,7 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 		// 在 abandonAttempt 判定之前就已赋值（proxy.go 里 recordUpstreamHeaders
 		// 先于 ShouldRetry），所以这里拿得到真实上游状态码。传输错误/超时转移时
 		// attemptStatus == 0，不进这个分支。
-		if attemptStatus >= 400 {
+		if shouldCaptureUpstreamBody(attemptStatus) {
 			captureUpstreamBody(reqID, p.Name, targetModel, attemptStatus, upstreamBody)
 		}
 		return forwardAttemptOutcome{
@@ -1516,7 +1516,7 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 			in.detail.Reason = attemptFailureReason(upstreamStatus, forwardErr)
 		}
 	}
-	if upstreamStatus >= 400 {
+	if shouldCaptureUpstreamBody(upstreamStatus) {
 		captureUpstreamBody(reqID, p.Name, targetModel, upstreamStatus, upstreamBody)
 	}
 	return forwardAttemptOutcome{
@@ -1536,6 +1536,21 @@ func setAttemptBuildError(detail *metrics.AttemptDetail, err error) {
 	detail.Error = err.Error()
 }
 
+// shouldCaptureUpstreamBody 判定本次尝试的请求体要不要落盘。
+//
+// 默认只抓 4xx/5xx：成功请求体量大且没有排查价值，全量落盘会写爆磁盘。
+// AI_GATEWAY_DEBUG_UPSTREAM_BODY_ALL 非空时放宽为「所有尝试都落盘」，用于
+// 构造「成功样本 vs 失败样本」的字段级对照——有些上游（如 znrx 的 glm-5.3）
+// 对同构请求随机返 400，只看失败样本无法区分是字段问题还是上游侧状态。
+//
+// 两个开关都为空时恒为 false，两个调用点因此不会进入 captureUpstreamBody。
+func shouldCaptureUpstreamBody(upstreamStatus int) bool {
+	if os.Getenv("AI_GATEWAY_DEBUG_UPSTREAM_BODY_ALL") != "" {
+		return true
+	}
+	return upstreamStatus >= 400
+}
+
 // captureUpstreamBody 把上游 4xx/5xx 时的转发请求体追加到 AI_GATEWAY_DEBUG_UPSTREAM_BODY
 // 指向的文件（JSONL），用于排查不指向字段的上游 400。
 //
@@ -1546,6 +1561,9 @@ func setAttemptBuildError(detail *metrics.AttemptDetail, err error) {
 //
 // env 为空（默认）时完全跳过，不影响主流程；设为输出文件路径即启用。每行一个 JSON：
 // {time, reqID, provider, targetModel, upstreamStatus, body}。写盘失败只记一行日志。
+//
+// 要有选择地落盘，调用方先用 shouldCaptureUpstreamBody 判定；本函数只负责打开
+// 文件后无脑写（env 为空时提前 return，保持零开销）。
 func captureUpstreamBody(reqID, provider, targetModel string, upstreamStatus int, body []byte) {
 	path := os.Getenv("AI_GATEWAY_DEBUG_UPSTREAM_BODY")
 	if path == "" {

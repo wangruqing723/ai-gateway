@@ -2838,6 +2838,103 @@ func TestCaptureUpstreamBodyWritesJSONLWhenEnvSet(t *testing.T) {
 	}
 }
 
+// TestShouldCaptureUpstreamBodyGatesOnEnvAndStatus 锁定判定口径：默认只抓 4xx/5xx，
+// ALL 开关非空时所有状态都抓。
+//
+// 注意本函数**只看状态码与 ALL 开关**，不看 AI_GATEWAY_DEBUG_UPSTREAM_BODY 是否设置：
+// 判定「要不要抓」与「抓到哪个文件」是两件事，后者由 captureUpstreamBody 内部
+// 的 path == "" 提前返回兜底（见 TestCaptureUpstreamBodySkipsWhenNoOutputPath）。
+func TestShouldCaptureUpstreamBodyGatesOnEnvAndStatus(t *testing.T) {
+	tests := []struct {
+		name        string
+		allEnv      string
+		status      int
+		wantCapture bool
+	}{
+		{"默认 4xx 抓", "", 400, true},
+		{"默认 5xx 抓", "", 500, true},
+		{"默认 2xx 不抓", "", 200, false},
+		{"默认 3xx 不抓", "", 302, false},
+		{"ALL 开启 2xx 也抓", "1", 200, true},
+		{"ALL 开启 4xx 照抓", "1", 400, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("AI_GATEWAY_DEBUG_UPSTREAM_BODY_ALL", tt.allEnv)
+			if got := shouldCaptureUpstreamBody(tt.status); got != tt.wantCapture {
+				t.Fatalf("shouldCaptureUpstreamBody(%d) = %v，期望 %v", tt.status, got, tt.wantCapture)
+			}
+		})
+	}
+}
+
+// TestCaptureUpstreamBodySkipsWhenNoOutputPath 锁定职责分离：即使判定层说「要抓」
+// （ALL 开关开着、状态码也够格），只要 AI_GATEWAY_DEBUG_UPSTREAM_BODY 为空，
+// captureUpstreamBody 就不写任何文件、也不报错。
+func TestCaptureUpstreamBodySkipsWhenNoOutputPath(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "upstream_debug.jsonl")
+	t.Setenv("AI_GATEWAY_DEBUG_UPSTREAM_BODY", "")
+	t.Setenv("AI_GATEWAY_DEBUG_UPSTREAM_BODY_ALL", "1")
+
+	// 判定层为 true（ALL 开着），但无输出路径，落盘函数应静默跳过。
+	if !shouldCaptureUpstreamBody(200) {
+		t.Fatal("ALL 开关开启时判定层应为 true")
+	}
+	captureUpstreamBody("r00395", "znrx", "glm-5.3", 200, []byte(`{"model":"glm-5.3"}`))
+
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("无输出路径时不应创建文件，stat err = %v", err)
+	}
+}
+
+// TestCaptureUpstreamBodyAllEnvCapturesSuccess 端到端一条：ALL 开关开启后，
+// 2xx 成功的请求体也会落盘——这正是对照「成功样本 vs 400 样本」的前提。
+func TestCaptureUpstreamBodyAllEnvCapturesSuccess(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "upstream_debug.jsonl")
+	t.Setenv("AI_GATEWAY_DEBUG_UPSTREAM_BODY", path)
+	t.Setenv("AI_GATEWAY_DEBUG_UPSTREAM_BODY_ALL", "1")
+
+	body := []byte(`{"model":"glm-5.3","stream":false,"messages":[{"role":"user","content":"hi"}]}`)
+	if !shouldCaptureUpstreamBody(200) {
+		t.Fatal("ALL 开关开启时 2xx 应判定为需落盘")
+	}
+	captureUpstreamBody("r00393", "znrx", "glm-5.3", 200, body)
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("抓包文件未生成: %v", err)
+	}
+	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("期望 1 行 JSONL，得到 %d 行: %q", len(lines), string(data))
+	}
+	var rec map[string]any
+	if err := json.Unmarshal([]byte(lines[0]), &rec); err != nil {
+		t.Fatalf("JSONL 行解析失败: %v", err)
+	}
+	if rec["reqID"] != "r00393" || rec["provider"] != "znrx" {
+		t.Fatalf("抓包元数据不符: %#v", rec)
+	}
+	if got := int(rec["upstreamStatus"].(float64)); got != 200 {
+		t.Fatalf("upstreamStatus = %v，期望 200", got)
+	}
+
+	// 关掉 ALL 后 2xx 不再落盘，4xx 仍落盘（原有行为不回归）。
+	t.Setenv("AI_GATEWAY_DEBUG_UPSTREAM_BODY_ALL", "")
+	if shouldCaptureUpstreamBody(200) {
+		t.Fatal("ALL 开关关闭时 2xx 不应判定为需落盘")
+	}
+	if !shouldCaptureUpstreamBody(400) {
+		t.Fatal("ALL 开关关闭时 4xx 仍应落盘")
+	}
+	captureUpstreamBody("r00394", "znrx", "glm-5.3", 400, body)
+	data2, _ := os.ReadFile(path)
+	if strings.Count(string(data2), "\n") != 2 {
+		t.Fatalf("关闭 ALL 后 4xx 应继续落盘，得到 %q", string(data2))
+	}
+}
+
 func TestCaptureUpstreamStreamWritesJSONLWhenEnvSet(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "upstream_stream.jsonl")
 	t.Setenv("AI_GATEWAY_DEBUG_UPSTREAM_STREAM", path)
