@@ -641,23 +641,57 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		reqLog.VisionFailMessage = "vision provider 已禁用，跳过图片翻译"
 	}
 
-	// 协议规范化失败且没有任何候选是同格式（同格式走原样透传，不需要 canonical 重建）
-	// —— 此时无论试哪个候选都会失败，必须在 vision 之前返回：视觉翻译是一次真实的
-	// 上游调用，放在后面等于先花钱再拒绝。单候选时代这条检查就在 vision 之前，
-	// 多候选下的等价条件是「所有候选都不是透传」。
-	if internal.Err != nil {
-		anyPassthrough := false
-		for _, candidate := range matched.Candidates {
-			if converter.IsPassthrough(candidate.Provider.Format, clientFormat) {
-				anyPassthrough = true
-				break
+	// 目标格式兼容性只由客户端请求和目标协议决定，与 provider 地址、模型名无关。
+	// 同格式透传保留原始请求体，不做 canonical 校验；其他格式每种只预检一次。
+	conversionErrors := make(map[string]error)
+	checkedFormats := make(map[string]struct{})
+	hasCompatibleFormat := false
+	var firstConversionErr error
+	for _, candidate := range matched.Candidates {
+		format := candidate.Provider.Format
+		if converter.IsPassthrough(format, clientFormat) {
+			hasCompatibleFormat = true
+			continue
+		}
+		if _, checked := checkedFormats[format]; !checked {
+			checkedFormats[format] = struct{}{}
+			conversionErrors[format] = converter.ValidateTargetCompatibility(internal, format)
+		}
+		if err := conversionErrors[format]; err != nil {
+			if firstConversionErr == nil {
+				firstConversionErr = err
 			}
+			continue
 		}
-		if !anyPassthrough {
-			reqLog.Error = "请求协议转换失败: " + internal.Err.Error()
-			writeJSONError(w, http.StatusBadRequest, "conversion_error", reqLog.Error)
-			return
+		hasCompatibleFormat = true
+	}
+	if !hasCompatibleFormat {
+		trail := make([]string, 0, len(matched.Candidates))
+		for index, candidate := range matched.Candidates {
+			err := conversionErrors[candidate.Provider.Format]
+			if err == nil {
+				err = firstConversionErr
+			}
+			started := time.Now()
+			detail := metrics.AttemptDetail{
+				Sequence:       index + 1,
+				Provider:       candidate.Provider.Name,
+				TargetModel:    candidate.TargetModel,
+				ProviderFormat: candidate.Provider.Format,
+				StartedAt:      started.In(beijingLoc).Format(time.RFC3339Nano),
+				Outcome:        "build_error",
+			}
+			setAttemptBuildError(&detail, err)
+			detail.DurationMs = time.Since(started).Milliseconds()
+			reqLog.AttemptDetails = append(reqLog.AttemptDetails, detail)
+			trail = append(trail, candidate.Provider.Name+":build_error")
 		}
+		reqLog.Attempts = 0
+		reqLog.AttemptTrail = strings.Join(trail, " → ")
+		reqLog.Error = "请求协议转换失败: " + firstConversionErr.Error()
+		logf(reqID, "  所有目标格式均不兼容，返回 conversion_error: %s", firstConversionErr)
+		writeJSONError(w, http.StatusBadRequest, "conversion_error", reqLog.Error)
+		return
 	}
 
 	// 粘性键必须在 vision 翻译之前算：翻译会把图片块换成文字描述，
@@ -772,6 +806,27 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
+		// 目标协议不兼容是本地跳过：不占真实尝试额度，也不借用熔断探针。
+		if err := conversionErrors[candidate.Provider.Format]; err != nil {
+			buildErr = err.Error()
+			trail = append(trail, name+":build_error")
+			nextDetailSequence++
+			started := time.Now()
+			detail := metrics.AttemptDetail{
+				Sequence:       nextDetailSequence,
+				Provider:       name,
+				TargetModel:    candidate.TargetModel,
+				ProviderFormat: candidate.Provider.Format,
+				StartedAt:      started.In(beijingLoc).Format(time.RFC3339Nano),
+				Outcome:        "build_error",
+			}
+			setAttemptBuildError(&detail, err)
+			detail.DurationMs = time.Since(started).Milliseconds()
+			reqLog.AttemptDetails = append(reqLog.AttemptDetails, detail)
+			logf(reqID, "  候选 %s 目标格式不兼容，跳过: %s", name, err)
+			continue
+		}
+
 		// 熔断过滤：开路的 provider 直接跳过，不占用尝试额度
 		if s.breaker != nil {
 			allowed, retryAfter := s.breaker.Allow(name)
@@ -826,7 +881,15 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// 是否还有后续候选可试：额度未用尽且 order 里后面还有候选
-		hasNext := attempts+1 < attemptLimit && pos+1 < len(order)
+		hasCompatibleNext := false
+		for nextPos := pos + 1; nextPos < len(order); nextPos++ {
+			next := matched.Candidates[order[nextPos]]
+			if conversionErrors[next.Provider.Format] == nil {
+				hasCompatibleNext = true
+				break
+			}
+		}
+		hasNext := attempts+1 < attemptLimit && hasCompatibleNext
 		localRetriesRemaining := candidate.LocalRetryMax
 		localRetryAttempt := false
 		var outcome forwardAttemptOutcome
@@ -843,22 +906,23 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 			}
 
 			outcome = s.forwardAttempt(w, r, forwardAttemptInput{
-				cfg:                   cfg,
-				reqID:                 reqID,
-				start:                 start,
-				clientFormat:          clientFormat,
-				originalModel:         model,
-				internal:              internal,
-				rawBody:               body,
-				needVision:            needVision,
-				candidate:             candidate,
-				contextBudget:         contextBudget,
-				allowFailoverTransfer: hasNext,
-				allowLocalRetry:       localRetriesRemaining > 0,
-				attemptNo:             attempts + 1,
-				httpAttemptNo:         nextHTTPAttemptNo + 1,
-				reqLog:                &reqLog,
-				detail:                &detail,
+				cfg:                             cfg,
+				reqID:                           reqID,
+				start:                           start,
+				clientFormat:                    clientFormat,
+				originalModel:                   model,
+				internal:                        internal,
+				targetCompatibilityPrevalidated: true,
+				rawBody:                         body,
+				needVision:                      needVision,
+				candidate:                       candidate,
+				contextBudget:                   contextBudget,
+				allowFailoverTransfer:           hasNext,
+				allowLocalRetry:                 localRetriesRemaining > 0,
+				attemptNo:                       attempts + 1,
+				httpAttemptNo:                   nextHTTPAttemptNo + 1,
+				reqLog:                          &reqLog,
+				detail:                          &detail,
 			})
 			detail.DurationMs = time.Since(attemptStarted).Milliseconds()
 			reqLog.AttemptDetails = append(reqLog.AttemptDetails, detail)
@@ -1069,9 +1133,11 @@ type forwardAttemptInput struct {
 	clientFormat  string
 	originalModel string
 	internal      *converter.Internal
-	rawBody       map[string]any
-	needVision    bool
-	candidate     router.Candidate
+	// targetCompatibilityPrevalidated 表示 handle 已在候选循环前完成按格式预检。
+	targetCompatibilityPrevalidated bool
+	rawBody                         map[string]any
+	needVision                      bool
+	candidate                       router.Candidate
 	// contextBudget 本次允许的输出上限硬顶，0 表示不限制。
 	contextBudget int
 	attemptNo     int // 从 1 开始，用于 x-ai-gateway-attempts
@@ -1149,6 +1215,15 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 				translated = converter.ToOpenAIResponsesBody(in.internal, targetModel)
 				upstreamMap["input"] = mergeTranslatedResponsesInput(in.rawBody["input"], translated["input"])
 			}
+		}
+	} else if in.targetCompatibilityPrevalidated {
+		switch p.Format {
+		case "anthropic":
+			upstreamMap = converter.ToAnthropicBody(in.internal, targetModel)
+		case "openai":
+			upstreamMap = converter.ToOpenAIChatBody(in.internal, targetModel)
+		default:
+			upstreamMap = converter.ToOpenAIResponsesBody(in.internal, targetModel)
 		}
 	} else if p.Format == "anthropic" {
 		upstreamMap, err = converter.ToAnthropicBodyChecked(in.internal, targetModel)

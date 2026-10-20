@@ -263,16 +263,7 @@ func ToAnthropicBody(in *Internal, targetModel string) map[string]any {
 
 // ToAnthropicBodyChecked 在生成 Anthropic 请求体前检查 normalization 与目标协议约束。
 func ToAnthropicBodyChecked(in *Internal, targetModel string) (map[string]any, error) {
-	if in == nil {
-		return nil, fmt.Errorf("internal request is nil")
-	}
-	if in.Err != nil {
-		return nil, fmt.Errorf("request normalization failed: %w", in.Err)
-	}
-	if err := validateAnthropicTargetMessages(in.Messages); err != nil {
-		return nil, err
-	}
-	if err := validateAnthropicTargetExtras(in.Extra); err != nil {
+	if err := ValidateTargetCompatibility(in, "anthropic"); err != nil {
 		return nil, err
 	}
 	return ToAnthropicBody(in, targetModel), nil
@@ -325,16 +316,7 @@ func ToOpenAIChatBody(in *Internal, targetModel string) map[string]any {
 
 // ToOpenAIChatBodyChecked 在生成 Chat 请求体前检查 normalization 与目标协议约束。
 func ToOpenAIChatBodyChecked(in *Internal, targetModel string) (map[string]any, error) {
-	if in == nil {
-		return nil, fmt.Errorf("internal request is nil")
-	}
-	if in.Err != nil {
-		return nil, fmt.Errorf("request normalization failed: %w", in.Err)
-	}
-	if err := validateOpenAIChatTargetMessages(in.Messages); err != nil {
-		return nil, err
-	}
-	if err := validateOpenAIChatTargetExtras(in.Extra); err != nil {
+	if err := ValidateTargetCompatibility(in, "openai"); err != nil {
 		return nil, err
 	}
 	return ToOpenAIChatBody(in, targetModel), nil
@@ -372,19 +354,46 @@ func ToOpenAIResponsesBody(in *Internal, targetModel string) map[string]any {
 // Responses 专属字段的兼容边界。跨协议转换宁可返回 conversion_error，也不静默丢掉
 // 会改变会话状态或工具语义的字段。
 func ToOpenAIResponsesBodyChecked(in *Internal, targetModel string) (map[string]any, error) {
-	if in == nil {
-		return nil, fmt.Errorf("internal request is nil")
-	}
-	if in.Err != nil {
-		return nil, fmt.Errorf("request normalization failed: %w", in.Err)
-	}
-	if err := validateResponsesTargetMessages(in.Messages); err != nil {
-		return nil, err
-	}
-	if err := validateResponsesTargetExtras(in.Extra); err != nil {
+	if err := ValidateTargetCompatibility(in, "openai-responses"); err != nil {
 		return nil, err
 	}
 	return ToOpenAIResponsesBody(in, targetModel), nil
+}
+
+// ValidateTargetCompatibility 检查内部请求是否能无损投影到目标协议。
+// 网关可在候选循环前按唯一目标格式预检，避免对同一请求重复执行相同的本地校验。
+func ValidateTargetCompatibility(in *Internal, targetFormat string) error {
+	if in == nil {
+		return fmt.Errorf("internal request is nil")
+	}
+	if in.Err != nil {
+		return fmt.Errorf("request normalization failed: %w", in.Err)
+	}
+	switch targetFormat {
+	case "anthropic":
+		if err := validateAnthropicTargetMessages(in.Messages); err != nil {
+			return err
+		}
+		return validateAnthropicTargetExtras(in.Extra)
+	case "openai":
+		if err := validateOpenAIChatTargetMessages(in.Messages); err != nil {
+			return err
+		}
+		if err := validateToolAdditionReferences(in.Messages, in.Tools); err != nil {
+			return err
+		}
+		return validateOpenAIChatTargetExtras(in.Extra)
+	case "openai-responses":
+		if err := validateResponsesTargetMessages(in.Messages); err != nil {
+			return err
+		}
+		if err := validateToolAdditionReferences(in.Messages, in.Tools); err != nil {
+			return err
+		}
+		return validateResponsesTargetExtras(in.Extra)
+	default:
+		return fmt.Errorf("unsupported target format %q", targetFormat)
+	}
 }
 
 // OverrideMaxTokens 按 provider 格式改写上游请求体里的输出上限字段。
@@ -756,6 +765,8 @@ func responsesInputFromMessages(messages []any) []any {
 				continue
 			}
 			switch getString(block, "type") {
+			case "tool_addition":
+				// 已验证引用并由请求级 tools 承载 schema，无需生成消息内容。
 			case "tool_use":
 				flushOrdinary()
 				out = append(out, map[string]any{
@@ -972,12 +983,57 @@ func validateAnthropicMessages(messages []any) error {
 				if ordinaryBeforeResult {
 					conversionErr = errors.Join(conversionErr, fmt.Errorf("anthropic message %d tool_result order cannot be represented in OpenAI Chat", messageIndex))
 				}
+			case "tool_addition":
+				// 会话控制元数据不承载消息内容，也不改变 tool_result 的顺序约束。
 			default:
 				ordinaryBeforeResult = true
 			}
 		}
 	}
 	return conversionErr
+}
+
+// validateToolAdditionReferences 校验 Anthropic 会话中的工具可用性元数据。
+// OpenAI 请求级 tools 会携带完整 schema，因此只接受指向已声明工具的引用。
+func validateToolAdditionReferences(messages []any, tools any) error {
+	declared := make(map[string]struct{})
+	if toolList, ok := tools.([]any); ok {
+		for _, value := range toolList {
+			tool, ok := value.(map[string]any)
+			if !ok {
+				continue
+			}
+			if name := getString(tool, "name"); name != "" {
+				declared[name] = struct{}{}
+			}
+		}
+	}
+
+	for messageIndex, value := range messages {
+		message, ok := value.(map[string]any)
+		if !ok {
+			continue
+		}
+		blocks, _ := message["content"].([]any)
+		for blockIndex, value := range blocks {
+			block, ok := value.(map[string]any)
+			if !ok || getString(block, "type") != "tool_addition" {
+				continue
+			}
+			reference, ok := block["tool"].(map[string]any)
+			if !ok || getString(reference, "type") != "tool_reference" {
+				return fmt.Errorf("anthropic message %d tool_addition block %d must contain a tool_reference", messageIndex, blockIndex)
+			}
+			name := getString(reference, "name")
+			if name == "" {
+				return fmt.Errorf("anthropic message %d tool_addition block %d tool_reference is missing name", messageIndex, blockIndex)
+			}
+			if _, ok := declared[name]; !ok {
+				return fmt.Errorf("anthropic message %d tool_addition block %d references undeclared tool %q", messageIndex, blockIndex, name)
+			}
+		}
+	}
+	return nil
 }
 
 func validateAnthropicTargetMessages(messages []any) error {
@@ -1035,6 +1091,8 @@ func validateOpenAIChatTargetMessages(messages []any) error {
 			}
 			switch getString(block, "type") {
 			case "text":
+			case "tool_addition":
+				// 引用结构与 schema 在目标兼容性预检中统一校验。
 			// 思考块在 canonicalMessageToOpenAIChat 里会被丢弃，这里必须放行：
 			// 校验跑在构建之前，不放行的话 Claude Code 的多轮历史永远转不过去。
 			case "thinking", "redacted_thinking":
@@ -1084,6 +1142,8 @@ func validateResponsesTargetMessages(messages []any) error {
 			}
 			switch getString(block, "type") {
 			case "text":
+			case "tool_addition":
+				// 引用结构与 schema 在目标兼容性预检中统一校验。
 			// 思考块在 responsesInputFromMessages 里会被丢弃，这里必须放行：
 			// 校验跑在构建之前，不放行的话 Claude Code 的多轮历史永远转不过去。
 			case "thinking", "redacted_thinking":
@@ -1724,6 +1784,9 @@ func canonicalMessageToOpenAIChat(message map[string]any) []any {
 		}
 		for _, value := range blocks {
 			block, ok := value.(map[string]any)
+			if ok && getString(block, "type") == "tool_addition" {
+				continue
+			}
 			if ok && getString(block, "type") == "tool_result" {
 				flushOrdinary()
 				out = append(out, map[string]any{
@@ -1759,6 +1822,8 @@ func canonicalMessageToOpenAIChat(message map[string]any) []any {
 					"arguments": marshalFunctionArguments(block["input"]),
 				},
 			})
+		case "tool_addition":
+			// 已在兼容性检查中验证引用，工具 schema 保留在请求级 tools。
 		default:
 			ordinary = append(ordinary, block)
 		}
