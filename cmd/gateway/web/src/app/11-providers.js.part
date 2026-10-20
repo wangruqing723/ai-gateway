@@ -224,13 +224,6 @@
                     return { label: '', valueClass: 'text-white', badgeClass: '' };
                 },
 
-                goToChatGPTProviderList() {
-                    this.$nextTick(() => {
-                        const behavior = window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth';
-                        this.$refs.chatGPTProviderList?.scrollIntoView({ behavior, block: 'start' });
-                    });
-                },
-
                 formatUsageWindowName(window) {
                     const parts = String(window?.name || '用量').trim().split(/\s+/);
                     const kind = parts.pop();
@@ -540,17 +533,19 @@
                     }
                 },
 
-                addProvider() {
+                // 从 ChatGPT 账户列表发起时，直接预选 OAuth 类型与账户，省去跳回列表后的重复选择。
+                addProvider(chatGPTAccount = null) {
+                    const selectedChatGPTAccount = chatGPTAccount?.status === 'ready' ? chatGPTAccount : null;
                     this.editingProvider = null;
                     this.probingProvider = false;
                     this.providerProbeStatus = null;
                     this.providerForm = {
                         name: '',
-                        baseUrl: '',
+                        baseUrl: selectedChatGPTAccount ? 'https://chatgpt.com/backend-api/codex' : '',
                         apiKey: '',
-                        format: 'anthropic',
-                        authType: '',
-                        accountId: '',
+                        format: selectedChatGPTAccount ? 'openai-responses' : 'anthropic',
+                        authType: selectedChatGPTAccount ? 'chatgptOAuth' : '',
+                        accountId: selectedChatGPTAccount?.id || '',
                         maxConcurrent: 5,
                         maxPerSecond: 0,
                         maxQueueWait: 30000,

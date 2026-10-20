@@ -1153,7 +1153,12 @@
                                                         <div class="flex min-w-0 flex-wrap items-center gap-2 text-xs" :title="Array.isArray(account.providers) && account.providers.length > 0 ? '绑定 Provider：' + account.providers.join(', ') : '未绑定 Provider'">
                                                             <span class="h-1.5 w-1.5 shrink-0 rounded-full" :class="Array.isArray(account.providers) && account.providers.length > 0 ? 'bg-good' : 'bg-line'"></span>
                                                             <span class="min-w-0 truncate" :class="Array.isArray(account.providers) && account.providers.length > 0 ? 'font-mono text-text' : 'text-muted'" x-text="Array.isArray(account.providers) && account.providers.length > 0 ? account.providers.join(', ') : '未绑定'"></span>
-                                                            <button x-show="!Array.isArray(account.providers) || account.providers.length === 0" type="button" @click.stop="goToChatGPTProviderList()" class="shrink-0 cursor-pointer rounded text-cyan transition hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan2" title="跳转到 Provider 列表" aria-label="前往 Provider 列表绑定账户">去绑定</button>
+                                                            <button type="button" @click.stop="addProvider(account)"
+                                                                    :disabled="account.status !== 'ready' || loading"
+                                                                    :title="account.status !== 'ready' ? '请先重新授权此账户，再创建 Provider' : (Array.isArray(account.providers) && account.providers.length > 0 ? '使用此账户新建另一个 Provider' : '创建 Provider 并绑定此账户')"
+                                                                    :aria-label="account.status !== 'ready' ? '账户需要重新授权后才能绑定 Provider' : (Array.isArray(account.providers) && account.providers.length > 0 ? '使用此 ChatGPT 账户新增 Provider' : '创建 Provider 并绑定此 ChatGPT 账户')"
+                                                                    class="shrink-0 cursor-pointer rounded text-cyan transition hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan2 disabled:cursor-not-allowed disabled:opacity-40"
+                                                                    x-text="account.status !== 'ready' ? '需授权' : (Array.isArray(account.providers) && account.providers.length > 0 ? '新增' : '创建')"></button>
                                                         </div>
                                                     </td>
                                                     <td class="px-4 py-2.5" @click.stop @keydown.stop>
@@ -5688,13 +5693,6 @@
                     return { label: '', valueClass: 'text-white', badgeClass: '' };
                 },
 
-                goToChatGPTProviderList() {
-                    this.$nextTick(() => {
-                        const behavior = window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth';
-                        this.$refs.chatGPTProviderList?.scrollIntoView({ behavior, block: 'start' });
-                    });
-                },
-
                 formatUsageWindowName(window) {
                     const parts = String(window?.name || '用量').trim().split(/\s+/);
                     const kind = parts.pop();
@@ -6004,17 +6002,19 @@
                     }
                 },
 
-                addProvider() {
+                // 从 ChatGPT 账户列表发起时，直接预选 OAuth 类型与账户，省去跳回列表后的重复选择。
+                addProvider(chatGPTAccount = null) {
+                    const selectedChatGPTAccount = chatGPTAccount?.status === 'ready' ? chatGPTAccount : null;
                     this.editingProvider = null;
                     this.probingProvider = false;
                     this.providerProbeStatus = null;
                     this.providerForm = {
                         name: '',
-                        baseUrl: '',
+                        baseUrl: selectedChatGPTAccount ? 'https://chatgpt.com/backend-api/codex' : '',
                         apiKey: '',
-                        format: 'anthropic',
-                        authType: '',
-                        accountId: '',
+                        format: selectedChatGPTAccount ? 'openai-responses' : 'anthropic',
+                        authType: selectedChatGPTAccount ? 'chatgptOAuth' : '',
+                        accountId: selectedChatGPTAccount?.id || '',
                         maxConcurrent: 5,
                         maxPerSecond: 0,
                         maxQueueWait: 30000,
