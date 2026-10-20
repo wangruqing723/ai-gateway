@@ -96,6 +96,103 @@ func TestAnthropicRequestToResponsesMapsMessagesToolsAndImages(t *testing.T) {
 	}
 }
 
+func TestAnthropicToolAdditionProjectsToOpenAITargets(t *testing.T) {
+	tool := func(name string) map[string]any {
+		return map[string]any{"name": name, "input_schema": map[string]any{"type": "object"}}
+	}
+	reference := func(name string) map[string]any {
+		return map[string]any{"type": "tool_addition", "tool": map[string]any{"type": "tool_reference", "name": name}}
+	}
+	in := FromAnthropic(map[string]any{
+		"messages": []any{map[string]any{"role": "assistant", "content": []any{
+			map[string]any{"type": "text", "text": "before"},
+			reference("tool_one"),
+			reference("tool_two"),
+			map[string]any{"type": "text", "text": "after"},
+		}}},
+		"tools": []any{tool("tool_one"), tool("tool_two")},
+	})
+
+	tests := []struct {
+		name  string
+		build func(*Internal) (map[string]any, error)
+	}{
+		{name: "openai chat", build: func(in *Internal) (map[string]any, error) { return ToOpenAIChatBodyChecked(in, "upstream") }},
+		{name: "openai responses", build: func(in *Internal) (map[string]any, error) { return ToOpenAIResponsesBodyChecked(in, "upstream") }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body, err := tt.build(in)
+			if err != nil {
+				t.Fatalf("tool_addition 转换失败：%v", err)
+			}
+			encoded, err := json.Marshal(body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(encoded), "tool_addition") || strings.Contains(string(encoded), "tool_reference") {
+				t.Fatalf("工具可用性元数据泄漏到请求体：%s", encoded)
+			}
+			if !strings.Contains(string(encoded), "before") || !strings.Contains(string(encoded), "after") {
+				t.Fatalf("普通消息内容丢失：%s", encoded)
+			}
+			tools, ok := body["tools"].([]any)
+			if !ok || len(tools) != 2 {
+				t.Fatalf("请求级工具定义 = %#v，期望保留两个 schema", body["tools"])
+			}
+		})
+	}
+}
+
+func TestAnthropicToolAdditionRequiresDeclaredToolReference(t *testing.T) {
+	in := FromAnthropic(map[string]any{
+		"messages": []any{map[string]any{"role": "assistant", "content": []any{
+			map[string]any{"type": "tool_addition", "tool": map[string]any{"type": "tool_reference", "name": "missing_tool"}},
+		}}},
+		"tools": []any{map[string]any{"name": "declared_tool", "input_schema": map[string]any{"type": "object"}}},
+	})
+
+	for _, tt := range []struct {
+		name  string
+		build func(*Internal) (map[string]any, error)
+	}{
+		{name: "openai chat", build: func(in *Internal) (map[string]any, error) { return ToOpenAIChatBodyChecked(in, "upstream") }},
+		{name: "openai responses", build: func(in *Internal) (map[string]any, error) { return ToOpenAIResponsesBodyChecked(in, "upstream") }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := tt.build(in); err == nil || !strings.Contains(err.Error(), "missing_tool") {
+				t.Fatalf("错误 = %v，期望明确指出未声明的工具引用", err)
+			}
+		})
+	}
+}
+
+func TestAnthropicToolAdditionRejectsUnknownReferenceShape(t *testing.T) {
+	for _, block := range []map[string]any{
+		{"type": "tool_addition"},
+		{"type": "tool_addition", "tool": map[string]any{"type": "tool_input", "name": "tool_one"}},
+		{"type": "tool_addition", "tool": map[string]any{"type": "tool_reference"}},
+	} {
+		in := FromAnthropic(map[string]any{
+			"messages": []any{map[string]any{"role": "assistant", "content": []any{block}}},
+			"tools":    []any{map[string]any{"name": "tool_one", "input_schema": map[string]any{"type": "object"}}},
+		})
+		for _, tt := range []struct {
+			name  string
+			build func(*Internal) (map[string]any, error)
+		}{
+			{name: "openai chat", build: func(in *Internal) (map[string]any, error) { return ToOpenAIChatBodyChecked(in, "upstream") }},
+			{name: "openai responses", build: func(in *Internal) (map[string]any, error) { return ToOpenAIResponsesBodyChecked(in, "upstream") }},
+		} {
+			t.Run(tt.name, func(t *testing.T) {
+				if _, err := tt.build(in); err == nil || !strings.Contains(err.Error(), "tool_addition") {
+					t.Fatalf("错误 = %v，期望明确指出未知的 tool_addition 结构", err)
+				}
+			})
+		}
+	}
+}
+
 func TestResponsesRequestMapsChatResponseFormatAndReasoningEffort(t *testing.T) {
 	in := FromOpenAIChat(map[string]any{
 		"messages": []any{map[string]any{"role": "user", "content": "json please"}},

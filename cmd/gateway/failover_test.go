@@ -224,6 +224,166 @@ func TestFailoverCanTransferBetweenChatAndResponsesProviders(t *testing.T) {
 	}
 }
 
+func TestCompatibilityPreflightSkipsIncompatibleFormatAndUsesPassthrough(t *testing.T) {
+	var responsesHits, chatHits atomic.Int32
+	responses := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		responsesHits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, responsesOKBody)
+	}))
+	defer responses.Close()
+	chat := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		chatHits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, openaiOKBody)
+	}))
+	defer chat.Close()
+
+	providers := map[string]*config.Provider{
+		"responses": {Name: "responses", BaseURL: responses.URL, Format: "openai-responses", MaxConcurrent: 1, MaxQueueWait: 1000},
+		"chat":      {Name: "chat", BaseURL: chat.URL, Format: "openai", MaxConcurrent: 1, MaxQueueWait: 1000},
+	}
+	srv := newFailoverTestServer(providers, config.Route{Match: "*", Targets: []config.Target{
+		{Provider: "responses", Model: "gpt-responses"},
+		{Provider: "chat", Model: "gpt-chat"},
+	}}, chat.Client(), defaultTestFailover())
+
+	recorder := postInference(srv, "/v1/chat/completions",
+		`{"model":"client-model","n":2,"messages":[{"role":"user","content":"hi"}]}`)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status/body = %d/%s", recorder.Code, recorder.Body.String())
+	}
+	if responsesHits.Load() != 0 || chatHits.Load() != 1 {
+		t.Fatalf("上游命中 responses/chat = %d/%d，期望只调用可透传的 Chat 候选", responsesHits.Load(), chatHits.Load())
+	}
+	entry := srv.metrics.Logs(metrics.LogFilter{Limit: 1})[0]
+	if entry.Attempts != 1 || len(entry.AttemptDetails) != 2 {
+		t.Fatalf("Attempts/AttemptDetails = %d/%#v，格式跳过不应消耗额度", entry.Attempts, entry.AttemptDetails)
+	}
+	if first := entry.AttemptDetails[0]; first.Provider != "responses" || first.Kind != "build_skip" || first.Outcome != "build_error" || first.Reason != "conversion_error" {
+		t.Fatalf("不兼容候选明细 = %#v", first)
+	}
+	if second := entry.AttemptDetails[1]; second.Provider != "chat" || second.Outcome != "success" {
+		t.Fatalf("透传候选明细 = %#v", second)
+	}
+}
+
+func TestIncompatibleLaterCandidateDoesNotTriggerFailoverFromLastCompatible429(t *testing.T) {
+	var chatHits, responsesHits atomic.Int32
+	chat := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		chatHits.Add(1)
+		w.Header().Set("Retry-After", "1")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = io.WriteString(w, `{"error":"rate limited"}`)
+	}))
+	defer chat.Close()
+	responses := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		responsesHits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, responsesOKBody)
+	}))
+	defer responses.Close()
+	providers := map[string]*config.Provider{
+		"chat":      {Name: "chat", BaseURL: chat.URL, Format: "openai", MaxConcurrent: 1, MaxQueueWait: 1000},
+		"responses": {Name: "responses", BaseURL: responses.URL, Format: "openai-responses", MaxConcurrent: 1, MaxQueueWait: 1000},
+	}
+	route := config.Route{Match: "*", Targets: []config.Target{
+		{Provider: "chat", Model: "gpt-chat"},
+		{Provider: "responses", Model: "gpt-responses"},
+	}}
+	srv := newFailoverTestServer(providers, route, chat.Client(), defaultTestFailover())
+
+	recorder := postInference(srv, "/v1/chat/completions",
+		`{"model":"client-model","n":2,"messages":[{"role":"user","content":"hi"}]}`)
+	if recorder.Code != http.StatusTooManyRequests {
+		t.Fatalf("status/body = %d/%s，最后一个兼容候选的 429 应保持上游语义", recorder.Code, recorder.Body.String())
+	}
+	if chatHits.Load() != 1 || responsesHits.Load() != 0 {
+		t.Fatalf("上游命中 chat/responses = %d/%d，期望不转移到不兼容候选", chatHits.Load(), responsesHits.Load())
+	}
+	entry := srv.metrics.Logs(metrics.LogFilter{Limit: 1})[0]
+	if entry.Attempts != 1 || len(entry.AttemptDetails) != 1 {
+		t.Fatalf("Attempts/AttemptDetails = %d/%#v", entry.Attempts, entry.AttemptDetails)
+	}
+}
+
+func TestCompatibilityPreflightReturnsOneConversionErrorWhenAllFormatsFail(t *testing.T) {
+	var hits atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, responsesOKBody)
+	}))
+	defer upstream.Close()
+	providers := map[string]*config.Provider{
+		"responses-a": {Name: "responses-a", BaseURL: upstream.URL, Format: "openai-responses", MaxConcurrent: 1, MaxQueueWait: 1000},
+		"responses-b": {Name: "responses-b", BaseURL: upstream.URL, Format: "openai-responses", MaxConcurrent: 1, MaxQueueWait: 1000},
+	}
+	route := config.Route{Match: "*", Targets: []config.Target{
+		{Provider: "responses-a", Model: "gpt-a"},
+		{Provider: "responses-b", Model: "gpt-b"},
+	}}
+	srv := newFailoverTestServer(providers, route, upstream.Client(), defaultTestFailover())
+
+	recorder := postInference(srv, "/v1/chat/completions",
+		`{"model":"client-model","n":2,"messages":[{"role":"user","content":"hi"}]}`)
+	if recorder.Code != http.StatusBadRequest || strings.Count(recorder.Body.String(), "conversion_error") != 1 {
+		t.Fatalf("status/body = %d/%s，期望一次请求级 conversion_error", recorder.Code, recorder.Body.String())
+	}
+	if hits.Load() != 0 {
+		t.Fatalf("不兼容请求调用上游 %d 次，期望 0", hits.Load())
+	}
+	entry := srv.metrics.Logs(metrics.LogFilter{Limit: 1})[0]
+	if entry.Attempts != 0 || len(entry.AttemptDetails) != 2 {
+		t.Fatalf("Attempts/AttemptDetails = %d/%#v，期望 0 次真实尝试并记录两个候选跳过", entry.Attempts, entry.AttemptDetails)
+	}
+	if entry.Provider != "" || entry.UpstreamFormat != "" || entry.UpstreamStatus != 0 {
+		t.Fatalf("无上游请求却记录了上游归属/状态：provider=%q format=%q status=%d", entry.Provider, entry.UpstreamFormat, entry.UpstreamStatus)
+	}
+	for _, detail := range entry.AttemptDetails {
+		if detail.Kind != "build_skip" || detail.Outcome != "build_error" || detail.Reason != "conversion_error" {
+			t.Errorf("候选明细 = %#v，期望本地 conversion_error 跳过", detail)
+		}
+	}
+}
+
+func TestToolAdditionSameFormatPassthroughKeepsNativeRequest(t *testing.T) {
+	captured := make(chan map[string]any, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode upstream request: %v", err)
+		} else {
+			captured <- body
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, anthropicOKBody)
+	}))
+	defer upstream.Close()
+	providers := map[string]*config.Provider{
+		"anthropic": {Name: "anthropic", BaseURL: upstream.URL, Format: "anthropic", MaxConcurrent: 1, MaxQueueWait: 1000},
+	}
+	srv := newFailoverTestServer(providers, config.Route{Match: "*", Provider: "anthropic", Model: "claude-upstream"}, upstream.Client(), defaultTestFailover())
+	requestBody := `{"model":"client-model","max_tokens":16,"messages":[{"role":"assistant","content":[{"type":"tool_addition","tool":{"type":"tool_reference","name":"tool_one"}},{"type":"text","text":"ready"}]}],"tools":[{"name":"tool_one","input_schema":{"type":"object"}}]}`
+
+	recorder := postInference(srv, "/v1/messages", requestBody)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status/body = %d/%s", recorder.Code, recorder.Body.String())
+	}
+	body := <-captured
+	messages, _ := body["messages"].([]any)
+	message, _ := messages[0].(map[string]any)
+	blocks, _ := message["content"].([]any)
+	addition, _ := blocks[0].(map[string]any)
+	if addition["type"] != "tool_addition" {
+		t.Fatalf("同格式透传改变了 tool_addition：%#v", body["messages"])
+	}
+	tools, _ := body["tools"].([]any)
+	if len(tools) != 1 {
+		t.Fatalf("同格式透传改变了顶层 tools：%#v", body["tools"])
+	}
+}
+
 func TestRequestLogFormatKeepsClientFormat(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
