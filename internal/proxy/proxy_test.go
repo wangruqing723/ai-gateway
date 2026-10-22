@@ -988,4 +988,125 @@ func TestForwardStreamPassthroughWithNamespaceEOFIsNormal(t *testing.T) {
 	if strings.Contains(body, "response.failed") || strings.Contains(body, "unexpected EOF") {
 		t.Fatalf("stream body = %q, passthrough+namespace EOF must not produce failure", body)
 	}
+	want := `data: {"type":"response.output_text.delta","delta":"hi"}` + "\n\n"
+	if body != want {
+		t.Fatalf("SSE 行分隔被改动：实际=%q，期望=%q", body, want)
+	}
+}
+
+func TestForwardStreamPassthroughWithNamespacePreservesFraming(t *testing.T) {
+	const delta = `data: {"type":"response.output_text.delta","delta":"测试成功"}`
+	const completed = `data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[]}}`
+	tests := []struct {
+		name string
+		body string
+	}{
+		{"data_only", delta + "\n\n" + completed + "\n\n"},
+		{"event_and_data", "event: response.output_text.delta\n" + delta + "\n\nevent: response.completed\n" + completed + "\n\n"},
+		{"crlf", "event: response.output_text.delta\r\n" + delta + "\r\n\r\nevent: response.completed\r\n" + completed + "\r\n\r\n"},
+		{"multiline_data", "data: {\n" + `data: "type":"response.completed","response":{"status":"completed","output":[]}` + "\ndata: }\n\n"},
+		{"other_fields", ": ping\n\nid: 1\nretry: 1000\nevent: response.output_text.delta\n" + delta + "\n\n" + completed + "\n\n"},
+		{"extra_empty_lines", "\n\n" + delta + "\n\n\n" + completed + "\n\n"},
+		{"unterminated_tail", delta + "\n\n" + completed},
+	}
+	modes := []struct {
+		name      string
+		namespace bool
+	}{
+		{"without_namespace", false},
+		{"with_namespace", true},
+	}
+	chunks := []struct {
+		name string
+		size int
+	}{
+		{"whole", 0},
+		{"one_byte", 1},
+		{"split_lines", 7},
+	}
+	for _, tt := range tests {
+		for _, mode := range modes {
+			for _, chunk := range chunks {
+				t.Run(tt.name+"/"+mode.name+"/"+chunk.name, func(t *testing.T) {
+					upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+						w.Header().Set("content-type", "text/event-stream")
+						size := chunk.size
+						if size == 0 {
+							size = len(tt.body)
+						}
+						for offset := 0; offset < len(tt.body); offset += size {
+							_, _ = io.WriteString(w, tt.body[offset:min(offset+size, len(tt.body))])
+							w.(http.Flusher).Flush()
+						}
+					}))
+					defer upstream.Close()
+
+					recorder := httptest.NewRecorder()
+					opts := forwardTestOptions(upstream, recorder, "openai-responses", "openai-responses", true, 2000, 2000)
+					want := tt.body
+					if mode.namespace {
+						opts.ToolNamespaces = map[string]converter.NamespacedName{
+							"multi_agent_v1__close_agent": {Namespace: "multi_agent_v1", Name: "close_agent"},
+						}
+						// 逐行路径沿用既有 CRLF 归一化，但不能丢失行分隔或补全未结束的末行。
+						want = strings.ReplaceAll(want, "\r\n", "\n")
+					}
+					if err := Forward(opts); err != nil {
+						t.Fatalf("Forward() 失败：%v", err)
+					}
+					if got := recorder.Body.String(); got != want {
+						t.Fatalf("SSE 帧被改动：\n实际=%q\n期望=%q", got, want)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestForwardStreamPassthroughWithNamespaceRestoresCalls(t *testing.T) {
+	stream := func(namespace bool) string {
+		item := map[string]any{
+			"type": "function_call", "id": "fc_1", "call_id": "call_1",
+			"name": "multi_agent_v1__close_agent", "arguments": "{}",
+		}
+		if namespace {
+			item["name"] = "close_agent"
+			item["namespace"] = "multi_agent_v1"
+		}
+		events := []map[string]any{
+			{"type": "response.output_item.added", "item": item},
+			{"type": "response.output_item.done", "item": item},
+			{"type": "response.completed", "response": map[string]any{
+				"id": "resp_1", "status": "completed", "output": []any{item},
+			}},
+		}
+		var body strings.Builder
+		for _, event := range events {
+			data, err := json.Marshal(event)
+			if err != nil {
+				t.Fatalf("构造 SSE 失败：%v", err)
+			}
+			body.WriteString("event: " + event["type"].(string) + "\ndata: " + string(data) + "\n\n")
+		}
+		return body.String()
+	}
+	upstreamBody := stream(false)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("content-type", "text/event-stream")
+		_, _ = io.WriteString(w, upstreamBody)
+		w.(http.Flusher).Flush()
+	}))
+	defer upstream.Close()
+
+	recorder := httptest.NewRecorder()
+	opts := forwardTestOptions(upstream, recorder, "openai-responses", "openai-responses", true, 2000, 2000)
+	opts.ToolNamespaces = map[string]converter.NamespacedName{
+		"multi_agent_v1__close_agent": {Namespace: "multi_agent_v1", Name: "close_agent"},
+	}
+	if err := Forward(opts); err != nil {
+		t.Fatalf("Forward() 失败：%v", err)
+	}
+	if got, want := recorder.Body.String(), stream(true); got != want {
+		t.Fatalf("工具名还原或 SSE 帧错误：\n实际=%q\n期望=%q", got, want)
+	}
 }

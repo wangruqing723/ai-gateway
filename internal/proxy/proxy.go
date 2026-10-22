@@ -734,6 +734,7 @@ func handleStream(ctx context.Context, cancel context.CancelFunc, resp *http.Res
 	// 套一层 namespace 还原。放在最外层，使转换器与透传器（同格式时 IsPassthrough
 	// 已被上面的条件排除，这里拿到的是 passthrough{}）都被覆盖。
 	transform = converter.WithNamespaceRestore(transform, opts.ToolNamespaces)
+	passthroughLines := converter.IsPassthroughTransformer(transform)
 	readBuf := make([]byte, 64*1024)
 	var lineBuf []byte
 	// rawCapture 仅在排查开关（OnStreamConversionError 非 nil）开启时累积原始上游 SSE。
@@ -768,6 +769,11 @@ func handleStream(ctx context.Context, cancel context.CancelFunc, resp *http.Res
 						return finishStreamWrite(werr, cancel, opts)
 					}
 					continue
+				}
+				if passthroughLines {
+					// 同格式 transformer 只还原工具名，不生成 SSE 帧；恢复本次
+					// 已消费的换行，避免 event/data 粘连或丢失事件间空行。
+					line += "\n"
 				}
 				if stop, err := writeTransformedLine(transform, line, cancel, opts, flusher, activityTimeout); stop {
 					capture.reportIfConversionError(transform)
