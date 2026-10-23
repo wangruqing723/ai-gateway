@@ -9,7 +9,7 @@
 
 ### `DELETE /api/chatgpt/accounts/{accountId}/bindings/{providerName}`
 
-解除指定 Provider 对指定账户的 OAuth 绑定。该操作保留 Provider 及其路由设置，将认证方式恢复为 API Key 模式、清除 `accountId`，并将 Provider 设为禁用；因此不会继续尝试用缺失的凭据请求上游。
+解除指定 Provider 对指定账户的 OAuth 绑定。该操作保留 `authType: chatgptOAuth` 和 Provider 其他设置，清除 `accountId` 并将 Provider 设为禁用。已禁用且未绑定账户的 OAuth Provider 仍可重新绑定；重新绑定成功后会自动启用。
 
 请求无需 body。路径中的账户 ID 与 Provider 名称须分别 URL 解码。
 
@@ -26,13 +26,13 @@
 - `409 binding_not_found`：Provider 当前没有绑定该账户，配置未变更。
 - `500 config_update_failed`：生成 revision 或保存配置失败；不返回令牌或 API Key。
 
-操作使用 ChatGPT 管理 API 的同源防护，并串行化配置读取、修改、落盘和热重载。成功后 `GET /api/chatgpt/accounts` 中该 Provider 会从账户的 `providers` 列表移除，账户满足现有删除条件。响应附带更新后的 `ETag`，与配置 revision 保持一致。
+操作使用 ChatGPT 管理 API 的同源防护，并串行化配置读取、修改、落盘和热重载。OAuth Provider 在已禁用时允许 `accountId` 为空；成功后 `GET /api/chatgpt/accounts` 中该 Provider 会从账户的 `providers` 列表移除，账户满足现有删除条件。响应附带更新后的 `ETag`，与配置 revision 保持一致。
 
 ## 更换绑定
 
 ### `PUT /api/chatgpt/accounts/{accountId}/bindings/{providerName}`
 
-将已绑定其他账户的 ChatGPT OAuth Provider 改绑到路径中的账户。目标账户须存在且状态为 `ready`；Provider 须存在、认证方式为 `chatgptOAuth` 且当前已有关联账户。成功后旧账户自动解除该关联；Provider 其余配置保持不变。
+将已有的 ChatGPT OAuth Provider 绑定到路径中的账户。目标账户须存在且状态为 `ready`；Provider 须存在且认证方式为 `chatgptOAuth`，可处于未绑定或已绑定其他账户状态。成功后旧账户自动解除关联；其他配置保持不变。禁用 Provider 也可选择，绑定成功后自动启用；原本启用的 Provider 保持启用。
 
 请求无需 body。路径中的账户 ID 与 Provider 名称须分别 URL 解码。
 
@@ -48,7 +48,6 @@
 - `409 account_not_ready`：目标账户需要重新授权。
 - `404 provider_not_found`：Provider 不存在。
 - `409 provider_not_oauth`：Provider 不是 ChatGPT OAuth Provider。
-- `409 binding_not_found`：Provider 当前没有可替换的账户绑定。
 - `500 config_update_failed`：生成 revision 或保存配置失败，运行配置不变。
 
 该操作复用配置串行锁、revision、配置保存和 `applyRuntimeConfig`。成功后账户列表的 `providers` 映射会反映新的关联关系；响应不含任何令牌或其他凭据。

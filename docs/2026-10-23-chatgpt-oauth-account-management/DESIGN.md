@@ -18,12 +18,12 @@
 
 ## 快捷换绑与解绑
 
-- 任意 `ready` 账户行都提供绑定/换绑已有 Provider 的入口，不要求该账户当前已绑定 Provider。用户选择一个已绑定其他账户的 OAuth Provider 后，将 Provider 改绑给当前账户。
-- 改绑目标 Provider 时仅替换其 `accountId`：目标 Provider 之前关联的账户自动解除该关联；目标账户原有的其他 Provider 绑定保留。Provider 的路由、启用状态及其他设置不变。
+- 任意 `ready` 账户行都提供绑定/换绑已有 Provider 的入口，不要求该账户当前已绑定 Provider。用户可选择未绑定或已绑定其他账户的 OAuth Provider；禁用 Provider 也可选，选项提示绑定后会自动启用。
+- 改绑目标 Provider 时替换其 `accountId`：目标 Provider 之前关联的账户自动解除该关联；目标账户原有的其他 Provider 绑定保留。Provider 的路由和其他设置不变；若目标 Provider 已禁用，绑定成功后启用。
 - 账户行对每个关联 Provider 提供“解绑并停用”操作，并在执行前确认 Provider 名称及停用影响。
-- 新增专用解绑 API。服务端在配置操作锁内确认 Provider 当前确实引用该账户，再清除 Provider 的 OAuth `authType` 与 `accountId`，保留其余配置并设为禁用；通过现有配置保存与运行时应用流程提交。清除凭据关联后 Provider 不会在路由请求中被使用，也不会因为缺少 API Key 发出请求。
-- 新增账户到已有 Provider 的改绑 API。服务端在配置操作锁内校验目标账户存在且可用、目标 Provider 为 ChatGPT OAuth Provider，再原子替换其账户 ID并保存、热重载。
-- 解绑完成后刷新账户列表和 Provider 配置，使“删除账户”立即可用。Provider 记录和路由配置仍保留，用户之后可编辑并重新绑定或配置其他认证方式。
+- 新增专用解绑 API。服务端在配置操作锁内确认 Provider 当前确实引用该账户，保留 OAuth `authType` 和其他配置，清空 `accountId` 并设为禁用；通过现有配置保存与运行时应用流程提交。配置校验允许已禁用的 OAuth Provider 暂无账户。
+- 新增账户到已有 Provider 的绑定/改绑 API。服务端在配置操作锁内校验目标账户存在且可用、目标 Provider 为 ChatGPT OAuth Provider，再替换其账户 ID并保存、热重载。原先禁用的 Provider 在成功绑定后启用，原先启用的保持启用。
+- 解绑完成后刷新账户列表和 Provider 配置，使“删除账户”立即可用。Provider 记录、OAuth 认证方式和路由配置仍保留，用户之后可重新绑定账户；重新绑定成功后 Provider 自动启用。
 
 ## 安全与失败处理
 

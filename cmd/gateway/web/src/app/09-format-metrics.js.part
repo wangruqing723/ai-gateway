@@ -310,52 +310,54 @@
                     // 熔断未启用时后端返回 breakers: null，和「全部闭合」是两种语义，
                     // 这里保留 null 往下传，由 breakerLabel 区分展示。
                     const breakers = this.health?.breakers || null;
-                    return Object.entries(this.providersByEnabled()).map(([name, provider]) => {
-                        const q = queues[name] || {};
-                        const h = health[name] || { status: 'unchecked', message: '未检测' };
-                        // 已启用但该 provider 还没被记录过，等价于闭合。
-                        const b = breakers ? (breakers[name] || { state: 'closed' }) : null;
-                        const running = Number(q.running || 0);
-                        const queued = Number(q.queued || 0);
-                        const enabled = provider.enabled !== false;
-                        let status = '空闲';
-                        let statusClass = 'border-good/35 bg-good/10 text-emerald-100';
-                        // 已禁用压过一切运行时状态：网关根本不会把请求排给它，
-                        // 再显示「空闲」「直通」会让人以为它还在服务。
-                        if (!enabled) {
-                            status = '已禁用';
-                            statusClass = 'bg-white/[.05] text-muted';
-                        } else if (this.config.directMode) {
-                            status = '直通';
-                            statusClass = 'border-cyan2/35 bg-cyan2/10 text-cyan';
-                        } else if (queued > 0) {
-                            status = '排队';
-                            statusClass = 'border-warn/35 bg-warn/10 text-amber-100';
-                        } else if (running > 0) {
-                            status = '忙碌';
-                            statusClass = 'border-cyan2/35 bg-cyan2/10 text-cyan';
-                        }
-                        return {
-                            name,
-                            enabled,
-                            format: provider.format || 'anthropic',
-                            running,
-                            queued,
-                            maxConcurrent: q.maxConcurrent || provider.maxConcurrent || 5,
-                            maxPerSecond: q.maxPerSecond ?? provider.maxPerSecond ?? 0,
-                            healthLabel: this.providerHealthLabel(h),
-                            healthClass: this.providerHealthClass(h.status),
-                            healthTitle: this.providerHealthTitle(h),
-                            breakerLabel: this.breakerLabel(b),
-                            breakerClass: this.breakerClass(b),
-                            breakerTitle: this.breakerTitle(b),
-                            // 判据与后端 ResetAll 的计数条件一致（state != closed || failures > 0）：
-                            // 闭合且无失败计数时重置是空操作，按钮不出现，免得点了没反应。
-                            breakerResettable: !!b && (b.state !== 'closed' || Number(b.consecutiveFailures || 0) > 0),
-                            status,
-                            statusClass
-                        };
-                    });
+                    return Object.entries(this.providersByEnabled())
+                        .filter(([, provider]) => this.providerMatchesEnabledFilter(provider, this.providerMonitorEnabledFilter))
+                        .map(([name, provider]) => {
+                            const q = queues[name] || {};
+                            const h = health[name] || { status: 'unchecked', message: '未检测' };
+                            // 已启用但该 provider 还没被记录过，等价于闭合。
+                            const b = breakers ? (breakers[name] || { state: 'closed' }) : null;
+                            const running = Number(q.running || 0);
+                            const queued = Number(q.queued || 0);
+                            const enabled = provider.enabled !== false;
+                            let status = '空闲';
+                            let statusClass = 'border-good/35 bg-good/10 text-emerald-100';
+                            // 已禁用压过一切运行时状态：网关根本不会把请求排给它，
+                            // 再显示「空闲」「直通」会让人以为它还在服务。
+                            if (!enabled) {
+                                status = '已禁用';
+                                statusClass = 'bg-white/[.05] text-muted';
+                            } else if (this.config.directMode) {
+                                status = '直通';
+                                statusClass = 'border-cyan2/35 bg-cyan2/10 text-cyan';
+                            } else if (queued > 0) {
+                                status = '排队';
+                                statusClass = 'border-warn/35 bg-warn/10 text-amber-100';
+                            } else if (running > 0) {
+                                status = '忙碌';
+                                statusClass = 'border-cyan2/35 bg-cyan2/10 text-cyan';
+                            }
+                            return {
+                                name,
+                                enabled,
+                                format: provider.format || 'anthropic',
+                                running,
+                                queued,
+                                maxConcurrent: q.maxConcurrent || provider.maxConcurrent || 5,
+                                maxPerSecond: q.maxPerSecond ?? provider.maxPerSecond ?? 0,
+                                healthLabel: this.providerHealthLabel(h),
+                                healthClass: this.providerHealthClass(h.status),
+                                healthTitle: this.providerHealthTitle(h),
+                                breakerLabel: this.breakerLabel(b),
+                                breakerClass: this.breakerClass(b),
+                                breakerTitle: this.breakerTitle(b),
+                                // 判据与后端 ResetAll 的计数条件一致（state != closed || failures > 0）：
+                                // 闭合且无失败计数时重置是空操作，按钮不出现，免得点了没反应。
+                                breakerResettable: !!b && (b.state !== 'closed' || Number(b.consecutiveFailures || 0) > 0),
+                                status,
+                                statusClass
+                            };
+                        });
                 },
 
                 // providerStateCounts 卡片标题旁的汇总徽章。

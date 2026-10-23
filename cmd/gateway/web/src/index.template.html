@@ -837,8 +837,16 @@
                                     </div>
                                     <div class="flex flex-wrap items-center gap-2">
                                         <!-- 快速筛选：按名称、Base URL、格式做包含匹配，Esc 清空。纯界面状态，不落盘。 -->
-                                        <span x-show="providerFilter.trim()" x-cloak class="text-xs tabular-nums text-muted"
-                                              x-text="'匹配 ' + filteredProviderCount() + ' / ' + providerCount()"></span>
+                                        <span x-show="providerFilter.trim() || providerListEnabledFilter !== 'all'" x-cloak class="text-xs tabular-nums text-muted"
+                                              x-text="'显示 ' + filteredProviderCount() + ' / ' + providerCount()"></span>
+                                        <label class="flex items-center gap-1.5 text-xs text-muted">
+                                            <span>启用状态</span>
+                                            <select x-model="providerListEnabledFilter" aria-label="按启用状态筛选 Provider" class="field w-32 py-2 text-sm">
+                                                <option value="enabled">仅启用</option>
+                                                <option value="disabled">仅禁用</option>
+                                                <option value="all">全部</option>
+                                            </select>
+                                        </label>
                                         <div class="relative">
                                             <span class="material-symbols-outlined pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-[18px] text-muted">search</span>
                                             <input type="text" autocomplete="off" spellcheck="false" x-model="providerFilter"
@@ -1024,6 +1032,9 @@
                                             </template>
                                             <tr x-show="!config.providers || Object.keys(config.providers).length === 0">
                                                 <td colspan="10" class="px-3 py-10 text-center text-sm text-muted">还没有 Provider</td>
+                                            </tr>
+                                            <tr x-show="providerCount() > 0 && filteredProviderCount() === 0">
+                                                <td colspan="10" class="px-3 py-10 text-center text-sm text-muted">没有符合当前筛选条件的 Provider</td>
                                             </tr>
                                         </tbody>
                                     </table>
@@ -1468,7 +1479,15 @@
                                               x-text="'已禁用 ' + providerStateCounts().disabled"></span>
                                     </div>
                                 </div>
-                                <div class="flex gap-2">
+                                <div class="flex flex-wrap items-center gap-2">
+                                    <label class="flex items-center gap-1.5 text-xs text-muted">
+                                        <span>启用状态</span>
+                                        <select x-model="providerMonitorEnabledFilter" aria-label="按启用状态筛选 Provider 运行状态" class="field w-32 py-2 text-sm">
+                                            <option value="enabled">仅启用</option>
+                                            <option value="disabled">仅禁用</option>
+                                            <option value="all">全部</option>
+                                        </select>
+                                    </label>
                                     <!-- 检测要逐个探上游、每个 5 秒超时，整体可能跑十几秒。
                                          必须就地给出「正在跑」的信号：只靠结束时的 toast，
                                          这段时间里按钮毫无变化，点了像没反应。 -->
@@ -1642,7 +1661,8 @@
                                         <!-- 必须带 _firstLoadDone：providerStatusRows() 在加载完成前也是空数组，
                                              不加这个条件就会和骨架屏同时出现。 -->
                                         <tr x-show="_firstLoadDone && providerStatusRows().length === 0">
-                                            <td colspan="8" class="px-3 py-10 text-center text-sm text-muted">还没有 Provider</td>
+                                            <td colspan="8" class="px-3 py-10 text-center text-sm text-muted"
+                                                x-text="providerCount() === 0 ? '还没有 Provider' : '没有符合当前筛选条件的 Provider'"></td>
                                         </tr>
                                     </tbody>
                                 </table>
@@ -3039,14 +3059,14 @@
                 <label class="block space-y-2">
                     <span class="text-xs font-bold text-muted">目标 Provider</span>
                     <select x-model="chatGPTAccountBindProvider" class="field" :disabled="!!bindingChatGPTAccountId">
-                        <option value="">选择已绑定其他账户的 Provider</option>
+                        <option value="">选择 ChatGPT OAuth Provider</option>
                         <template x-for="item in chatGPTOAuthProvidersForAccountBinding()" :key="item.name">
-                            <option :value="item.name" x-text="chatGPTAccountBindProviderLabel(item)"></option>
+                            <option :value="item.name" :title="chatGPTAccountBindProviderTip(item)" x-text="chatGPTAccountBindProviderLabel(item)"></option>
                         </template>
                     </select>
                 </label>
                 <p x-show="selectedChatGPTAccountBindingProvider()" x-cloak class="rounded-lg border border-warn/30 bg-warn/10 p-3 text-xs leading-relaxed text-amber-100" x-text="chatGPTAccountBindImpactText()"></p>
-                <p x-show="chatGPTOAuthProvidersForAccountBinding().length === 0" class="rounded-lg border border-line bg-panel/60 p-3 text-sm text-muted">没有可换绑的其他账户 Provider。可通过账户行的“创建 Provider”新建。</p>
+                <p x-show="chatGPTOAuthProvidersForAccountBinding().length === 0" class="rounded-lg border border-line bg-panel/60 p-3 text-sm text-muted">没有其他可绑定的 ChatGPT OAuth Provider。可通过账户行的“创建 Provider”新建。</p>
             </div>
             <div class="flex flex-wrap justify-end gap-2 border-t border-line p-5">
                 <button type="button" @click="closeChatGPTAccountBindDialog()" :disabled="!!bindingChatGPTAccountId" class="btn btn-secondary disabled:opacity-50">取消</button>

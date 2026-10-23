@@ -837,8 +837,16 @@
                                     </div>
                                     <div class="flex flex-wrap items-center gap-2">
                                         <!-- 快速筛选：按名称、Base URL、格式做包含匹配，Esc 清空。纯界面状态，不落盘。 -->
-                                        <span x-show="providerFilter.trim()" x-cloak class="text-xs tabular-nums text-muted"
-                                              x-text="'匹配 ' + filteredProviderCount() + ' / ' + providerCount()"></span>
+                                        <span x-show="providerFilter.trim() || providerListEnabledFilter !== 'all'" x-cloak class="text-xs tabular-nums text-muted"
+                                              x-text="'显示 ' + filteredProviderCount() + ' / ' + providerCount()"></span>
+                                        <label class="flex items-center gap-1.5 text-xs text-muted">
+                                            <span>启用状态</span>
+                                            <select x-model="providerListEnabledFilter" aria-label="按启用状态筛选 Provider" class="field w-32 py-2 text-sm">
+                                                <option value="enabled">仅启用</option>
+                                                <option value="disabled">仅禁用</option>
+                                                <option value="all">全部</option>
+                                            </select>
+                                        </label>
                                         <div class="relative">
                                             <span class="material-symbols-outlined pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-[18px] text-muted">search</span>
                                             <input type="text" autocomplete="off" spellcheck="false" x-model="providerFilter"
@@ -1024,6 +1032,9 @@
                                             </template>
                                             <tr x-show="!config.providers || Object.keys(config.providers).length === 0">
                                                 <td colspan="10" class="px-3 py-10 text-center text-sm text-muted">还没有 Provider</td>
+                                            </tr>
+                                            <tr x-show="providerCount() > 0 && filteredProviderCount() === 0">
+                                                <td colspan="10" class="px-3 py-10 text-center text-sm text-muted">没有符合当前筛选条件的 Provider</td>
                                             </tr>
                                         </tbody>
                                     </table>
@@ -1468,7 +1479,15 @@
                                               x-text="'已禁用 ' + providerStateCounts().disabled"></span>
                                     </div>
                                 </div>
-                                <div class="flex gap-2">
+                                <div class="flex flex-wrap items-center gap-2">
+                                    <label class="flex items-center gap-1.5 text-xs text-muted">
+                                        <span>启用状态</span>
+                                        <select x-model="providerMonitorEnabledFilter" aria-label="按启用状态筛选 Provider 运行状态" class="field w-32 py-2 text-sm">
+                                            <option value="enabled">仅启用</option>
+                                            <option value="disabled">仅禁用</option>
+                                            <option value="all">全部</option>
+                                        </select>
+                                    </label>
                                     <!-- 检测要逐个探上游、每个 5 秒超时，整体可能跑十几秒。
                                          必须就地给出「正在跑」的信号：只靠结束时的 toast，
                                          这段时间里按钮毫无变化，点了像没反应。 -->
@@ -1642,7 +1661,8 @@
                                         <!-- 必须带 _firstLoadDone：providerStatusRows() 在加载完成前也是空数组，
                                              不加这个条件就会和骨架屏同时出现。 -->
                                         <tr x-show="_firstLoadDone && providerStatusRows().length === 0">
-                                            <td colspan="8" class="px-3 py-10 text-center text-sm text-muted">还没有 Provider</td>
+                                            <td colspan="8" class="px-3 py-10 text-center text-sm text-muted"
+                                                x-text="providerCount() === 0 ? '还没有 Provider' : '没有符合当前筛选条件的 Provider'"></td>
                                         </tr>
                                     </tbody>
                                 </table>
@@ -3039,14 +3059,14 @@
                 <label class="block space-y-2">
                     <span class="text-xs font-bold text-muted">目标 Provider</span>
                     <select x-model="chatGPTAccountBindProvider" class="field" :disabled="!!bindingChatGPTAccountId">
-                        <option value="">选择已绑定其他账户的 Provider</option>
+                        <option value="">选择 ChatGPT OAuth Provider</option>
                         <template x-for="item in chatGPTOAuthProvidersForAccountBinding()" :key="item.name">
-                            <option :value="item.name" x-text="chatGPTAccountBindProviderLabel(item)"></option>
+                            <option :value="item.name" :title="chatGPTAccountBindProviderTip(item)" x-text="chatGPTAccountBindProviderLabel(item)"></option>
                         </template>
                     </select>
                 </label>
                 <p x-show="selectedChatGPTAccountBindingProvider()" x-cloak class="rounded-lg border border-warn/30 bg-warn/10 p-3 text-xs leading-relaxed text-amber-100" x-text="chatGPTAccountBindImpactText()"></p>
-                <p x-show="chatGPTOAuthProvidersForAccountBinding().length === 0" class="rounded-lg border border-line bg-panel/60 p-3 text-sm text-muted">没有可换绑的其他账户 Provider。可通过账户行的“创建 Provider”新建。</p>
+                <p x-show="chatGPTOAuthProvidersForAccountBinding().length === 0" class="rounded-lg border border-line bg-panel/60 p-3 text-sm text-muted">没有其他可绑定的 ChatGPT OAuth Provider。可通过账户行的“创建 Provider”新建。</p>
             </div>
             <div class="flex flex-wrap justify-end gap-2 border-t border-line p-5">
                 <button type="button" @click="closeChatGPTAccountBindDialog()" :disabled="!!bindingChatGPTAccountId" class="btn btn-secondary disabled:opacity-50">取消</button>
@@ -3373,6 +3393,9 @@
                 showProviderModal: false,
                 // 提供商列表的快速筛选词：按名称、Base URL、格式做包含匹配，纯界面状态，不落盘。
                 providerFilter: '',
+                // 两处 Provider 列表的启用状态筛选彼此独立，默认只显示启用项。
+                providerListEnabledFilter: 'enabled',
+                providerMonitorEnabledFilter: 'enabled',
                 // ChatGPT OAuth 账户列表筛选词：按邮箱、账户 ID、标签、备注和绑定 Provider 匹配。
                 chatGPTAccountFilter: '',
                 // Provider 抽屉内的账户选择搜索词，与账户列表筛选彼此独立。
@@ -4988,52 +5011,54 @@
                     // 熔断未启用时后端返回 breakers: null，和「全部闭合」是两种语义，
                     // 这里保留 null 往下传，由 breakerLabel 区分展示。
                     const breakers = this.health?.breakers || null;
-                    return Object.entries(this.providersByEnabled()).map(([name, provider]) => {
-                        const q = queues[name] || {};
-                        const h = health[name] || { status: 'unchecked', message: '未检测' };
-                        // 已启用但该 provider 还没被记录过，等价于闭合。
-                        const b = breakers ? (breakers[name] || { state: 'closed' }) : null;
-                        const running = Number(q.running || 0);
-                        const queued = Number(q.queued || 0);
-                        const enabled = provider.enabled !== false;
-                        let status = '空闲';
-                        let statusClass = 'border-good/35 bg-good/10 text-emerald-100';
-                        // 已禁用压过一切运行时状态：网关根本不会把请求排给它，
-                        // 再显示「空闲」「直通」会让人以为它还在服务。
-                        if (!enabled) {
-                            status = '已禁用';
-                            statusClass = 'bg-white/[.05] text-muted';
-                        } else if (this.config.directMode) {
-                            status = '直通';
-                            statusClass = 'border-cyan2/35 bg-cyan2/10 text-cyan';
-                        } else if (queued > 0) {
-                            status = '排队';
-                            statusClass = 'border-warn/35 bg-warn/10 text-amber-100';
-                        } else if (running > 0) {
-                            status = '忙碌';
-                            statusClass = 'border-cyan2/35 bg-cyan2/10 text-cyan';
-                        }
-                        return {
-                            name,
-                            enabled,
-                            format: provider.format || 'anthropic',
-                            running,
-                            queued,
-                            maxConcurrent: q.maxConcurrent || provider.maxConcurrent || 5,
-                            maxPerSecond: q.maxPerSecond ?? provider.maxPerSecond ?? 0,
-                            healthLabel: this.providerHealthLabel(h),
-                            healthClass: this.providerHealthClass(h.status),
-                            healthTitle: this.providerHealthTitle(h),
-                            breakerLabel: this.breakerLabel(b),
-                            breakerClass: this.breakerClass(b),
-                            breakerTitle: this.breakerTitle(b),
-                            // 判据与后端 ResetAll 的计数条件一致（state != closed || failures > 0）：
-                            // 闭合且无失败计数时重置是空操作，按钮不出现，免得点了没反应。
-                            breakerResettable: !!b && (b.state !== 'closed' || Number(b.consecutiveFailures || 0) > 0),
-                            status,
-                            statusClass
-                        };
-                    });
+                    return Object.entries(this.providersByEnabled())
+                        .filter(([, provider]) => this.providerMatchesEnabledFilter(provider, this.providerMonitorEnabledFilter))
+                        .map(([name, provider]) => {
+                            const q = queues[name] || {};
+                            const h = health[name] || { status: 'unchecked', message: '未检测' };
+                            // 已启用但该 provider 还没被记录过，等价于闭合。
+                            const b = breakers ? (breakers[name] || { state: 'closed' }) : null;
+                            const running = Number(q.running || 0);
+                            const queued = Number(q.queued || 0);
+                            const enabled = provider.enabled !== false;
+                            let status = '空闲';
+                            let statusClass = 'border-good/35 bg-good/10 text-emerald-100';
+                            // 已禁用压过一切运行时状态：网关根本不会把请求排给它，
+                            // 再显示「空闲」「直通」会让人以为它还在服务。
+                            if (!enabled) {
+                                status = '已禁用';
+                                statusClass = 'bg-white/[.05] text-muted';
+                            } else if (this.config.directMode) {
+                                status = '直通';
+                                statusClass = 'border-cyan2/35 bg-cyan2/10 text-cyan';
+                            } else if (queued > 0) {
+                                status = '排队';
+                                statusClass = 'border-warn/35 bg-warn/10 text-amber-100';
+                            } else if (running > 0) {
+                                status = '忙碌';
+                                statusClass = 'border-cyan2/35 bg-cyan2/10 text-cyan';
+                            }
+                            return {
+                                name,
+                                enabled,
+                                format: provider.format || 'anthropic',
+                                running,
+                                queued,
+                                maxConcurrent: q.maxConcurrent || provider.maxConcurrent || 5,
+                                maxPerSecond: q.maxPerSecond ?? provider.maxPerSecond ?? 0,
+                                healthLabel: this.providerHealthLabel(h),
+                                healthClass: this.providerHealthClass(h.status),
+                                healthTitle: this.providerHealthTitle(h),
+                                breakerLabel: this.breakerLabel(b),
+                                breakerClass: this.breakerClass(b),
+                                breakerTitle: this.breakerTitle(b),
+                                // 判据与后端 ResetAll 的计数条件一致（state != closed || failures > 0）：
+                                // 闭合且无失败计数时重置是空操作，按钮不出现，免得点了没反应。
+                                breakerResettable: !!b && (b.state !== 'closed' || Number(b.consecutiveFailures || 0) > 0),
+                                status,
+                                statusClass
+                            };
+                        });
                 },
 
                 // providerStateCounts 卡片标题旁的汇总徽章。
@@ -6082,7 +6107,8 @@
                 chatGPTOAuthProvidersForAccountBinding() {
                     const targetAccountId = this.chatGPTAccountBindTargetId;
                     return Object.entries(this.config.providers || {})
-                        .filter(([, provider]) => provider?.authType === 'chatgptOAuth' && provider.accountId && provider.accountId !== targetAccountId)
+                        // 未绑定和已绑定到其他账户的 OAuth Provider 都可选；禁用状态不参与过滤。
+                        .filter(([, provider]) => provider?.authType === 'chatgptOAuth' && provider.accountId !== targetAccountId)
                         .sort(([a], [b]) => a.localeCompare(b))
                         .map(([name, provider]) => ({
                             name,
@@ -6109,15 +6135,27 @@
 
                 chatGPTAccountBindProviderLabel(item) {
                     const account = item?.account;
-                    const accountName = account?.email || account?.id || item?.provider?.accountId || '其他账户';
-                    return `${item?.name || ''} · 当前绑定 ${accountName}${item?.provider?.enabled === false ? '（已停用）' : ''}`;
+                    const provider = item?.provider;
+                    const accountName = account?.email || account?.id || provider?.accountId || '';
+                    const binding = provider?.accountId ? `当前绑定 ${accountName || provider.accountId}` : '当前未绑定账户';
+                    return `${item?.name || ''} · ${binding}${provider?.enabled === false ? '（已禁用，绑定后启用）' : ''}`;
+                },
+
+                chatGPTAccountBindProviderTip(item) {
+                    return item?.provider?.enabled === false
+                        ? '该 Provider 已禁用；绑定成功后会自动启用并参与请求转发。'
+                        : '';
                 },
 
                 chatGPTAccountBindImpactText() {
                     const item = this.selectedChatGPTAccountBindingProvider();
                     if (!item) return '';
                     const previousAccount = item.account?.email || item.provider.accountId;
-                    return `该 Provider 当前绑定账户 ${previousAccount}。确认后会解除原账户与该 Provider 的关联，并绑定到所选账户；Provider 的路由和其他设置保留。`;
+                    const binding = previousAccount
+                        ? `该 Provider 当前绑定账户 ${previousAccount}。确认后会解除原账户关联并绑定到所选账户。`
+                        : '该 Provider 当前未绑定账户。确认后会绑定到所选账户。';
+                    const disabledTip = item.provider.enabled === false ? ' Provider 已禁用，绑定后会自动启用。' : '';
+                    return `${binding}${disabledTip} Provider 的路由和其他设置保留。`;
                 },
 
                 openChatGPTAccountBindDialog(account) {
@@ -6145,7 +6183,7 @@
                     }
                     const account = this.chatgptAccounts.find(item => item.id === accountId);
                     const provider = this.config.providers?.[providerName];
-                    if (!account || account.status !== 'ready' || !provider || provider.authType !== 'chatgptOAuth' || !provider.accountId || provider.accountId === accountId) {
+                    if (!account || account.status !== 'ready' || !provider || provider.authType !== 'chatgptOAuth' || provider.accountId === accountId) {
                         this.showStatus('账户或 Provider 绑定信息已变化，正在刷新页面数据', 'error');
                         await Promise.all([this.loadConfig(), this.loadChatGPTAccounts(false, false)]);
                         this.closeChatGPTAccountBindDialog();
@@ -6184,7 +6222,7 @@
                         return;
                     }
                     if (!(await this.askConfirm(
-                        `解除「${providerName}」与 ${account.email || account.id} 的绑定后，该 Provider 会保留路由和其他设置、切换为 API Key 模式并停用。`,
+                        `解除「${providerName}」与 ${account.email || account.id} 的绑定后，该 Provider 保留 ChatGPT OAuth 认证方式、清除账户关联并停用。之后可绑定其他账户，重新绑定成功后会自动启用 Provider。`,
                         { title: '解除 ChatGPT 账户绑定', confirmText: '解绑并停用' }
                     ))) return;
 
@@ -6479,8 +6517,17 @@
                     }
                 },
 
+                // 按 Provider 的 enabled 状态筛选；未写 enabled 按默认启用处理。
+                providerMatchesEnabledFilter(provider, filter) {
+                    const enabled = provider?.enabled !== false;
+                    if (filter === 'enabled') return enabled;
+                    if (filter === 'disabled') return !enabled;
+                    return true;
+                },
+
                 // 提供商快速筛选：按名称、Base URL、格式做不区分大小写的包含匹配。
                 providerMatchesFilter(name, provider) {
+                    if (!this.providerMatchesEnabledFilter(provider, this.providerListEnabledFilter)) return false;
                     const q = (this.providerFilter || '').trim().toLowerCase();
                     if (!q) return true;
                     return [name, provider?.baseUrl, provider?.format]

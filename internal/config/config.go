@@ -1138,8 +1138,8 @@ func validateProvider(name string, p *Provider, validateLimits bool) error {
 		if p.APIKey != "" {
 			return fmt.Errorf("providers.%s 使用 ChatGPT OAuth 时不能同时配置 apiKey", name)
 		}
-		if strings.TrimSpace(p.AccountID) == "" {
-			return fmt.Errorf("providers.%s.accountId 不能为空", name)
+		if strings.TrimSpace(p.AccountID) == "" && p.IsEnabled() {
+			return fmt.Errorf("providers.%s.accountId 不能为空，除非 Provider 已禁用", name)
 		}
 		if p.BaseURL != "https://chatgpt.com/backend-api/codex" {
 			return fmt.Errorf("providers.%s.baseUrl 使用 ChatGPT OAuth 时必须为 https://chatgpt.com/backend-api/codex", name)

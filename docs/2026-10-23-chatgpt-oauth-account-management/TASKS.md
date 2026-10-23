@@ -16,7 +16,7 @@
 
 - `ready` 账户的状态标签显示访问令牌剩余到期时间，并沿用 3 天内、24 小时内和已过期的警告颜色；时间推进时页面状态会更新。非 `ready` 状态仍沿用“需重新授权”等现有错误状态。
 - 新建和编辑提供商时，搜索框仅在展开的账户下拉面板中出现；可按邮箱、账户 ID、套餐、标签或备注筛选，未就绪账户不可选。
-- 任意 `ready` 账户（当前已绑定或未绑定）都能选择已有 ChatGPT OAuth Provider；若 Provider 当前关联其他账户，改绑后旧账户不再列出该 Provider，目标账户会列出该 Provider。
-- 改绑只替换所选 Provider 的账户关联，目标账户原有的其他 Provider 关联和所选 Provider 的路由及其他设置保留。
-- 用户可以从账户列表解除绑定；该操作保留 Provider 的路由及其他设置，清除 OAuth 账户关联并停用 Provider，避免无凭据请求。解除后账户可以删除。
+- 任意 `ready` 账户（当前已绑定或未绑定）都能选择未绑定或已绑定其他账户的 ChatGPT OAuth Provider，包括已禁用 Provider；选项提示禁用状态，绑定成功后自动启用。
+- 改绑替换所选 Provider 的账户关联；若原 Provider 已禁用，则绑定后启用。目标账户原有的其他 Provider 关联和所选 Provider 的路由及其他设置保留。
+- 用户可以从账户列表解除绑定；该操作保留 Provider 的 OAuth 认证方式、路由及其他设置，清除账户关联并停用 Provider，避免无凭据请求。解除后账户可以删除，Provider 仍可绑定其他账户。
 - API 不返回 OAuth token；嵌入式 `web/index.html` 与前端源码同步。

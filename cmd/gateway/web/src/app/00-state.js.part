@@ -184,6 +184,9 @@
                 showProviderModal: false,
                 // 提供商列表的快速筛选词：按名称、Base URL、格式做包含匹配，纯界面状态，不落盘。
                 providerFilter: '',
+                // 两处 Provider 列表的启用状态筛选彼此独立，默认只显示启用项。
+                providerListEnabledFilter: 'enabled',
+                providerMonitorEnabledFilter: 'enabled',
                 // ChatGPT OAuth 账户列表筛选词：按邮箱、账户 ID、标签、备注和绑定 Provider 匹配。
                 chatGPTAccountFilter: '',
                 // Provider 抽屉内的账户选择搜索词，与账户列表筛选彼此独立。

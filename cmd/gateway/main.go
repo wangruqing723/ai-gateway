@@ -2418,8 +2418,8 @@ func (s *server) handleChatGPTAuthAPI(w http.ResponseWriter, r *http.Request, pa
 	}
 }
 
-// handleUnbindChatGPTAccountProvider 清除一个 Provider 对 ChatGPT OAuth 账户的引用，
-// 同时停用 Provider，避免缺少 OAuth 凭据时继续接收路由请求。
+// handleUnbindChatGPTAccountProvider 清除 Provider 对 ChatGPT OAuth 账户的引用并停用它。
+// 保留 OAuth 认证方式，用户之后可以把该 Provider 绑定到其他账户。
 func (s *server) handleUnbindChatGPTAccountProvider(w http.ResponseWriter, escapedID, escapedProviderName string) {
 	id, err := url.PathUnescape(escapedID)
 	if err != nil || id == "" || strings.Contains(id, "/") {
@@ -2465,7 +2465,6 @@ func (s *server) handleUnbindChatGPTAccountProvider(w http.ResponseWriter, escap
 			continue
 		}
 		providerCopy := *current
-		providerCopy.AuthType = ""
 		providerCopy.AccountID = ""
 		disabled := false
 		providerCopy.Enabled = &disabled
@@ -2492,8 +2491,8 @@ func (s *server) handleUnbindChatGPTAccountProvider(w http.ResponseWriter, escap
 	})
 }
 
-// handleBindChatGPTAccountProvider 将已有的 OAuth Provider 改绑到目标账户。
-// Provider 的其他配置不变，原账户的 providers 引用会随配置更新自动移除。
+// handleBindChatGPTAccountProvider 将已有的 OAuth Provider 绑定到目标账户。
+// Provider 可以尚未绑定或绑定在其他账户上；若原先已禁用，绑定成功后自动启用。
 func (s *server) handleBindChatGPTAccountProvider(w http.ResponseWriter, escapedID, escapedProviderName string) {
 	id, err := url.PathUnescape(escapedID)
 	if err != nil || id == "" || strings.Contains(id, "/") {
@@ -2535,10 +2534,6 @@ func (s *server) handleBindChatGPTAccountProvider(w http.ResponseWriter, escaped
 		writeJSONError(w, http.StatusConflict, "provider_not_oauth", "目标 Provider 不是 ChatGPT OAuth Provider")
 		return
 	}
-	if provider.AccountID == "" {
-		writeJSONError(w, http.StatusConflict, "binding_not_found", "目标 Provider 当前未绑定其他账户")
-		return
-	}
 	if provider.AccountID == id {
 		writeJSON(w, http.StatusOK, map[string]any{"status": "bound", "provider": providerName, "accountId": id})
 		return
@@ -2553,6 +2548,10 @@ func (s *server) handleBindChatGPTAccountProvider(w http.ResponseWriter, escaped
 		}
 		providerCopy := *current
 		providerCopy.AccountID = id
+		// Enabled=nil 表示默认启用；绑定成功后恢复该默认值，避免保留旧的禁用状态。
+		if !providerCopy.IsEnabled() {
+			providerCopy.Enabled = nil
+		}
 		newCfg.Providers[name] = &providerCopy
 	}
 
