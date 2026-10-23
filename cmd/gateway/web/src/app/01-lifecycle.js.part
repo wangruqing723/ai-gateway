@@ -8,6 +8,9 @@
                     });
                     await this.loadConfig();
                     await this.loadChatGPTAccounts();
+                    this._chatGPTExpiryTimer = window.setInterval(() => {
+                        this.chatGPTNow = Date.now();
+                    }, 60_000);
                     if (this.monitorPollingAllowed()) await this.refreshMonitor();
                     this._monitorPollTimer = window.setInterval(() => {
                         if (this.monitorPollingAllowed()) this.refreshMonitor(false);
@@ -58,6 +61,7 @@
 
                 destroy() {
                     if (this._monitorPollTimer !== null) window.clearInterval(this._monitorPollTimer);
+                    if (this._chatGPTExpiryTimer !== null) window.clearInterval(this._chatGPTExpiryTimer);
                     if (this._oauthPollTimer !== null) window.clearInterval(this._oauthPollTimer);
                     if (this._monitorVisibilityHandler) {
                         document.removeEventListener('visibilitychange', this._monitorVisibilityHandler);

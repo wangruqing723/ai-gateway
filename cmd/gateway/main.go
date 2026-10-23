@@ -2393,6 +2393,17 @@ func (s *server) handleChatGPTAuthAPI(w http.ResponseWriter, r *http.Request, pa
 				s.handleRefreshChatGPTAccountUsage(w, r, accountID)
 				return
 			}
+			if parts := strings.Split(relativePath, "/bindings/"); len(parts) == 2 {
+				switch r.Method {
+				case http.MethodDelete:
+					s.handleUnbindChatGPTAccountProvider(w, parts[0], parts[1])
+				case http.MethodPut:
+					s.handleBindChatGPTAccountProvider(w, parts[0], parts[1])
+				default:
+					writeMethodNotAllowed(w, http.MethodDelete, http.MethodPut)
+				}
+				return
+			}
 			switch r.Method {
 			case http.MethodPatch:
 				s.handleUpdateChatGPTAccountMetadata(w, r, relativePath)
@@ -2405,6 +2416,160 @@ func (s *server) handleChatGPTAuthAPI(w http.ResponseWriter, r *http.Request, pa
 		}
 		writeJSONError(w, http.StatusNotFound, "gateway_error", "未知的 ChatGPT OAuth API 端点")
 	}
+}
+
+// handleUnbindChatGPTAccountProvider 清除一个 Provider 对 ChatGPT OAuth 账户的引用，
+// 同时停用 Provider，避免缺少 OAuth 凭据时继续接收路由请求。
+func (s *server) handleUnbindChatGPTAccountProvider(w http.ResponseWriter, escapedID, escapedProviderName string) {
+	id, err := url.PathUnescape(escapedID)
+	if err != nil || id == "" || strings.Contains(id, "/") {
+		writeJSONError(w, http.StatusBadRequest, "invalid_account_id", "账户 ID 无效")
+		return
+	}
+	providerName, err := url.PathUnescape(escapedProviderName)
+	if err != nil || providerName == "" || strings.Contains(providerName, "/") {
+		writeJSONError(w, http.StatusBadRequest, "invalid_provider_name", "Provider 名称无效")
+		return
+	}
+
+	s.configOpMu.Lock()
+	defer s.configOpMu.Unlock()
+
+	if _, ok := s.chatgptAuth.Account(id); !ok {
+		writeJSONError(w, http.StatusNotFound, "account_not_found", "ChatGPT OAuth 账户不存在")
+		return
+	}
+
+	s.cfgMu.RLock()
+	oldCfg := s.cfg
+	s.cfgMu.RUnlock()
+	if oldCfg == nil {
+		writeJSONError(w, http.StatusInternalServerError, "config_update_failed", "当前配置不可用")
+		return
+	}
+	provider, ok := oldCfg.Providers[providerName]
+	if !ok || provider == nil {
+		writeJSONError(w, http.StatusNotFound, "provider_not_found", "Provider 不存在")
+		return
+	}
+	if provider.AuthType != "chatgptOAuth" || provider.AccountID != id {
+		writeJSONError(w, http.StatusConflict, "binding_not_found", "该 Provider 当前未绑定此 ChatGPT 账户，配置未变更")
+		return
+	}
+
+	newCfg := *oldCfg
+	newCfg.Providers = make(map[string]*config.Provider, len(oldCfg.Providers))
+	for name, current := range oldCfg.Providers {
+		if name != providerName {
+			newCfg.Providers[name] = current
+			continue
+		}
+		providerCopy := *current
+		providerCopy.AuthType = ""
+		providerCopy.AccountID = ""
+		disabled := false
+		providerCopy.Enabled = &disabled
+		newCfg.Providers[name] = &providerCopy
+	}
+
+	revision, err := s.issueConfigRevision()
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "config_update_failed", "生成配置 revision 失败")
+		return
+	}
+	newCfg.Path = oldCfg.Path
+	if err := config.Save(&newCfg); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "config_update_failed", "解除绑定时保存配置失败: "+err.Error())
+		return
+	}
+	s.applyRuntimeConfig(&newCfg, revision)
+
+	w.Header().Set("ETag", strconv.Quote(revision))
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":   "unbound",
+		"provider": providerName,
+		"enabled":  false,
+	})
+}
+
+// handleBindChatGPTAccountProvider 将已有的 OAuth Provider 改绑到目标账户。
+// Provider 的其他配置不变，原账户的 providers 引用会随配置更新自动移除。
+func (s *server) handleBindChatGPTAccountProvider(w http.ResponseWriter, escapedID, escapedProviderName string) {
+	id, err := url.PathUnescape(escapedID)
+	if err != nil || id == "" || strings.Contains(id, "/") {
+		writeJSONError(w, http.StatusBadRequest, "invalid_account_id", "账户 ID 无效")
+		return
+	}
+	providerName, err := url.PathUnescape(escapedProviderName)
+	if err != nil || providerName == "" || strings.Contains(providerName, "/") {
+		writeJSONError(w, http.StatusBadRequest, "invalid_provider_name", "Provider 名称无效")
+		return
+	}
+
+	s.configOpMu.Lock()
+	defer s.configOpMu.Unlock()
+
+	account, ok := s.chatgptAuth.Account(id)
+	if !ok {
+		writeJSONError(w, http.StatusNotFound, "account_not_found", "ChatGPT OAuth 账户不存在")
+		return
+	}
+	if account.Status != "ready" {
+		writeJSONError(w, http.StatusConflict, "account_not_ready", "目标 ChatGPT OAuth 账户需要重新授权")
+		return
+	}
+
+	s.cfgMu.RLock()
+	oldCfg := s.cfg
+	s.cfgMu.RUnlock()
+	if oldCfg == nil {
+		writeJSONError(w, http.StatusInternalServerError, "config_update_failed", "当前配置不可用")
+		return
+	}
+	provider, ok := oldCfg.Providers[providerName]
+	if !ok || provider == nil {
+		writeJSONError(w, http.StatusNotFound, "provider_not_found", "Provider 不存在")
+		return
+	}
+	if provider.AuthType != "chatgptOAuth" {
+		writeJSONError(w, http.StatusConflict, "provider_not_oauth", "目标 Provider 不是 ChatGPT OAuth Provider")
+		return
+	}
+	if provider.AccountID == "" {
+		writeJSONError(w, http.StatusConflict, "binding_not_found", "目标 Provider 当前未绑定其他账户")
+		return
+	}
+	if provider.AccountID == id {
+		writeJSON(w, http.StatusOK, map[string]any{"status": "bound", "provider": providerName, "accountId": id})
+		return
+	}
+
+	newCfg := *oldCfg
+	newCfg.Providers = make(map[string]*config.Provider, len(oldCfg.Providers))
+	for name, current := range oldCfg.Providers {
+		if name != providerName {
+			newCfg.Providers[name] = current
+			continue
+		}
+		providerCopy := *current
+		providerCopy.AccountID = id
+		newCfg.Providers[name] = &providerCopy
+	}
+
+	revision, err := s.issueConfigRevision()
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "config_update_failed", "生成配置 revision 失败")
+		return
+	}
+	newCfg.Path = oldCfg.Path
+	if err := config.Save(&newCfg); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "config_update_failed", "更换绑定时保存配置失败: "+err.Error())
+		return
+	}
+	s.applyRuntimeConfig(&newCfg, revision)
+
+	w.Header().Set("ETag", strconv.Quote(revision))
+	writeJSON(w, http.StatusOK, map[string]any{"status": "bound", "provider": providerName, "accountId": id})
 }
 
 func (s *server) handleUpdateChatGPTAccountMetadata(w http.ResponseWriter, r *http.Request, escapedID string) {

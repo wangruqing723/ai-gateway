@@ -1114,7 +1114,7 @@
                                                                 <div class="truncate text-sm font-semibold text-white" :title="account.email || account.id" x-text="account.email || account.id"></div>
                                                                 <div class="mt-1 flex flex-wrap items-center gap-1.5">
                                                                     <span class="tag bg-white/[.06] text-muted" x-text="account.usage?.planType || account.plan || '类型未知'"></span>
-                                                                    <span class="tag" :class="account.status === 'ready' ? 'bg-good/10 text-good' : 'bg-danger/10 text-danger'" :title="account.status === 'ready' ? '令牌尚未被判定失效；额度查询状态单独显示' : '令牌刷新已确认需要重新授权'" x-text="account.status === 'ready' ? '令牌未判失效' : '需重新授权'"></span>
+                                                                    <span class="tag" :class="chatGPTAccountStatusInfo(account).badgeClass" :title="chatGPTAccountStatusInfo(account).title" x-text="chatGPTAccountStatusInfo(account).label"></span>
                                                                 </div>
                                                                 <div x-show="Array.isArray(account.tags) && account.tags.length > 0" class="mt-1 flex min-w-0 flex-wrap items-center gap-1">
                                                                     <template x-for="tag in (Array.isArray(account.tags) ? account.tags : [])" :key="tag">
@@ -1150,15 +1150,31 @@
                                                         </div>
                                                     </td>
                                                     <td class="px-3 py-3">
-                                                        <div class="flex min-w-0 flex-wrap items-center gap-2 text-xs" :title="Array.isArray(account.providers) && account.providers.length > 0 ? '绑定 Provider：' + account.providers.join(', ') : '未绑定 Provider'">
-                                                            <span class="h-1.5 w-1.5 shrink-0 rounded-full" :class="Array.isArray(account.providers) && account.providers.length > 0 ? 'bg-good' : 'bg-line'"></span>
-                                                            <span class="min-w-0 truncate" :class="Array.isArray(account.providers) && account.providers.length > 0 ? 'font-mono text-text' : 'text-muted'" x-text="Array.isArray(account.providers) && account.providers.length > 0 ? account.providers.join(', ') : '未绑定'"></span>
+                                                        <div class="space-y-1.5 text-xs" :title="Array.isArray(account.providers) && account.providers.length > 0 ? '绑定 Provider：' + account.providers.join(', ') : '未绑定 Provider'">
+                                                            <template x-if="!Array.isArray(account.providers) || account.providers.length === 0">
+                                                                <div class="flex items-center gap-2 text-muted">
+                                                                    <span class="h-1.5 w-1.5 shrink-0 rounded-full bg-line"></span>
+                                                                    <span>未绑定</span>
+                                                                </div>
+                                                            </template>
+                                                            <template x-for="providerName in (Array.isArray(account.providers) ? account.providers : [])" :key="providerName">
+                                                                <div class="flex min-w-0 flex-wrap items-center gap-1.5">
+                                                                    <span class="h-1.5 w-1.5 shrink-0 rounded-full bg-good"></span>
+                                                                    <span class="min-w-0 max-w-36 truncate font-mono text-text" x-text="providerName" :title="providerName"></span>
+                                                                    <button type="button" @click.stop="unbindChatGPTAccountProvider(account, providerName)" :disabled="loading || !!unbindingChatGPTProvider || !!bindingChatGPTAccountId" :title="'解除绑定并停用 Provider ' + providerName" class="rounded text-amber-100 transition hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan2 disabled:opacity-40" :aria-label="'解除 Provider ' + providerName + ' 的账户绑定并停用">解绑</button>
+                                                                </div>
+                                                            </template>
+                                                            <button type="button" @click.stop="openChatGPTAccountBindDialog(account)"
+                                                                    :disabled="account.status !== 'ready' || loading || !!unbindingChatGPTProvider || !!bindingChatGPTAccountId"
+                                                                    :title="account.status !== 'ready' ? '请先重新授权此账户，再绑定 Provider' : '选择已有 Provider；如果它已绑定其他账户，原账户会自动解除绑定'"
+                                                                    class="cursor-pointer rounded text-cyan transition hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan2 disabled:cursor-not-allowed disabled:opacity-40"
+                                                                    x-text="Array.isArray(account.providers) && account.providers.length > 0 ? '换绑已有 Provider' : '绑定已有 Provider'"></button>
                                                             <button type="button" @click.stop="addProvider(account)"
-                                                                    :disabled="account.status !== 'ready' || loading"
+                                                                    :disabled="account.status !== 'ready' || loading || !!unbindingChatGPTProvider || !!bindingChatGPTAccountId"
                                                                     :title="account.status !== 'ready' ? '请先重新授权此账户，再创建 Provider' : (Array.isArray(account.providers) && account.providers.length > 0 ? '使用此账户新建另一个 Provider' : '创建 Provider 并绑定此账户')"
                                                                     :aria-label="account.status !== 'ready' ? '账户需要重新授权后才能绑定 Provider' : (Array.isArray(account.providers) && account.providers.length > 0 ? '使用此 ChatGPT 账户新增 Provider' : '创建 Provider 并绑定此 ChatGPT 账户')"
-                                                                    class="shrink-0 cursor-pointer rounded text-cyan transition hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan2 disabled:cursor-not-allowed disabled:opacity-40"
-                                                                    x-text="account.status !== 'ready' ? '需授权' : (Array.isArray(account.providers) && account.providers.length > 0 ? '新增' : '创建')"></button>
+                                                                    class="cursor-pointer rounded text-cyan transition hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan2 disabled:cursor-not-allowed disabled:opacity-40"
+                                                                    x-text="account.status !== 'ready' ? '需授权' : (Array.isArray(account.providers) && account.providers.length > 0 ? '+ 新增 Provider' : '+ 创建 Provider')"></button>
                                                         </div>
                                                     </td>
                                                     <td class="px-4 py-2.5" @click.stop @keydown.stop>
@@ -1169,7 +1185,7 @@
                                                             <button type="button" @click="exportChatGPTAccount(account)" :disabled="exportingChatGPTAccounts" :title="'导出 ' + (account.email || '此账户')" class="btn btn-ghost disabled:cursor-not-allowed disabled:opacity-50" aria-label="导出 ChatGPT 账户">
                                                                 <span class="material-symbols-outlined text-[18px]">save</span>
                                                             </button>
-                                                            <button type="button" @click="removeChatGPTAccount(account)" :disabled="Array.isArray(account.providers) && account.providers.length > 0" :title="Array.isArray(account.providers) && account.providers.length > 0 ? '请先解除 Provider 绑定：' + account.providers.join(', ') : '删除账户'" class="btn btn-ghost btn-ghost-danger disabled:cursor-not-allowed disabled:opacity-40" aria-label="删除 ChatGPT 账户">
+                                                            <button type="button" @click="removeChatGPTAccount(account)" :disabled="(Array.isArray(account.providers) && account.providers.length > 0) || !!bindingChatGPTAccountId || !!unbindingChatGPTProvider" :title="Array.isArray(account.providers) && account.providers.length > 0 ? '请先解除 Provider 绑定：' + account.providers.join(', ') : '删除账户'" class="btn btn-ghost btn-ghost-danger disabled:cursor-not-allowed disabled:opacity-40" aria-label="删除 ChatGPT 账户">
                                                                 <span class="material-symbols-outlined text-[18px]">delete</span>
                                                             </button>
                                                         </div>
@@ -2333,15 +2349,48 @@
                             </label>
                         </div>
                         <div x-show="providerForm.authType === 'chatgptOAuth'" x-cloak class="block">
-                            <label for="provider-chatgpt-account" class="mb-1.5 block text-xs font-bold text-muted">ChatGPT 账户</label>
-                            <select autocomplete="off" id="provider-chatgpt-account" x-model="providerForm.accountId" class="field">
-                                <option value="">选择已连接账户</option>
-                                <template x-for="account in chatgptAccounts" :key="account.id">
-                                    <option :value="account.id" :disabled="account.status !== 'ready'" x-text="(account.email || account.id) + (account.status === 'ready' ? '' : '（需重新授权）')"></option>
-                                </template>
-                            </select>
+                            <label for="provider-chatgpt-account-trigger" class="mb-1.5 block text-xs font-bold text-muted">ChatGPT 账户</label>
+                            <div class="relative" @click.away="providerChatGPTAccountPickerOpen && closeProviderChatGPTAccountPicker()">
+                                <button autocomplete="off" id="provider-chatgpt-account-trigger" type="button"
+                                        @click="toggleProviderChatGPTAccountPicker()"
+                                        @keydown="onProviderChatGPTAccountPickerKeydown($event)"
+                                        role="combobox" aria-haspopup="listbox" aria-controls="provider-chatgpt-account-options"
+                                        :aria-expanded="String(providerChatGPTAccountPickerOpen)"
+                                        class="field flex w-full items-center justify-between gap-3 text-left">
+                                    <span class="min-w-0 truncate" :class="selectedProviderChatGPTAccount() ? 'text-text' : 'text-muted'"
+                                          x-text="selectedProviderChatGPTAccount() ? providerChatGPTAccountOptionLabel({ account: selectedProviderChatGPTAccount() }) : '选择已连接账户'"></span>
+                                    <span class="material-symbols-outlined shrink-0 text-[18px] text-muted" x-text="providerChatGPTAccountPickerOpen ? 'keyboard_arrow_up' : 'keyboard_arrow_down'"></span>
+                                </button>
+                                <div x-show="providerChatGPTAccountPickerOpen" x-cloak x-transition
+                                     class="absolute left-0 right-0 top-[calc(100%+4px)] z-30 overflow-hidden rounded-lg border border-line bg-panel3 shadow-glow">
+                                    <div class="border-b border-line p-2">
+                                        <input autocomplete="off" id="provider-chatgpt-account-search" type="search" x-model="providerChatGPTAccountFilter"
+                                               @input="providerChatGPTAccountActive = -1"
+                                               @keydown="onProviderChatGPTAccountPickerKeydown($event)"
+                                               placeholder="搜索邮箱、账户 ID、套餐、标签或备注"
+                                               aria-label="搜索 ChatGPT 账户" aria-controls="provider-chatgpt-account-options"
+                                               class="field w-full py-1.5 text-sm">
+                                    </div>
+                                    <ul id="provider-chatgpt-account-options" role="listbox" aria-label="ChatGPT 账户"
+                                        class="max-h-56 overflow-y-auto py-1 text-sm">
+                                        <template x-for="(option, optionIndex) in providerChatGPTAccountPickerOptions()" :key="option.id || '__empty__'">
+                                            <li :id="'provider-chatgpt-account-option-' + optionIndex" role="option"
+                                                :aria-selected="String(providerForm.accountId === option.id)"
+                                                :aria-disabled="String(option.disabled)"
+                                                @click.prevent="!option.disabled && chooseProviderChatGPTAccount(option.id)"
+                                                @mouseenter="!option.disabled && (providerChatGPTAccountActive = optionIndex)"
+                                                :class="option.disabled ? 'cursor-not-allowed text-muted/50' : (providerChatGPTAccountActive === optionIndex ? 'bg-cyan2/15 text-white' : (providerForm.accountId === option.id ? 'text-cyan' : 'text-text'))"
+                                                class="cursor-pointer truncate px-3 py-2"
+                                                x-text="providerChatGPTAccountOptionLabel(option)"></li>
+                                        </template>
+                                        <li x-show="filteredProviderChatGPTAccounts().length === 0"
+                                            class="px-3 py-2 text-xs text-muted"
+                                            x-text="chatgptAccounts.length ? '没有匹配的账户' : '尚未连接 ChatGPT 账户'"></li>
+                                    </ul>
+                                </div>
+                            </div>
                             <div class="mt-1 flex flex-wrap items-center justify-between gap-2 text-xs text-muted">
-                                <span>上游地址和 Responses 格式由 OAuth 类型固定。</span>
+                                <span x-text="'按邮箱、账户 ID、套餐、标签或备注搜索；需重新授权的账户不可选。上游地址和 Responses 格式由 OAuth 类型固定。'"></span>
                                 <button type="button" @click="openChatGPTOAuthDialog()" :disabled="startingChatGPTOAuth" class="text-cyan hover:text-white disabled:opacity-60">+ 连接新账户</button>
                             </div>
                         </div>
@@ -2966,6 +3015,44 @@
                 <button type="button" @click="exportChatGPTAccounts()" :disabled="chatGPTExportAccountIds.length === 0 || exportingChatGPTAccounts" class="btn btn-primary disabled:cursor-not-allowed disabled:opacity-50">
                     <span x-show="exportingChatGPTAccounts" x-cloak class="material-symbols-outlined gw-spin text-[18px]">progress_activity</span>
                     <span x-text="exportingChatGPTAccounts ? '正在生成文件…' : '导出所选账户'"></span>
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 从账户行选择一个已有 OAuth Provider；若 Provider 当前属于其他账户，改绑时自动替换旧关联。 -->
+    <div x-show="showChatGPTAccountBindDialog" x-transition.opacity x-cloak
+         @keydown.escape.window="closeChatGPTAccountBindDialog()"
+         @click.self="closeChatGPTAccountBindDialog()"
+         class="fixed inset-0 z-[80] grid place-items-center overflow-y-auto bg-black/70 p-4">
+        <div class="glass w-full max-w-xl rounded-lg shadow-glow" role="dialog" aria-modal="true" aria-labelledby="chatgpt-bind-title">
+            <div class="flex items-start justify-between gap-4 border-b border-line p-5">
+                <div>
+                    <h3 id="chatgpt-bind-title" class="text-lg font-bold text-white" x-text="chatGPTAccountBindDialogTitle()"></h3>
+                    <p class="mt-1 break-all text-sm text-muted" x-text="chatGPTAccountBindingTarget()?.email || chatGPTAccountBindTargetId"></p>
+                </div>
+                <button type="button" @click="closeChatGPTAccountBindDialog()" :disabled="!!bindingChatGPTAccountId" class="btn btn-secondary px-2 py-2 disabled:opacity-50" aria-label="关闭账户绑定弹窗">
+                    <span class="material-symbols-outlined">close</span>
+                </button>
+            </div>
+            <div class="space-y-4 p-5">
+                <label class="block space-y-2">
+                    <span class="text-xs font-bold text-muted">目标 Provider</span>
+                    <select x-model="chatGPTAccountBindProvider" class="field" :disabled="!!bindingChatGPTAccountId">
+                        <option value="">选择已绑定其他账户的 Provider</option>
+                        <template x-for="item in chatGPTOAuthProvidersForAccountBinding()" :key="item.name">
+                            <option :value="item.name" x-text="chatGPTAccountBindProviderLabel(item)"></option>
+                        </template>
+                    </select>
+                </label>
+                <p x-show="selectedChatGPTAccountBindingProvider()" x-cloak class="rounded-lg border border-warn/30 bg-warn/10 p-3 text-xs leading-relaxed text-amber-100" x-text="chatGPTAccountBindImpactText()"></p>
+                <p x-show="chatGPTOAuthProvidersForAccountBinding().length === 0" class="rounded-lg border border-line bg-panel/60 p-3 text-sm text-muted">没有可换绑的其他账户 Provider。可通过账户行的“创建 Provider”新建。</p>
+            </div>
+            <div class="flex flex-wrap justify-end gap-2 border-t border-line p-5">
+                <button type="button" @click="closeChatGPTAccountBindDialog()" :disabled="!!bindingChatGPTAccountId" class="btn btn-secondary disabled:opacity-50">取消</button>
+                <button type="button" @click="bindChatGPTAccountToProvider()" :disabled="!chatGPTAccountBindProvider || !!bindingChatGPTAccountId || chatGPTOAuthProvidersForAccountBinding().length === 0" class="btn btn-primary disabled:cursor-not-allowed disabled:opacity-50">
+                    <span x-show="bindingChatGPTAccountId" x-cloak class="material-symbols-outlined gw-spin text-[18px]">progress_activity</span>
+                    <span x-text="bindingChatGPTAccountId ? '正在换绑…' : '确认换绑' "></span>
                 </button>
             </div>
         </div>

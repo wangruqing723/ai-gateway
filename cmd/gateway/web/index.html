@@ -1114,7 +1114,7 @@
                                                                 <div class="truncate text-sm font-semibold text-white" :title="account.email || account.id" x-text="account.email || account.id"></div>
                                                                 <div class="mt-1 flex flex-wrap items-center gap-1.5">
                                                                     <span class="tag bg-white/[.06] text-muted" x-text="account.usage?.planType || account.plan || '类型未知'"></span>
-                                                                    <span class="tag" :class="account.status === 'ready' ? 'bg-good/10 text-good' : 'bg-danger/10 text-danger'" :title="account.status === 'ready' ? '令牌尚未被判定失效；额度查询状态单独显示' : '令牌刷新已确认需要重新授权'" x-text="account.status === 'ready' ? '令牌未判失效' : '需重新授权'"></span>
+                                                                    <span class="tag" :class="chatGPTAccountStatusInfo(account).badgeClass" :title="chatGPTAccountStatusInfo(account).title" x-text="chatGPTAccountStatusInfo(account).label"></span>
                                                                 </div>
                                                                 <div x-show="Array.isArray(account.tags) && account.tags.length > 0" class="mt-1 flex min-w-0 flex-wrap items-center gap-1">
                                                                     <template x-for="tag in (Array.isArray(account.tags) ? account.tags : [])" :key="tag">
@@ -1150,15 +1150,31 @@
                                                         </div>
                                                     </td>
                                                     <td class="px-3 py-3">
-                                                        <div class="flex min-w-0 flex-wrap items-center gap-2 text-xs" :title="Array.isArray(account.providers) && account.providers.length > 0 ? '绑定 Provider：' + account.providers.join(', ') : '未绑定 Provider'">
-                                                            <span class="h-1.5 w-1.5 shrink-0 rounded-full" :class="Array.isArray(account.providers) && account.providers.length > 0 ? 'bg-good' : 'bg-line'"></span>
-                                                            <span class="min-w-0 truncate" :class="Array.isArray(account.providers) && account.providers.length > 0 ? 'font-mono text-text' : 'text-muted'" x-text="Array.isArray(account.providers) && account.providers.length > 0 ? account.providers.join(', ') : '未绑定'"></span>
+                                                        <div class="space-y-1.5 text-xs" :title="Array.isArray(account.providers) && account.providers.length > 0 ? '绑定 Provider：' + account.providers.join(', ') : '未绑定 Provider'">
+                                                            <template x-if="!Array.isArray(account.providers) || account.providers.length === 0">
+                                                                <div class="flex items-center gap-2 text-muted">
+                                                                    <span class="h-1.5 w-1.5 shrink-0 rounded-full bg-line"></span>
+                                                                    <span>未绑定</span>
+                                                                </div>
+                                                            </template>
+                                                            <template x-for="providerName in (Array.isArray(account.providers) ? account.providers : [])" :key="providerName">
+                                                                <div class="flex min-w-0 flex-wrap items-center gap-1.5">
+                                                                    <span class="h-1.5 w-1.5 shrink-0 rounded-full bg-good"></span>
+                                                                    <span class="min-w-0 max-w-36 truncate font-mono text-text" x-text="providerName" :title="providerName"></span>
+                                                                    <button type="button" @click.stop="unbindChatGPTAccountProvider(account, providerName)" :disabled="loading || !!unbindingChatGPTProvider || !!bindingChatGPTAccountId" :title="'解除绑定并停用 Provider ' + providerName" class="rounded text-amber-100 transition hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan2 disabled:opacity-40" :aria-label="'解除 Provider ' + providerName + ' 的账户绑定并停用">解绑</button>
+                                                                </div>
+                                                            </template>
+                                                            <button type="button" @click.stop="openChatGPTAccountBindDialog(account)"
+                                                                    :disabled="account.status !== 'ready' || loading || !!unbindingChatGPTProvider || !!bindingChatGPTAccountId"
+                                                                    :title="account.status !== 'ready' ? '请先重新授权此账户，再绑定 Provider' : '选择已有 Provider；如果它已绑定其他账户，原账户会自动解除绑定'"
+                                                                    class="cursor-pointer rounded text-cyan transition hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan2 disabled:cursor-not-allowed disabled:opacity-40"
+                                                                    x-text="Array.isArray(account.providers) && account.providers.length > 0 ? '换绑已有 Provider' : '绑定已有 Provider'"></button>
                                                             <button type="button" @click.stop="addProvider(account)"
-                                                                    :disabled="account.status !== 'ready' || loading"
+                                                                    :disabled="account.status !== 'ready' || loading || !!unbindingChatGPTProvider || !!bindingChatGPTAccountId"
                                                                     :title="account.status !== 'ready' ? '请先重新授权此账户，再创建 Provider' : (Array.isArray(account.providers) && account.providers.length > 0 ? '使用此账户新建另一个 Provider' : '创建 Provider 并绑定此账户')"
                                                                     :aria-label="account.status !== 'ready' ? '账户需要重新授权后才能绑定 Provider' : (Array.isArray(account.providers) && account.providers.length > 0 ? '使用此 ChatGPT 账户新增 Provider' : '创建 Provider 并绑定此 ChatGPT 账户')"
-                                                                    class="shrink-0 cursor-pointer rounded text-cyan transition hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan2 disabled:cursor-not-allowed disabled:opacity-40"
-                                                                    x-text="account.status !== 'ready' ? '需授权' : (Array.isArray(account.providers) && account.providers.length > 0 ? '新增' : '创建')"></button>
+                                                                    class="cursor-pointer rounded text-cyan transition hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan2 disabled:cursor-not-allowed disabled:opacity-40"
+                                                                    x-text="account.status !== 'ready' ? '需授权' : (Array.isArray(account.providers) && account.providers.length > 0 ? '+ 新增 Provider' : '+ 创建 Provider')"></button>
                                                         </div>
                                                     </td>
                                                     <td class="px-4 py-2.5" @click.stop @keydown.stop>
@@ -1169,7 +1185,7 @@
                                                             <button type="button" @click="exportChatGPTAccount(account)" :disabled="exportingChatGPTAccounts" :title="'导出 ' + (account.email || '此账户')" class="btn btn-ghost disabled:cursor-not-allowed disabled:opacity-50" aria-label="导出 ChatGPT 账户">
                                                                 <span class="material-symbols-outlined text-[18px]">save</span>
                                                             </button>
-                                                            <button type="button" @click="removeChatGPTAccount(account)" :disabled="Array.isArray(account.providers) && account.providers.length > 0" :title="Array.isArray(account.providers) && account.providers.length > 0 ? '请先解除 Provider 绑定：' + account.providers.join(', ') : '删除账户'" class="btn btn-ghost btn-ghost-danger disabled:cursor-not-allowed disabled:opacity-40" aria-label="删除 ChatGPT 账户">
+                                                            <button type="button" @click="removeChatGPTAccount(account)" :disabled="(Array.isArray(account.providers) && account.providers.length > 0) || !!bindingChatGPTAccountId || !!unbindingChatGPTProvider" :title="Array.isArray(account.providers) && account.providers.length > 0 ? '请先解除 Provider 绑定：' + account.providers.join(', ') : '删除账户'" class="btn btn-ghost btn-ghost-danger disabled:cursor-not-allowed disabled:opacity-40" aria-label="删除 ChatGPT 账户">
                                                                 <span class="material-symbols-outlined text-[18px]">delete</span>
                                                             </button>
                                                         </div>
@@ -2333,15 +2349,48 @@
                             </label>
                         </div>
                         <div x-show="providerForm.authType === 'chatgptOAuth'" x-cloak class="block">
-                            <label for="provider-chatgpt-account" class="mb-1.5 block text-xs font-bold text-muted">ChatGPT 账户</label>
-                            <select autocomplete="off" id="provider-chatgpt-account" x-model="providerForm.accountId" class="field">
-                                <option value="">选择已连接账户</option>
-                                <template x-for="account in chatgptAccounts" :key="account.id">
-                                    <option :value="account.id" :disabled="account.status !== 'ready'" x-text="(account.email || account.id) + (account.status === 'ready' ? '' : '（需重新授权）')"></option>
-                                </template>
-                            </select>
+                            <label for="provider-chatgpt-account-trigger" class="mb-1.5 block text-xs font-bold text-muted">ChatGPT 账户</label>
+                            <div class="relative" @click.away="providerChatGPTAccountPickerOpen && closeProviderChatGPTAccountPicker()">
+                                <button autocomplete="off" id="provider-chatgpt-account-trigger" type="button"
+                                        @click="toggleProviderChatGPTAccountPicker()"
+                                        @keydown="onProviderChatGPTAccountPickerKeydown($event)"
+                                        role="combobox" aria-haspopup="listbox" aria-controls="provider-chatgpt-account-options"
+                                        :aria-expanded="String(providerChatGPTAccountPickerOpen)"
+                                        class="field flex w-full items-center justify-between gap-3 text-left">
+                                    <span class="min-w-0 truncate" :class="selectedProviderChatGPTAccount() ? 'text-text' : 'text-muted'"
+                                          x-text="selectedProviderChatGPTAccount() ? providerChatGPTAccountOptionLabel({ account: selectedProviderChatGPTAccount() }) : '选择已连接账户'"></span>
+                                    <span class="material-symbols-outlined shrink-0 text-[18px] text-muted" x-text="providerChatGPTAccountPickerOpen ? 'keyboard_arrow_up' : 'keyboard_arrow_down'"></span>
+                                </button>
+                                <div x-show="providerChatGPTAccountPickerOpen" x-cloak x-transition
+                                     class="absolute left-0 right-0 top-[calc(100%+4px)] z-30 overflow-hidden rounded-lg border border-line bg-panel3 shadow-glow">
+                                    <div class="border-b border-line p-2">
+                                        <input autocomplete="off" id="provider-chatgpt-account-search" type="search" x-model="providerChatGPTAccountFilter"
+                                               @input="providerChatGPTAccountActive = -1"
+                                               @keydown="onProviderChatGPTAccountPickerKeydown($event)"
+                                               placeholder="搜索邮箱、账户 ID、套餐、标签或备注"
+                                               aria-label="搜索 ChatGPT 账户" aria-controls="provider-chatgpt-account-options"
+                                               class="field w-full py-1.5 text-sm">
+                                    </div>
+                                    <ul id="provider-chatgpt-account-options" role="listbox" aria-label="ChatGPT 账户"
+                                        class="max-h-56 overflow-y-auto py-1 text-sm">
+                                        <template x-for="(option, optionIndex) in providerChatGPTAccountPickerOptions()" :key="option.id || '__empty__'">
+                                            <li :id="'provider-chatgpt-account-option-' + optionIndex" role="option"
+                                                :aria-selected="String(providerForm.accountId === option.id)"
+                                                :aria-disabled="String(option.disabled)"
+                                                @click.prevent="!option.disabled && chooseProviderChatGPTAccount(option.id)"
+                                                @mouseenter="!option.disabled && (providerChatGPTAccountActive = optionIndex)"
+                                                :class="option.disabled ? 'cursor-not-allowed text-muted/50' : (providerChatGPTAccountActive === optionIndex ? 'bg-cyan2/15 text-white' : (providerForm.accountId === option.id ? 'text-cyan' : 'text-text'))"
+                                                class="cursor-pointer truncate px-3 py-2"
+                                                x-text="providerChatGPTAccountOptionLabel(option)"></li>
+                                        </template>
+                                        <li x-show="filteredProviderChatGPTAccounts().length === 0"
+                                            class="px-3 py-2 text-xs text-muted"
+                                            x-text="chatgptAccounts.length ? '没有匹配的账户' : '尚未连接 ChatGPT 账户'"></li>
+                                    </ul>
+                                </div>
+                            </div>
                             <div class="mt-1 flex flex-wrap items-center justify-between gap-2 text-xs text-muted">
-                                <span>上游地址和 Responses 格式由 OAuth 类型固定。</span>
+                                <span x-text="'按邮箱、账户 ID、套餐、标签或备注搜索；需重新授权的账户不可选。上游地址和 Responses 格式由 OAuth 类型固定。'"></span>
                                 <button type="button" @click="openChatGPTOAuthDialog()" :disabled="startingChatGPTOAuth" class="text-cyan hover:text-white disabled:opacity-60">+ 连接新账户</button>
                             </div>
                         </div>
@@ -2971,6 +3020,44 @@
         </div>
     </div>
 
+    <!-- 从账户行选择一个已有 OAuth Provider；若 Provider 当前属于其他账户，改绑时自动替换旧关联。 -->
+    <div x-show="showChatGPTAccountBindDialog" x-transition.opacity x-cloak
+         @keydown.escape.window="closeChatGPTAccountBindDialog()"
+         @click.self="closeChatGPTAccountBindDialog()"
+         class="fixed inset-0 z-[80] grid place-items-center overflow-y-auto bg-black/70 p-4">
+        <div class="glass w-full max-w-xl rounded-lg shadow-glow" role="dialog" aria-modal="true" aria-labelledby="chatgpt-bind-title">
+            <div class="flex items-start justify-between gap-4 border-b border-line p-5">
+                <div>
+                    <h3 id="chatgpt-bind-title" class="text-lg font-bold text-white" x-text="chatGPTAccountBindDialogTitle()"></h3>
+                    <p class="mt-1 break-all text-sm text-muted" x-text="chatGPTAccountBindingTarget()?.email || chatGPTAccountBindTargetId"></p>
+                </div>
+                <button type="button" @click="closeChatGPTAccountBindDialog()" :disabled="!!bindingChatGPTAccountId" class="btn btn-secondary px-2 py-2 disabled:opacity-50" aria-label="关闭账户绑定弹窗">
+                    <span class="material-symbols-outlined">close</span>
+                </button>
+            </div>
+            <div class="space-y-4 p-5">
+                <label class="block space-y-2">
+                    <span class="text-xs font-bold text-muted">目标 Provider</span>
+                    <select x-model="chatGPTAccountBindProvider" class="field" :disabled="!!bindingChatGPTAccountId">
+                        <option value="">选择已绑定其他账户的 Provider</option>
+                        <template x-for="item in chatGPTOAuthProvidersForAccountBinding()" :key="item.name">
+                            <option :value="item.name" x-text="chatGPTAccountBindProviderLabel(item)"></option>
+                        </template>
+                    </select>
+                </label>
+                <p x-show="selectedChatGPTAccountBindingProvider()" x-cloak class="rounded-lg border border-warn/30 bg-warn/10 p-3 text-xs leading-relaxed text-amber-100" x-text="chatGPTAccountBindImpactText()"></p>
+                <p x-show="chatGPTOAuthProvidersForAccountBinding().length === 0" class="rounded-lg border border-line bg-panel/60 p-3 text-sm text-muted">没有可换绑的其他账户 Provider。可通过账户行的“创建 Provider”新建。</p>
+            </div>
+            <div class="flex flex-wrap justify-end gap-2 border-t border-line p-5">
+                <button type="button" @click="closeChatGPTAccountBindDialog()" :disabled="!!bindingChatGPTAccountId" class="btn btn-secondary disabled:opacity-50">取消</button>
+                <button type="button" @click="bindChatGPTAccountToProvider()" :disabled="!chatGPTAccountBindProvider || !!bindingChatGPTAccountId || chatGPTOAuthProvidersForAccountBinding().length === 0" class="btn btn-primary disabled:cursor-not-allowed disabled:opacity-50">
+                    <span x-show="bindingChatGPTAccountId" x-cloak class="material-symbols-outlined gw-spin text-[18px]">progress_activity</span>
+                    <span x-text="bindingChatGPTAccountId ? '正在换绑…' : '确认换绑' "></span>
+                </button>
+            </div>
+        </div>
+    </div>
+
     <!-- ChatGPT OAuth 授权方式选择。连接账户入口只打开此弹窗，不会创建会话或打开浏览器页面。 -->
     <div x-show="showChatGPTOAuthDialog" x-transition.opacity x-cloak
          @keydown.escape.window="closeChatGPTOAuthDialog()"
@@ -3123,9 +3210,16 @@
                 probingProvider: false,
                 providerProbeStatus: null,
                 chatgptAccounts: [],
+                chatGPTNow: Date.now(),
+                _chatGPTExpiryTimer: null,
                 loadingChatGPTAccounts: false,
                 refreshingChatGPTUsage: false,
                 refreshingChatGPTAccountId: '',
+                unbindingChatGPTProvider: '',
+                bindingChatGPTAccountId: '',
+                showChatGPTAccountBindDialog: false,
+                chatGPTAccountBindTargetId: '',
+                chatGPTAccountBindProvider: '',
                 showChatGPTImportDialog: false,
                 showChatGPTExportDialog: false,
                 chatGPTImportFile: null,
@@ -3281,6 +3375,10 @@
                 providerFilter: '',
                 // ChatGPT OAuth 账户列表筛选词：按邮箱、账户 ID、标签、备注和绑定 Provider 匹配。
                 chatGPTAccountFilter: '',
+                // Provider 抽屉内的账户选择搜索词，与账户列表筛选彼此独立。
+                providerChatGPTAccountFilter: '',
+                providerChatGPTAccountPickerOpen: false,
+                providerChatGPTAccountActive: -1,
                 // Provider 抽屉「高级设置」的展开状态：打开抽屉时按是否已有高级配置决定（见 openProviderDrawer）。
                 providerAdvancedOpen: false,
                 // 抽屉防误丢：打开时记下表单指纹，关闭前比对，有差异才确认。
@@ -3365,6 +3463,9 @@
                     });
                     await this.loadConfig();
                     await this.loadChatGPTAccounts();
+                    this._chatGPTExpiryTimer = window.setInterval(() => {
+                        this.chatGPTNow = Date.now();
+                    }, 60_000);
                     if (this.monitorPollingAllowed()) await this.refreshMonitor();
                     this._monitorPollTimer = window.setInterval(() => {
                         if (this.monitorPollingAllowed()) this.refreshMonitor(false);
@@ -3415,6 +3516,7 @@
 
                 destroy() {
                     if (this._monitorPollTimer !== null) window.clearInterval(this._monitorPollTimer);
+                    if (this._chatGPTExpiryTimer !== null) window.clearInterval(this._chatGPTExpiryTimer);
                     if (this._oauthPollTimer !== null) window.clearInterval(this._oauthPollTimer);
                     if (this._monitorVisibilityHandler) {
                         document.removeEventListener('visibilitychange', this._monitorVisibilityHandler);
@@ -3668,8 +3770,10 @@
                         this.restartRequired = data.restartRequired || [];
                         this._serverConfigData = data;
                         this.applyServerConfig();
+                        return true;
                     } catch (err) {
                         this.showStatus('加载配置失败: ' + err.message, 'error');
+                        return false;
                     }
                 },
 
@@ -3968,6 +4072,12 @@
                 escapeProviderModal(e) {
                     if (!this.showProviderModal) return;
                     if (this.confirmDialog.open || this.showChatGPTOAuthDialog) return;
+                    if (this.providerChatGPTAccountPickerOpen) {
+                        e?.preventDefault();
+                        e?.stopImmediatePropagation();
+                        this.closeProviderChatGPTAccountPicker(true);
+                        return;
+                    }
                     // 先截断当前 ESC。若抽屉有未保存修改，下一轮事件队列再开确认框，
                     // 确认框的 window 监听就不会把触发关闭的这次 ESC 当成取消。
                     e?.preventDefault();
@@ -5680,7 +5790,7 @@
                     if (!Number.isFinite(expiresAt)) {
                         return { label: '', valueClass: 'text-muted', badgeClass: '' };
                     }
-                    const remaining = expiresAt - Date.now();
+                    const remaining = expiresAt - (this.chatGPTNow || Date.now());
                     if (remaining <= 0) {
                         return { label: '已过期', valueClass: 'text-danger', badgeClass: 'bg-danger/10 text-danger' };
                     }
@@ -5691,6 +5801,48 @@
                         return { label: '3 天内到期', valueClass: 'text-amber-100', badgeClass: 'bg-warn/10 text-amber-100' };
                     }
                     return { label: '', valueClass: 'text-white', badgeClass: '' };
+                },
+
+                chatGPTAccountStatusInfo(account) {
+                    if (account?.status !== 'ready') {
+                        return {
+                            label: '需重新授权',
+                            badgeClass: 'bg-danger/10 text-danger',
+                            title: '令牌刷新已确认需要重新授权'
+                        };
+                    }
+                    const expiresAt = Date.parse(account?.expiresAt || '');
+                    if (!Number.isFinite(expiresAt)) {
+                        return {
+                            label: '访问令牌到期时间未知',
+                            badgeClass: 'bg-white/[.06] text-muted',
+                            title: '未记录访问令牌到期时间'
+                        };
+                    }
+                    const now = this.chatGPTNow || Date.now();
+                    const remaining = expiresAt - now;
+                    const expiry = this.chatGPTExpiryInfo(account);
+                    if (remaining <= 0) {
+                        return {
+                            label: '访问令牌已过期',
+                            badgeClass: expiry.badgeClass,
+                            title: `访问令牌于 ${this.formatChatGPTDate(account.expiresAt)} 到期；使用时仍会尝试自动续期`
+                        };
+                    }
+                    const days = Math.floor(remaining / 86400000);
+                    const hours = Math.floor((remaining % 86400000) / 3600000);
+                    const minutes = Math.floor((remaining % 3600000) / 60000);
+                    const countdown = days > 0
+                        ? `${days} 天${hours > 0 ? ` ${hours} 小时` : ''}`
+                        : hours > 0
+                            ? `${hours} 小时${minutes > 0 ? ` ${minutes} 分钟` : ''}`
+                            : minutes > 0 ? `${minutes} 分钟` : '不足 1 分钟';
+                    const label = `访问令牌到期：${countdown} 后`;
+                    return {
+                        label,
+                        badgeClass: expiry.badgeClass || 'bg-good/10 text-good',
+                        title: `${label}（${this.formatChatGPTDate(account.expiresAt)}）；使用时仍会尝试自动续期，此提示不代表额度状态`
+                    };
                 },
 
                 formatUsageWindowName(window) {
@@ -5927,6 +6079,136 @@
                     }
                 },
 
+                chatGPTOAuthProvidersForAccountBinding() {
+                    const targetAccountId = this.chatGPTAccountBindTargetId;
+                    return Object.entries(this.config.providers || {})
+                        .filter(([, provider]) => provider?.authType === 'chatgptOAuth' && provider.accountId && provider.accountId !== targetAccountId)
+                        .sort(([a], [b]) => a.localeCompare(b))
+                        .map(([name, provider]) => ({
+                            name,
+                            provider,
+                            account: this.chatgptAccounts.find(account => account.id === provider.accountId) || null
+                        }));
+                },
+
+                chatGPTAccountBindingTarget() {
+                    return this.chatgptAccounts.find(account => account.id === this.chatGPTAccountBindTargetId) || null;
+                },
+
+                chatGPTAccountBindDialogTitle() {
+                    const account = this.chatGPTAccountBindingTarget();
+                    return Array.isArray(account?.providers) && account.providers.length > 0
+                        ? '换绑已有 Provider'
+                        : '绑定已有 Provider';
+                },
+
+                selectedChatGPTAccountBindingProvider() {
+                    return this.chatGPTOAuthProvidersForAccountBinding()
+                        .find(item => item.name === this.chatGPTAccountBindProvider) || null;
+                },
+
+                chatGPTAccountBindProviderLabel(item) {
+                    const account = item?.account;
+                    const accountName = account?.email || account?.id || item?.provider?.accountId || '其他账户';
+                    return `${item?.name || ''} · 当前绑定 ${accountName}${item?.provider?.enabled === false ? '（已停用）' : ''}`;
+                },
+
+                chatGPTAccountBindImpactText() {
+                    const item = this.selectedChatGPTAccountBindingProvider();
+                    if (!item) return '';
+                    const previousAccount = item.account?.email || item.provider.accountId;
+                    return `该 Provider 当前绑定账户 ${previousAccount}。确认后会解除原账户与该 Provider 的关联，并绑定到所选账户；Provider 的路由和其他设置保留。`;
+                },
+
+                openChatGPTAccountBindDialog(account) {
+                    if (!account?.id || account.status !== 'ready' || this.bindingChatGPTAccountId) return;
+                    this.chatGPTAccountBindTargetId = account.id;
+                    const options = this.chatGPTOAuthProvidersForAccountBinding();
+                    this.chatGPTAccountBindProvider = options[0]?.name || '';
+                    this.showChatGPTAccountBindDialog = true;
+                },
+
+                closeChatGPTAccountBindDialog() {
+                    if (this.bindingChatGPTAccountId) return;
+                    this.showChatGPTAccountBindDialog = false;
+                    this.chatGPTAccountBindTargetId = '';
+                    this.chatGPTAccountBindProvider = '';
+                },
+
+                async bindChatGPTAccountToProvider() {
+                    const accountId = this.chatGPTAccountBindTargetId;
+                    const providerName = this.chatGPTAccountBindProvider;
+                    if (!accountId || !providerName || this.bindingChatGPTAccountId) return;
+                    if (this.isDirty()) {
+                        this.showStatus('请先保存或撤销未保存的配置修改，再更换账户绑定', 'error');
+                        return;
+                    }
+                    const account = this.chatgptAccounts.find(item => item.id === accountId);
+                    const provider = this.config.providers?.[providerName];
+                    if (!account || account.status !== 'ready' || !provider || provider.authType !== 'chatgptOAuth' || !provider.accountId || provider.accountId === accountId) {
+                        this.showStatus('账户或 Provider 绑定信息已变化，正在刷新页面数据', 'error');
+                        await Promise.all([this.loadConfig(), this.loadChatGPTAccounts(false, false)]);
+                        this.closeChatGPTAccountBindDialog();
+                        return;
+                    }
+
+                    this.bindingChatGPTAccountId = accountId;
+                    try {
+                        const url = `/api/chatgpt/accounts/${encodeURIComponent(accountId)}/bindings/${encodeURIComponent(providerName)}`;
+                        const res = await fetch(url, { method: 'PUT' });
+                        if (!res.ok) throw new Error(await this.errorText(res, '更换 Provider 绑定账户失败'));
+                        const [configLoaded, accountsLoaded] = await Promise.all([
+                            this.loadConfig(),
+                            this.loadChatGPTAccounts(false, false)
+                        ]);
+                        if (!configLoaded || !accountsLoaded) {
+                            this.showChatGPTAccountBindDialog = false;
+                            this.showStatus('Provider 已改绑，但页面数据刷新失败，请刷新页面', 'error');
+                            return;
+                        }
+                        this.showChatGPTAccountBindDialog = false;
+                        this.chatGPTAccountBindTargetId = '';
+                        this.chatGPTAccountBindProvider = '';
+                        this.showStatus(`Provider「${providerName}」已绑定到 ${account.email || account.id}，原账户绑定已解除`, 'success');
+                    } catch (err) {
+                        this.showStatus('更换 Provider 绑定账户失败: ' + err.message, 'error');
+                    } finally {
+                        this.bindingChatGPTAccountId = '';
+                    }
+                },
+
+                async unbindChatGPTAccountProvider(account, providerName) {
+                    if (!account?.id || !providerName || this.unbindingChatGPTProvider || this.bindingChatGPTAccountId) return;
+                    if (this.isDirty()) {
+                        this.showStatus('请先保存或撤销未保存的配置修改，再解除绑定', 'error');
+                        return;
+                    }
+                    if (!(await this.askConfirm(
+                        `解除「${providerName}」与 ${account.email || account.id} 的绑定后，该 Provider 会保留路由和其他设置、切换为 API Key 模式并停用。`,
+                        { title: '解除 ChatGPT 账户绑定', confirmText: '解绑并停用' }
+                    ))) return;
+
+                    this.unbindingChatGPTProvider = providerName;
+                    try {
+                        const url = `/api/chatgpt/accounts/${encodeURIComponent(account.id)}/bindings/${encodeURIComponent(providerName)}`;
+                        const res = await fetch(url, { method: 'DELETE' });
+                        if (!res.ok) throw new Error(await this.errorText(res, '解除绑定失败'));
+                        const [configLoaded, accountsLoaded] = await Promise.all([
+                            this.loadConfig(),
+                            this.loadChatGPTAccounts(false, false)
+                        ]);
+                        if (!configLoaded || !accountsLoaded) {
+                            this.showStatus('绑定已解除且 Provider 已停用，但页面数据刷新失败，请刷新页面', 'error');
+                            return;
+                        }
+                        this.showStatus(`Provider「${providerName}」已解除绑定并停用，现在可以删除该账户`, 'success');
+                    } catch (err) {
+                        this.showStatus('解除 ChatGPT 账户绑定失败: ' + err.message, 'error');
+                    } finally {
+                        this.unbindingChatGPTProvider = '';
+                    }
+                },
+
                 editChatGPTAccountMetadata(account) {
                     if (!account?.id) return;
                     this.chatGPTAccountMetadataDrafts = {
@@ -5991,6 +6273,7 @@
                 },
 
                 providerAuthTypeChanged() {
+                    this.closeProviderChatGPTAccountPicker();
                     if (this.providerForm.authType === 'chatgptOAuth') {
                         this.providerForm.baseUrl = 'https://chatgpt.com/backend-api/codex';
                         this.providerForm.format = 'openai-responses';
@@ -6005,6 +6288,8 @@
                 // 从 ChatGPT 账户列表发起时，直接预选 OAuth 类型与账户，省去跳回列表后的重复选择。
                 addProvider(chatGPTAccount = null) {
                     const selectedChatGPTAccount = chatGPTAccount?.status === 'ready' ? chatGPTAccount : null;
+                    this.providerChatGPTAccountFilter = '';
+                    this.closeProviderChatGPTAccountPicker();
                     this.editingProvider = null;
                     this.probingProvider = false;
                     this.providerProbeStatus = null;
@@ -6035,6 +6320,8 @@
 
                 editProvider(name) {
                     this.editingProvider = name;
+                    this.providerChatGPTAccountFilter = '';
+                    this.closeProviderChatGPTAccountPicker();
                     this.probingProvider = false;
                     this.providerProbeStatus = null;
                     const p = this.config.providers[name];
@@ -6233,6 +6520,118 @@
 
                 filteredChatGPTAccounts() {
                     return this.chatgptAccounts.filter(account => this.chatGPTAccountMatchesFilter(account));
+                },
+
+                providerChatGPTAccountMatchesFilter(account) {
+                    const q = (this.providerChatGPTAccountFilter || '').trim().toLowerCase();
+                    if (!q) return true;
+                    const values = [
+                        account?.email,
+                        account?.id,
+                        account?.plan,
+                        account?.usage?.planType,
+                        account?.note,
+                        ...(Array.isArray(account?.tags) ? account.tags : [])
+                    ];
+                    return values.some(value => String(value || '').toLowerCase().includes(q));
+                },
+
+                filteredProviderChatGPTAccounts() {
+                    return this.chatgptAccounts.filter(account => this.providerChatGPTAccountMatchesFilter(account));
+                },
+
+                selectedProviderChatGPTAccount() {
+                    return this.chatgptAccounts.find(account => account.id === this.providerForm.accountId) || null;
+                },
+
+                providerChatGPTAccountPickerOptions() {
+                    return [
+                        { id: '', account: null, disabled: false },
+                        ...this.filteredProviderChatGPTAccounts().map(account => ({
+                            id: account.id,
+                            account,
+                            disabled: account.status !== 'ready'
+                        }))
+                    ];
+                },
+
+                providerChatGPTAccountOptionLabel(option) {
+                    const account = option?.account;
+                    if (!account) return '选择已连接账户';
+                    const plan = account.usage?.planType || account.plan;
+                    return (account.email || account.id) + (plan ? ' · ' + plan : '') + (account.status === 'ready' ? '' : '（需重新授权）');
+                },
+
+                openProviderChatGPTAccountPicker() {
+                    this.providerChatGPTAccountPickerOpen = true;
+                    this.providerChatGPTAccountActive = -1;
+                    this.providerChatGPTAccountFilter = '';
+                    this.$nextTick(() => document.getElementById('provider-chatgpt-account-search')?.focus());
+                },
+
+                toggleProviderChatGPTAccountPicker() {
+                    if (this.providerChatGPTAccountPickerOpen) {
+                        this.closeProviderChatGPTAccountPicker();
+                        return;
+                    }
+                    this.openProviderChatGPTAccountPicker();
+                },
+
+                closeProviderChatGPTAccountPicker(returnFocus = false) {
+                    this.providerChatGPTAccountPickerOpen = false;
+                    this.providerChatGPTAccountActive = -1;
+                    this.providerChatGPTAccountFilter = '';
+                    if (returnFocus) {
+                        this.$nextTick(() => document.getElementById('provider-chatgpt-account-trigger')?.focus());
+                    }
+                },
+
+                chooseProviderChatGPTAccount(accountId) {
+                    if (accountId) {
+                        const account = this.chatgptAccounts.find(item => item.id === accountId);
+                        if (!account || account.status !== 'ready') return;
+                    }
+                    this.providerForm.accountId = accountId;
+                    this.closeProviderChatGPTAccountPicker(true);
+                },
+
+                moveProviderChatGPTAccountActive(direction) {
+                    const options = this.providerChatGPTAccountPickerOptions();
+                    if (!options.length) return;
+                    let index = this.providerChatGPTAccountActive;
+                    if (index < 0) index = direction > 0 ? -1 : 0;
+                    for (let count = 0; count < options.length; count++) {
+                        index = (index + direction + options.length) % options.length;
+                        if (!options[index].disabled) {
+                            this.providerChatGPTAccountActive = index;
+                            this.$nextTick(() => document.getElementById('provider-chatgpt-account-option-' + index)?.scrollIntoView({ block: 'nearest' }));
+                            return;
+                        }
+                    }
+                    this.providerChatGPTAccountActive = -1;
+                },
+
+                onProviderChatGPTAccountPickerKeydown(event) {
+                    if (event.isComposing || event.keyCode === 229) return;
+                    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+                        event.preventDefault();
+                        if (!this.providerChatGPTAccountPickerOpen) this.openProviderChatGPTAccountPicker();
+                        this.moveProviderChatGPTAccountActive(event.key === 'ArrowDown' ? 1 : -1);
+                        return;
+                    }
+                    if (event.key === 'Enter' && this.providerChatGPTAccountPickerOpen) {
+                        const option = this.providerChatGPTAccountPickerOptions()[this.providerChatGPTAccountActive];
+                        if (option && !option.disabled) {
+                            event.preventDefault();
+                            this.chooseProviderChatGPTAccount(option.id);
+                        }
+                        return;
+                    }
+                    if (event.key === 'Escape' && this.providerChatGPTAccountPickerOpen) {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        this.closeProviderChatGPTAccountPicker(true);
+                    }
                 },
 
                 // 列表里直接改格式：选完立即写盘，失败回滚，与路由模型就地编辑同一套语义。

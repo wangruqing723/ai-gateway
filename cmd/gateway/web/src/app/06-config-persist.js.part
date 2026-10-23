@@ -80,6 +80,12 @@
                 escapeProviderModal(e) {
                     if (!this.showProviderModal) return;
                     if (this.confirmDialog.open || this.showChatGPTOAuthDialog) return;
+                    if (this.providerChatGPTAccountPickerOpen) {
+                        e?.preventDefault();
+                        e?.stopImmediatePropagation();
+                        this.closeProviderChatGPTAccountPicker(true);
+                        return;
+                    }
                     // 先截断当前 ESC。若抽屉有未保存修改，下一轮事件队列再开确认框，
                     // 确认框的 window 监听就不会把触发关闭的这次 ESC 当成取消。
                     e?.preventDefault();

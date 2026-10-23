@@ -211,7 +211,7 @@
                     if (!Number.isFinite(expiresAt)) {
                         return { label: '', valueClass: 'text-muted', badgeClass: '' };
                     }
-                    const remaining = expiresAt - Date.now();
+                    const remaining = expiresAt - (this.chatGPTNow || Date.now());
                     if (remaining <= 0) {
                         return { label: '已过期', valueClass: 'text-danger', badgeClass: 'bg-danger/10 text-danger' };
                     }
@@ -222,6 +222,48 @@
                         return { label: '3 天内到期', valueClass: 'text-amber-100', badgeClass: 'bg-warn/10 text-amber-100' };
                     }
                     return { label: '', valueClass: 'text-white', badgeClass: '' };
+                },
+
+                chatGPTAccountStatusInfo(account) {
+                    if (account?.status !== 'ready') {
+                        return {
+                            label: '需重新授权',
+                            badgeClass: 'bg-danger/10 text-danger',
+                            title: '令牌刷新已确认需要重新授权'
+                        };
+                    }
+                    const expiresAt = Date.parse(account?.expiresAt || '');
+                    if (!Number.isFinite(expiresAt)) {
+                        return {
+                            label: '访问令牌到期时间未知',
+                            badgeClass: 'bg-white/[.06] text-muted',
+                            title: '未记录访问令牌到期时间'
+                        };
+                    }
+                    const now = this.chatGPTNow || Date.now();
+                    const remaining = expiresAt - now;
+                    const expiry = this.chatGPTExpiryInfo(account);
+                    if (remaining <= 0) {
+                        return {
+                            label: '访问令牌已过期',
+                            badgeClass: expiry.badgeClass,
+                            title: `访问令牌于 ${this.formatChatGPTDate(account.expiresAt)} 到期；使用时仍会尝试自动续期`
+                        };
+                    }
+                    const days = Math.floor(remaining / 86400000);
+                    const hours = Math.floor((remaining % 86400000) / 3600000);
+                    const minutes = Math.floor((remaining % 3600000) / 60000);
+                    const countdown = days > 0
+                        ? `${days} 天${hours > 0 ? ` ${hours} 小时` : ''}`
+                        : hours > 0
+                            ? `${hours} 小时${minutes > 0 ? ` ${minutes} 分钟` : ''}`
+                            : minutes > 0 ? `${minutes} 分钟` : '不足 1 分钟';
+                    const label = `访问令牌到期：${countdown} 后`;
+                    return {
+                        label,
+                        badgeClass: expiry.badgeClass || 'bg-good/10 text-good',
+                        title: `${label}（${this.formatChatGPTDate(account.expiresAt)}）；使用时仍会尝试自动续期，此提示不代表额度状态`
+                    };
                 },
 
                 formatUsageWindowName(window) {
@@ -458,6 +500,136 @@
                     }
                 },
 
+                chatGPTOAuthProvidersForAccountBinding() {
+                    const targetAccountId = this.chatGPTAccountBindTargetId;
+                    return Object.entries(this.config.providers || {})
+                        .filter(([, provider]) => provider?.authType === 'chatgptOAuth' && provider.accountId && provider.accountId !== targetAccountId)
+                        .sort(([a], [b]) => a.localeCompare(b))
+                        .map(([name, provider]) => ({
+                            name,
+                            provider,
+                            account: this.chatgptAccounts.find(account => account.id === provider.accountId) || null
+                        }));
+                },
+
+                chatGPTAccountBindingTarget() {
+                    return this.chatgptAccounts.find(account => account.id === this.chatGPTAccountBindTargetId) || null;
+                },
+
+                chatGPTAccountBindDialogTitle() {
+                    const account = this.chatGPTAccountBindingTarget();
+                    return Array.isArray(account?.providers) && account.providers.length > 0
+                        ? '换绑已有 Provider'
+                        : '绑定已有 Provider';
+                },
+
+                selectedChatGPTAccountBindingProvider() {
+                    return this.chatGPTOAuthProvidersForAccountBinding()
+                        .find(item => item.name === this.chatGPTAccountBindProvider) || null;
+                },
+
+                chatGPTAccountBindProviderLabel(item) {
+                    const account = item?.account;
+                    const accountName = account?.email || account?.id || item?.provider?.accountId || '其他账户';
+                    return `${item?.name || ''} · 当前绑定 ${accountName}${item?.provider?.enabled === false ? '（已停用）' : ''}`;
+                },
+
+                chatGPTAccountBindImpactText() {
+                    const item = this.selectedChatGPTAccountBindingProvider();
+                    if (!item) return '';
+                    const previousAccount = item.account?.email || item.provider.accountId;
+                    return `该 Provider 当前绑定账户 ${previousAccount}。确认后会解除原账户与该 Provider 的关联，并绑定到所选账户；Provider 的路由和其他设置保留。`;
+                },
+
+                openChatGPTAccountBindDialog(account) {
+                    if (!account?.id || account.status !== 'ready' || this.bindingChatGPTAccountId) return;
+                    this.chatGPTAccountBindTargetId = account.id;
+                    const options = this.chatGPTOAuthProvidersForAccountBinding();
+                    this.chatGPTAccountBindProvider = options[0]?.name || '';
+                    this.showChatGPTAccountBindDialog = true;
+                },
+
+                closeChatGPTAccountBindDialog() {
+                    if (this.bindingChatGPTAccountId) return;
+                    this.showChatGPTAccountBindDialog = false;
+                    this.chatGPTAccountBindTargetId = '';
+                    this.chatGPTAccountBindProvider = '';
+                },
+
+                async bindChatGPTAccountToProvider() {
+                    const accountId = this.chatGPTAccountBindTargetId;
+                    const providerName = this.chatGPTAccountBindProvider;
+                    if (!accountId || !providerName || this.bindingChatGPTAccountId) return;
+                    if (this.isDirty()) {
+                        this.showStatus('请先保存或撤销未保存的配置修改，再更换账户绑定', 'error');
+                        return;
+                    }
+                    const account = this.chatgptAccounts.find(item => item.id === accountId);
+                    const provider = this.config.providers?.[providerName];
+                    if (!account || account.status !== 'ready' || !provider || provider.authType !== 'chatgptOAuth' || !provider.accountId || provider.accountId === accountId) {
+                        this.showStatus('账户或 Provider 绑定信息已变化，正在刷新页面数据', 'error');
+                        await Promise.all([this.loadConfig(), this.loadChatGPTAccounts(false, false)]);
+                        this.closeChatGPTAccountBindDialog();
+                        return;
+                    }
+
+                    this.bindingChatGPTAccountId = accountId;
+                    try {
+                        const url = `/api/chatgpt/accounts/${encodeURIComponent(accountId)}/bindings/${encodeURIComponent(providerName)}`;
+                        const res = await fetch(url, { method: 'PUT' });
+                        if (!res.ok) throw new Error(await this.errorText(res, '更换 Provider 绑定账户失败'));
+                        const [configLoaded, accountsLoaded] = await Promise.all([
+                            this.loadConfig(),
+                            this.loadChatGPTAccounts(false, false)
+                        ]);
+                        if (!configLoaded || !accountsLoaded) {
+                            this.showChatGPTAccountBindDialog = false;
+                            this.showStatus('Provider 已改绑，但页面数据刷新失败，请刷新页面', 'error');
+                            return;
+                        }
+                        this.showChatGPTAccountBindDialog = false;
+                        this.chatGPTAccountBindTargetId = '';
+                        this.chatGPTAccountBindProvider = '';
+                        this.showStatus(`Provider「${providerName}」已绑定到 ${account.email || account.id}，原账户绑定已解除`, 'success');
+                    } catch (err) {
+                        this.showStatus('更换 Provider 绑定账户失败: ' + err.message, 'error');
+                    } finally {
+                        this.bindingChatGPTAccountId = '';
+                    }
+                },
+
+                async unbindChatGPTAccountProvider(account, providerName) {
+                    if (!account?.id || !providerName || this.unbindingChatGPTProvider || this.bindingChatGPTAccountId) return;
+                    if (this.isDirty()) {
+                        this.showStatus('请先保存或撤销未保存的配置修改，再解除绑定', 'error');
+                        return;
+                    }
+                    if (!(await this.askConfirm(
+                        `解除「${providerName}」与 ${account.email || account.id} 的绑定后，该 Provider 会保留路由和其他设置、切换为 API Key 模式并停用。`,
+                        { title: '解除 ChatGPT 账户绑定', confirmText: '解绑并停用' }
+                    ))) return;
+
+                    this.unbindingChatGPTProvider = providerName;
+                    try {
+                        const url = `/api/chatgpt/accounts/${encodeURIComponent(account.id)}/bindings/${encodeURIComponent(providerName)}`;
+                        const res = await fetch(url, { method: 'DELETE' });
+                        if (!res.ok) throw new Error(await this.errorText(res, '解除绑定失败'));
+                        const [configLoaded, accountsLoaded] = await Promise.all([
+                            this.loadConfig(),
+                            this.loadChatGPTAccounts(false, false)
+                        ]);
+                        if (!configLoaded || !accountsLoaded) {
+                            this.showStatus('绑定已解除且 Provider 已停用，但页面数据刷新失败，请刷新页面', 'error');
+                            return;
+                        }
+                        this.showStatus(`Provider「${providerName}」已解除绑定并停用，现在可以删除该账户`, 'success');
+                    } catch (err) {
+                        this.showStatus('解除 ChatGPT 账户绑定失败: ' + err.message, 'error');
+                    } finally {
+                        this.unbindingChatGPTProvider = '';
+                    }
+                },
+
                 editChatGPTAccountMetadata(account) {
                     if (!account?.id) return;
                     this.chatGPTAccountMetadataDrafts = {
@@ -522,6 +694,7 @@
                 },
 
                 providerAuthTypeChanged() {
+                    this.closeProviderChatGPTAccountPicker();
                     if (this.providerForm.authType === 'chatgptOAuth') {
                         this.providerForm.baseUrl = 'https://chatgpt.com/backend-api/codex';
                         this.providerForm.format = 'openai-responses';
@@ -536,6 +709,8 @@
                 // 从 ChatGPT 账户列表发起时，直接预选 OAuth 类型与账户，省去跳回列表后的重复选择。
                 addProvider(chatGPTAccount = null) {
                     const selectedChatGPTAccount = chatGPTAccount?.status === 'ready' ? chatGPTAccount : null;
+                    this.providerChatGPTAccountFilter = '';
+                    this.closeProviderChatGPTAccountPicker();
                     this.editingProvider = null;
                     this.probingProvider = false;
                     this.providerProbeStatus = null;
@@ -566,6 +741,8 @@
 
                 editProvider(name) {
                     this.editingProvider = name;
+                    this.providerChatGPTAccountFilter = '';
+                    this.closeProviderChatGPTAccountPicker();
                     this.probingProvider = false;
                     this.providerProbeStatus = null;
                     const p = this.config.providers[name];
@@ -764,6 +941,118 @@
 
                 filteredChatGPTAccounts() {
                     return this.chatgptAccounts.filter(account => this.chatGPTAccountMatchesFilter(account));
+                },
+
+                providerChatGPTAccountMatchesFilter(account) {
+                    const q = (this.providerChatGPTAccountFilter || '').trim().toLowerCase();
+                    if (!q) return true;
+                    const values = [
+                        account?.email,
+                        account?.id,
+                        account?.plan,
+                        account?.usage?.planType,
+                        account?.note,
+                        ...(Array.isArray(account?.tags) ? account.tags : [])
+                    ];
+                    return values.some(value => String(value || '').toLowerCase().includes(q));
+                },
+
+                filteredProviderChatGPTAccounts() {
+                    return this.chatgptAccounts.filter(account => this.providerChatGPTAccountMatchesFilter(account));
+                },
+
+                selectedProviderChatGPTAccount() {
+                    return this.chatgptAccounts.find(account => account.id === this.providerForm.accountId) || null;
+                },
+
+                providerChatGPTAccountPickerOptions() {
+                    return [
+                        { id: '', account: null, disabled: false },
+                        ...this.filteredProviderChatGPTAccounts().map(account => ({
+                            id: account.id,
+                            account,
+                            disabled: account.status !== 'ready'
+                        }))
+                    ];
+                },
+
+                providerChatGPTAccountOptionLabel(option) {
+                    const account = option?.account;
+                    if (!account) return '选择已连接账户';
+                    const plan = account.usage?.planType || account.plan;
+                    return (account.email || account.id) + (plan ? ' · ' + plan : '') + (account.status === 'ready' ? '' : '（需重新授权）');
+                },
+
+                openProviderChatGPTAccountPicker() {
+                    this.providerChatGPTAccountPickerOpen = true;
+                    this.providerChatGPTAccountActive = -1;
+                    this.providerChatGPTAccountFilter = '';
+                    this.$nextTick(() => document.getElementById('provider-chatgpt-account-search')?.focus());
+                },
+
+                toggleProviderChatGPTAccountPicker() {
+                    if (this.providerChatGPTAccountPickerOpen) {
+                        this.closeProviderChatGPTAccountPicker();
+                        return;
+                    }
+                    this.openProviderChatGPTAccountPicker();
+                },
+
+                closeProviderChatGPTAccountPicker(returnFocus = false) {
+                    this.providerChatGPTAccountPickerOpen = false;
+                    this.providerChatGPTAccountActive = -1;
+                    this.providerChatGPTAccountFilter = '';
+                    if (returnFocus) {
+                        this.$nextTick(() => document.getElementById('provider-chatgpt-account-trigger')?.focus());
+                    }
+                },
+
+                chooseProviderChatGPTAccount(accountId) {
+                    if (accountId) {
+                        const account = this.chatgptAccounts.find(item => item.id === accountId);
+                        if (!account || account.status !== 'ready') return;
+                    }
+                    this.providerForm.accountId = accountId;
+                    this.closeProviderChatGPTAccountPicker(true);
+                },
+
+                moveProviderChatGPTAccountActive(direction) {
+                    const options = this.providerChatGPTAccountPickerOptions();
+                    if (!options.length) return;
+                    let index = this.providerChatGPTAccountActive;
+                    if (index < 0) index = direction > 0 ? -1 : 0;
+                    for (let count = 0; count < options.length; count++) {
+                        index = (index + direction + options.length) % options.length;
+                        if (!options[index].disabled) {
+                            this.providerChatGPTAccountActive = index;
+                            this.$nextTick(() => document.getElementById('provider-chatgpt-account-option-' + index)?.scrollIntoView({ block: 'nearest' }));
+                            return;
+                        }
+                    }
+                    this.providerChatGPTAccountActive = -1;
+                },
+
+                onProviderChatGPTAccountPickerKeydown(event) {
+                    if (event.isComposing || event.keyCode === 229) return;
+                    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+                        event.preventDefault();
+                        if (!this.providerChatGPTAccountPickerOpen) this.openProviderChatGPTAccountPicker();
+                        this.moveProviderChatGPTAccountActive(event.key === 'ArrowDown' ? 1 : -1);
+                        return;
+                    }
+                    if (event.key === 'Enter' && this.providerChatGPTAccountPickerOpen) {
+                        const option = this.providerChatGPTAccountPickerOptions()[this.providerChatGPTAccountActive];
+                        if (option && !option.disabled) {
+                            event.preventDefault();
+                            this.chooseProviderChatGPTAccount(option.id);
+                        }
+                        return;
+                    }
+                    if (event.key === 'Escape' && this.providerChatGPTAccountPickerOpen) {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        this.closeProviderChatGPTAccountPicker(true);
+                    }
                 },
 
                 // 列表里直接改格式：选完立即写盘，失败回滚，与路由模型就地编辑同一套语义。
