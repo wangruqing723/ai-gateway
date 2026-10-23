@@ -3141,6 +3141,8 @@
          positionInlineList 按锚点实时算，滚动 / 改窗口大小时重算。
          z-[60] 在 tooltip（70）之下、弹窗（50）之上。
 
+         靠近视口底部时向上展开，并按输入框上下方的可用空间限制高度。
+
          :style 必须用对象形式，不能用字符串模板：字符串形式 Alpine 走
          setAttribute('style', …) 整体替换内联样式，会把 x-show 写上的
          display:none 一起抹掉。而 startInlineModel 一开编辑就调
@@ -3150,7 +3152,7 @@
     <div id="inline-model-list" role="listbox"
          x-show="inlineModel.routeIndex >= 0 && inlineModel.open" x-cloak x-transition
          @click.outside="if (!$event.target.closest('[data-inline-anchor]')) { inlineModel.open = false; inlineModel.active = -1; }"
-         :style="{ left: (inlineModel.listPos?.left ?? 0) + 'px', top: (inlineModel.listPos?.top ?? 0) + 'px', width: (inlineModel.listPos?.width ?? 220) + 'px' }"
+         :style="{ left: (inlineModel.listPos?.left ?? 0) + 'px', top: inlineModel.listPos?.top ?? '0px', bottom: inlineModel.listPos?.bottom ?? 'auto', width: (inlineModel.listPos?.width ?? 220) + 'px', maxHeight: inlineModel.listPos?.maxHeight ?? '240px' }"
          class="fixed z-[60] max-h-60 overflow-y-auto rounded-lg border border-line bg-panel3 py-1 text-xs shadow-glow">
         <div x-show="inlineModel.modelsLoading" class="flex items-center gap-2 px-3 py-1.5 text-muted">
             <span class="material-symbols-outlined gw-spin text-[14px]">progress_activity</span>正在查询上游模型列表…
@@ -7607,11 +7609,22 @@
                     const el = anchor.querySelector('#inline-model-input') || anchor;
                     const rect = el.getBoundingClientRect();
                     const width = Math.max(rect.width, 220);
+                    const gap = 4;
+                    const viewportPadding = 8;
+                    const preferredMaxHeight = 240;
+                    const maxHeight = Math.max(0, Math.min(preferredMaxHeight, window.innerHeight - viewportPadding * 2));
+                    const spaceBelow = Math.max(0, window.innerHeight - rect.bottom - gap - viewportPadding);
+                    const spaceAbove = Math.max(0, rect.top - gap - viewportPadding);
+                    const opensAbove = spaceBelow < maxHeight && spaceAbove > spaceBelow;
+                    const availableHeight = opensAbove ? spaceAbove : spaceBelow;
                     this.inlineModel.listPos = {
                         // 靠右的候选项要往左收，否则浮层探出视口右侧
                         left: Math.max(8, Math.min(rect.left, window.innerWidth - width - 8)),
-                        top: rect.bottom + 4,
-                        width
+                        top: opensAbove ? 'auto' : `${rect.bottom + gap}px`,
+                        bottom: opensAbove ? `${window.innerHeight - rect.top + gap}px` : 'auto',
+                        width,
+                        // 靠近视口底部时向上展开；两侧都受限时，列表自身仍可在可用高度内滚动。
+                        maxHeight: `${Math.min(maxHeight, availableHeight)}px`
                     };
                 },
 

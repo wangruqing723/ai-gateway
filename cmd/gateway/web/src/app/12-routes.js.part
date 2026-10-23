@@ -714,11 +714,22 @@
                     const el = anchor.querySelector('#inline-model-input') || anchor;
                     const rect = el.getBoundingClientRect();
                     const width = Math.max(rect.width, 220);
+                    const gap = 4;
+                    const viewportPadding = 8;
+                    const preferredMaxHeight = 240;
+                    const maxHeight = Math.max(0, Math.min(preferredMaxHeight, window.innerHeight - viewportPadding * 2));
+                    const spaceBelow = Math.max(0, window.innerHeight - rect.bottom - gap - viewportPadding);
+                    const spaceAbove = Math.max(0, rect.top - gap - viewportPadding);
+                    const opensAbove = spaceBelow < maxHeight && spaceAbove > spaceBelow;
+                    const availableHeight = opensAbove ? spaceAbove : spaceBelow;
                     this.inlineModel.listPos = {
                         // 靠右的候选项要往左收，否则浮层探出视口右侧
                         left: Math.max(8, Math.min(rect.left, window.innerWidth - width - 8)),
-                        top: rect.bottom + 4,
-                        width
+                        top: opensAbove ? 'auto' : `${rect.bottom + gap}px`,
+                        bottom: opensAbove ? `${window.innerHeight - rect.top + gap}px` : 'auto',
+                        width,
+                        // 靠近视口底部时向上展开；两侧都受限时，列表自身仍可在可用高度内滚动。
+                        maxHeight: `${Math.min(maxHeight, availableHeight)}px`
                     };
                 },
 
