@@ -1573,6 +1573,12 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 		}
 	}
 	status := upstreamStatus
+	// 流内失败：上游真实状态码是 200，但 trail 记 200 会掩盖故障。改用等效状态码，
+	// 与 header 阶段的同类失败在日志里保持同一口径（如 limited:429）。
+	var streamFailure *proxy.UpstreamStreamError
+	if errors.As(forwardErr, &streamFailure) {
+		status = streamFailure.Status
+	}
 	if status == 0 {
 		status = statusFromRecorder(w)
 	}
@@ -1735,6 +1741,21 @@ func captureUpstreamStream(reqID, provider, targetModel, clientFormat, providerF
 }
 
 func attemptFailureReason(status int, err error) string {
+	// 上游先回 200、随后在流里报错：真实状态码是 200，失败语义由等效状态码决定，
+	// reason 与 header 阶段的同类失败保持一致（429/ratelimit 等），便于聚合筛选。
+	var streamErr *proxy.UpstreamStreamError
+	if errors.As(err, &streamErr) {
+		switch {
+		case streamErr.Status == http.StatusTooManyRequests:
+			return "429/ratelimit"
+		case streamErr.Status == http.StatusUnauthorized || streamErr.Status == http.StatusForbidden:
+			return fmt.Sprintf("%d/auth", streamErr.Status)
+		case streamErr.Status >= 500:
+			return fmt.Sprintf("%d/server", streamErr.Status)
+		case streamErr.Status > 0:
+			return fmt.Sprintf("%d/client", streamErr.Status)
+		}
+	}
 	if errors.Is(err, proxy.ErrConversion) {
 		return "conversion_error"
 	}
@@ -1832,6 +1853,15 @@ func classifyFailure(f *config.Failover, upstreamCode int, retryAfter time.Durat
 //
 // err 在任何状态码下都要参与判定，不能只在 upstreamCode == 0 时看。
 func breakerOutcomeFor(upstreamCode int, err error) breaker.Outcome {
+	// 流内失败：上游真实状态码是 200，但失败语义由等效状态码决定。判据与 header
+	// 阶段的同类失败一致——4xx（含限流）不计入熔断，5xx / 未知错误计失败。
+	var streamErr *proxy.UpstreamStreamError
+	if errors.As(err, &streamErr) {
+		if streamErr.Status >= 500 {
+			return breaker.OutcomeFailure
+		}
+		return breaker.OutcomeIgnored
+	}
 	if upstreamCode == 0 {
 		switch {
 		case errors.Is(err, context.Canceled):

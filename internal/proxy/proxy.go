@@ -113,7 +113,9 @@ type Options struct {
 	StreamActivityTimeout int
 	HTTPClient            *http.Client
 	// ShouldRetry 为 nil 时行为与不支持转移的旧版本完全一致。
-	// 流式响应一旦开始写入（handleStream）就不再询问：已发出的 SSE 字节不可回收。
+	// 流式响应一旦向客户端提交（预读阶段结束、写出 200 头）就不再询问：已发出的
+	// SSE 字节不可回收。预读阶段发现上游流内失败事件时仍会询问一次，此时
+	// upstreamCode 是按错误类型换算出的等效状态码（如 limit → 429）。
 	ShouldRetry ShouldRetryFunc
 	// OnUpstreamStatus 收到上游响应头后上报状态码，可为 nil。
 	// 与 ShouldRetry 分开：后者只在「可放弃」的时机询问，拿不到最后一个候选
@@ -123,7 +125,9 @@ type Options struct {
 	OnUpstreamHeaders UpstreamHeadersFunc
 	// OnErrorBody 提供脱敏、最多 8 KiB 的上游错误正文。
 	OnErrorBody ErrorBodyFunc
-	// OnResponseStarted 在向客户端写响应头或正文前调用。
+	// OnResponseStarted 在向客户端写出响应头前调用。
+	// 流式路径上它推迟到预读提交时（见 handleStream）：预读阶段发现上游流内失败
+	// 并放弃本次尝试时，客户端一个字节都没收到，不应算作「响应已开始」。
 	OnResponseStarted ResponseStartedFunc
 	// OnFirstByte 在向客户端写出第一个内容事件后调用，仅流式路径。
 	// 可能被调用多次（每个内容事件都会调），调用方只记录第一次即可。
@@ -638,7 +642,11 @@ func chatGPTOAuthStreamResponse(raw []byte) (map[string]any, error) {
 }
 
 // handleStream 流式响应：核心改善点。
-// 用活跃超时计时器：每收到一块数据就重置；超时则 cancel ctx 断开上游，并向客户端补发合规 SSE 收尾事件。
+//
+// 先预读开场事件（见 prereadStream）：上游 200 之后紧接着的流内错误（限流、过载）
+// 在这一阶段就能识别并放弃，交给故障转移；确认有内容后才向客户端提交 200 头。
+// 提交之后用活跃超时计时器：每收到一块数据就重置；超时则 cancel ctx 断开上游，
+// 并向客户端补发合规 SSE 收尾事件。
 func handleStream(ctx context.Context, cancel context.CancelFunc, resp *http.Response, opts *Options) error {
 	flusher, ok := opts.ClientRes.(http.Flusher)
 	if !ok {
@@ -652,6 +660,36 @@ func handleStream(ctx context.Context, cancel context.CancelFunc, resp *http.Res
 	if opts.ClientFormat == "anthropic" {
 		h.Set("anthropic-version", "2023-06-01")
 	}
+	// 后台读取：预读与正文共用同一路数据，避免两个 goroutine 同时读 resp.Body。
+	chunks := make(chan streamChunk, 1)
+	go readStreamChunks(ctx, resp.Body, chunks)
+
+	// ── 预读阶段：暂存开场事件，命中上游流内失败时不写客户端 ──
+	// 上游先回 200、紧接着在流里报错（限流、过载）是常见形态。此时客户端还没收到
+	// 任何字节，仍可放弃本次尝试交给故障转移；一旦提交就不能再换候选。
+	pre := prereadStream(ctx, chunks, opts)
+	if pre.aborted {
+		if clientRequestCanceled(opts) {
+			opts.Log("客户端断开连接")
+			return nil
+		}
+		return ctx.Err()
+	}
+	if pre.failure != nil {
+		cancel() // 停止后台读取，放弃这条流
+		recordErrorBody(opts, sanitizeErrorBody(pre.failure.Raw), false)
+		if abandonAttempt(opts, pre.failure.Status, 0, pre.failure) {
+			opts.Log("← 流内错误（等效 HTTP %d），放弃本候选", pre.failure.Status)
+			return ErrAttemptAbandoned
+		}
+		markResponseStarted(opts)
+		opts.Log("← 流内错误（等效 HTTP %d）: %s", pre.failure.Status, pre.failure.Message)
+		if err := writeStreamErrorAsHTTP(opts, pre.failure); err != nil {
+			return err
+		}
+		return pre.failure
+	}
+
 	markResponseStarted(opts)
 	opts.ClientRes.WriteHeader(http.StatusOK)
 
@@ -704,61 +742,60 @@ func handleStream(ctx context.Context, cancel context.CancelFunc, resp *http.Res
 	// 相同格式直接透传字节流，保留完整 SSE 格式与打字机效果；不同格式逐行解析转换。
 	// 但带 namespace 映射时不能走字节透传：上游返回的是展平名，必须逐行改回
 	// {name, namespace}，否则 Codex 认不出自己的工具（实测 unsupported call）。
+	//
+	// 预读阶段消费掉的字节仍属于开场部分：提交后先原样补写（pending），客户端
+	// 收到的内容与改动前完全一致，只是开场部分晚到最多 streamPrereadHold。
+	capture := newRawCapture(opts.OnStreamConversionError)
+	pending := pre.buffered
+	pendingErr := pre.readErr
+
 	isPassthrough := converter.IsPassthrough(opts.Provider.Format, opts.ClientFormat) &&
 		len(opts.ToolNamespaces) == 0
 
-	if isPassthrough {
-		buf := make([]byte, 16*1024)
-		for {
-			n, err := resp.Body.Read(buf)
-			if n > 0 {
-				markActivity()
-				if werr := writeAndFlushStream(opts.ClientRes, flusher, buf[:n], activityTimeout); werr != nil {
-					return finishStreamWrite(werr, cancel, opts)
-				}
-				// 写成功之后才算首字：失败的那次客户端什么也没看到。
-				// 透传块可能同时含 ping 与内容，containsStreamContent 只要有内容行就为真。
-				if containsStreamContent(buf[:n]) {
-					markFirstByte(opts)
-				}
-			}
-			if err != nil {
-				return finishStream(err, timedOut.Load(), opts, flusher)
-			}
-		}
-	}
+	// handleChunk 处理一块上游字节；返回 true 表示本次流转发已经结束，调用方直接返回 err。
+	var handleChunk func([]byte) (bool, error)
+	// finish 用上游的结束原因收尾（EOF、读错误、活跃超时等）。
+	var finish func(error) error
 
-	// 不同格式：逐行解析并经 transformer 转换（对齐 Node 的按 \n 切分逻辑）。
-	// 手动按 \n 分行读取，并将跨格式单事件限制在 8 MiB。
-	transform := converter.NewStreamTransformer(opts.Provider.Format, opts.ClientFormat)
-	// 套一层 namespace 还原。放在最外层，使转换器与透传器（同格式时 IsPassthrough
-	// 已被上面的条件排除，这里拿到的是 passthrough{}）都被覆盖。
-	transform = converter.WithNamespaceRestore(transform, opts.ToolNamespaces)
-	passthroughLines := converter.IsPassthroughTransformer(transform)
-	readBuf := make([]byte, 64*1024)
-	var lineBuf []byte
-	// rawCapture 仅在排查开关（OnStreamConversionError 非 nil）开启时累积原始上游 SSE。
-	capture := newRawCapture(opts.OnStreamConversionError)
-	for {
-		n, readErr := resp.Body.Read(readBuf)
-		if n > 0 {
-			markActivity()
-			chunk := readBuf[:n]
-			capture.append(chunk)
+	if isPassthrough {
+		handleChunk = func(chunk []byte) (bool, error) {
+			if werr := writeAndFlushStream(opts.ClientRes, flusher, chunk, activityTimeout); werr != nil {
+				return true, finishStreamWrite(werr, cancel, opts)
+			}
+			// 写成功之后才算首字：失败的那次客户端什么也没看到。
+			// 透传块可能同时含 ping 与内容，containsStreamContent 只要有内容行就为真。
+			if containsStreamContent(chunk) {
+				markFirstByte(opts)
+			}
+			return false, nil
+		}
+		finish = func(readErr error) error {
+			return finishStream(readErr, timedOut.Load(), opts, flusher)
+		}
+	} else {
+		// 不同格式：逐行解析并经 transformer 转换（对齐 Node 的按 \n 切分逻辑）。
+		// 手动按 \n 分行读取，并将跨格式单事件限制在 8 MiB。
+		transform := converter.NewStreamTransformer(opts.Provider.Format, opts.ClientFormat)
+		// 套一层 namespace 还原。放在最外层，使转换器与透传器（同格式时 IsPassthrough
+		// 已被上面的条件排除，这里拿到的是 passthrough{}）都被覆盖。
+		transform = converter.WithNamespaceRestore(transform, opts.ToolNamespaces)
+		passthroughLines := converter.IsPassthroughTransformer(transform)
+		var lineBuf []byte
+		handleChunk = func(chunk []byte) (bool, error) {
 			for {
 				idx := bytes.IndexByte(chunk, '\n')
 				if idx < 0 {
 					// 无完整行，剩余数据暂存到 lineBuf
 					if len(lineBuf)+len(chunk) > maxSSEEventBytes {
 						cancel()
-						return finishStream(newSSEEventTooLargeError(), false, opts, flusher)
+						return true, finishStream(newSSEEventTooLargeError(), false, opts, flusher)
 					}
 					lineBuf = append(lineBuf, chunk...)
-					break
+					return false, nil
 				}
 				if len(lineBuf)+idx > maxSSEEventBytes {
 					cancel()
-					return finishStream(newSSEEventTooLargeError(), false, opts, flusher)
+					return true, finishStream(newSSEEventTooLargeError(), false, opts, flusher)
 				}
 				line := string(append(lineBuf, chunk[:idx]...))
 				lineBuf = lineBuf[:0]
@@ -766,7 +803,7 @@ func handleStream(ctx context.Context, cancel context.CancelFunc, resp *http.Res
 				line = strings.TrimRight(line, "\r")
 				if line == "" {
 					if werr := writeAndFlushStream(opts.ClientRes, flusher, []byte("\n"), activityTimeout); werr != nil {
-						return finishStreamWrite(werr, cancel, opts)
+						return true, finishStreamWrite(werr, cancel, opts)
 					}
 					continue
 				}
@@ -777,17 +814,18 @@ func handleStream(ctx context.Context, cancel context.CancelFunc, resp *http.Res
 				}
 				if stop, err := writeTransformedLine(transform, line, cancel, opts, flusher, activityTimeout); stop {
 					capture.reportIfConversionError(transform)
-					return err
+					return true, err
 				}
 				if converter.StreamCompleted(transform) {
-					return nil
+					return true, nil
 				}
 			}
 		}
-		if readErr != nil {
+		finish = func(readErr error) error {
 			// 流结束：lineBuf 中可能有不以 \n 结尾的最后一行
 			if len(lineBuf) > 0 {
 				line := strings.TrimRight(string(lineBuf), "\r")
+				lineBuf = lineBuf[:0]
 				if line != "" {
 					if stop, err := writeTransformedLine(transform, line, cancel, opts, flusher, activityTimeout); stop {
 						capture.reportIfConversionError(transform)
@@ -799,6 +837,46 @@ func handleStream(ctx context.Context, cancel context.CancelFunc, resp *http.Res
 				}
 			}
 			return finishTransformedStream(transform, readErr, timedOut.Load(), opts, flusher)
+		}
+	}
+
+	for {
+		if len(pending) > 0 {
+			chunk := pending
+			pending = nil
+			markActivity()
+			capture.append(chunk)
+			if done, err := handleChunk(chunk); done {
+				return err
+			}
+		}
+		if pendingErr != nil {
+			readErr := pendingErr
+			pendingErr = nil
+			return finish(readErr)
+		}
+		select {
+		case <-ctx.Done():
+			// 客户端断开或活跃超时：后台读取可能已退出，不能只等它送 err。
+			if clientRequestCanceled(opts) {
+				opts.Log("客户端断开连接")
+				return nil
+			}
+			return finish(ctx.Err())
+		case part, ok := <-chunks:
+			if !ok {
+				return finish(io.EOF)
+			}
+			if len(part.data) > 0 {
+				markActivity()
+				capture.append(part.data)
+				if done, err := handleChunk(part.data); done {
+					return err
+				}
+			}
+			if part.err != nil {
+				return finish(part.err)
+			}
 		}
 	}
 }
