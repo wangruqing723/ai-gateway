@@ -2053,7 +2053,21 @@
                                             @mouseleave="hideTip()"
                                             @focus="showTip(modelTrail(log) + (formatTrail(log) ? '\n' + formatTrail(log) : ''), $event)"
                                             @blur="hideTip()" tabindex="0">
-                                            <span class="block truncate font-mono text-xs text-cyan" x-text="modelTrail(log)"></span>
+                                            <!-- 客户端模型做成带底色的 tag，颜色按模型首次出现顺序从固定色板领取
+                                                 并记在 localStorage：同一模型始终同色，不同模型不撞色（色板用满前），
+                                                 长列表里能一眼扫出模型切换点。
+                                                 上游目标模型保持原来的青色等宽字，只在被改写时跟随，同侧相同则折叠。 -->
+                                            <span class="flex min-w-0 items-center gap-1.5 font-mono text-xs">
+                                                <template x-if="log.model">
+                                                    <span class="tag max-w-full shrink-0 overflow-hidden" :style="clientModelTagStyle(log)" x-text="log.model"></span>
+                                                </template>
+                                                <template x-if="!log.model">
+                                                    <span class="truncate text-muted" x-text="log.targetModel || '--'"></span>
+                                                </template>
+                                                <span x-show="log.model && log.targetModel && log.model !== log.targetModel"
+                                                      class="min-w-0 truncate text-cyan"
+                                                      x-text="'→ ' + log.targetModel"></span>
+                                            </span>
                                             <span class="block truncate text-[11px] text-muted" x-text="formatTrail(log)"></span>
                                             <span x-show="Number(log.visionFailed || 0) > 0"
                                                   class="tag mt-1 w-fit bg-danger/10 text-rose-100"
@@ -3373,6 +3387,12 @@
                 // 混用会得出「在日志页筛过某个 provider，监控页就显示暂无错误记录」这种假象——
                 // 筛选器是日志页的视图状态，不该顺带改掉仪表盘的统计口径。
                 monitorLogs: [],
+                // 请求日志「客户端模型」标签的配色分配：模型名 → { slot, seen }。
+                // slot 是 clientModelPalette 下标，seen 是最近出现时间（毫秒），
+                // 色板用满时按 seen 回收最久没出现的那个。持久化在 localStorage。
+                clientModelColors: {},
+                // 上次把 clientModelColors 落盘的时间，用于节流只刷新 seen 的写入。
+                _clientModelColorsSavedAt: 0,
                 expandedLogId: null,
                 // ChatGPT 账户列表一次只展开一行详情（同请求日志），存账户 id，'' 表示都收起。
                 expandedChatGPTAccountId: '',
@@ -3531,6 +3551,7 @@
                     this.scheduleRestoreGuard();
                     this.loadDirtyToastPos();
                     this.loadPreviewDrawerState();
+                    this.loadClientModelColors();
                     // 窗口变小后旧坐标可能落到视窗外，重新收进来
                     window.addEventListener('resize', () => {
                         if (this.dirtyToastPos) {
@@ -3866,7 +3887,10 @@
                     // 逐个探上游、每个 5 秒超时，先给个即时提示，别让用户干等。
                     // 带上个数：后端分批跑，耗时上界随 provider 数量增长，
                     // 报个数比光说"正在检测"更能让用户判断该等多久。
-                    const pending = Object.keys(this.config.providers || {}).length;
+                    // 只数已启用的：后端 checkAll 与周期检测都跳过禁用的 provider，
+                    // 拿配置全量计数会报出 32 个而实际只探 18 个。
+                    const pending = Object.values(this.config.providers || {})
+                        .filter((provider) => provider?.enabled !== false).length;
                     this.showStatus(pending ? `正在检测 ${pending} 个 Provider…` : '正在检测 Provider…', 'success');
                     try {
                         const res = await fetch('/api/providers/health', { method: 'POST' });
@@ -3875,8 +3899,13 @@
                         const providers = data.providers || {};
                         this.health = this.health || {};
                         this.health.providerHealth = providers;
-                        const total = Object.keys(providers).length;
-                        const ok = Object.values(providers).filter((p) => p.status === 'ok').length;
+                        // 完成口径与进行中一致：只统计已启用的，避免响应里混进
+                        // 已禁用 provider（如批量接口为 OAuth 账户补状态时不再看 enabled）
+                        // 把分母撑大，出现「检测 18 个却报 18/20 可用」。
+                        const checked = Object.keys(providers)
+                            .filter((name) => this.config.providers?.[name]?.enabled !== false);
+                        const total = checked.length;
+                        const ok = checked.filter((name) => providers[name]?.status === 'ok').length;
                         this.showStatus(`Provider 检测完成：${ok}/${total} 可用`, ok === total ? 'success' : 'error');
                     } catch (err) {
                         this.showStatus('Provider 健康检测失败: ' + err.message, 'error');
@@ -3963,6 +3992,9 @@
                     });
                     const data = await this.loadOptionalJSON('/api/logs?' + params.toString());
                     const logs = Array.isArray(data?.data) ? data.data : [];
+                    // 先分配配色再赋值：渲染时每个模型都已有固定色位，不会出现
+                    // 首帧回落默认色、下一帧才变色的闪烁。
+                    this.assignClientModelColors(logs);
                     this.requestLogs = logs;
                     // 轮询刷新时同一请求 ID 保持展开；筛选后该行消失则收起，避免状态指向不可见日志。
                     if (this.expandedLogId && !logs.some((log) => this.logKey(log) === this.expandedLogId)) {
@@ -4814,6 +4846,127 @@
                     const target = log?.targetModel || '';
                     if (client && target && client !== target) return client + ' → ' + target;
                     return client || target || '--';
+                },
+
+                // clientModelPalette 是请求日志「客户端模型」标签的固定色板。
+                //
+                // 不按模型名哈希取色：哈希只保证「同名同色」，不保证「异名异色」，
+                // 十来个模型落进有限的色相里必然有几对在人眼里撞色（实测
+                // claude-fable-5-1 / deepseek-v4-flash 都落在 133° 左右的绿色）。
+                // 改为按模型首次出现的顺序依次领一个色位，色板用满之前保证不重复。
+                //
+                // 顺序即分配顺序：前 8 个是彼此差别最大的基色，常见的模型数量内
+                // 不会领到相近的两色；后 4 个只在模型更多时才用到。
+                // 写成内联色值而不是 Tailwind 类名：类名要靠 tailwind.config.js
+                // 扫源码字面量才会进产物，色板变动就得多重建一次 vendor/tailwind.css。
+                clientModelPalette: [
+                    { text: '#7dd3fc', bg: 'rgba(56, 189, 248, .16)' },   // 天蓝
+                    { text: '#fcd34d', bg: 'rgba(251, 191, 36, .16)' },   // 琥珀
+                    { text: '#fb7185', bg: 'rgba(251, 113, 133, .16)' },  // 玫红
+                    { text: '#4ade80', bg: 'rgba(74, 222, 128, .14)' },   // 绿
+                    { text: '#c4b5fd', bg: 'rgba(139, 92, 246, .2)' },    // 紫
+                    { text: '#fb923c', bg: 'rgba(249, 115, 22, .16)' },   // 橙
+                    { text: '#e879f9', bg: 'rgba(217, 70, 239, .16)' },   // 品红
+                    { text: '#e2e8f0', bg: 'rgba(148, 163, 184, .2)' },   // 银白
+                    { text: '#5eead4', bg: 'rgba(20, 184, 166, .16)' },   // 青绿
+                    { text: '#bef264', bg: 'rgba(132, 204, 22, .16)' },   // 黄绿
+                    { text: '#a5b4fc', bg: 'rgba(99, 102, 241, .2)' },    // 靛蓝
+                    { text: '#d6b38a', bg: 'rgba(180, 130, 80, .2)' }     // 棕
+                ],
+
+                // clientModelTagStyle 取该模型已分配色位的内联样式。
+                // 分配在 assignClientModelColors 里完成（loadRequestLogs 赋值前），
+                // 这里只读不写：渲染路径里写状态会让 Alpine 反复触发重渲染。
+                clientModelTagStyle(log) {
+                    const entry = this.clientModelColors[log?.model || ''];
+                    if (!entry) return '';
+                    const color = this.clientModelPalette[entry.slot % this.clientModelPalette.length];
+                    return `background: ${color.bg}; color: ${color.text};`;
+                },
+
+                // assignClientModelColors 给本批日志里出现的模型分配色位。
+                //
+                // - 已分配的模型沿用原色位，只刷新 seen（最近出现时间）；
+                // - 新模型领最小的空闲色位，所以同一浏览器里模型按首次出现顺序取色；
+                // - 色板用满时回收 seen 最早的那个：本批出现的模型 seen 已被刷成当前时间，
+                //   天然排在后面，不会把屏幕上正显示着的颜色抢走。只有一屏里同时出现
+                //   超过色板容量的模型时才不得不复用。
+                //
+                // 只在有新分配时立即落盘；单纯刷新 seen 节流到每分钟最多一次，
+                // 避免每次轮询都写 localStorage。
+                assignClientModelColors(logs) {
+                    const map = this.clientModelColors;
+                    const now = Date.now();
+                    const names = [];
+                    for (const log of logs) {
+                        const name = log?.model || '';
+                        if (name && !names.includes(name)) names.push(name);
+                    }
+                    let assigned = false;
+                    let touched = false;
+                    for (const name of names) {
+                        if (map[name]) {
+                            map[name].seen = now;
+                            touched = true;
+                        }
+                    }
+                    const size = this.clientModelPalette.length;
+                    for (const name of names) {
+                        if (map[name]) continue;
+                        const used = new Set(Object.values(map).map((entry) => entry.slot));
+                        let slot = -1;
+                        for (let i = 0; i < size; i += 1) {
+                            if (!used.has(i)) { slot = i; break; }
+                        }
+                        if (slot < 0) {
+                            let oldest = '';
+                            for (const [key, entry] of Object.entries(map)) {
+                                if (!oldest || entry.seen < map[oldest].seen) oldest = key;
+                            }
+                            slot = map[oldest].slot;
+                            delete map[oldest];
+                        }
+                        map[name] = { slot, seen: now };
+                        assigned = true;
+                    }
+                    if (assigned || (touched && now - this._clientModelColorsSavedAt > 60000)) {
+                        this.saveClientModelColors();
+                    }
+                },
+
+                loadClientModelColors() {
+                    let parsed = null;
+                    try {
+                        parsed = JSON.parse(window.localStorage.getItem('gw.clientModelColors') || 'null');
+                    } catch (err) {
+                        // localStorage 被禁用或内容损坏：从空表开始重新按出现顺序分配
+                    }
+                    if (!parsed || typeof parsed !== 'object') return;
+                    const size = this.clientModelPalette.length;
+                    const bySlot = {};
+                    for (const [name, entry] of Object.entries(parsed)) {
+                        const slot = Number(entry?.slot);
+                        const seen = Number(entry?.seen) || 0;
+                        if (!name || !Number.isInteger(slot) || slot < 0 || slot >= size) continue;
+                        // 同一色位被两个模型占用（手改过存储或旧数据）时留最近出现的那个，
+                        // 否则两个模型会显示成同一种颜色，正是要避免的情况。
+                        if (bySlot[slot] && bySlot[slot].seen >= seen) continue;
+                        bySlot[slot] = { name, seen };
+                    }
+                    const map = {};
+                    for (const [slot, { name, seen }] of Object.entries(bySlot)) {
+                        map[name] = { slot: Number(slot), seen };
+                    }
+                    this.clientModelColors = map;
+                },
+
+                saveClientModelColors() {
+                    this._clientModelColorsSavedAt = Date.now();
+                    try {
+                        window.localStorage.setItem('gw.clientModelColors', JSON.stringify(this.clientModelColors));
+                    } catch (err) {
+                        // 存不了只影响跨刷新的颜色稳定，本次页面内的分配照常生效
+                    }
                 },
 
                 // formatTrail 把客户端格式与上游格式做成对比短写：anthropic → openai-chat。

@@ -113,6 +113,127 @@
                     return client || target || '--';
                 },
 
+                // clientModelPalette 是请求日志「客户端模型」标签的固定色板。
+                //
+                // 不按模型名哈希取色：哈希只保证「同名同色」，不保证「异名异色」，
+                // 十来个模型落进有限的色相里必然有几对在人眼里撞色（实测
+                // claude-fable-5-1 / deepseek-v4-flash 都落在 133° 左右的绿色）。
+                // 改为按模型首次出现的顺序依次领一个色位，色板用满之前保证不重复。
+                //
+                // 顺序即分配顺序：前 8 个是彼此差别最大的基色，常见的模型数量内
+                // 不会领到相近的两色；后 4 个只在模型更多时才用到。
+                // 写成内联色值而不是 Tailwind 类名：类名要靠 tailwind.config.js
+                // 扫源码字面量才会进产物，色板变动就得多重建一次 vendor/tailwind.css。
+                clientModelPalette: [
+                    { text: '#7dd3fc', bg: 'rgba(56, 189, 248, .16)' },   // 天蓝
+                    { text: '#fcd34d', bg: 'rgba(251, 191, 36, .16)' },   // 琥珀
+                    { text: '#fb7185', bg: 'rgba(251, 113, 133, .16)' },  // 玫红
+                    { text: '#4ade80', bg: 'rgba(74, 222, 128, .14)' },   // 绿
+                    { text: '#c4b5fd', bg: 'rgba(139, 92, 246, .2)' },    // 紫
+                    { text: '#fb923c', bg: 'rgba(249, 115, 22, .16)' },   // 橙
+                    { text: '#e879f9', bg: 'rgba(217, 70, 239, .16)' },   // 品红
+                    { text: '#e2e8f0', bg: 'rgba(148, 163, 184, .2)' },   // 银白
+                    { text: '#5eead4', bg: 'rgba(20, 184, 166, .16)' },   // 青绿
+                    { text: '#bef264', bg: 'rgba(132, 204, 22, .16)' },   // 黄绿
+                    { text: '#a5b4fc', bg: 'rgba(99, 102, 241, .2)' },    // 靛蓝
+                    { text: '#d6b38a', bg: 'rgba(180, 130, 80, .2)' }     // 棕
+                ],
+
+                // clientModelTagStyle 取该模型已分配色位的内联样式。
+                // 分配在 assignClientModelColors 里完成（loadRequestLogs 赋值前），
+                // 这里只读不写：渲染路径里写状态会让 Alpine 反复触发重渲染。
+                clientModelTagStyle(log) {
+                    const entry = this.clientModelColors[log?.model || ''];
+                    if (!entry) return '';
+                    const color = this.clientModelPalette[entry.slot % this.clientModelPalette.length];
+                    return `background: ${color.bg}; color: ${color.text};`;
+                },
+
+                // assignClientModelColors 给本批日志里出现的模型分配色位。
+                //
+                // - 已分配的模型沿用原色位，只刷新 seen（最近出现时间）；
+                // - 新模型领最小的空闲色位，所以同一浏览器里模型按首次出现顺序取色；
+                // - 色板用满时回收 seen 最早的那个：本批出现的模型 seen 已被刷成当前时间，
+                //   天然排在后面，不会把屏幕上正显示着的颜色抢走。只有一屏里同时出现
+                //   超过色板容量的模型时才不得不复用。
+                //
+                // 只在有新分配时立即落盘；单纯刷新 seen 节流到每分钟最多一次，
+                // 避免每次轮询都写 localStorage。
+                assignClientModelColors(logs) {
+                    const map = this.clientModelColors;
+                    const now = Date.now();
+                    const names = [];
+                    for (const log of logs) {
+                        const name = log?.model || '';
+                        if (name && !names.includes(name)) names.push(name);
+                    }
+                    let assigned = false;
+                    let touched = false;
+                    for (const name of names) {
+                        if (map[name]) {
+                            map[name].seen = now;
+                            touched = true;
+                        }
+                    }
+                    const size = this.clientModelPalette.length;
+                    for (const name of names) {
+                        if (map[name]) continue;
+                        const used = new Set(Object.values(map).map((entry) => entry.slot));
+                        let slot = -1;
+                        for (let i = 0; i < size; i += 1) {
+                            if (!used.has(i)) { slot = i; break; }
+                        }
+                        if (slot < 0) {
+                            let oldest = '';
+                            for (const [key, entry] of Object.entries(map)) {
+                                if (!oldest || entry.seen < map[oldest].seen) oldest = key;
+                            }
+                            slot = map[oldest].slot;
+                            delete map[oldest];
+                        }
+                        map[name] = { slot, seen: now };
+                        assigned = true;
+                    }
+                    if (assigned || (touched && now - this._clientModelColorsSavedAt > 60000)) {
+                        this.saveClientModelColors();
+                    }
+                },
+
+                loadClientModelColors() {
+                    let parsed = null;
+                    try {
+                        parsed = JSON.parse(window.localStorage.getItem('gw.clientModelColors') || 'null');
+                    } catch (err) {
+                        // localStorage 被禁用或内容损坏：从空表开始重新按出现顺序分配
+                    }
+                    if (!parsed || typeof parsed !== 'object') return;
+                    const size = this.clientModelPalette.length;
+                    const bySlot = {};
+                    for (const [name, entry] of Object.entries(parsed)) {
+                        const slot = Number(entry?.slot);
+                        const seen = Number(entry?.seen) || 0;
+                        if (!name || !Number.isInteger(slot) || slot < 0 || slot >= size) continue;
+                        // 同一色位被两个模型占用（手改过存储或旧数据）时留最近出现的那个，
+                        // 否则两个模型会显示成同一种颜色，正是要避免的情况。
+                        if (bySlot[slot] && bySlot[slot].seen >= seen) continue;
+                        bySlot[slot] = { name, seen };
+                    }
+                    const map = {};
+                    for (const [slot, { name, seen }] of Object.entries(bySlot)) {
+                        map[name] = { slot: Number(slot), seen };
+                    }
+                    this.clientModelColors = map;
+                },
+
+                saveClientModelColors() {
+                    this._clientModelColorsSavedAt = Date.now();
+                    try {
+                        window.localStorage.setItem('gw.clientModelColors', JSON.stringify(this.clientModelColors));
+                    } catch (err) {
+                        // 存不了只影响跨刷新的颜色稳定，本次页面内的分配照常生效
+                    }
+                },
+
                 // formatTrail 把客户端格式与上游格式做成对比短写：anthropic → openai-chat。
                 // 跨协议转换是本项目高频排查项，列表里一眼能看出格式是否被转；
                 // 两侧相同或只一侧有值时退化为单值，和原来只写客户端格式一致，不增噪声。

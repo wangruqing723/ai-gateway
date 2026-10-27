@@ -162,6 +162,12 @@
                 // 混用会得出「在日志页筛过某个 provider，监控页就显示暂无错误记录」这种假象——
                 // 筛选器是日志页的视图状态，不该顺带改掉仪表盘的统计口径。
                 monitorLogs: [],
+                // 请求日志「客户端模型」标签的配色分配：模型名 → { slot, seen }。
+                // slot 是 clientModelPalette 下标，seen 是最近出现时间（毫秒），
+                // 色板用满时按 seen 回收最久没出现的那个。持久化在 localStorage。
+                clientModelColors: {},
+                // 上次把 clientModelColors 落盘的时间，用于节流只刷新 seen 的写入。
+                _clientModelColorsSavedAt: 0,
                 expandedLogId: null,
                 // ChatGPT 账户列表一次只展开一行详情（同请求日志），存账户 id，'' 表示都收起。
                 expandedChatGPTAccountId: '',

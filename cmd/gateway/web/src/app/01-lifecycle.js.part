@@ -51,6 +51,7 @@
                     this.scheduleRestoreGuard();
                     this.loadDirtyToastPos();
                     this.loadPreviewDrawerState();
+                    this.loadClientModelColors();
                     // 窗口变小后旧坐标可能落到视窗外，重新收进来
                     window.addEventListener('resize', () => {
                         if (this.dirtyToastPos) {

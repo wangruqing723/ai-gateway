@@ -2053,7 +2053,21 @@
                                             @mouseleave="hideTip()"
                                             @focus="showTip(modelTrail(log) + (formatTrail(log) ? '\n' + formatTrail(log) : ''), $event)"
                                             @blur="hideTip()" tabindex="0">
-                                            <span class="block truncate font-mono text-xs text-cyan" x-text="modelTrail(log)"></span>
+                                            <!-- 客户端模型做成带底色的 tag，颜色按模型首次出现顺序从固定色板领取
+                                                 并记在 localStorage：同一模型始终同色，不同模型不撞色（色板用满前），
+                                                 长列表里能一眼扫出模型切换点。
+                                                 上游目标模型保持原来的青色等宽字，只在被改写时跟随，同侧相同则折叠。 -->
+                                            <span class="flex min-w-0 items-center gap-1.5 font-mono text-xs">
+                                                <template x-if="log.model">
+                                                    <span class="tag max-w-full shrink-0 overflow-hidden" :style="clientModelTagStyle(log)" x-text="log.model"></span>
+                                                </template>
+                                                <template x-if="!log.model">
+                                                    <span class="truncate text-muted" x-text="log.targetModel || '--'"></span>
+                                                </template>
+                                                <span x-show="log.model && log.targetModel && log.model !== log.targetModel"
+                                                      class="min-w-0 truncate text-cyan"
+                                                      x-text="'→ ' + log.targetModel"></span>
+                                            </span>
                                             <span class="block truncate text-[11px] text-muted" x-text="formatTrail(log)"></span>
                                             <span x-show="Number(log.visionFailed || 0) > 0"
                                                   class="tag mt-1 w-fit bg-danger/10 text-rose-100"

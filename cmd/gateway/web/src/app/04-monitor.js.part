@@ -49,7 +49,10 @@
                     // 逐个探上游、每个 5 秒超时，先给个即时提示，别让用户干等。
                     // 带上个数：后端分批跑，耗时上界随 provider 数量增长，
                     // 报个数比光说"正在检测"更能让用户判断该等多久。
-                    const pending = Object.keys(this.config.providers || {}).length;
+                    // 只数已启用的：后端 checkAll 与周期检测都跳过禁用的 provider，
+                    // 拿配置全量计数会报出 32 个而实际只探 18 个。
+                    const pending = Object.values(this.config.providers || {})
+                        .filter((provider) => provider?.enabled !== false).length;
                     this.showStatus(pending ? `正在检测 ${pending} 个 Provider…` : '正在检测 Provider…', 'success');
                     try {
                         const res = await fetch('/api/providers/health', { method: 'POST' });
@@ -58,8 +61,13 @@
                         const providers = data.providers || {};
                         this.health = this.health || {};
                         this.health.providerHealth = providers;
-                        const total = Object.keys(providers).length;
-                        const ok = Object.values(providers).filter((p) => p.status === 'ok').length;
+                        // 完成口径与进行中一致：只统计已启用的，避免响应里混进
+                        // 已禁用 provider（如批量接口为 OAuth 账户补状态时不再看 enabled）
+                        // 把分母撑大，出现「检测 18 个却报 18/20 可用」。
+                        const checked = Object.keys(providers)
+                            .filter((name) => this.config.providers?.[name]?.enabled !== false);
+                        const total = checked.length;
+                        const ok = checked.filter((name) => providers[name]?.status === 'ok').length;
                         this.showStatus(`Provider 检测完成：${ok}/${total} 可用`, ok === total ? 'success' : 'error');
                     } catch (err) {
                         this.showStatus('Provider 健康检测失败: ' + err.message, 'error');
@@ -146,6 +154,9 @@
                     });
                     const data = await this.loadOptionalJSON('/api/logs?' + params.toString());
                     const logs = Array.isArray(data?.data) ? data.data : [];
+                    // 先分配配色再赋值：渲染时每个模型都已有固定色位，不会出现
+                    // 首帧回落默认色、下一帧才变色的闪烁。
+                    this.assignClientModelColors(logs);
                     this.requestLogs = logs;
                     // 轮询刷新时同一请求 ID 保持展开；筛选后该行消失则收起，避免状态指向不可见日志。
                     if (this.expandedLogId && !logs.some((log) => this.logKey(log) === this.expandedLogId)) {
