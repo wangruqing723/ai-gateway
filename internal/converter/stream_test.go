@@ -911,6 +911,49 @@ func TestResponsesStreamFailureReusesIDAndNextSequence(t *testing.T) {
 	}
 }
 
+// 上游失败事件有两种形状：官方 response.failed 把错误放在 response.error.message，
+// 兼容 OpenAI 的上游在流中途直接发 `event: error`，错误放在扁平的 error.message。
+// 两种都必须把真实原因带给客户端与日志，不能被兜底文案顶掉。
+func TestResponsesStreamErrorKeepsUpstreamMessage(t *testing.T) {
+	const upstreamMessage = "Your requests to gpt-6.1-sol for gpt-6.1-sol in eastus2 have exceeded token rate limit."
+	flat := `data: {"type":"error","error":{"type":"too_many_requests","code":"rate_limit_exceeded","message":"` + upstreamMessage + `"},"sequence_number":1}`
+	nested := `data: {"type":"response.failed","response":{"status":"failed","error":{"code":"server_error","message":"` + upstreamMessage + `"}}}`
+	tests := []struct {
+		name        string
+		transformer StreamTransformer
+		line        string
+	}{
+		{name: "flat error / anthropic target", transformer: NewStreamTransformer("openai-responses", "anthropic"), line: flat},
+		{name: "flat error / chat target", transformer: NewStreamTransformer("openai-responses", "openai-chat"), line: flat},
+		{name: "response.failed / anthropic target", transformer: NewStreamTransformer("openai-responses", "anthropic"), line: nested},
+		{name: "response.failed / chat target", transformer: NewStreamTransformer("openai-responses", "openai-chat"), line: nested},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if chunks := tt.transformer.Transform(tt.line); len(chunks) != 0 {
+				t.Fatalf("error event produced normal chunks: %#v", chunks)
+			}
+			err := StreamError(tt.transformer)
+			if err == nil || !strings.Contains(err.Error(), upstreamMessage) {
+				t.Fatalf("stream error = %v, want 上游原文", err)
+			}
+			failure := strings.Join(StreamFailure(tt.transformer), "")
+			if !strings.Contains(failure, upstreamMessage) || strings.Contains(failure, "Responses 上游流式响应失败") {
+				t.Fatalf("failure terminal = %q", failure)
+			}
+		})
+	}
+}
+
+// 上游连 message 都没给时仍要回落兜底文案，避免空错误。
+func TestResponsesStreamErrorFallsBackWhenMessageMissing(t *testing.T) {
+	transformer := NewStreamTransformer("openai-responses", "anthropic")
+	transformer.Transform(`data: {"type":"error","error":{"type":"server_error","code":"upstream_failed"}}`)
+	if err := StreamError(transformer); err == nil || err.Error() != "Responses 上游流式响应失败" {
+		t.Fatalf("stream error = %v", err)
+	}
+}
+
 func TestStreamFailureUsesTargetProtocolWithoutSuccessTerminal(t *testing.T) {
 	t.Run("anthropic-target", func(t *testing.T) {
 		transformer := NewStreamTransformer("openai", "anthropic")

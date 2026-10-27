@@ -1289,6 +1289,28 @@ func responsesSummaryText(item map[string]any) string {
 	return text
 }
 
+// responsesErrorMessage 从 Responses 的失败事件里取上游真正给出的错误文案。
+//
+// 两种形状都要认：
+//   - 官方 response.failed：错误在 response.error.message；
+//   - 兼容 OpenAI 的上游在流中途直接发 `event: error`，错误在扁平的
+//     top-level error.message（实测 agentrouter 的 gpt-6.1-sol 用这套，
+//     报的是 rate_limit_exceeded）。
+//
+// 只认前者会让后者把限流、超限这类真实原因丢掉，客户端和日志只剩兜底文案。
+// 非流式路径 parseResponsesOutput 认的就是扁平形状，这里与之对齐。
+func responsesErrorMessage(data map[string]any) string {
+	if response, ok := data["response"].(map[string]any); ok {
+		if e, ok := response["error"].(map[string]any); ok && getString(e, "message") != "" {
+			return getString(e, "message")
+		}
+	}
+	if e, ok := data["error"].(map[string]any); ok && getString(e, "message") != "" {
+		return getString(e, "message")
+	}
+	return getString(data, "message")
+}
+
 func (t *responsesToChat) Err() error        { return t.s.err }
 func (t *responsesToChat) Failure() []string { return chatStreamFailure(t.s) }
 func (t *responsesToChat) Completed() bool   { return t.s.completed }
@@ -1494,12 +1516,7 @@ func (t *responsesToChat) Transform(line string) []string {
 		return t.finish("length")
 	case "response.failed", "error":
 		t.s.failureType = "upstream_error"
-		message := getString(data, "message")
-		if response, ok := data["response"].(map[string]any); ok {
-			if e, ok := response["error"].(map[string]any); ok && getString(e, "message") != "" {
-				message = getString(e, "message")
-			}
-		}
+		message := responsesErrorMessage(data)
 		if message == "" {
 			message = "Responses 上游流式响应失败"
 		}
@@ -1784,12 +1801,7 @@ func (t *responsesToAnthropic) Transform(line string) []string {
 		return t.finish(true, responsesEventUsage(data))
 	case "response.failed", "error":
 		t.s.failureType = "upstream_error"
-		message := getString(data, "message")
-		if response, ok := data["response"].(map[string]any); ok {
-			if e, ok := response["error"].(map[string]any); ok && getString(e, "message") != "" {
-				message = getString(e, "message")
-			}
-		}
+		message := responsesErrorMessage(data)
 		if message == "" {
 			message = "Responses 上游流式响应失败"
 		}
