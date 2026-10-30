@@ -8198,7 +8198,11 @@
                         window.removeEventListener('pointermove', onMove);
                         window.removeEventListener('pointerup', onUp);
                         window.removeEventListener('pointercancel', onUp);
-                        if (drag) this.applyRowDrag(drag);
+                        // 换位必须推迟到清 rowDrag 的那轮刷新之后。同一轮里先清 rowDrag 再 splice，
+                        // 依赖 rowDrag 的行 :class 会先按旧的 x-for 作用域（route / ti）算完；
+                        // 作用域刷新后触发的重算又被 Alpine 调度器当成「本轮已入队」去重丢掉，
+                        // 于是停用行的变暗、首位候选的高亮留在原位置，换到了别的行上。
+                        if (drag) this.$nextTick(() => this.applyRowDrag(drag));
                     };
                     window.addEventListener('pointermove', onMove);
                     window.addEventListener('pointerup', onUp);
