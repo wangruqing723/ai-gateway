@@ -32,4 +32,9 @@ func TestEventLogKeepsNewestHundredEvents(t *testing.T) {
 	if got := log.Events()[0]; !got.Recovered || got.Kind != "health_recovered" {
 		t.Fatalf("recovery event = %#v", got)
 	}
+
+	log.Add("key_recovered", "provider", "key recovered")
+	if got := log.Events()[0]; !got.Recovered || got.Kind != "key_recovered" {
+		t.Fatalf("key recovery event = %#v", got)
+	}
 }

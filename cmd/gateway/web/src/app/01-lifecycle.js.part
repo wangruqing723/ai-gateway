@@ -11,16 +11,24 @@
                     this._chatGPTExpiryTimer = window.setInterval(() => {
                         this.chatGPTNow = Date.now();
                     }, 60_000);
+                    this._providerKeyCountdownTimer = window.setInterval(() => {
+                        this.decrementProviderKeyCooldowns();
+                    }, 1000);
                     if (this.monitorPollingAllowed()) await this.refreshMonitor();
+                    else await this.loadHealth(false);
                     this._monitorPollTimer = window.setInterval(() => {
                         if (this.monitorPollingAllowed()) this.refreshMonitor(false);
+                        else if (document.visibilityState === 'visible' && this.activeTab === 'providers') this.loadHealth(false);
                     }, 5000);
                     this._monitorVisibilityHandler = () => {
                         if (this.monitorPollingAllowed()) this.refreshMonitor(false);
+                        else if (document.visibilityState === 'visible' && this.activeTab === 'providers') this.loadHealth(false);
                     };
                     document.addEventListener('visibilitychange', this._monitorVisibilityHandler);
                     this.$watch('activeTab', (tab, oldTab) => {
-                        if (tab !== oldTab && this.monitorPollingAllowed()) this.refreshMonitor(false);
+                        if (tab === oldTab) return;
+                        if (tab === 'providers') this.loadHealth(false);
+                        else if (this.monitorPollingAllowed()) this.refreshMonitor(false);
                     });
                     // 直接编辑的字段仍需手动保存，关页面前拦一下，免得改了半天丢掉
                     window.addEventListener('beforeunload', (e) => {

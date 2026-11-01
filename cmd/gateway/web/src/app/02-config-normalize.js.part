@@ -3,11 +3,26 @@
                     const rawProviders = pick(data, 'providers', 'Providers') || {};
                     const providers = {};
                     Object.entries(rawProviders).forEach(([name, p]) => {
+                        const rawKeys = pick(p, 'apiKeys', 'APIKeys');
+                        const rawKeyCooldown = pick(p, 'keyCooldown', 'KeyCooldown');
                         providers[name] = {
                             name: pick(p, 'name', 'Name') || name,
                             baseUrl: pick(p, 'baseUrl', 'BaseURL') || '',
                             apiKey: pick(p, 'apiKey', 'APIKey') || '',
                             apiKeyConfigured: !!pick(p, 'apiKeyConfigured', 'APIKeyConfigured'),
+                            apiKeys: Array.isArray(rawKeys) ? rawKeys.map((key) => ({
+                                id: pick(key, 'id', 'ID') || '',
+                                name: pick(key, 'name', 'Name') || '',
+                                value: pick(key, 'value', 'Value') || '',
+                                enabled: pick(key, 'enabled', 'Enabled') !== false,
+                                valueConfigured: !!pick(key, 'valueConfigured', 'ValueConfigured'),
+                                fingerprint: pick(key, 'fingerprint', 'Fingerprint') || ''
+                            })) : undefined,
+                            keyCooldown: rawKeyCooldown ? {
+                                authMs: pick(rawKeyCooldown, 'authMs', 'AuthMs') ?? null,
+                                quotaMs: pick(rawKeyCooldown, 'quotaMs', 'QuotaMs') ?? null,
+                                rateLimitMs: pick(rawKeyCooldown, 'rateLimitMs', 'RateLimitMs') ?? null
+                            } : undefined,
                             format: pick(p, 'format', 'Format') || 'anthropic',
                             authType: pick(p, 'authType', 'AuthType') || '',
                             accountId: pick(p, 'accountId', 'AccountID') || '',

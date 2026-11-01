@@ -112,12 +112,33 @@
 
                 providersYaml() {
                     return Object.entries(this.config.providers || {}).map(([name, p]) => {
+                        const apiKeys = Array.isArray(p.apiKeys) ? p.apiKeys : [];
+                        const listMode = apiKeys.length > 0;
+                        const apiKeyValue = p.apiKeyConfigured || p.apiKey
+                            ? '__AI_GATEWAY_KEEP_API_KEY__'
+                            : '';
                         const lines = [
                             `  ${name}:`,
                             `    baseUrl: "${p.baseUrl || ''}"`,
-                            ...(p.authType === 'chatgptOAuth' ? [] : [`    apiKey: "${p.apiKey || ''}"`]),
+                            ...(p.authType === 'chatgptOAuth' || listMode ? [] : [`    apiKey: "${apiKeyValue}"`]),
                             `    format: ${p.format || 'anthropic'}`
                         ];
+                        if (listMode) {
+                            lines.push('    apiKeys:');
+                            apiKeys.forEach((key) => {
+                                lines.push(`      - id: ${JSON.stringify(key.id || '')}`);
+                                if (key.name) lines.push(`        name: ${JSON.stringify(key.name)}`);
+                                lines.push('        value: "__AI_GATEWAY_KEEP_API_KEY__"');
+                                if (key.enabled === false) lines.push('        enabled: false');
+                            });
+                        }
+                        const keyCooldown = this.keyCooldownPayload(p.keyCooldown);
+                        if (listMode && keyCooldown) {
+                            lines.push('    keyCooldown:');
+                            if (keyCooldown.authMs !== null) lines.push(`      authMs: ${keyCooldown.authMs}`);
+                            if (keyCooldown.quotaMs !== null) lines.push(`      quotaMs: ${keyCooldown.quotaMs}`);
+                            if (keyCooldown.rateLimitMs !== null) lines.push(`      rateLimitMs: ${keyCooldown.rateLimitMs}`);
+                        }
                         if (p.authType) lines.push(`    authType: ${p.authType}`);
                         if (p.accountId) lines.push(`    accountId: ${p.accountId}`);
                         // 只在配了时才输出，与后端 yaml omitempty 一致，避免预览里

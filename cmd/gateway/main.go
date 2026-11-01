@@ -38,6 +38,7 @@ import (
 	"ai-gateway/internal/config"
 	"ai-gateway/internal/converter"
 	"ai-gateway/internal/httpclient"
+	"ai-gateway/internal/keypool"
 	"ai-gateway/internal/metrics"
 	"ai-gateway/internal/providerhealth"
 	"ai-gateway/internal/proxy"
@@ -108,7 +109,10 @@ func main() {
 		logSystem("ChatGPT OAuth 回调不可用: %s", callbackErr)
 	}
 	eventLog := metrics.NewEventLog()
+	keyPool := keypool.New(nil)
+	translator.SetKeyPool(keyPool)
 	healthChecker := providerhealth.NewChecker()
+	healthChecker.SetKeyPool(keyPool)
 	revision, err := newConfigRevision()
 	if err != nil {
 		_ = imgCache.Close()
@@ -122,6 +126,7 @@ func main() {
 		listenHost:        cfg.Host,
 		listenPort:        cfg.Port,
 		qm:                qm,
+		keyPool:           keyPool,
 		httpPool:          httpPool,
 		resolveHTTPClient: httpPool.For,
 		cache:             imgCache,
@@ -134,6 +139,8 @@ func main() {
 		selector:          balancer.New(),
 		webDevDir:         os.Getenv("AI_GATEWAY_WEB_DIR"),
 	}
+	keyPool.SetEventHandler(srv.onKeyPoolEvent)
+	keyPool.Reconcile(cfg)
 	healthChecker.OnStateChange = srv.onProviderHealthStateChange
 	srv.breaker.SetSettings(breakerSettingsWithCallback(cfg, srv.onBreakerStateChange))
 	initialLimits := make(map[string]queue.Limits, len(cfg.Providers))
@@ -244,6 +251,7 @@ type server struct {
 	listenHost        string
 	listenPort        int
 	qm                *queue.Manager
+	keyPool           *keypool.Pool
 	httpPool          *httpclient.Pool
 	resolveHTTPClient func(proxyURL string) (*http.Client, error)
 	cache             cacheRuntime
@@ -371,6 +379,12 @@ func (s *server) onProviderHealthStateChange(provider, fromStatus, toStatus stri
 	s.eventLog.Add("health_down", provider, detail)
 }
 
+func (s *server) onKeyPoolEvent(event keypool.Event) {
+	if s.eventLog != nil {
+		s.eventLog.Add(event.Kind, event.Provider, event.Detail)
+	}
+}
+
 func (s *server) resolveClient(proxyURL string) (*http.Client, error) {
 	if s.resolveHTTPClient == nil {
 		return nil, errors.New("HTTP client 池未初始化")
@@ -475,6 +489,19 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.handleBreakerReset(w, r)
+		return
+	}
+
+	if urlPath == "/api/providers/keys/cooldown/reset" {
+		if r.Method != http.MethodPost {
+			writeMethodNotAllowed(w, http.MethodPost)
+			return
+		}
+		if isCrossSiteRequest(r) {
+			writeForbiddenOrigin(w)
+			return
+		}
+		s.handleKeyCooldownReset(w, r)
 		return
 	}
 
@@ -720,7 +747,9 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 	// 图片翻译放在候选循环之外：产出的是文字描述，与具体目标无关，重复调用纯浪费
 	if needVision {
 		vp := matched.VisionProvider
-		vp.APIKey = router.ResolveAPIKey(vp, r.Header)
+		if !vp.UsesKeyList() {
+			vp.APIKey = router.ResolveAPIKey(vp, r.Header)
+		}
 		reqLog.VisionModel = matched.VisionModel
 		var visionResult vision.Result
 		internal.Messages, visionResult = s.translator.Translate(r.Context(), internal.Messages, vp, matched.VisionModel,
@@ -773,7 +802,9 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		freeSkips int
 		// contextSkips 因输入装不进候选窗口而跳过的次数；与熔断跳过一样不消耗额度。
 		contextSkips       int
+		keySkips           int
 		soonestRetry       time.Duration
+		soonestKeyRetry    time.Time
 		nextHTTPAttemptNo  int
 		nextDetailSequence int
 		localRetryCanceled bool
@@ -824,6 +855,30 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 			detail.DurationMs = time.Since(started).Milliseconds()
 			reqLog.AttemptDetails = append(reqLog.AttemptDetails, detail)
 			logf(reqID, "  候选 %s 目标格式不兼容，跳过: %s", name, err)
+			continue
+		}
+
+		if candidate.Provider.UsesKeyList() && (s.keyPool == nil || !s.keyPool.HasSelectable(name, candidate.Provider, nil)) {
+			keySkips++
+			retryAt := s.keyPool.EarliestRecovery(name, candidate.Provider)
+			if !retryAt.IsZero() && (soonestKeyRetry.IsZero() || retryAt.Before(soonestKeyRetry)) {
+				soonestKeyRetry = retryAt
+			}
+			trail = append(trail, name+":no_selectable_key")
+			nextDetailSequence++
+			skipStarted := time.Now()
+			reqLog.AttemptDetails = append(reqLog.AttemptDetails, metrics.AttemptDetail{
+				Sequence:       nextDetailSequence,
+				Kind:           "key_skip",
+				Provider:       name,
+				TargetModel:    candidate.TargetModel,
+				ProviderFormat: candidate.Provider.Format,
+				StartedAt:      skipStarted.In(beijingLoc).Format(time.RFC3339Nano),
+				DurationMs:     time.Since(skipStarted).Milliseconds(),
+				Outcome:        "skipped",
+				Reason:         "no_selectable_key",
+			})
+			logf(reqID, "  候选 %s 没有可选择的 Provider 密钥，跳过", name)
 			continue
 		}
 
@@ -892,45 +947,133 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		hasNext := attempts+1 < attemptLimit && hasCompatibleNext
 		localRetriesRemaining := candidate.LocalRetryMax
 		localRetryAttempt := false
+		excludedKeys := make(map[string]struct{})
+		candidateActualAttempts := 0
+		candidateAllFreeAttempts := true
+		candidateNoKey := false
+		candidateKeySelectionExhausted := false
+		outcomeTrailRecorded := false
 		var outcome forwardAttemptOutcome
 		for {
-			nextDetailSequence++
-			attemptStarted := time.Now()
-			detail := metrics.AttemptDetail{
-				Sequence:       nextDetailSequence,
-				Provider:       name,
-				TargetModel:    candidate.TargetModel,
-				ProviderFormat: candidate.Provider.Format,
-				StartedAt:      attemptStarted.In(beijingLoc).Format(time.RFC3339Nano),
-				LocalRetry:     localRetryAttempt,
+			chainRemaining := time.Duration(requestChainBudgetMs(cfg, internal.Stream)) * time.Millisecond
+			for {
+				var ticket *keypool.Ticket
+				allowKeySwitch := false
+				if candidate.Provider.UsesKeyList() {
+					var retryAt time.Time
+					ticket, retryAt = s.keyPool.Select(name, candidate.Provider, excludedKeys)
+					if ticket == nil {
+						if !retryAt.IsZero() && (soonestKeyRetry.IsZero() || retryAt.Before(soonestKeyRetry)) {
+							soonestKeyRetry = retryAt
+						}
+						if candidateActualAttempts == 0 {
+							candidateNoKey = true
+							keySkips++
+							trail = append(trail, name+":no_selectable_key")
+							nextDetailSequence++
+							started := time.Now()
+							reqLog.AttemptDetails = append(reqLog.AttemptDetails, metrics.AttemptDetail{
+								Sequence:       nextDetailSequence,
+								Kind:           "key_skip",
+								Provider:       name,
+								TargetModel:    candidate.TargetModel,
+								ProviderFormat: candidate.Provider.Format,
+								StartedAt:      started.In(beijingLoc).Format(time.RFC3339Nano),
+								DurationMs:     time.Since(started).Milliseconds(),
+								Outcome:        "skipped",
+								Reason:         "no_selectable_key",
+							})
+							if s.breaker != nil {
+								s.breaker.Report(name, breaker.OutcomeIgnored)
+							}
+						} else {
+							candidateKeySelectionExhausted = true
+						}
+						break
+					}
+					excludedForSwitch := make(map[string]struct{}, len(excludedKeys)+1)
+					for id := range excludedKeys {
+						excludedForSwitch[id] = struct{}{}
+					}
+					excludedForSwitch[ticket.Key.ID] = struct{}{}
+					allowKeySwitch = s.keyPool.HasSelectable(name, candidate.Provider, excludedForSwitch)
+				}
+
+				nextDetailSequence++
+				attemptStarted := time.Now()
+				detail := metrics.AttemptDetail{
+					Sequence:       nextDetailSequence,
+					Provider:       name,
+					TargetModel:    candidate.TargetModel,
+					ProviderFormat: candidate.Provider.Format,
+					StartedAt:      attemptStarted.In(beijingLoc).Format(time.RFC3339Nano),
+					LocalRetry:     localRetryAttempt,
+				}
+				if ticket != nil {
+					detail.KeyID = ticket.Key.ID
+					detail.KeyName = ticket.Key.Name
+					detail.KeyFingerprint = ticket.Fingerprint
+				}
+
+				outcome = s.forwardAttempt(w, r, forwardAttemptInput{
+					cfg:                             cfg,
+					reqID:                           reqID,
+					start:                           start,
+					clientFormat:                    clientFormat,
+					originalModel:                   model,
+					internal:                        internal,
+					targetCompatibilityPrevalidated: true,
+					rawBody:                         body,
+					needVision:                      needVision,
+					candidate:                       candidate,
+					keyTicket:                       ticket,
+					allowKeySwitch:                  allowKeySwitch,
+					chainBudgetMs:                   int(chainRemaining / time.Millisecond),
+					contextBudget:                   contextBudget,
+					allowFailoverTransfer:           hasNext,
+					allowLocalRetry:                 localRetriesRemaining > 0,
+					attemptNo:                       attempts + 1,
+					httpAttemptNo:                   nextHTTPAttemptNo + 1,
+					reqLog:                          &reqLog,
+					detail:                          &detail,
+				})
+				outcomeTrailRecorded = false
+				detail.DurationMs = time.Since(attemptStarted).Milliseconds()
+				reqLog.AttemptDetails = append(reqLog.AttemptDetails, detail)
+				if outcome.requestStarted {
+					nextHTTPAttemptNo++
+					candidateActualAttempts++
+					if !outcome.freeAttempt {
+						candidateAllFreeAttempts = false
+					}
+					chainRemaining -= outcome.upstreamDuration
+				}
+
+				willLocalRetry := outcome.abandoned && !outcome.keySwitch && !outcome.freeAttempt && localRetriesRemaining > 0
+				deferShortRateLimitCooldown := ticket != nil && outcome.upstreamStatus == http.StatusTooManyRequests &&
+					willLocalRetry && !isLongRetryAfter(&cfg.Failover, outcome.retryAfter)
+				if ticket != nil && outcome.requestStarted && !deferShortRateLimitCooldown {
+					s.keyPool.Report(ticket, outcome.upstreamStatus, outcome.retryAfter)
+				}
+
+				if outcome.keySwitch {
+					excludedKeys[ticket.Key.ID] = struct{}{}
+					trail = append(trail, outcome.trail)
+					outcomeTrailRecorded = true
+					if chainRemaining <= 0 {
+						candidateKeySelectionExhausted = true
+						break
+					}
+					continue
+				}
+				break
 			}
 
-			outcome = s.forwardAttempt(w, r, forwardAttemptInput{
-				cfg:                             cfg,
-				reqID:                           reqID,
-				start:                           start,
-				clientFormat:                    clientFormat,
-				originalModel:                   model,
-				internal:                        internal,
-				targetCompatibilityPrevalidated: true,
-				rawBody:                         body,
-				needVision:                      needVision,
-				candidate:                       candidate,
-				contextBudget:                   contextBudget,
-				allowFailoverTransfer:           hasNext,
-				allowLocalRetry:                 localRetriesRemaining > 0,
-				attemptNo:                       attempts + 1,
-				httpAttemptNo:                   nextHTTPAttemptNo + 1,
-				reqLog:                          &reqLog,
-				detail:                          &detail,
-			})
-			detail.DurationMs = time.Since(attemptStarted).Milliseconds()
-			reqLog.AttemptDetails = append(reqLog.AttemptDetails, detail)
-			if outcome.requestStarted {
-				nextHTTPAttemptNo++
+			if candidateNoKey || candidateKeySelectionExhausted {
+				break
 			}
-
-			if outcome.buildErr != "" || !outcome.abandoned || outcome.freeAttempt || localRetriesRemaining <= 0 {
+			if outcome.buildErr != "" || !outcome.abandoned || outcome.freeAttempt || localRetriesRemaining <= 0 ||
+				(candidate.Provider.UsesKeyList() && (outcome.upstreamStatus == http.StatusUnauthorized || outcome.upstreamStatus == http.StatusPaymentRequired || outcome.upstreamStatus == http.StatusForbidden)) {
 				break
 			}
 
@@ -941,6 +1084,12 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 				break
 			}
 			localRetryAttempt = true
+		}
+		if candidateNoKey {
+			continue
+		}
+		if candidateActualAttempts > 0 {
+			outcome.freeAttempt = outcome.freeAttempt && candidateAllFreeAttempts
 		}
 
 		if outcome.buildErr != "" {
@@ -962,13 +1111,17 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 			// 上游自报「这段时间不可用」（429 + 超阈值的 Retry-After）：与熔断跳过同等
 			// 待遇，不消耗额度，否则一个自曝限流的上游会挤掉本来还能试的健康候选。
 			freeSkips++
-			trail = append(trail, outcome.trail)
+			if !outcomeTrailRecorded {
+				trail = append(trail, outcome.trail)
+			}
 			lastAbandoned = true
 			logf(reqID, "  候选 %s 放弃（%s），不计入尝试额度", name, outcome.trail)
 			continue
 		}
 		attempts++
-		trail = append(trail, outcome.trail)
+		if !outcomeTrailRecorded {
+			trail = append(trail, outcome.trail)
+		}
 		lastAbandoned = outcome.abandoned
 		if !outcome.abandoned {
 			// 只在确实成功后绑定粘性：绑定失败过的目标会把整条会话钉在坏上游上。
@@ -1002,6 +1155,20 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		reqLog.AttemptTrail = strings.Join(trail, " → ")
 		reqLog.Error = "全部候选上游均已禁用"
 		writeJSONError(w, http.StatusServiceUnavailable, "all_candidates_disabled", reqLog.Error)
+	case attempts == 0 && keySkips > 0:
+		reqLog.AttemptTrail = strings.Join(trail, " → ")
+		reqLog.Error = "没有可选择的 Provider 密钥"
+		if !soonestKeyRetry.IsZero() {
+			remaining := time.Until(soonestKeyRetry)
+			if remaining > 0 {
+				seconds := int((remaining + time.Second - 1) / time.Second)
+				if seconds < 1 {
+					seconds = 1
+				}
+				w.Header().Set("retry-after", strconv.Itoa(seconds))
+			}
+		}
+		writeJSONError(w, http.StatusServiceUnavailable, "no_selectable_provider_key", reqLog.Error)
 	case attempts == 0 && breakerSkips > 0:
 		// 全部候选被熔断：给出最早恢复者的剩余冷却，让客户端知道何时重试
 		reqLog.AttemptTrail = strings.Join(trail, " → ")
@@ -1040,6 +1207,36 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		reqLog.Error = "全部候选上游均不可用"
 		writeJSONError(w, http.StatusBadGateway, "all_candidates_failed", reqLog.Error)
 	}
+}
+
+func requestChainBudgetMs(cfg *config.Config, streaming bool) int {
+	if cfg.DirectMode {
+		if streaming {
+			return cfg.DirectTimeoutStreamHeader
+		}
+		return cfg.DirectTimeoutNoStream
+	}
+	return cfg.Timeout
+}
+
+// forwardAttemptTimeouts 解析单次转发超时；密钥链预算只覆盖列表模式的真实请求。
+func forwardAttemptTimeouts(cfg *config.Config, streaming, keyListMode bool, chainBudgetMs int) (timeoutMs, headerTimeoutMs, activityTimeoutMs int) {
+	timeoutMs = cfg.Timeout
+	headerTimeoutMs = 0 // 0 表示 proxy 回退用 timeoutMs
+	activityTimeoutMs = cfg.StreamActivityTimeout
+	if cfg.DirectMode {
+		timeoutMs = cfg.DirectTimeoutNoStream
+		headerTimeoutMs = cfg.DirectTimeoutStreamHeader
+		activityTimeoutMs = cfg.DirectTimeoutStreamActive
+	}
+	if keyListMode && chainBudgetMs > 0 {
+		if streaming {
+			headerTimeoutMs = chainBudgetMs
+		} else {
+			timeoutMs = chainBudgetMs
+		}
+	}
+	return timeoutMs, headerTimeoutMs, activityTimeoutMs
 }
 
 // resolveContextBudget 计算单个候选允许的输出预算。
@@ -1138,6 +1335,9 @@ type forwardAttemptInput struct {
 	rawBody                         map[string]any
 	needVision                      bool
 	candidate                       router.Candidate
+	keyTicket                       *keypool.Ticket
+	allowKeySwitch                  bool
+	chainBudgetMs                   int
 	// contextBudget 本次允许的输出上限硬顶，0 表示不限制。
 	contextBudget int
 	attemptNo     int // 从 1 开始，用于 x-ai-gateway-attempts
@@ -1162,7 +1362,11 @@ type forwardAttemptOutcome struct {
 	// breakerOutcome 本次尝试对熔断计数的影响，由调用方汇报给 breaker。
 	breakerOutcome breaker.Outcome
 	// freeAttempt 本次放弃不消耗 maxAttempts 额度，见 failoverDecision.freeAttempt。
-	freeAttempt bool
+	freeAttempt      bool
+	keySwitch        bool
+	upstreamStatus   int
+	retryAfter       time.Duration
+	upstreamDuration time.Duration
 }
 
 // forwardAttempt 执行单个候选的一次转发尝试。
@@ -1171,15 +1375,33 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 	cfg := in.cfg
 	reqID := in.reqID
 	p := in.candidate.Provider
+	if p != nil {
+		providerCopy := *p
+		p = &providerCopy
+	}
 	targetModel := in.candidate.TargetModel
 
-	apiKey, keySource := router.ResolveAPIKeyWithSource(p, r.Header)
+	apiKey, keySource := "", "provider"
+	if in.keyTicket != nil {
+		apiKey = in.keyTicket.Key.Value
+	} else {
+		apiKey, keySource = router.ResolveAPIKeyWithSource(p, r.Header)
+	}
 	if p.AuthType == "chatgptOAuth" {
 		// OAuth Provider 始终使用绑定账户的凭据，不能回退到客户端传入的 API Key。
 		apiKey = ""
 		keySource = "chatgptOAuth"
 	}
 	p.APIKey = apiKey
+	if in.detail != nil {
+		if in.keyTicket != nil {
+			in.detail.KeyID = in.keyTicket.Key.ID
+			in.detail.KeyName = in.keyTicket.Key.Name
+			in.detail.KeyFingerprint = in.keyTicket.Fingerprint
+		} else {
+			in.detail.KeyFingerprint = keyFingerprint(apiKey)
+		}
+	}
 
 	isPassthrough := converter.IsPassthrough(p.Format, in.clientFormat)
 	// 这里只兜住「部分候选是透传、部分不是」的情况：全部候选都不透传时 handle()
@@ -1389,15 +1611,7 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 		defer release()
 	}
 
-	// 超时参数：直通模式用 direct* 三档；否则沿用全局 timeout / streamActivityTimeout
-	timeoutMs := cfg.Timeout
-	headerTimeoutMs := 0 // 0 表示 proxy 回退用 timeoutMs
-	activityTimeoutMs := cfg.StreamActivityTimeout
-	if cfg.DirectMode {
-		timeoutMs = cfg.DirectTimeoutNoStream
-		headerTimeoutMs = cfg.DirectTimeoutStreamHeader
-		activityTimeoutMs = cfg.DirectTimeoutStreamActive
-	}
+	timeoutMs, headerTimeoutMs, activityTimeoutMs := forwardAttemptTimeouts(cfg, in.internal.Stream, in.keyTicket != nil, in.chainBudgetMs)
 
 	// 告知客户端实际服务的候选与尝试次数（对齐 Cloudflare 的 cf-aig-step 思路）。
 	// 所有放弃都发生在 WriteHeader 之前，因此这里覆盖写入是安全的，流式响应也能带上。
@@ -1413,15 +1627,19 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 		// abandonReason / abandonBreaker / abandonFree 由 ShouldRetry 回调写、
 		// Forward 返回后读。与 OnUpstreamStatus 一样，回调与 Forward 同 goroutine
 		// 同步执行，用普通变量即可；atomic.Value 只会多一层装箱和类型断言的失败路径。
-		abandonReason string
-		abandonFree   bool
+		abandonReason     string
+		abandonFree       bool
+		abandonKeySwitch  bool
+		abandonRetryAfter time.Duration
+		abandonStatus     int
 		// 必须显式初始化成 OutcomeIgnored：Outcome 的零值是 OutcomeSuccess，
 		// 万一回调没写入就用零值，会把一次放弃当成成功上报给熔断器。
 		abandonBreaker = breaker.OutcomeIgnored
 		// attemptStatus 本次尝试拿到的上游状态码，0 表示上游没给出响应头。
 		// 必须用本次尝试的局部变量，不能直接读 in.reqLog.UpstreamStatus：后者跨候选
 		// 共享，候选 1 的 502 会在候选 2 传输失败（不上报）时被当成候选 2 的状态码。
-		attemptStatus int
+		attemptStatus     int
+		attemptRetryAfter time.Duration
 		// firstByteDone 保证首字耗时只记一次。放在尝试作用域是安全的：
 		// 流式一旦开始写客户端就不再询问 ShouldRetry，至多一个候选能写出内容事件，
 		// 不存在两个候选各记一次、后者覆盖前者的情况。
@@ -1454,6 +1672,7 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 			in.reqLog.UpstreamStatus = code
 		},
 		OnUpstreamHeaders: func(code int, requestID string, retryAfter time.Duration) {
+			attemptRetryAfter = retryAfter
 			if in.detail == nil {
 				return
 			}
@@ -1489,22 +1708,42 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 			captureUpstreamStream(reqID, p.Name, targetModel, in.clientFormat, p.Format, raw, truncated, convErr)
 		}
 	}
-	if in.allowFailoverTransfer || in.allowLocalRetry {
+	var upstreamStarted time.Time
+	if in.keyTicket != nil || in.allowFailoverTransfer || in.allowLocalRetry {
 		opts.ShouldRetry = func(upstreamCode int, retryAfter time.Duration, err error) bool {
+			if in.keyTicket != nil && in.allowKeySwitch && isKeyRelatedFailure(upstreamCode) {
+				remaining := time.Duration(in.chainBudgetMs)*time.Millisecond - time.Since(upstreamStarted)
+				if remaining >= time.Second {
+					abandonReason = keyFailureReason(upstreamCode)
+					abandonBreaker = breakerOutcomeFor(upstreamCode, err)
+					abandonFree = isKeySwitchFreeAttempt(upstreamCode, &cfg.Failover, retryAfter)
+					abandonKeySwitch = true
+					abandonRetryAfter = retryAfter
+					abandonStatus = upstreamCode
+					return true
+				}
+			}
 			decision := classifyFailure(&cfg.Failover, upstreamCode, retryAfter, err)
 			failoverOK := cfg.Failover.Enabled && in.allowFailoverTransfer && decision.transfer
 			localOK := in.allowLocalRetry && decision.transfer && !decision.freeAttempt
+			if in.keyTicket != nil && (upstreamCode == http.StatusUnauthorized || upstreamCode == http.StatusForbidden || upstreamCode == http.StatusPaymentRequired) {
+				localOK = false
+			}
 			if !failoverOK && !localOK {
 				return false
 			}
 			abandonReason = decision.reason
 			abandonBreaker = breakerOutcomeFor(upstreamCode, err)
 			abandonFree = decision.freeAttempt
+			abandonRetryAfter = retryAfter
+			abandonStatus = upstreamCode
 			return true
 		}
 	}
 
+	upstreamStarted = time.Now()
 	forwardErr := proxy.Forward(opts)
+	upstreamDuration := time.Since(upstreamStarted)
 	if errors.Is(forwardErr, proxy.ErrAttemptAbandoned) {
 		// ErrAttemptAbandoned 只可能由上面的回调返回 true 触发，此时三个变量必已写入；
 		// 兜底值仅防御 proxy 侧未来改动，不代表正常路径。
@@ -1514,6 +1753,9 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 		}
 		if in.detail != nil {
 			in.detail.Outcome = "transferred"
+			if abandonKeySwitch {
+				in.detail.Outcome = "key_switched"
+			}
 			in.detail.Reason = reason
 			in.detail.FreeAttempt = abandonFree
 		}
@@ -1527,11 +1769,15 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 			captureUpstreamBody(reqID, p.Name, targetModel, attemptStatus, upstreamBody)
 		}
 		return forwardAttemptOutcome{
-			abandoned:      true,
-			requestStarted: true,
-			trail:          p.Name + ":" + reason,
-			breakerOutcome: abandonBreaker,
-			freeAttempt:    abandonFree,
+			abandoned:        true,
+			requestStarted:   true,
+			trail:            attemptTrail(p.Name, in.keyTicket, attemptStatus, reason),
+			breakerOutcome:   abandonBreaker,
+			freeAttempt:      abandonFree,
+			keySwitch:        abandonKeySwitch,
+			upstreamStatus:   abandonStatus,
+			retryAfter:       abandonRetryAfter,
+			upstreamDuration: upstreamDuration,
 		}
 	}
 
@@ -1601,10 +1847,57 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 		captureUpstreamBody(reqID, p.Name, targetModel, upstreamStatus, upstreamBody)
 	}
 	return forwardAttemptOutcome{
-		trail:          fmt.Sprintf("%s:%d", p.Name, status),
-		requestStarted: true,
-		breakerOutcome: breakerOutcome,
+		trail:            attemptTrail(p.Name, in.keyTicket, status, keyFailureReasonIfNeeded(in.keyTicket, status)),
+		requestStarted:   true,
+		breakerOutcome:   breakerOutcome,
+		upstreamStatus:   status,
+		retryAfter:       attemptRetryAfter,
+		upstreamDuration: upstreamDuration,
 	}
+}
+
+func keyFailureReasonIfNeeded(ticket *keypool.Ticket, status int) string {
+	if ticket != nil && isKeyRelatedFailure(status) {
+		return keyFailureReason(status)
+	}
+	return ""
+}
+
+func isKeyRelatedFailure(status int) bool {
+	return status == http.StatusUnauthorized || status == http.StatusPaymentRequired || status == http.StatusForbidden || status == http.StatusTooManyRequests
+}
+
+func keyFailureReason(status int) string {
+	switch status {
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return fmt.Sprintf("%d/key_auth", status)
+	case http.StatusPaymentRequired:
+		return "402/key_quota"
+	case http.StatusTooManyRequests:
+		return "429/key_rate_limit"
+	default:
+		return fmt.Sprintf("%d/key_error", status)
+	}
+}
+
+func isLongRetryAfter(f *config.Failover, retryAfter time.Duration) bool {
+	capMs := f.RetryAfterCapMs()
+	return capMs > 0 && retryAfter > time.Duration(capMs)*time.Millisecond
+}
+
+// isKeySwitchFreeAttempt 只有超过阈值的 429 才能免除候选尝试额度。
+func isKeySwitchFreeAttempt(status int, f *config.Failover, retryAfter time.Duration) bool {
+	return status == http.StatusTooManyRequests && isLongRetryAfter(f, retryAfter)
+}
+
+func attemptTrail(provider string, ticket *keypool.Ticket, status int, reason string) string {
+	if ticket != nil {
+		provider += "#" + ticket.Key.ID
+	}
+	if reason != "" {
+		return provider + ":" + reason
+	}
+	return fmt.Sprintf("%s:%d", provider, status)
 }
 
 func setAttemptBuildError(detail *metrics.AttemptDetail, err error) {
@@ -2008,6 +2301,7 @@ func (s *server) handleHealth(w http.ResponseWriter, head bool) {
 	}
 	cs, heapAllocMB, sysMB := s.healthStats(time.Now())
 	providerHealth := s.providerHealth.Snapshot(cfg)
+	providerKeys := s.keyPool.Snapshot(cfg)
 	for name, provider := range cfg.Providers {
 		if provider != nil && provider.AuthType == "chatgptOAuth" {
 			providerHealth[name] = s.chatGPTProviderStatus(name, provider)
@@ -2019,6 +2313,7 @@ func (s *server) handleHealth(w http.ResponseWriter, head bool) {
 		"listenAddress":  net.JoinHostPort(listenHost, strconv.Itoa(listenPort)),
 		"queues":         queues,
 		"providerHealth": providerHealth,
+		"providerKeys":   providerKeys,
 		"cache": map[string]any{
 			"total":       cs.Total,
 			"contentSize": cs.ContentSize,
@@ -2104,6 +2399,49 @@ func (s *server) handleBreakerReset(w http.ResponseWriter, r *http.Request) {
 		payload["reset"] = s.breaker.ResetAll()
 	}
 	payload["breakers"] = s.breaker.Snapshot()
+	out, _ := json.Marshal(payload)
+	w.Header().Set("content-type", "application/json")
+	w.Header().Set("content-length", fmt.Sprintf("%d", len(out)))
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(out)
+}
+
+func (s *server) handleKeyCooldownReset(w http.ResponseWriter, r *http.Request) {
+	providerName := r.URL.Query().Get("provider")
+	keyID := r.URL.Query().Get("key")
+	if strings.TrimSpace(providerName) == "" || strings.TrimSpace(keyID) == "" {
+		writeJSONError(w, http.StatusBadRequest, "gateway_error", "provider 与 key 参数均为必填")
+		return
+	}
+	if s.keyPool == nil {
+		writeJSONError(w, http.StatusServiceUnavailable, "gateway_error", "密钥状态池不可用")
+		return
+	}
+	s.cfgMu.RLock()
+	cfg := s.cfg
+	provider := cfg.Providers[providerName]
+	s.cfgMu.RUnlock()
+	if provider == nil || !provider.UsesKeyList() {
+		writeJSONError(w, http.StatusNotFound, "gateway_error", "未找到列表模式 Provider")
+		return
+	}
+	found := false
+	for _, key := range provider.APIKeys {
+		if key.ID == keyID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		writeJSONError(w, http.StatusNotFound, "gateway_error", "未找到 Provider 密钥身份")
+		return
+	}
+	payload := map[string]any{
+		"provider": providerName,
+		"key":      keyID,
+		"reset":    s.keyPool.Release(providerName, keyID),
+		"keys":     s.keyPool.Snapshot(cfg)[providerName],
+	}
 	out, _ := json.Marshal(payload)
 	w.Header().Set("content-type", "application/json")
 	w.Header().Set("content-length", fmt.Sprintf("%d", len(out)))
@@ -2210,14 +2548,28 @@ func (s *server) handleProviderModels(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(out)
 		return
 	}
+	providerCopy := *provider
+	if providerCopy.Name == "" {
+		providerCopy.Name = name
+	}
+	provider = &providerCopy
+	if provider.UsesKeyList() && (s.keyPool == nil || !s.keyPool.HasSelectable(name, provider, nil)) {
+		writeJSONError(w, http.StatusServiceUnavailable, "no_selectable_provider_key", fmt.Sprintf("provider %s 没有可选择的 Provider 密钥", name))
+		return
+	}
 
 	client, err := s.resolveClient(provider.Proxy)
 	if err != nil {
 		writeJSONError(w, http.StatusBadGateway, "upstream_error", "解析 provider 代理失败: "+err.Error())
 		return
 	}
-	models, err := fetchUpstreamModels(r.Context(), provider, client)
+	models, err := fetchUpstreamModels(r.Context(), provider, client, s.keyPool)
 	if err != nil {
+		var noSelectable *noSelectableProviderKeyError
+		if errors.As(err, &noSelectable) {
+			writeJSONError(w, http.StatusServiceUnavailable, "no_selectable_provider_key", err.Error())
+			return
+		}
 		writeJSONError(w, http.StatusBadGateway, "upstream_error", err.Error())
 		return
 	}
@@ -2739,12 +3091,20 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 }
 
 type providerProbeRequest struct {
-	Name      string `json:"name"`
-	BaseURL   string `json:"baseUrl"`
-	Format    string `json:"format"`
-	APIKey    string `json:"apiKey"`
-	UserAgent string `json:"userAgent"`
-	Proxy     string `json:"proxy"`
+	Name      string             `json:"name"`
+	BaseURL   string             `json:"baseUrl"`
+	Format    string             `json:"format"`
+	APIKey    string             `json:"apiKey"`
+	APIKeys   []providerProbeKey `json:"apiKeys"`
+	TestKeyID string             `json:"testKeyId"`
+	UserAgent string             `json:"userAgent"`
+	Proxy     string             `json:"proxy"`
+}
+
+type providerProbeKey struct {
+	ID      string `json:"id"`
+	Value   string `json:"value"`
+	Enabled *bool  `json:"enabled,omitempty"`
 }
 
 // handleProviderProbe 用临时 provider 配置探测 /v1/models。其结果仅属于当前弹窗，
@@ -2779,11 +3139,35 @@ func (s *server) handleProviderProbe(w http.ResponseWriter, r *http.Request) {
 		UserAgent: input.UserAgent,
 		Proxy:     input.Proxy,
 	}
+	for _, key := range input.APIKeys {
+		p.APIKeys = append(p.APIKeys, config.ProviderKey{ID: key.ID, Value: key.Value, Enabled: key.Enabled})
+	}
+	if input.TestKeyID != "" && len(p.APIKeys) == 0 {
+		writeJSONError(w, http.StatusBadRequest, "config_validation_error", "testKeyId 只能与 apiKeys 一起出现")
+		return
+	}
+	selectedKey := -1
+	if input.TestKeyID != "" {
+		for index, key := range p.APIKeys {
+			if key.ID == input.TestKeyID {
+				selectedKey = index
+				break
+			}
+		}
+		if selectedKey < 0 {
+			writeJSONError(w, http.StatusBadRequest, "config_validation_error", "testKeyId 未命中 apiKeys 中的密钥身份")
+			return
+		}
+	}
 
 	// sentinel 仅可引用同名已落盘 provider 的秘密；不要求 URL 或格式未改变，
 	// 这与 PUT /api/config 的宽松回填语义一致。
 	s.cfgMu.RLock()
-	stored, exists := s.cfg.Providers[p.Name]
+	var stored *config.Provider
+	exists := false
+	if s.cfg != nil {
+		stored, exists = s.cfg.Providers[p.Name]
+	}
 	s.cfgMu.RUnlock()
 	if p.APIKey == config.APIKeyKeepSentinel {
 		if !exists || stored == nil || stored.APIKey == "" {
@@ -2791,6 +3175,50 @@ func (s *server) handleProviderProbe(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		p.APIKey = stored.APIKey
+	}
+	if p.UsesKeyList() {
+		sentinelCount := 0
+		for _, key := range p.APIKeys {
+			if key.Value == config.APIKeyKeepSentinel {
+				sentinelCount++
+			}
+		}
+		if exists && stored != nil && stored.UsesKeyList() {
+			oldValues := make(map[string]string, len(stored.APIKeys))
+			for _, key := range stored.APIKeys {
+				oldValues[key.ID] = key.Value
+			}
+			for index := range p.APIKeys {
+				if p.APIKeys[index].Value != config.APIKeyKeepSentinel {
+					continue
+				}
+				value, ok := oldValues[p.APIKeys[index].ID]
+				if !ok || value == "" {
+					writeJSONError(w, http.StatusBadRequest, "config_validation_error", fmt.Sprintf("apiKeys[%s] 无法保留已有密钥：磁盘上没有该身份的已存密钥", p.APIKeys[index].ID))
+					return
+				}
+				p.APIKeys[index].Value = value
+			}
+		} else if sentinelCount > 0 {
+			if sentinelCount > 1 {
+				writeJSONError(w, http.StatusBadRequest, "config_validation_error", "apiKeys 不能从单值 apiKey 同时回填多个密钥")
+				return
+			}
+			if !exists || stored == nil || stored.APIKey == "" {
+				for _, key := range p.APIKeys {
+					if key.Value == config.APIKeyKeepSentinel {
+						writeJSONError(w, http.StatusBadRequest, "config_validation_error", fmt.Sprintf("apiKeys[%s] 无法保留已有密钥：磁盘上没有该身份的已存密钥", key.ID))
+						return
+					}
+				}
+			}
+			for index := range p.APIKeys {
+				if p.APIKeys[index].Value == config.APIKeyKeepSentinel {
+					p.APIKeys[index].Value = stored.APIKey
+					break
+				}
+			}
+		}
 	}
 	if proxyPasswordIsSentinel(p.Proxy) {
 		password, ok := proxyPassword(stored, exists)
@@ -2804,7 +3232,22 @@ func (s *server) handleProviderProbe(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "config_validation_error", err.Error())
 		return
 	}
-	status, ok := s.providerHealth.ProbeAdHoc(r.Context(), p, s.resolveClient)
+	if p.UsesKeyList() {
+		if err := config.ValidateProviderKeyValues(p.Name, p); err != nil {
+			writeJSONError(w, http.StatusBadRequest, "config_validation_error", err.Error())
+			return
+		}
+	}
+	probeProvider := p
+	if selectedKey >= 0 {
+		selected := p.APIKeys[selectedKey]
+		enabled := true
+		selected.Enabled = &enabled
+		probeCopy := *p
+		probeCopy.APIKeys = []config.ProviderKey{selected}
+		probeProvider = &probeCopy
+	}
+	status, ok := s.providerHealth.ProbeAdHoc(r.Context(), probeProvider, s.resolveClient)
 	if !ok {
 		writeJSONError(w, http.StatusServiceUnavailable, "gateway_error", "健康检测繁忙，请稍后重试")
 		return
@@ -2832,37 +3275,92 @@ func redactProbeMessage(message string, p *config.Provider) string {
 	if p.APIKey != "" {
 		message = strings.ReplaceAll(message, p.APIKey, config.APIKeyKeepSentinel)
 	}
+	keyValues := make([]string, 0, len(p.APIKeys))
+	for _, key := range p.APIKeys {
+		if key.Value != "" {
+			keyValues = append(keyValues, key.Value)
+		}
+	}
+	sort.Slice(keyValues, func(i, j int) bool { return len(keyValues[i]) > len(keyValues[j]) })
+	for _, value := range keyValues {
+		message = strings.ReplaceAll(message, value, config.APIKeyKeepSentinel)
+	}
 	return message
 }
 
-// fetchUpstreamModels 用 provider 配置的 apiKey 调上游 /v1/models，返回模型 id 列表。
-func fetchUpstreamModels(parent context.Context, p *config.Provider, client *http.Client) ([]string, error) {
-	endpoint := modelsEndpoint(p.BaseURL)
+type noSelectableProviderKeyError struct {
+	provider string
+}
+
+func (e *noSelectableProviderKeyError) Error() string {
+	return fmt.Sprintf("provider %s 没有可选择的 Provider 密钥", e.provider)
+}
+
+// fetchUpstreamModels 按配置顺序查询模型；列表模式共用一次 10 秒预算且不更新冷却。
+func fetchUpstreamModels(parent context.Context, p *config.Provider, client *http.Client, pools ...*keypool.Pool) ([]string, error) {
 	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
 	defer cancel()
 
+	if p.UsesKeyList() {
+		var pool *keypool.Pool
+		if len(pools) > 0 {
+			pool = pools[0]
+		}
+		providerName := p.Name
+		if providerName == "" {
+			providerName = "provider"
+		}
+		if pool == nil {
+			return nil, &noSelectableProviderKeyError{provider: providerName}
+		}
+		excluded := make(map[string]struct{}, len(p.APIKeys))
+		var lastErr error
+		for {
+			ticket, _ := pool.Select(providerName, p, excluded)
+			if ticket == nil {
+				if lastErr != nil {
+					return nil, lastErr
+				}
+				return nil, &noSelectableProviderKeyError{provider: providerName}
+			}
+			attemptProvider := *p
+			attemptProvider.APIKey = ticket.Key.Value
+			attemptProvider.APIKeys = nil
+			models, status, err := fetchUpstreamModelsOnce(ctx, &attemptProvider, client)
+			if err == nil {
+				return models, nil
+			}
+			if !isProviderKeySwitchStatus(status) {
+				return nil, err
+			}
+			excluded[ticket.Key.ID] = struct{}{}
+			lastErr = err
+		}
+	}
+
+	models, _, err := fetchUpstreamModelsOnce(ctx, p, client)
+	return models, err
+}
+
+func fetchUpstreamModelsOnce(ctx context.Context, p *config.Provider, client *http.Client) ([]string, int, error) {
+	endpoint := modelsEndpoint(p.BaseURL)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
-		return nil, fmt.Errorf("构建请求失败: %w", err)
+		return nil, 0, fmt.Errorf("构建请求失败: %w", err)
 	}
 	req.Header.Set("accept", "application/json")
-	// 与转发路径同源的需求：部分上游按 User-Agent 做准入（实测 agentrouter.org 在
-	// Go 默认 UA 下对 /v1/models 返回 401 unauthorized_client_error，换成配置的
-	// UA 即返回完整列表）。不带上这个头，UA 门禁型 provider 的模型列表永远查不了。
-	// 这里没有客户端请求可转发（网关自己发起），故只有「配了就用」一档。
+	// 与转发路径同源的需求：部分上游按 User-Agent 做准入，模型查询也须带上配置值。
 	if p.UserAgent != "" {
 		req.Header.Set("User-Agent", p.UserAgent)
 	}
 	if p.APIKey != "" {
 		proxy.SetUpstreamAuthHeaders(req.Header, p.Format, p.APIKey)
 	}
-	// 与 UA 同源的理由：上游对 /v1/models 的准入可能也看自定义头，
-	// 转发路径带了这里不带的话，配置能转发却查不到模型列表。
 	proxy.ApplyExtraHeaders(req.Header, p.ExtraHeaders)
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("上游不可达: %w", err)
+		return nil, 0, fmt.Errorf("上游不可达: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -2873,22 +3371,21 @@ func fetchUpstreamModels(parent context.Context, p *config.Provider, client *htt
 		} else if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed {
 			msg = "上游不支持 /v1/models 端点"
 		}
-		return nil, errors.New(msg)
+		return nil, resp.StatusCode, errors.New(msg)
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxConfigBodyBytes))
 	if err != nil {
-		return nil, fmt.Errorf("读取上游响应失败: %w", err)
+		return nil, resp.StatusCode, fmt.Errorf("读取上游响应失败: %w", err)
 	}
 
-	// OpenAI 与 Anthropic 的 /v1/models 都是 {data:[{id:"..."}, ...]}
 	var payload struct {
 		Data []struct {
 			ID string `json:"id"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil {
-		return nil, fmt.Errorf("解析上游模型列表失败: %w", err)
+		return nil, resp.StatusCode, fmt.Errorf("解析上游模型列表失败: %w", err)
 	}
 	models := make([]string, 0, len(payload.Data))
 	for _, m := range payload.Data {
@@ -2896,7 +3393,16 @@ func fetchUpstreamModels(parent context.Context, p *config.Provider, client *htt
 			models = append(models, m.ID)
 		}
 	}
-	return models, nil
+	return models, resp.StatusCode, nil
+}
+
+func isProviderKeySwitchStatus(status int) bool {
+	switch status {
+	case http.StatusUnauthorized, http.StatusPaymentRequired, http.StatusForbidden, http.StatusTooManyRequests:
+		return true
+	default:
+		return false
+	}
 }
 
 // modelsEndpoint 由 baseURL 拼出标准 /v1/models 路径。
@@ -3201,7 +3707,7 @@ func (s *server) handleConfigAPI(w http.ResponseWriter, r *http.Request) {
 
 // handleGetConfig 返回配置 JSON（apiKey 脱敏）
 func (s *server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
-	cfg, revision, restartRequired, err := s.configViewSnapshot()
+	cfg, revision, restartRequired, keyViews, err := s.configViewSnapshot()
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "gateway_error", "生成配置 revision 失败: "+err.Error())
 		return
@@ -3220,6 +3726,15 @@ func (s *server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 	for name, provider := range cfg.Providers {
 		view, _ := providers[name].(map[string]any)
 		view["apiKeyConfigured"] = provider.APIKey == config.APIKeyKeepSentinel
+		encodedKeys, _ := view["apiKeys"].([]any)
+		for index, encodedKey := range encodedKeys {
+			keyView, _ := encodedKey.(map[string]any)
+			if index >= len(keyViews[name]) || keyView == nil {
+				continue
+			}
+			keyView["valueConfigured"] = keyViews[name][index].valueConfigured
+			keyView["fingerprint"] = keyViews[name][index].fingerprint
+		}
 	}
 	response["revision"] = revision
 	response["restartRequired"] = restartRequired
@@ -3229,13 +3744,18 @@ func (s *server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(response)
 }
 
-func (s *server) configViewSnapshot() (*config.Config, string, []string, error) {
+type providerKeyViewMetadata struct {
+	valueConfigured bool
+	fingerprint     string
+}
+
+func (s *server) configViewSnapshot() (*config.Config, string, []string, map[string][]providerKeyViewMetadata, error) {
 	s.cfgMu.Lock()
 	defer s.cfgMu.Unlock()
 	if s.revision == "" {
 		revision, err := s.issueConfigRevision()
 		if err != nil {
-			return nil, "", nil, err
+			return nil, "", nil, nil, err
 		}
 		s.revision = revision
 	}
@@ -3247,16 +3767,30 @@ func (s *server) configViewSnapshot() (*config.Config, string, []string, error) 
 	}
 	cfgCopy := *s.cfg
 	cfgCopy.Providers = make(map[string]*config.Provider, len(s.cfg.Providers))
+	keyViews := make(map[string][]providerKeyViewMetadata)
 	for name, provider := range s.cfg.Providers {
 		providerCopy := *provider
 		providerCopy.Name = ""
 		if provider.APIKey != "" {
 			providerCopy.APIKey = config.APIKeyKeepSentinel
 		}
+		providerCopy.APIKeys = append([]config.ProviderKey(nil), provider.APIKeys...)
+		if provider.UsesKeyList() {
+			keyViews[name] = make([]providerKeyViewMetadata, len(provider.APIKeys))
+			for index, key := range provider.APIKeys {
+				keyViews[name][index] = providerKeyViewMetadata{
+					valueConfigured: key.Value != "",
+					fingerprint:     keypool.Fingerprint(key.Value),
+				}
+				if key.Value != "" {
+					providerCopy.APIKeys[index].Value = config.APIKeyKeepSentinel
+				}
+			}
+		}
 		providerCopy.Proxy = config.RedactProxyPassword(provider.Proxy)
 		cfgCopy.Providers[name] = &providerCopy
 	}
-	return &cfgCopy, s.revision, restartRequiredFields(s.cfg, s.listenHost, s.listenPort), nil
+	return &cfgCopy, s.revision, restartRequiredFields(s.cfg, s.listenHost, s.listenPort), keyViews, nil
 }
 
 func proxyPasswordIsSentinel(proxyURL string) bool {
@@ -3365,6 +3899,54 @@ func (s *server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			p.APIKey = oldProvider.APIKey
+		}
+		if p.UsesKeyList() {
+			sentinelCount := 0
+			for _, key := range p.APIKeys {
+				if key.Value == config.APIKeyKeepSentinel {
+					sentinelCount++
+				}
+			}
+			if exists && oldProvider.UsesKeyList() {
+				oldValues := make(map[string]string, len(oldProvider.APIKeys))
+				for _, oldKey := range oldProvider.APIKeys {
+					oldValues[oldKey.ID] = oldKey.Value
+				}
+				for index := range p.APIKeys {
+					if p.APIKeys[index].Value != config.APIKeyKeepSentinel {
+						continue
+					}
+					value, ok := oldValues[p.APIKeys[index].ID]
+					if !ok || value == "" {
+						writeJSONError(w, http.StatusBadRequest, "config_validation_error", fmt.Sprintf("providers.%s.apiKeys[%s] 无法保留已有密钥：磁盘上没有该身份的已存密钥", name, p.APIKeys[index].ID))
+						return
+					}
+					p.APIKeys[index].Value = value
+				}
+			} else if sentinelCount > 0 {
+				if sentinelCount > 1 {
+					writeJSONError(w, http.StatusBadRequest, "config_validation_error", fmt.Sprintf("providers.%s.apiKeys 不能从单值 apiKey 同时回填多个密钥", name))
+					return
+				}
+				if !exists || oldProvider.APIKey == "" {
+					for _, key := range p.APIKeys {
+						if key.Value == config.APIKeyKeepSentinel {
+							writeJSONError(w, http.StatusBadRequest, "config_validation_error", fmt.Sprintf("providers.%s.apiKeys[%s] 无法保留已有密钥：磁盘上没有该身份的已存密钥", name, key.ID))
+							return
+						}
+					}
+				}
+				for index := range p.APIKeys {
+					if p.APIKeys[index].Value == config.APIKeyKeepSentinel {
+						p.APIKeys[index].Value = oldProvider.APIKey
+						break
+					}
+				}
+			}
+			if err := config.ValidateProviderKeyValues(name, p); err != nil {
+				writeJSONError(w, http.StatusBadRequest, "config_validation_error", err.Error())
+				return
+			}
 		}
 		if proxyPasswordIsSentinel(p.Proxy) {
 			password, ok := proxyPassword(oldProvider, exists)
@@ -3509,6 +4091,9 @@ func (s *server) applyRuntimeConfig(newCfg *config.Config, revision string) []st
 			activeRoutes[route.Match] = struct{}{}
 		}
 		s.selector.Reconcile(activeRoutes)
+	}
+	if s.keyPool != nil {
+		s.keyPool.Reconcile(newCfg)
 	}
 	if s.metrics != nil {
 		// 窗口变了才重建桶；SetWindow 内部会保留仍落在新窗口内的历史桶

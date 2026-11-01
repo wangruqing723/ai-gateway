@@ -8,9 +8,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -18,6 +20,7 @@ import (
 
 	"ai-gateway/internal/cache"
 	"ai-gateway/internal/config"
+	"ai-gateway/internal/keypool"
 	"ai-gateway/internal/queue"
 )
 
@@ -39,6 +42,7 @@ type Translator struct {
 	cache      recognitionCache
 	qm         *queue.Manager
 	resolve    ClientResolver
+	keyPool    *keypool.Pool
 	directMode atomic.Bool // 直通模式：跳过视觉队列的并发/限速控制
 
 	mu      sync.Mutex
@@ -73,6 +77,11 @@ func New(c *cache.Cache, qm *queue.Manager, resolve ClientResolver, directMode b
 // SetDirectMode 动态更新后续视觉识别是否跳过队列。
 func (t *Translator) SetDirectMode(enabled bool) {
 	t.directMode.Store(enabled)
+}
+
+// SetKeyPool 注入 Provider 密钥冷却池。
+func (t *Translator) SetKeyPool(pool *keypool.Pool) {
+	t.keyPool = pool
 }
 
 // HasImages 检测消息数组是否包含图片块（对齐 Node hasImages：最多检查一层 tool_result）。
@@ -350,6 +359,9 @@ func (t *Translator) runRecognition(ctx context.Context, hash string, r *recogni
 }
 
 func (t *Translator) recognize(ctx context.Context, imageBlock map[string]any, vision *config.Provider, visionModel string) (string, error) {
+	if vision.UsesKeyList() {
+		return t.doRecognize(ctx, imageBlock, vision, visionModel)
+	}
 	if t.directMode.Load() {
 		// 直通模式：跳过队列，直接识别
 		return t.doRecognize(ctx, imageBlock, vision, visionModel)
@@ -383,6 +395,52 @@ func (t *Translator) leaveRecognition(hash string, r *recognition) {
 
 // doRecognize 实际调用视觉模型（OpenAI /chat/completions 格式）。
 func (t *Translator) doRecognize(ctx context.Context, imageBlock map[string]any, vision *config.Provider, visionModel string) (string, error) {
+	if vision.UsesKeyList() {
+		if t.keyPool == nil {
+			return "", fmt.Errorf("没有可选择的 Provider 密钥")
+		}
+		excluded := make(map[string]struct{}, len(vision.APIKeys))
+		var lastErr error
+		for {
+			ticket, _ := t.keyPool.Select(vision.Name, vision, excluded)
+			if ticket == nil {
+				if lastErr != nil {
+					return "", lastErr
+				}
+				return "", fmt.Errorf("没有可选择的 Provider 密钥")
+			}
+
+			text, err := t.recognizeWithKey(ctx, imageBlock, vision, visionModel, ticket.Key.Value)
+			if err == nil {
+				t.keyPool.Report(ticket, http.StatusOK, 0)
+				return text, nil
+			}
+
+			var upstreamErr *visionHTTPError
+			if !errors.As(err, &upstreamErr) || !isKeyRelatedStatus(upstreamErr.status) {
+				return "", err
+			}
+			t.keyPool.Report(ticket, upstreamErr.status, upstreamErr.retryAfter)
+			excluded[ticket.Key.ID] = struct{}{}
+			lastErr = err
+		}
+	}
+	return t.doRecognizeRequest(ctx, imageBlock, vision, visionModel, vision.APIKey, false)
+}
+
+func (t *Translator) recognizeWithKey(ctx context.Context, imageBlock map[string]any, vision *config.Provider, visionModel, apiKey string) (string, error) {
+	if t.directMode.Load() {
+		return t.doRecognizeRequest(ctx, imageBlock, vision, visionModel, apiKey, true)
+	}
+	release, _, err := t.qm.Acquire(ctx, vision.Name, vision.MaxConcurrent, vision.MaxPerSecond, vision.MaxQueueWait)
+	if err != nil {
+		return "", err
+	}
+	defer release()
+	return t.doRecognizeRequest(ctx, imageBlock, vision, visionModel, apiKey, true)
+}
+
+func (t *Translator) doRecognizeRequest(ctx context.Context, imageBlock map[string]any, vision *config.Provider, visionModel, apiKey string, keyListMode bool) (string, error) {
 	openAIBlock, err := toOpenAIImageBlock(imageBlock)
 	if err != nil {
 		return "", err
@@ -404,7 +462,7 @@ func (t *Translator) doRecognize(ctx context.Context, imageBlock map[string]any,
 		return "", fmt.Errorf("视觉 API 网络请求失败: %w", err)
 	}
 	req.Header.Set("content-type", "application/json")
-	req.Header.Set("authorization", "Bearer "+vision.APIKey)
+	req.Header.Set("authorization", "Bearer "+apiKey)
 	// 视觉识别也是网关自己发起的上游请求，同样受 UA 门禁型 provider 影响
 	// （实测 agentrouter.org 系上游对 Go 默认 UA 返回 401 unauthorized client）。
 	// 与 providerhealth / fetchUpstreamModels 同语义：配了就用，没配不设头。
@@ -426,19 +484,31 @@ func (t *Translator) doRecognize(ctx context.Context, imageBlock map[string]any,
 	defer resp.Body.Close()
 
 	if resp.ContentLength > maxVisionResponseBodyBytes {
+		if keyListMode && isKeyRelatedStatus(resp.StatusCode) {
+			return "", newVisionHTTPError(resp, "")
+		}
 		return "", fmt.Errorf("视觉 API 响应超过大小限制 (%d bytes)", maxVisionResponseBodyBytes)
 	}
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxVisionResponseBodyBytes+1))
 	if err != nil {
+		if keyListMode && isKeyRelatedStatus(resp.StatusCode) {
+			return "", newVisionHTTPError(resp, "")
+		}
 		return "", fmt.Errorf("读取视觉响应失败: %w", err)
 	}
 	if len(raw) > maxVisionResponseBodyBytes {
+		if keyListMode && isKeyRelatedStatus(resp.StatusCode) {
+			return "", newVisionHTTPError(resp, string(raw))
+		}
 		return "", fmt.Errorf("视觉 API 响应超过大小限制 (%d bytes)", maxVisionResponseBodyBytes)
 	}
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		snippet := string(raw)
 		if len(snippet) > 200 {
 			snippet = snippet[:200]
+		}
+		if keyListMode && isKeyRelatedStatus(resp.StatusCode) {
+			return "", newVisionHTTPError(resp, snippet)
 		}
 		return "", fmt.Errorf("视觉 API 响应异常 (HTTP %d): %s", resp.StatusCode, snippet)
 	}
@@ -456,6 +526,54 @@ func (t *Translator) doRecognize(ctx context.Context, imageBlock map[string]any,
 		return "", fmt.Errorf("视觉 API 响应异常 (HTTP %d): %s", resp.StatusCode, snippet)
 	}
 	return text, nil
+}
+
+func newVisionHTTPError(resp *http.Response, snippet string) *visionHTTPError {
+	if len(snippet) > 200 {
+		snippet = snippet[:200]
+	}
+	return &visionHTTPError{
+		status:     resp.StatusCode,
+		retryAfter: parseRetryAfter(resp.Header.Get("Retry-After"), time.Now()),
+		message:    fmt.Sprintf("视觉 API 响应异常 (HTTP %d): %s", resp.StatusCode, snippet),
+	}
+}
+
+type visionHTTPError struct {
+	status     int
+	retryAfter time.Duration
+	message    string
+}
+
+func (e *visionHTTPError) Error() string { return e.message }
+
+func isKeyRelatedStatus(status int) bool {
+	switch status {
+	case http.StatusUnauthorized, http.StatusPaymentRequired, http.StatusForbidden, http.StatusTooManyRequests:
+		return true
+	default:
+		return false
+	}
+}
+
+func parseRetryAfter(value string, now time.Time) time.Duration {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0
+	}
+	if seconds, err := strconv.ParseInt(value, 10, 64); err == nil && seconds > 0 {
+		duration, err := time.ParseDuration(value + "s")
+		if err == nil {
+			return duration
+		}
+		return time.Duration(1<<63 - 1)
+	}
+	if at, err := http.ParseTime(value); err == nil {
+		if duration := at.Sub(now); duration > 0 {
+			return duration
+		}
+	}
+	return 0
 }
 
 // extractVisionText 优先 content，其次 reasoning_content（对齐 Node 版兼容逻辑）。

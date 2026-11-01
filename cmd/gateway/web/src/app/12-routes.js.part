@@ -1168,6 +1168,7 @@
                 dragList(kind) {
                     if (kind === 'route') return this.config.routes;
                     if (kind === 'target') return this.routeForm.targets;
+                    if (kind === 'provider-key') return this.providerForm.apiKeys;
                     return null;
                 },
 
@@ -1203,7 +1204,9 @@
                 // 候选列表是 div、路由列表是 tr，而且两者外层容器都还有别的兄弟节点
                 // （表头行、空状态行）。属性选择器让模板结构以后怎么调都不影响这里。
                 dragRowElements(kind) {
-                    const root = kind === 'route' ? this.$refs.routeRows : this.$refs.targetRows;
+                    const root = kind === 'route'
+                        ? this.$refs.routeRows
+                        : kind === 'provider-key' ? this.$refs.providerKeyRows : this.$refs.targetRows;
                     if (!root) return [];
                     return Array.from(root.querySelectorAll('[data-drag-row]'));
                 },
@@ -1225,6 +1228,7 @@
                     // 取出后数组左移了一格：落点在 from 之后时下标要减 1。
                     const target = to > from ? to - 1 : to;
                     list.splice(target, 0, moved);
+                    if (kind === 'provider-key') this.providerKeyListChanged();
                 },
 
                 // ── 模板绑定用的小查询 ──────────────────────────────

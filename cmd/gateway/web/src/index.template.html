@@ -987,14 +987,18 @@
                                                       @focus="showTip('ChatGPT OAuth 账户', $event)"
                                                       @blur="hideTip()"
                                                       tabindex="0">OAuth</span>
-                                                <span x-show="provider.authType !== 'chatgptOAuth' && provider.apiKeyConfigured"
+                                                <span x-show="provider.authType !== 'chatgptOAuth' && hasProviderKeyList(provider)"
+                                                      class="tag bg-cyan2/10 text-cyan"
+                                                      :title="providerKeyListBadge(name, provider)"
+                                                      x-text="providerKeyListBadge(name, provider)"></span>
+                                                <span x-show="provider.authType !== 'chatgptOAuth' && !hasProviderKeyList(provider) && provider.apiKeyConfigured"
                                                               class="material-symbols-outlined text-[18px] text-good"
                                                               @mouseenter="showTip('已配置密钥', $event)"
                                                               @mouseleave="hideTip()"
                                                               @focus="showTip('已配置密钥', $event)"
                                                               @blur="hideTip()"
                                                               tabindex="0">key</span>
-                                                <span x-show="provider.authType !== 'chatgptOAuth' && !provider.apiKeyConfigured"
+                                                <span x-show="provider.authType !== 'chatgptOAuth' && !hasProviderKeyList(provider) && !provider.apiKeyConfigured"
                                                               class="material-symbols-outlined text-[18px] text-muted"
                                                               @mouseenter="showTip('未配置，从客户端请求头读取', $event)"
                                                               @mouseleave="hideTip()"
@@ -2241,12 +2245,15 @@
                                                                 <td class="whitespace-nowrap px-3 py-2">
                                                                     <div class="font-mono text-text" x-text="detail.provider"></div>
                                                                     <div class="font-mono text-[11px] text-cyan" x-text="detail.targetModel || '--'"></div>
+                                                                    <div x-show="detail.keyName" class="mt-0.5 text-[11px] text-muted" x-text="'密钥名称：' + detail.keyName"></div>
+                                                                    <div x-show="detail.keyId" class="font-mono text-[11px] text-muted" x-text="'密钥身份：' + detail.keyId"></div>
+                                                                    <div x-show="detail.keyFingerprint" class="font-mono text-[11px] text-muted" x-text="'密钥指纹：' + detail.keyFingerprint"></div>
                                                                 </td>
                                                                 <td class="whitespace-nowrap px-3 py-2 font-mono text-muted" x-text="detail.providerFormat"></td>
                                                                 <td class="whitespace-nowrap px-3 py-2 font-mono" :class="Number(detail.upstreamStatus) >= 500 ? 'text-danger' : Number(detail.upstreamStatus) >= 400 ? 'text-warn' : 'text-text'" x-text="detail.upstreamStatus || '--'"></td>
                                                                 <td class="px-3 py-2">
-                                                                    <div class="font-mono text-text" x-text="detail.outcome"></div>
-                                                                    <div class="mt-0.5 font-mono text-[11px] text-muted" x-text="detail.reason || detail.kind"></div>
+                                                                    <div class="font-mono text-text" x-text="attemptOutcomeLabel(detail.outcome)"></div>
+                                                                    <div class="mt-0.5 text-[11px] text-muted" x-text="attemptDetailExplanation(detail)"></div>
                                                                     <div x-show="detail.responseStarted && detail.outcome !== 'success'" class="mt-0.5 text-xs text-warn">已开始响应，未转移</div>
                                                                     <div x-show="detail.upstreamRequestId" class="mt-0.5 break-all font-mono text-[11px] text-muted">
                                                                         request-id:
@@ -2372,15 +2379,92 @@
                             </select>
                             <span class="mt-1 block text-xs text-muted">ChatGPT OAuth 令牌由网关安全保存，Provider 只关联账户 ID。</span>
                         </label>
-                        <div x-show="providerForm.authType !== 'chatgptOAuth'" class="block">
-                            <label for="provider-api-key" class="mb-1.5 block text-xs font-bold text-muted">API Key</label>
-                            <input autocomplete="off" id="provider-api-key" type="password" x-model="providerForm.apiKey"
-                                   :placeholder="providerForm.apiKeyConfigured ? '已配置，留空保持不变' : '留空则从客户端请求头提取'"
-                                   class="field">
-                            <label for="provider-clear-api-key" x-show="providerForm.apiKeyConfigured" x-cloak class="mt-2 flex items-center gap-2 text-xs text-muted">
-                                <input autocomplete="off" id="provider-clear-api-key" type="checkbox" x-model="providerForm.clearApiKey" class="h-4 w-4 rounded border-line bg-panel text-cyan2 focus:ring-cyan2">
-                                清除已有密钥，改用客户端请求头
-                            </label>
+                        <div x-show="providerForm.authType !== 'chatgptOAuth'" class="block sm:col-span-2">
+                            <div class="mb-2 flex items-center justify-between gap-3">
+                                <div>
+                                    <div class="text-xs font-bold text-muted">API 密钥</div>
+                                    <div class="mt-1 text-xs text-muted">已保存的值留空表示保留；只显示服务端返回的指纹。</div>
+                                </div>
+                                <button type="button" @click="addProviderKey()" class="btn btn-secondary">
+                                    <span class="material-symbols-outlined text-[18px]">add</span>添加密钥
+                                </button>
+                            </div>
+                            <div x-show="providerForm.keyListMode && !providerForm.keyListOriginallyConfigured && providerForm.apiKeys.length" x-cloak class="mb-2 rounded-lg border border-warn/25 bg-warn/5 px-3 py-2 text-xs text-warn">
+                                保存后将使用 apiKeys 列表，并启用密钥冷却。
+                            </div>
+                            <div x-show="providerForm.keyListMode && providerHasConfiguredKeyRows() && providerEnabledKeyCount() === 0" x-cloak class="mb-2 rounded-lg border border-danger/35 bg-danger/10 px-3 py-2 text-xs text-rose-100">
+                                所有密钥都已停用；保存仍然允许，但该 Provider 暂时没有可选择的密钥。
+                            </div>
+                            <div x-ref="providerKeyRows" class="space-y-2">
+                                <template x-for="(key, index) in providerForm.apiKeys" :key="key.id">
+                                    <div data-drag-row class="rounded-lg border border-line bg-panel2/40 p-3"
+                                         :class="[rowDropClass('provider-key', index, providerForm.apiKeys.length), isRowDragSource('provider-key', index) ? 'opacity-50' : '']">
+                                        <div class="flex flex-wrap items-center gap-2">
+                                            <button type="button" @pointerdown="startRowDrag('provider-key', index, $event)"
+                                                    class="cursor-grab rounded p-1 text-muted hover:text-cyan" style="touch-action: none"
+                                                    title="拖动排序" aria-label="拖动密钥排序">
+                                                <span class="material-symbols-outlined text-[18px]">drag_indicator</span>
+                                            </button>
+                                            <span class="font-mono text-xs text-muted" x-text="key.id"></span>
+                                            <span x-show="providerForm.keyListMode" x-cloak class="text-xs"
+                                                  :class="providerKeyStateClass(key)" x-text="providerKeyStateLabel(key)"></span>
+                                            <span x-show="!providerForm.keyListMode" x-cloak class="text-xs text-muted">旧单值写法</span>
+                                            <button type="button" x-show="providerForm.keyListMode && providerKeyCooling(key)" x-cloak
+                                                    @click="resetProviderKeyCooldown(key)" :disabled="resettingProviderKey === key.id"
+                                                    class="btn btn-ghost text-xs disabled:opacity-60">
+                                                <span x-text="resettingProviderKey === key.id ? '解除中…' : '解除冷却'"></span>
+                                            </button>
+                                            <span x-show="key.fingerprint" class="ml-auto font-mono text-xs text-muted"
+                                                  x-text="'指纹 ' + key.fingerprint"></span>
+                                            <button type="button" @click="removeProviderKey(index)" class="btn btn-ghost ml-auto" title="删除密钥" aria-label="删除密钥">
+                                                <span class="material-symbols-outlined text-[18px]">delete</span>
+                                            </button>
+                                        </div>
+                                        <div class="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
+                                            <label class="block">
+                                                <span class="mb-1 block text-xs text-muted">名称</span>
+                                                <input autocomplete="off" type="text" x-model="key.name" @input="providerKeyListChanged()"
+                                                       placeholder="可选，例如主账号" class="field">
+                                            </label>
+                                            <label class="block">
+                                                <span class="mb-1 block text-xs text-muted">密钥值</span>
+                                                <input autocomplete="off" type="password" x-model="key.value" @input="providerKeyListChanged()"
+                                                       :placeholder="key.valueConfigured ? '已配置，留空保持不变' : '输入密钥值'" class="field">
+                                            </label>
+                                        </div>
+                                        <div class="mt-3 flex flex-wrap items-center gap-3">
+                                            <label class="flex items-center gap-2 text-xs text-muted">
+                                                <input autocomplete="off" type="checkbox" x-model="key.enabled" @change="providerKeyListChanged()"
+                                                       class="h-4 w-4 rounded border-line bg-panel text-cyan2 focus:ring-cyan2">
+                                                启用
+                                            </label>
+                                            <button type="button" @click="probeProviderKey(key)"
+                                                    :disabled="probingProvider" class="btn btn-secondary disabled:opacity-60">
+                                                <span class="material-symbols-outlined text-[18px]" :class="probingProvider && providerProbeKeyId === key.id && 'gw-spin'"
+                                                      x-text="probingProvider && providerProbeKeyId === key.id ? 'progress_activity' : 'health_and_safety'"></span>
+                                                测试此密钥
+                                            </button>
+                                        </div>
+                                    </div>
+                                </template>
+                                <div x-show="!providerForm.apiKeys.length" x-cloak class="rounded-lg border border-line px-3 py-3 text-xs text-muted">
+                                    当前没有密钥；请求将从客户端请求头提取。
+                                </div>
+                            </div>
+                            <div x-show="providerForm.keyListMode" x-cloak class="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-3">
+                                <label class="block">
+                                    <span class="mb-1 block text-xs text-muted">鉴权失败冷却（毫秒）</span>
+                                    <input autocomplete="off" type="number" min="0" max="86400000" step="1" x-model.number="providerForm.keyCooldown.authMs" placeholder="留空 = 未配置" class="field">
+                                </label>
+                                <label class="block">
+                                    <span class="mb-1 block text-xs text-muted">配额失败冷却（毫秒）</span>
+                                    <input autocomplete="off" type="number" min="0" max="86400000" step="1" x-model.number="providerForm.keyCooldown.quotaMs" placeholder="留空 = 未配置" class="field">
+                                </label>
+                                <label class="block">
+                                    <span class="mb-1 block text-xs text-muted">限流冷却（毫秒）</span>
+                                    <input autocomplete="off" type="number" min="0" max="86400000" step="1" x-model.number="providerForm.keyCooldown.rateLimitMs" placeholder="留空 = 未配置" class="field">
+                                </label>
+                            </div>
                         </div>
                         <div x-show="providerForm.authType === 'chatgptOAuth'" x-cloak class="block">
                             <label for="provider-chatgpt-account-trigger" class="mb-1.5 block text-xs font-bold text-muted">ChatGPT 账户</label>

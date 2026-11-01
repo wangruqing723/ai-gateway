@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"ai-gateway/internal/config"
+	"ai-gateway/internal/keypool"
 	"ai-gateway/internal/proxy"
 )
 
@@ -42,6 +43,7 @@ type Checker struct {
 	mu       sync.RWMutex
 	statuses map[string]cachedStatus
 	sem      chan struct{}
+	keyPool  *keypool.Pool
 	// OnStateChange 在正常与异常边界变化后调用，回调发生在状态锁释放之后。
 	OnStateChange func(provider, fromStatus, toStatus string, status Status)
 
@@ -71,6 +73,11 @@ func NewChecker() *Checker {
 		statuses: make(map[string]cachedStatus),
 		sem:      make(chan struct{}, checkConcurrency),
 	}
+}
+
+// SetKeyPool 注入 Provider 密钥冷却池。
+func (c *Checker) SetKeyPool(pool *keypool.Pool) {
+	c.keyPool = pool
 }
 
 // Snapshot 返回所有配置 provider 的最近检测状态。
@@ -219,7 +226,7 @@ func (c *Checker) checkAll(ctx context.Context, cfg *config.Config, resolve Clie
 				results <- result{name: provider.Name, status: errorStatus(provider.Name, modelsEndpoint(provider.BaseURL), err.Error(), 0), fingerprint: fingerprint}
 				return
 			}
-			results <- result{name: provider.Name, status: checkOne(ctx, &provider, client), fingerprint: fingerprint}
+			results <- result{name: provider.Name, status: c.checkOne(ctx, &provider, client), fingerprint: fingerprint}
 		}(pCopy, fingerprint)
 	}
 
@@ -304,7 +311,7 @@ func (c *Checker) CheckProvider(ctx context.Context, cfg *config.Config, resolve
 		c.storeStatus(name, status, fingerprint, generation)
 		return status, true
 	}
-	status := checkOne(ctx, &pCopy, client)
+	status := c.checkOne(ctx, &pCopy, client)
 	c.storeStatus(name, status, fingerprint, generation)
 	return status, true
 }
@@ -440,6 +447,10 @@ func providerFingerprint(name string, provider *config.Provider) string {
 	} else {
 		// 认证类型、User-Agent 与代理会改变探测语义或实际出网请求，变更后旧缓存不能继续表示新配置。
 		fmt.Fprintf(h, "%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s", name, provider.AuthType, provider.BaseURL, provider.Format, provider.APIKey, provider.UserAgent, provider.Proxy)
+		for _, key := range provider.APIKeys {
+			valueHash := sha256.Sum256([]byte(key.Value))
+			fmt.Fprintf(h, "\x00key:%s:%x:enabled=%t", key.ID, valueHash, key.IsEnabled())
+		}
 	}
 	return fmt.Sprintf("%x", h.Sum(nil))
 }
@@ -452,13 +463,99 @@ func uncheckedOAuthStatus(name string) Status {
 	return Status{Name: name, Status: "unchecked", Message: "ChatGPT OAuth 账户状态由网关单独检查"}
 }
 
+func (c *Checker) checkOne(parent context.Context, p *config.Provider, client *http.Client) Status {
+	return checkOneWithPool(parent, p, client, c.keyPool)
+}
+
 func checkOne(parent context.Context, p *config.Provider, client *http.Client) Status {
+	return checkOneWithPool(parent, p, client, nil)
+}
+
+func checkOneWithPool(parent context.Context, p *config.Provider, client *http.Client, pool *keypool.Pool) Status {
 	if isChatGPTOAuth(p) {
 		return uncheckedOAuthStatus(p.Name)
 	}
-	endpoint := modelsEndpoint(p.BaseURL)
 	ctx, cancel := context.WithTimeout(parent, checkTimeout)
 	defer cancel()
+	if !p.UsesKeyList() {
+		return checkOneRequest(ctx, p, client)
+	}
+
+	excluded := make(map[string]struct{}, len(p.APIKeys))
+	var lastStatus *Status
+	var failedIDs []string
+	for {
+		var key config.ProviderKey
+		if pool != nil {
+			ticket, _ := pool.Select(p.Name, p, excluded)
+			if ticket == nil {
+				if lastStatus != nil {
+					return *lastStatus
+				}
+				return noSelectableKeyStatus(p.Name, modelsEndpoint(p.BaseURL))
+			}
+			key = ticket.Key
+		} else {
+			found := false
+			for _, candidate := range p.APIKeys {
+				if !candidate.IsEnabled() {
+					continue
+				}
+				if _, skip := excluded[candidate.ID]; skip {
+					continue
+				}
+				key = candidate
+				found = true
+				break
+			}
+			if !found {
+				if lastStatus != nil {
+					return *lastStatus
+				}
+				return noSelectableKeyStatus(p.Name, modelsEndpoint(p.BaseURL))
+			}
+		}
+
+		attemptProvider := *p
+		attemptProvider.APIKey = key.Value
+		attemptProvider.APIKeys = nil
+		status := checkOneRequest(ctx, &attemptProvider, client)
+		if status.Status == "ok" {
+			if len(failedIDs) > 0 {
+				status.Message = "可用；此前密钥身份失败：" + strings.Join(failedIDs, "、")
+			}
+			return status
+		}
+		if !isKeyRelatedStatus(status.HTTPCode) {
+			return status
+		}
+		excluded[key.ID] = struct{}{}
+		failedIDs = append(failedIDs, key.ID)
+		lastStatus = &status
+	}
+}
+
+func noSelectableKeyStatus(name, endpoint string) Status {
+	return Status{
+		Name:      name,
+		Status:    "warn",
+		Endpoint:  endpoint,
+		Message:   "没有可选择的 Provider 密钥",
+		CheckedAt: time.Now().Format(time.RFC3339),
+	}
+}
+
+func isKeyRelatedStatus(status int) bool {
+	switch status {
+	case http.StatusUnauthorized, http.StatusPaymentRequired, http.StatusForbidden, http.StatusTooManyRequests:
+		return true
+	default:
+		return false
+	}
+}
+
+func checkOneRequest(ctx context.Context, p *config.Provider, client *http.Client) Status {
+	endpoint := modelsEndpoint(p.BaseURL)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {

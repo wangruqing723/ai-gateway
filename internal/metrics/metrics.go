@@ -193,6 +193,9 @@ type RequestLog struct {
 type AttemptDetail struct {
 	Sequence           int    `json:"sequence"`
 	AttemptNumber      int    `json:"attemptNumber,omitempty"`
+	KeyID              string `json:"keyId,omitempty"`
+	KeyName            string `json:"keyName,omitempty"`
+	KeyFingerprint     string `json:"keyFingerprint,omitempty"`
 	Kind               string `json:"kind"`
 	Provider           string `json:"provider"`
 	TargetModel        string `json:"targetModel,omitempty"`

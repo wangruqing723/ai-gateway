@@ -104,6 +104,11 @@ metrics:
 # ChatGPT OAuth Provider 使用 authType: chatgptOAuth 与 accountId，并固定 Responses 格式。
 # 账户需先在 Web 管理页「提供商」中连接；保存 Provider 时选择该账户。
 # apiKey 可选：留空则从客户端请求头中自动提取
+# apiKeys 与 apiKey 互斥，最多 10 个。列表模式按配置顺序选择密钥：id 是 Provider 内唯一身份，
+# name 仅用于展示，value 是密钥值，enabled: false 表示停用（省略时默认启用）。
+# 401/402/403/429 会触发密钥切换与冷却处理；若只剩一把可选密钥，短暂 429 可能先走本地重试。
+# keyCooldown 可覆盖默认冷却：authMs 300000（401/403）、quotaMs 60000（402）、
+# rateLimitMs 30000（429）；各项范围 0-86400000 毫秒，仅列表模式可配置。
 providers:
   mimo:
     baseUrl: "https://token-plan-cn.xiaomimimo.com"
@@ -152,6 +157,23 @@ providers:
     #                         # 启动不报错（禁用不该挡住网关起来）。
     #                         # 周期健康探测与整表快照跳过已禁用 provider；单行的手动
     #                         # 检测仍可单独探测，便于禁用期间盯着它恢复。模型列表查询不受影响。
+
+  multi_key_example:
+    baseUrl: "https://api.example.com"
+    format: openai
+    maxConcurrent: 5
+    maxQueueWait: 30000
+    apiKeys:
+      - id: primary
+        name: 主密钥
+        value: "sk-xxx"
+      - id: backup
+        name: 备用密钥
+        value: "sk-yyy"
+    # keyCooldown:       # 可选覆盖默认冷却，范围 0-86400000 毫秒
+    #   authMs: 300000   # 401/403
+    #   quotaMs: 60000   # 402
+    #   rateLimitMs: 30000 # 429
 
   mimo_vision:
     baseUrl: "https://api.xiaomimimo.com"

@@ -714,8 +714,184 @@
                         this.providerForm.apiKey = '';
                         this.providerForm.apiKeyConfigured = false;
                         this.providerForm.clearApiKey = false;
+                        this.providerForm.apiKeys = [];
+                        this.providerForm.keyListMode = false;
+                        this.providerForm.keyCooldown = { authMs: null, quotaMs: null, rateLimitMs: null };
                     } else if (this.providerForm.baseUrl === 'https://chatgpt.com/backend-api/codex') {
                         this.providerForm.baseUrl = '';
+                    }
+                    if (this.providerForm.authType !== 'chatgptOAuth' && !this.providerForm.apiKeys.length) {
+                        this.providerForm.apiKeys = [this.newProviderKey()];
+                    }
+                },
+
+                // 身份只在前端生成，重命名、启停和排序时都随密钥行保留。
+                newProviderKeyId() {
+                    const used = new Set((this.providerForm?.apiKeys || []).map((key) => key.id));
+                    let id;
+                    do {
+                        const bytes = new Uint32Array(1);
+                        if (globalThis.crypto?.getRandomValues) {
+                            globalThis.crypto.getRandomValues(bytes);
+                        } else {
+                            bytes[0] = Math.floor(Math.random() * 0x100000000);
+                        }
+                        id = 'k' + bytes[0].toString(16).padStart(8, '0').slice(-7);
+                    } while (used.has(id));
+                    return id;
+                },
+
+                newProviderKey() {
+                    return {
+                        id: this.newProviderKeyId(), name: '', value: '', enabled: true,
+                        valueConfigured: false, fingerprint: ''
+                    };
+                },
+
+                providerKeyListChanged() {
+                    this.providerForm.keyListMode = true;
+                },
+
+                addProviderKey() {
+                    if (!Array.isArray(this.providerForm.apiKeys)) this.providerForm.apiKeys = [];
+                    if (this.providerForm.apiKeys.length >= 10) {
+                        this.showStatus('每个 Provider 最多 10 个密钥', 'error');
+                        return;
+                    }
+                    this.providerForm.keyListMode = true;
+                    this.providerForm.apiKeys.push(this.newProviderKey());
+                },
+
+                removeProviderKey(index) {
+                    this.providerForm.apiKeys.splice(index, 1);
+                    this.providerForm.keyListMode = true;
+                },
+
+                // 保存前只保留有新值或有已存值的行；空白占位行不送给后端。
+                providerKeysPayload(rows) {
+                    return (Array.isArray(rows) ? rows : [])
+                        .filter((key) => key?.value || key?.valueConfigured)
+                        .map((key) => ({
+                            id: key.id,
+                            name: key.name || undefined,
+                            value: key.value || (key.valueConfigured ? '__AI_GATEWAY_KEEP_API_KEY__' : ''),
+                            enabled: key.enabled === false ? false : undefined
+                        }));
+                },
+
+                // 所有冷却项留空时省略父对象，与后端 omitempty 一致。
+                keyCooldownPayload(value) {
+                    const source = value || {};
+                    const payload = {};
+                    for (const field of ['authMs', 'quotaMs', 'rateLimitMs']) {
+                        const number = this.numOrNull(source[field]);
+                        if (number !== null) payload[field] = number;
+                    }
+                    return Object.keys(payload).length ? payload : undefined;
+                },
+
+                hasProviderKeyList(provider) {
+                    return Array.isArray(provider?.apiKeys) && provider.apiKeys.length > 0;
+                },
+
+                providerKeyListBadge(name, provider) {
+                    const keys = Array.isArray(provider?.apiKeys) ? provider.apiKeys : [];
+                    const enabled = keys.filter((key) => key.enabled !== false).length;
+                    const healthValue = this.health?.providerKeys?.[name];
+                    const healthKeys = Array.isArray(healthValue) ? healthValue : [];
+                    const cooling = healthKeys.filter((key) => Number(key.remainingMs) > 0 || key.state === 'cooling').length;
+                    return `启用 ${enabled}/${keys.length} · 冷却 ${cooling}`;
+                },
+
+                providerEnabledKeyCount() {
+                    return (this.providerForm.apiKeys || []).filter((key) =>
+                        key.enabled !== false && (key.valueConfigured || key.value)
+                    ).length;
+                },
+
+                providerHasConfiguredKeyRows() {
+                    return (this.providerForm.apiKeys || []).some((key) => key.valueConfigured || key.value);
+                },
+
+                providerKeyHealth(key, providerName = this.editingProvider) {
+                    const keys = this.health?.providerKeys?.[providerName];
+                    return (Array.isArray(keys) ? keys : []).find((item) => item.id === key?.id) || null;
+                },
+
+                providerKeyReasonLabel(reason) {
+                    return {
+                        auth: '鉴权失败',
+                        quota: '配额耗尽',
+                        rateLimit: '触发限流'
+                    }[reason] || '上游暂不可用';
+                },
+
+                providerKeyCooling(key) {
+                    const health = this.providerKeyHealth(key);
+                    return !!health && (health.state === 'cooling' || Number(health.remainingMs) > 0);
+                },
+
+                providerKeyStateLabel(key) {
+                    const health = this.providerKeyHealth(key);
+                    const remaining = Math.max(0, Number(health?.remainingMs) || 0);
+                    if (key?.enabled === false) {
+                        if (remaining > 0) return `停用 · 冷却剩余 ${this.formatMs(remaining)}`;
+                        return '停用';
+                    }
+                    if (health?.state === 'disabled') {
+                        if (remaining > 0) {
+                            const reason = health.reason ? ` · ${this.providerKeyReasonLabel(health.reason)}` : '';
+                            return `冷却中${reason} · 剩余 ${this.formatMs(remaining)}`;
+                        }
+                        return '可选择';
+                    }
+                    if (health?.state === 'cooling' && remaining > 0) {
+                        return `冷却中 · ${this.providerKeyReasonLabel(health.reason)} · 剩余 ${this.formatMs(remaining)}`;
+                    }
+                    if (health?.state === 'selectable' || health?.state === 'cooling') return '可选择';
+                    return '状态未知';
+                },
+
+                providerKeyStateClass(key) {
+                    const health = this.providerKeyHealth(key);
+                    if (key?.enabled === false) return 'text-muted';
+                    if (health?.state === 'disabled') return Number(health.remainingMs) > 0 ? 'text-warn' : 'text-good';
+                    if (health?.state === 'cooling' && Number(health.remainingMs) > 0) return 'text-warn';
+                    if (health?.state === 'selectable' || health?.state === 'cooling') return 'text-good';
+                    return 'text-muted';
+                },
+
+                decrementProviderKeyCooldowns() {
+                    const providers = this.health?.providerKeys;
+                    if (!providers) return;
+                    Object.values(providers).forEach((keys) => {
+                        (Array.isArray(keys) ? keys : []).forEach((key) => {
+                            const remaining = Number(key.remainingMs) || 0;
+                            if (remaining > 0) {
+                                key.remainingMs = Math.max(0, remaining - 1000);
+                                if (key.remainingMs === 0 && key.state === 'cooling') key.state = 'selectable';
+                            }
+                        });
+                    });
+                },
+
+                async resetProviderKeyCooldown(key) {
+                    const provider = this.editingProvider;
+                    if (!provider || this.resettingProviderKey === key?.id) return;
+                    this.resettingProviderKey = key.id;
+                    try {
+                        const query = `provider=${encodeURIComponent(provider)}&key=${encodeURIComponent(key.id)}`;
+                        const res = await fetch(`/api/providers/keys/cooldown/reset?${query}`, { method: 'POST' });
+                        if (!res.ok) throw new Error(await this.errorText(res, '解除密钥冷却失败'));
+                        const data = await res.json();
+                        if (!Array.isArray(data.keys)) throw new Error('响应里没有密钥状态');
+                        const providerKeys = { ...(this.health?.providerKeys || {}), [data.provider || provider]: data.keys };
+                        this.health = { ...(this.health || {}), providerKeys };
+                        this.showStatus(data.reset ? '密钥冷却已解除' : '该密钥当前不在冷却中', 'success');
+                    } catch (err) {
+                        this.showStatus('解除密钥冷却失败: ' + err.message, 'error');
+                    } finally {
+                        this.resettingProviderKey = '';
                     }
                 },
 
@@ -731,6 +907,10 @@
                         name: '',
                         baseUrl: selectedChatGPTAccount ? 'https://chatgpt.com/backend-api/codex' : '',
                         apiKey: '',
+                        apiKeys: selectedChatGPTAccount ? [] : [this.newProviderKey()],
+                        keyCooldown: { authMs: null, quotaMs: null, rateLimitMs: null },
+                        keyListMode: false,
+                        keyListOriginallyConfigured: false,
                         format: selectedChatGPTAccount ? 'openai-responses' : 'anthropic',
                         authType: selectedChatGPTAccount ? 'chatgptOAuth' : '',
                         accountId: selectedChatGPTAccount?.id || '',
@@ -752,17 +932,39 @@
                     this.openProviderDrawer();
                 },
 
-                editProvider(name) {
+                async editProvider(name) {
                     this.editingProvider = name;
                     this.providerChatGPTAccountFilter = '';
                     this.closeProviderChatGPTAccountPicker();
                     this.probingProvider = false;
                     this.providerProbeStatus = null;
                     const p = this.config.providers[name];
+                    const rawApiKeys = Array.isArray(p.apiKeys) ? p.apiKeys : null;
+                    const apiKeys = rawApiKeys
+                        ? rawApiKeys.map((key) => ({
+                            id: key.id,
+                            name: key.name || '',
+                            value: '',
+                            enabled: key.enabled !== false,
+                            valueConfigured: !!key.valueConfigured,
+                            fingerprint: key.fingerprint || ''
+                        }))
+                        : [{
+                            ...this.newProviderKey(),
+                            valueConfigured: !!p.apiKeyConfigured
+                        }];
                     this.providerForm = {
                         name,
                         baseUrl: p.baseUrl,
                         apiKey: '',
+                        apiKeys,
+                        keyCooldown: {
+                            authMs: p.keyCooldown?.authMs ?? null,
+                            quotaMs: p.keyCooldown?.quotaMs ?? null,
+                            rateLimitMs: p.keyCooldown?.rateLimitMs ?? null
+                        },
+                        keyListMode: rawApiKeys !== null,
+                        keyListOriginallyConfigured: rawApiKeys !== null,
                         format: p.format,
                         authType: p.authType || '',
                         accountId: p.accountId || '',
@@ -782,6 +984,7 @@
                         apiKeyConfigured: !!p.apiKeyConfigured,
                         clearApiKey: false
                     };
+                    if (rawApiKeys !== null) await this.loadHealth(false);
                     this.openProviderDrawer();
                 },
 
@@ -801,6 +1004,10 @@
                         name: this.nextCopyName(name, Object.keys(this.config.providers || {})),
                         baseUrl: p.baseUrl,
                         apiKey: '',
+                        apiKeys: p.authType === 'chatgptOAuth' ? [] : [this.newProviderKey()],
+                        keyCooldown: { authMs: null, quotaMs: null, rateLimitMs: null },
+                        keyListMode: false,
+                        keyListOriginallyConfigured: false,
                         format: p.format,
                         authType: p.authType || '',
                         accountId: p.accountId || '',
@@ -823,7 +1030,7 @@
                         clearApiKey: false
                     };
                     this.openProviderDrawer();
-                    if (p.apiKeyConfigured) {
+                    if (p.apiKeyConfigured || p.apiKeys?.length) {
                         this.showStatus(`已按「${name}」预填，API Key 需重新填写`, 'success');
                     }
                 },
@@ -865,17 +1072,33 @@
                         return;
                     }
 
-                    const existing = this.editingProvider ? this.config.providers[this.editingProvider] : null;
-                    let apiKey = oauth ? '' : this.providerForm.apiKey;
-                    if (!apiKey && this.providerForm.apiKeyConfigured && !this.providerForm.clearApiKey) {
-                        apiKey = existing?.apiKey || '';
+                    let apiKey = '';
+                    let apiKeys;
+                    let keyCooldown;
+                    if (!oauth && this.providerForm.keyListMode) {
+                        const rows = this.providerKeysPayload(this.providerForm.apiKeys);
+                        if (rows.length) {
+                            apiKeys = rows.map((key) => {
+                                const source = this.providerForm.apiKeys.find((item) => item.id === key.id);
+                                return {
+                                    ...key,
+                                    valueConfigured: !!source?.valueConfigured || !!source?.value,
+                                    fingerprint: source?.fingerprint || ''
+                                };
+                            });
+                            keyCooldown = this.keyCooldownPayload(this.providerForm.keyCooldown);
+                        }
+                    } else if (!oauth) {
+                        const legacyKey = this.providerForm.apiKeys?.[0];
+                        apiKey = legacyKey?.value || (legacyKey?.valueConfigured ? '__AI_GATEWAY_KEEP_API_KEY__' : '');
                     }
-                    if (this.providerForm.clearApiKey) apiKey = '';
                     const snapshot = this.snapshotConfig();
                     this.config.providers[this.providerForm.name] = {
                         baseUrl: oauth ? 'https://chatgpt.com/backend-api/codex' : this.providerForm.baseUrl,
                         apiKey,
-                        apiKeyConfigured: apiKey !== '',
+                        apiKeyConfigured: apiKey !== '' || !!apiKeys?.length,
+                        apiKeys,
+                        keyCooldown,
                         format: oauth ? 'openai-responses' : this.providerForm.format,
                         authType: oauth ? 'chatgptOAuth' : undefined,
                         accountId: oauth ? this.providerForm.accountId : undefined,
@@ -907,6 +1130,7 @@
                     // 等于同一件事确认两遍，实际结果是用户忘记第二步。
                     // 失败时回滚内存并留着弹窗，避免界面显示的和磁盘上的不一致。
                     if (await this.persistConfig()) {
+                        if (apiKeys?.length) await this.loadHealth(false);
                         this.showProviderModal = false;
                     } else {
                         this.restoreConfig(snapshot);
@@ -1223,31 +1447,54 @@
                         this.showStatus('ChatGPT OAuth 账户状态可在 Provider 页面查看', 'success');
                         return;
                     }
+                    await this.runProviderProbe(null);
+                },
+
+                async probeProviderKey(key) {
+                    if (!key?.value && !key?.valueConfigured) {
+                        this.showStatus('请先填写此密钥，再进行单行测试', 'error');
+                        return;
+                    }
+                    await this.runProviderProbe(key);
+                },
+
+                async runProviderProbe(testKey) {
                     if (this.probingProvider) return;
                     if (!this.providerForm.name || !this.providerForm.baseUrl) {
                         this.showStatus('名称和 URL 不能为空', 'error');
                         return;
                     }
-                    const existing = this.editingProvider ? this.config.providers[this.editingProvider] : null;
-                    let apiKey = this.providerForm.apiKey || '';
-                    if (!apiKey && this.providerForm.apiKeyConfigured && !this.providerForm.clearApiKey) {
-                        apiKey = existing?.apiKey || '__AI_GATEWAY_KEEP_API_KEY__';
+                    const input = {
+                        name: this.providerForm.name,
+                        baseUrl: this.providerForm.baseUrl,
+                        format: this.providerForm.format,
+                        userAgent: this.providerForm.userAgent || '',
+                        proxy: this.providerForm.proxy || ''
+                    };
+                    if (testKey || this.providerForm.keyListMode) {
+                        const rows = testKey
+                            ? (this.providerForm.keyListMode ? this.providerForm.apiKeys : [testKey])
+                            : this.providerForm.apiKeys;
+                        input.apiKeys = (rows || [])
+                            .filter((key) => key?.value || key?.valueConfigured)
+                            .map((key) => ({
+                                id: key.id,
+                                value: key.value || (key.valueConfigured ? '__AI_GATEWAY_KEEP_API_KEY__' : ''),
+                                enabled: key.enabled !== false
+                            }));
+                        if (testKey) input.testKeyId = testKey.id;
+                    } else {
+                        const key = this.providerForm.apiKeys?.[0];
+                        input.apiKey = key?.value || (key?.valueConfigured ? '__AI_GATEWAY_KEEP_API_KEY__' : '');
                     }
-                    if (this.providerForm.clearApiKey) apiKey = '';
                     this.probingProvider = true;
+                    this.providerProbeKeyId = testKey?.id || '';
                     this.providerProbeStatus = null;
                     try {
                         const res = await fetch('/api/providers/probe', {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({
-                                name: this.providerForm.name,
-                                baseUrl: this.providerForm.baseUrl,
-                                format: this.providerForm.format,
-                                apiKey,
-                                userAgent: this.providerForm.userAgent || '',
-                                proxy: this.providerForm.proxy || ''
-                            })
+                            body: JSON.stringify(input)
                         });
                         if (!res.ok) throw new Error(await this.errorText(res, '检测失败'));
                         const data = await res.json();
@@ -1258,6 +1505,7 @@
                         this.providerProbeStatus = { status: 'error', message: err.message || '检测失败' };
                     } finally {
                         this.probingProvider = false;
+                        this.providerProbeKeyId = '';
                     }
                 },
 

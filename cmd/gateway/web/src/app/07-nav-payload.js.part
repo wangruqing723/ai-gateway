@@ -44,6 +44,16 @@
                         providers[name] = {
                             baseUrl: provider.baseUrl || '',
                             apiKey: provider.apiKey || '',
+                            // 只回传后端可写字段；valueConfigured 与 fingerprint 是 GET 专用元数据。
+                            apiKeys: Array.isArray(provider.apiKeys) && provider.apiKeys.length
+                                ? provider.apiKeys.map((key) => ({
+                                    id: key.id,
+                                    name: key.name || undefined,
+                                    value: key.value || '',
+                                    enabled: key.enabled === false ? false : undefined
+                                }))
+                                : undefined,
+                            keyCooldown: this.keyCooldownPayload(provider.keyCooldown),
                             format: provider.format || 'anthropic',
                             authType: provider.authType || undefined,
                             accountId: provider.accountId || undefined,

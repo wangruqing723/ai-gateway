@@ -987,14 +987,18 @@
                                                       @focus="showTip('ChatGPT OAuth 账户', $event)"
                                                       @blur="hideTip()"
                                                       tabindex="0">OAuth</span>
-                                                <span x-show="provider.authType !== 'chatgptOAuth' && provider.apiKeyConfigured"
+                                                <span x-show="provider.authType !== 'chatgptOAuth' && hasProviderKeyList(provider)"
+                                                      class="tag bg-cyan2/10 text-cyan"
+                                                      :title="providerKeyListBadge(name, provider)"
+                                                      x-text="providerKeyListBadge(name, provider)"></span>
+                                                <span x-show="provider.authType !== 'chatgptOAuth' && !hasProviderKeyList(provider) && provider.apiKeyConfigured"
                                                               class="material-symbols-outlined text-[18px] text-good"
                                                               @mouseenter="showTip('已配置密钥', $event)"
                                                               @mouseleave="hideTip()"
                                                               @focus="showTip('已配置密钥', $event)"
                                                               @blur="hideTip()"
                                                               tabindex="0">key</span>
-                                                <span x-show="provider.authType !== 'chatgptOAuth' && !provider.apiKeyConfigured"
+                                                <span x-show="provider.authType !== 'chatgptOAuth' && !hasProviderKeyList(provider) && !provider.apiKeyConfigured"
                                                               class="material-symbols-outlined text-[18px] text-muted"
                                                               @mouseenter="showTip('未配置，从客户端请求头读取', $event)"
                                                               @mouseleave="hideTip()"
@@ -2241,12 +2245,15 @@
                                                                 <td class="whitespace-nowrap px-3 py-2">
                                                                     <div class="font-mono text-text" x-text="detail.provider"></div>
                                                                     <div class="font-mono text-[11px] text-cyan" x-text="detail.targetModel || '--'"></div>
+                                                                    <div x-show="detail.keyName" class="mt-0.5 text-[11px] text-muted" x-text="'密钥名称：' + detail.keyName"></div>
+                                                                    <div x-show="detail.keyId" class="font-mono text-[11px] text-muted" x-text="'密钥身份：' + detail.keyId"></div>
+                                                                    <div x-show="detail.keyFingerprint" class="font-mono text-[11px] text-muted" x-text="'密钥指纹：' + detail.keyFingerprint"></div>
                                                                 </td>
                                                                 <td class="whitespace-nowrap px-3 py-2 font-mono text-muted" x-text="detail.providerFormat"></td>
                                                                 <td class="whitespace-nowrap px-3 py-2 font-mono" :class="Number(detail.upstreamStatus) >= 500 ? 'text-danger' : Number(detail.upstreamStatus) >= 400 ? 'text-warn' : 'text-text'" x-text="detail.upstreamStatus || '--'"></td>
                                                                 <td class="px-3 py-2">
-                                                                    <div class="font-mono text-text" x-text="detail.outcome"></div>
-                                                                    <div class="mt-0.5 font-mono text-[11px] text-muted" x-text="detail.reason || detail.kind"></div>
+                                                                    <div class="font-mono text-text" x-text="attemptOutcomeLabel(detail.outcome)"></div>
+                                                                    <div class="mt-0.5 text-[11px] text-muted" x-text="attemptDetailExplanation(detail)"></div>
                                                                     <div x-show="detail.responseStarted && detail.outcome !== 'success'" class="mt-0.5 text-xs text-warn">已开始响应，未转移</div>
                                                                     <div x-show="detail.upstreamRequestId" class="mt-0.5 break-all font-mono text-[11px] text-muted">
                                                                         request-id:
@@ -2372,15 +2379,92 @@
                             </select>
                             <span class="mt-1 block text-xs text-muted">ChatGPT OAuth 令牌由网关安全保存，Provider 只关联账户 ID。</span>
                         </label>
-                        <div x-show="providerForm.authType !== 'chatgptOAuth'" class="block">
-                            <label for="provider-api-key" class="mb-1.5 block text-xs font-bold text-muted">API Key</label>
-                            <input autocomplete="off" id="provider-api-key" type="password" x-model="providerForm.apiKey"
-                                   :placeholder="providerForm.apiKeyConfigured ? '已配置，留空保持不变' : '留空则从客户端请求头提取'"
-                                   class="field">
-                            <label for="provider-clear-api-key" x-show="providerForm.apiKeyConfigured" x-cloak class="mt-2 flex items-center gap-2 text-xs text-muted">
-                                <input autocomplete="off" id="provider-clear-api-key" type="checkbox" x-model="providerForm.clearApiKey" class="h-4 w-4 rounded border-line bg-panel text-cyan2 focus:ring-cyan2">
-                                清除已有密钥，改用客户端请求头
-                            </label>
+                        <div x-show="providerForm.authType !== 'chatgptOAuth'" class="block sm:col-span-2">
+                            <div class="mb-2 flex items-center justify-between gap-3">
+                                <div>
+                                    <div class="text-xs font-bold text-muted">API 密钥</div>
+                                    <div class="mt-1 text-xs text-muted">已保存的值留空表示保留；只显示服务端返回的指纹。</div>
+                                </div>
+                                <button type="button" @click="addProviderKey()" class="btn btn-secondary">
+                                    <span class="material-symbols-outlined text-[18px]">add</span>添加密钥
+                                </button>
+                            </div>
+                            <div x-show="providerForm.keyListMode && !providerForm.keyListOriginallyConfigured && providerForm.apiKeys.length" x-cloak class="mb-2 rounded-lg border border-warn/25 bg-warn/5 px-3 py-2 text-xs text-warn">
+                                保存后将使用 apiKeys 列表，并启用密钥冷却。
+                            </div>
+                            <div x-show="providerForm.keyListMode && providerHasConfiguredKeyRows() && providerEnabledKeyCount() === 0" x-cloak class="mb-2 rounded-lg border border-danger/35 bg-danger/10 px-3 py-2 text-xs text-rose-100">
+                                所有密钥都已停用；保存仍然允许，但该 Provider 暂时没有可选择的密钥。
+                            </div>
+                            <div x-ref="providerKeyRows" class="space-y-2">
+                                <template x-for="(key, index) in providerForm.apiKeys" :key="key.id">
+                                    <div data-drag-row class="rounded-lg border border-line bg-panel2/40 p-3"
+                                         :class="[rowDropClass('provider-key', index, providerForm.apiKeys.length), isRowDragSource('provider-key', index) ? 'opacity-50' : '']">
+                                        <div class="flex flex-wrap items-center gap-2">
+                                            <button type="button" @pointerdown="startRowDrag('provider-key', index, $event)"
+                                                    class="cursor-grab rounded p-1 text-muted hover:text-cyan" style="touch-action: none"
+                                                    title="拖动排序" aria-label="拖动密钥排序">
+                                                <span class="material-symbols-outlined text-[18px]">drag_indicator</span>
+                                            </button>
+                                            <span class="font-mono text-xs text-muted" x-text="key.id"></span>
+                                            <span x-show="providerForm.keyListMode" x-cloak class="text-xs"
+                                                  :class="providerKeyStateClass(key)" x-text="providerKeyStateLabel(key)"></span>
+                                            <span x-show="!providerForm.keyListMode" x-cloak class="text-xs text-muted">旧单值写法</span>
+                                            <button type="button" x-show="providerForm.keyListMode && providerKeyCooling(key)" x-cloak
+                                                    @click="resetProviderKeyCooldown(key)" :disabled="resettingProviderKey === key.id"
+                                                    class="btn btn-ghost text-xs disabled:opacity-60">
+                                                <span x-text="resettingProviderKey === key.id ? '解除中…' : '解除冷却'"></span>
+                                            </button>
+                                            <span x-show="key.fingerprint" class="ml-auto font-mono text-xs text-muted"
+                                                  x-text="'指纹 ' + key.fingerprint"></span>
+                                            <button type="button" @click="removeProviderKey(index)" class="btn btn-ghost ml-auto" title="删除密钥" aria-label="删除密钥">
+                                                <span class="material-symbols-outlined text-[18px]">delete</span>
+                                            </button>
+                                        </div>
+                                        <div class="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
+                                            <label class="block">
+                                                <span class="mb-1 block text-xs text-muted">名称</span>
+                                                <input autocomplete="off" type="text" x-model="key.name" @input="providerKeyListChanged()"
+                                                       placeholder="可选，例如主账号" class="field">
+                                            </label>
+                                            <label class="block">
+                                                <span class="mb-1 block text-xs text-muted">密钥值</span>
+                                                <input autocomplete="off" type="password" x-model="key.value" @input="providerKeyListChanged()"
+                                                       :placeholder="key.valueConfigured ? '已配置，留空保持不变' : '输入密钥值'" class="field">
+                                            </label>
+                                        </div>
+                                        <div class="mt-3 flex flex-wrap items-center gap-3">
+                                            <label class="flex items-center gap-2 text-xs text-muted">
+                                                <input autocomplete="off" type="checkbox" x-model="key.enabled" @change="providerKeyListChanged()"
+                                                       class="h-4 w-4 rounded border-line bg-panel text-cyan2 focus:ring-cyan2">
+                                                启用
+                                            </label>
+                                            <button type="button" @click="probeProviderKey(key)"
+                                                    :disabled="probingProvider" class="btn btn-secondary disabled:opacity-60">
+                                                <span class="material-symbols-outlined text-[18px]" :class="probingProvider && providerProbeKeyId === key.id && 'gw-spin'"
+                                                      x-text="probingProvider && providerProbeKeyId === key.id ? 'progress_activity' : 'health_and_safety'"></span>
+                                                测试此密钥
+                                            </button>
+                                        </div>
+                                    </div>
+                                </template>
+                                <div x-show="!providerForm.apiKeys.length" x-cloak class="rounded-lg border border-line px-3 py-3 text-xs text-muted">
+                                    当前没有密钥；请求将从客户端请求头提取。
+                                </div>
+                            </div>
+                            <div x-show="providerForm.keyListMode" x-cloak class="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-3">
+                                <label class="block">
+                                    <span class="mb-1 block text-xs text-muted">鉴权失败冷却（毫秒）</span>
+                                    <input autocomplete="off" type="number" min="0" max="86400000" step="1" x-model.number="providerForm.keyCooldown.authMs" placeholder="留空 = 未配置" class="field">
+                                </label>
+                                <label class="block">
+                                    <span class="mb-1 block text-xs text-muted">配额失败冷却（毫秒）</span>
+                                    <input autocomplete="off" type="number" min="0" max="86400000" step="1" x-model.number="providerForm.keyCooldown.quotaMs" placeholder="留空 = 未配置" class="field">
+                                </label>
+                                <label class="block">
+                                    <span class="mb-1 block text-xs text-muted">限流冷却（毫秒）</span>
+                                    <input autocomplete="off" type="number" min="0" max="86400000" step="1" x-model.number="providerForm.keyCooldown.rateLimitMs" placeholder="留空 = 未配置" class="field">
+                                </label>
+                            </div>
                         </div>
                         <div x-show="providerForm.authType === 'chatgptOAuth'" x-cloak class="block">
                             <label for="provider-chatgpt-account-trigger" class="mb-1.5 block text-xs font-bold text-muted">ChatGPT 账户</label>
@@ -3245,9 +3329,12 @@
                 // 弹窗临时探测与首页已落盘 provider 的健康缓存隔离，绝不复用 checkingProvider。
                 probingProvider: false,
                 providerProbeStatus: null,
+                providerProbeKeyId: '',
+                resettingProviderKey: '',
                 chatgptAccounts: [],
                 chatGPTNow: Date.now(),
                 _chatGPTExpiryTimer: null,
+                _providerKeyCountdownTimer: null,
                 loadingChatGPTAccounts: false,
                 refreshingChatGPTUsage: false,
                 refreshingChatGPTAccountId: '',
@@ -3458,6 +3545,10 @@
                     // JSON 解析（true / 20 / {...} 保留类型，解析失败按字符串），是 provider
                     // 重建点之一，漏字段会让绑定在保存时被静默丢弃。
                     extraBody: [],
+                    // 列表模式的密钥行与冷却时长；旧单值也在 apiKeys 中暂存为表单行。
+                    apiKeys: [],
+                    keyCooldown: { authMs: null, quotaMs: null, rateLimitMs: null },
+                    keyListMode: false,
                     // enabled 默认 true：新增 provider 默认启用；editProvider 回填既有值。
                     enabled: true,
                     apiKeyConfigured: false,
@@ -3511,16 +3602,24 @@
                     this._chatGPTExpiryTimer = window.setInterval(() => {
                         this.chatGPTNow = Date.now();
                     }, 60_000);
+                    this._providerKeyCountdownTimer = window.setInterval(() => {
+                        this.decrementProviderKeyCooldowns();
+                    }, 1000);
                     if (this.monitorPollingAllowed()) await this.refreshMonitor();
+                    else await this.loadHealth(false);
                     this._monitorPollTimer = window.setInterval(() => {
                         if (this.monitorPollingAllowed()) this.refreshMonitor(false);
+                        else if (document.visibilityState === 'visible' && this.activeTab === 'providers') this.loadHealth(false);
                     }, 5000);
                     this._monitorVisibilityHandler = () => {
                         if (this.monitorPollingAllowed()) this.refreshMonitor(false);
+                        else if (document.visibilityState === 'visible' && this.activeTab === 'providers') this.loadHealth(false);
                     };
                     document.addEventListener('visibilitychange', this._monitorVisibilityHandler);
                     this.$watch('activeTab', (tab, oldTab) => {
-                        if (tab !== oldTab && this.monitorPollingAllowed()) this.refreshMonitor(false);
+                        if (tab === oldTab) return;
+                        if (tab === 'providers') this.loadHealth(false);
+                        else if (this.monitorPollingAllowed()) this.refreshMonitor(false);
                     });
                     // 直接编辑的字段仍需手动保存，关页面前拦一下，免得改了半天丢掉
                     window.addEventListener('beforeunload', (e) => {
@@ -3574,11 +3673,26 @@
                     const rawProviders = pick(data, 'providers', 'Providers') || {};
                     const providers = {};
                     Object.entries(rawProviders).forEach(([name, p]) => {
+                        const rawKeys = pick(p, 'apiKeys', 'APIKeys');
+                        const rawKeyCooldown = pick(p, 'keyCooldown', 'KeyCooldown');
                         providers[name] = {
                             name: pick(p, 'name', 'Name') || name,
                             baseUrl: pick(p, 'baseUrl', 'BaseURL') || '',
                             apiKey: pick(p, 'apiKey', 'APIKey') || '',
                             apiKeyConfigured: !!pick(p, 'apiKeyConfigured', 'APIKeyConfigured'),
+                            apiKeys: Array.isArray(rawKeys) ? rawKeys.map((key) => ({
+                                id: pick(key, 'id', 'ID') || '',
+                                name: pick(key, 'name', 'Name') || '',
+                                value: pick(key, 'value', 'Value') || '',
+                                enabled: pick(key, 'enabled', 'Enabled') !== false,
+                                valueConfigured: !!pick(key, 'valueConfigured', 'ValueConfigured'),
+                                fingerprint: pick(key, 'fingerprint', 'Fingerprint') || ''
+                            })) : undefined,
+                            keyCooldown: rawKeyCooldown ? {
+                                authMs: pick(rawKeyCooldown, 'authMs', 'AuthMs') ?? null,
+                                quotaMs: pick(rawKeyCooldown, 'quotaMs', 'QuotaMs') ?? null,
+                                rateLimitMs: pick(rawKeyCooldown, 'rateLimitMs', 'RateLimitMs') ?? null
+                            } : undefined,
                             format: pick(p, 'format', 'Format') || 'anthropic',
                             authType: pick(p, 'authType', 'AuthType') || '',
                             accountId: pick(p, 'accountId', 'AccountID') || '',
@@ -4376,6 +4490,16 @@
                         providers[name] = {
                             baseUrl: provider.baseUrl || '',
                             apiKey: provider.apiKey || '',
+                            // 只回传后端可写字段；valueConfigured 与 fingerprint 是 GET 专用元数据。
+                            apiKeys: Array.isArray(provider.apiKeys) && provider.apiKeys.length
+                                ? provider.apiKeys.map((key) => ({
+                                    id: key.id,
+                                    name: key.name || undefined,
+                                    value: key.value || '',
+                                    enabled: key.enabled === false ? false : undefined
+                                }))
+                                : undefined,
+                            keyCooldown: this.keyCooldownPayload(provider.keyCooldown),
                             format: provider.format || 'anthropic',
                             authType: provider.authType || undefined,
                             accountId: provider.accountId || undefined,
@@ -4838,6 +4962,29 @@
                     return (Number(log?.attempts) || 0) > 1 ? `${log.attempts} 次尝试` : '--';
                 },
 
+                attemptOutcomeLabel(outcome) {
+                    if (outcome === 'key_switched') return '密钥切换';
+                    return outcome || '--';
+                },
+
+                attemptDetailExplanation(detail) {
+                    const reasonLabels = {
+                        key_auth: '鉴权失败',
+                        key_quota: '配额耗尽',
+                        key_rate_limit: '触发限流',
+                        '401/key_auth': '鉴权失败',
+                        '403/key_auth': '鉴权失败',
+                        '402/key_quota': '配额耗尽',
+                        '429/key_rate_limit': '触发限流',
+                        no_selectable_key: '没有可选择的密钥'
+                    };
+                    if (detail?.kind === 'key_skip') return '无可选择密钥，跳过该 Provider';
+                    if (detail?.outcome === 'key_switched') {
+                        return `当前密钥${reasonLabels[detail.reason] || '失败'}，已切换到下一密钥`;
+                    }
+                    return reasonLabels[detail?.reason] || detail?.reason || detail?.kind || '--';
+                },
+
                 // modelTrail 把客户端模型与上游目标模型做成对比短写：gpt-5.6-sol → glm-5.2。
                 // 路由映射改写模型名时一眼能看出实际打到上游的是哪个模型；
                 // 两侧相同或只一侧有值时退化为单值，不增噪声。
@@ -5057,13 +5204,15 @@
                         breaker_open: '熔断打开',
                         breaker_recovered: '熔断已恢复',
                         health_down: '健康异常',
-                        health_recovered: '健康已恢复'
+                        health_recovered: '健康已恢复',
+                        key_cooldown: '密钥冷却',
+                        key_recovered: '密钥恢复'
                     }[event?.kind] || '状态变化';
                 },
 
                 runEventClass(event) {
-                    if (event?.recovered) return 'border-good/20 bg-good/5 text-emerald-200/80';
-                    if (event?.kind === 'health_down') return 'border-danger/35 bg-danger/10 text-rose-100';
+                    if (event?.recovered || event?.kind === 'key_recovered') return 'border-good/20 bg-good/5 text-emerald-200/80';
+                    if (event?.kind === 'health_down' || event?.kind === 'key_cooldown') return 'border-danger/35 bg-danger/10 text-rose-100';
                     return 'border-warn/35 bg-warn/10 text-amber-100';
                 },
 
@@ -5676,12 +5825,33 @@
 
                 providersYaml() {
                     return Object.entries(this.config.providers || {}).map(([name, p]) => {
+                        const apiKeys = Array.isArray(p.apiKeys) ? p.apiKeys : [];
+                        const listMode = apiKeys.length > 0;
+                        const apiKeyValue = p.apiKeyConfigured || p.apiKey
+                            ? '__AI_GATEWAY_KEEP_API_KEY__'
+                            : '';
                         const lines = [
                             `  ${name}:`,
                             `    baseUrl: "${p.baseUrl || ''}"`,
-                            ...(p.authType === 'chatgptOAuth' ? [] : [`    apiKey: "${p.apiKey || ''}"`]),
+                            ...(p.authType === 'chatgptOAuth' || listMode ? [] : [`    apiKey: "${apiKeyValue}"`]),
                             `    format: ${p.format || 'anthropic'}`
                         ];
+                        if (listMode) {
+                            lines.push('    apiKeys:');
+                            apiKeys.forEach((key) => {
+                                lines.push(`      - id: ${JSON.stringify(key.id || '')}`);
+                                if (key.name) lines.push(`        name: ${JSON.stringify(key.name)}`);
+                                lines.push('        value: "__AI_GATEWAY_KEEP_API_KEY__"');
+                                if (key.enabled === false) lines.push('        enabled: false');
+                            });
+                        }
+                        const keyCooldown = this.keyCooldownPayload(p.keyCooldown);
+                        if (listMode && keyCooldown) {
+                            lines.push('    keyCooldown:');
+                            if (keyCooldown.authMs !== null) lines.push(`      authMs: ${keyCooldown.authMs}`);
+                            if (keyCooldown.quotaMs !== null) lines.push(`      quotaMs: ${keyCooldown.quotaMs}`);
+                            if (keyCooldown.rateLimitMs !== null) lines.push(`      rateLimitMs: ${keyCooldown.rateLimitMs}`);
+                        }
                         if (p.authType) lines.push(`    authType: ${p.authType}`);
                         if (p.accountId) lines.push(`    accountId: ${p.accountId}`);
                         // 只在配了时才输出，与后端 yaml omitempty 一致，避免预览里
@@ -6473,8 +6643,184 @@
                         this.providerForm.apiKey = '';
                         this.providerForm.apiKeyConfigured = false;
                         this.providerForm.clearApiKey = false;
+                        this.providerForm.apiKeys = [];
+                        this.providerForm.keyListMode = false;
+                        this.providerForm.keyCooldown = { authMs: null, quotaMs: null, rateLimitMs: null };
                     } else if (this.providerForm.baseUrl === 'https://chatgpt.com/backend-api/codex') {
                         this.providerForm.baseUrl = '';
+                    }
+                    if (this.providerForm.authType !== 'chatgptOAuth' && !this.providerForm.apiKeys.length) {
+                        this.providerForm.apiKeys = [this.newProviderKey()];
+                    }
+                },
+
+                // 身份只在前端生成，重命名、启停和排序时都随密钥行保留。
+                newProviderKeyId() {
+                    const used = new Set((this.providerForm?.apiKeys || []).map((key) => key.id));
+                    let id;
+                    do {
+                        const bytes = new Uint32Array(1);
+                        if (globalThis.crypto?.getRandomValues) {
+                            globalThis.crypto.getRandomValues(bytes);
+                        } else {
+                            bytes[0] = Math.floor(Math.random() * 0x100000000);
+                        }
+                        id = 'k' + bytes[0].toString(16).padStart(8, '0').slice(-7);
+                    } while (used.has(id));
+                    return id;
+                },
+
+                newProviderKey() {
+                    return {
+                        id: this.newProviderKeyId(), name: '', value: '', enabled: true,
+                        valueConfigured: false, fingerprint: ''
+                    };
+                },
+
+                providerKeyListChanged() {
+                    this.providerForm.keyListMode = true;
+                },
+
+                addProviderKey() {
+                    if (!Array.isArray(this.providerForm.apiKeys)) this.providerForm.apiKeys = [];
+                    if (this.providerForm.apiKeys.length >= 10) {
+                        this.showStatus('每个 Provider 最多 10 个密钥', 'error');
+                        return;
+                    }
+                    this.providerForm.keyListMode = true;
+                    this.providerForm.apiKeys.push(this.newProviderKey());
+                },
+
+                removeProviderKey(index) {
+                    this.providerForm.apiKeys.splice(index, 1);
+                    this.providerForm.keyListMode = true;
+                },
+
+                // 保存前只保留有新值或有已存值的行；空白占位行不送给后端。
+                providerKeysPayload(rows) {
+                    return (Array.isArray(rows) ? rows : [])
+                        .filter((key) => key?.value || key?.valueConfigured)
+                        .map((key) => ({
+                            id: key.id,
+                            name: key.name || undefined,
+                            value: key.value || (key.valueConfigured ? '__AI_GATEWAY_KEEP_API_KEY__' : ''),
+                            enabled: key.enabled === false ? false : undefined
+                        }));
+                },
+
+                // 所有冷却项留空时省略父对象，与后端 omitempty 一致。
+                keyCooldownPayload(value) {
+                    const source = value || {};
+                    const payload = {};
+                    for (const field of ['authMs', 'quotaMs', 'rateLimitMs']) {
+                        const number = this.numOrNull(source[field]);
+                        if (number !== null) payload[field] = number;
+                    }
+                    return Object.keys(payload).length ? payload : undefined;
+                },
+
+                hasProviderKeyList(provider) {
+                    return Array.isArray(provider?.apiKeys) && provider.apiKeys.length > 0;
+                },
+
+                providerKeyListBadge(name, provider) {
+                    const keys = Array.isArray(provider?.apiKeys) ? provider.apiKeys : [];
+                    const enabled = keys.filter((key) => key.enabled !== false).length;
+                    const healthValue = this.health?.providerKeys?.[name];
+                    const healthKeys = Array.isArray(healthValue) ? healthValue : [];
+                    const cooling = healthKeys.filter((key) => Number(key.remainingMs) > 0 || key.state === 'cooling').length;
+                    return `启用 ${enabled}/${keys.length} · 冷却 ${cooling}`;
+                },
+
+                providerEnabledKeyCount() {
+                    return (this.providerForm.apiKeys || []).filter((key) =>
+                        key.enabled !== false && (key.valueConfigured || key.value)
+                    ).length;
+                },
+
+                providerHasConfiguredKeyRows() {
+                    return (this.providerForm.apiKeys || []).some((key) => key.valueConfigured || key.value);
+                },
+
+                providerKeyHealth(key, providerName = this.editingProvider) {
+                    const keys = this.health?.providerKeys?.[providerName];
+                    return (Array.isArray(keys) ? keys : []).find((item) => item.id === key?.id) || null;
+                },
+
+                providerKeyReasonLabel(reason) {
+                    return {
+                        auth: '鉴权失败',
+                        quota: '配额耗尽',
+                        rateLimit: '触发限流'
+                    }[reason] || '上游暂不可用';
+                },
+
+                providerKeyCooling(key) {
+                    const health = this.providerKeyHealth(key);
+                    return !!health && (health.state === 'cooling' || Number(health.remainingMs) > 0);
+                },
+
+                providerKeyStateLabel(key) {
+                    const health = this.providerKeyHealth(key);
+                    const remaining = Math.max(0, Number(health?.remainingMs) || 0);
+                    if (key?.enabled === false) {
+                        if (remaining > 0) return `停用 · 冷却剩余 ${this.formatMs(remaining)}`;
+                        return '停用';
+                    }
+                    if (health?.state === 'disabled') {
+                        if (remaining > 0) {
+                            const reason = health.reason ? ` · ${this.providerKeyReasonLabel(health.reason)}` : '';
+                            return `冷却中${reason} · 剩余 ${this.formatMs(remaining)}`;
+                        }
+                        return '可选择';
+                    }
+                    if (health?.state === 'cooling' && remaining > 0) {
+                        return `冷却中 · ${this.providerKeyReasonLabel(health.reason)} · 剩余 ${this.formatMs(remaining)}`;
+                    }
+                    if (health?.state === 'selectable' || health?.state === 'cooling') return '可选择';
+                    return '状态未知';
+                },
+
+                providerKeyStateClass(key) {
+                    const health = this.providerKeyHealth(key);
+                    if (key?.enabled === false) return 'text-muted';
+                    if (health?.state === 'disabled') return Number(health.remainingMs) > 0 ? 'text-warn' : 'text-good';
+                    if (health?.state === 'cooling' && Number(health.remainingMs) > 0) return 'text-warn';
+                    if (health?.state === 'selectable' || health?.state === 'cooling') return 'text-good';
+                    return 'text-muted';
+                },
+
+                decrementProviderKeyCooldowns() {
+                    const providers = this.health?.providerKeys;
+                    if (!providers) return;
+                    Object.values(providers).forEach((keys) => {
+                        (Array.isArray(keys) ? keys : []).forEach((key) => {
+                            const remaining = Number(key.remainingMs) || 0;
+                            if (remaining > 0) {
+                                key.remainingMs = Math.max(0, remaining - 1000);
+                                if (key.remainingMs === 0 && key.state === 'cooling') key.state = 'selectable';
+                            }
+                        });
+                    });
+                },
+
+                async resetProviderKeyCooldown(key) {
+                    const provider = this.editingProvider;
+                    if (!provider || this.resettingProviderKey === key?.id) return;
+                    this.resettingProviderKey = key.id;
+                    try {
+                        const query = `provider=${encodeURIComponent(provider)}&key=${encodeURIComponent(key.id)}`;
+                        const res = await fetch(`/api/providers/keys/cooldown/reset?${query}`, { method: 'POST' });
+                        if (!res.ok) throw new Error(await this.errorText(res, '解除密钥冷却失败'));
+                        const data = await res.json();
+                        if (!Array.isArray(data.keys)) throw new Error('响应里没有密钥状态');
+                        const providerKeys = { ...(this.health?.providerKeys || {}), [data.provider || provider]: data.keys };
+                        this.health = { ...(this.health || {}), providerKeys };
+                        this.showStatus(data.reset ? '密钥冷却已解除' : '该密钥当前不在冷却中', 'success');
+                    } catch (err) {
+                        this.showStatus('解除密钥冷却失败: ' + err.message, 'error');
+                    } finally {
+                        this.resettingProviderKey = '';
                     }
                 },
 
@@ -6490,6 +6836,10 @@
                         name: '',
                         baseUrl: selectedChatGPTAccount ? 'https://chatgpt.com/backend-api/codex' : '',
                         apiKey: '',
+                        apiKeys: selectedChatGPTAccount ? [] : [this.newProviderKey()],
+                        keyCooldown: { authMs: null, quotaMs: null, rateLimitMs: null },
+                        keyListMode: false,
+                        keyListOriginallyConfigured: false,
                         format: selectedChatGPTAccount ? 'openai-responses' : 'anthropic',
                         authType: selectedChatGPTAccount ? 'chatgptOAuth' : '',
                         accountId: selectedChatGPTAccount?.id || '',
@@ -6511,17 +6861,39 @@
                     this.openProviderDrawer();
                 },
 
-                editProvider(name) {
+                async editProvider(name) {
                     this.editingProvider = name;
                     this.providerChatGPTAccountFilter = '';
                     this.closeProviderChatGPTAccountPicker();
                     this.probingProvider = false;
                     this.providerProbeStatus = null;
                     const p = this.config.providers[name];
+                    const rawApiKeys = Array.isArray(p.apiKeys) ? p.apiKeys : null;
+                    const apiKeys = rawApiKeys
+                        ? rawApiKeys.map((key) => ({
+                            id: key.id,
+                            name: key.name || '',
+                            value: '',
+                            enabled: key.enabled !== false,
+                            valueConfigured: !!key.valueConfigured,
+                            fingerprint: key.fingerprint || ''
+                        }))
+                        : [{
+                            ...this.newProviderKey(),
+                            valueConfigured: !!p.apiKeyConfigured
+                        }];
                     this.providerForm = {
                         name,
                         baseUrl: p.baseUrl,
                         apiKey: '',
+                        apiKeys,
+                        keyCooldown: {
+                            authMs: p.keyCooldown?.authMs ?? null,
+                            quotaMs: p.keyCooldown?.quotaMs ?? null,
+                            rateLimitMs: p.keyCooldown?.rateLimitMs ?? null
+                        },
+                        keyListMode: rawApiKeys !== null,
+                        keyListOriginallyConfigured: rawApiKeys !== null,
                         format: p.format,
                         authType: p.authType || '',
                         accountId: p.accountId || '',
@@ -6541,6 +6913,7 @@
                         apiKeyConfigured: !!p.apiKeyConfigured,
                         clearApiKey: false
                     };
+                    if (rawApiKeys !== null) await this.loadHealth(false);
                     this.openProviderDrawer();
                 },
 
@@ -6560,6 +6933,10 @@
                         name: this.nextCopyName(name, Object.keys(this.config.providers || {})),
                         baseUrl: p.baseUrl,
                         apiKey: '',
+                        apiKeys: p.authType === 'chatgptOAuth' ? [] : [this.newProviderKey()],
+                        keyCooldown: { authMs: null, quotaMs: null, rateLimitMs: null },
+                        keyListMode: false,
+                        keyListOriginallyConfigured: false,
                         format: p.format,
                         authType: p.authType || '',
                         accountId: p.accountId || '',
@@ -6582,7 +6959,7 @@
                         clearApiKey: false
                     };
                     this.openProviderDrawer();
-                    if (p.apiKeyConfigured) {
+                    if (p.apiKeyConfigured || p.apiKeys?.length) {
                         this.showStatus(`已按「${name}」预填，API Key 需重新填写`, 'success');
                     }
                 },
@@ -6624,17 +7001,33 @@
                         return;
                     }
 
-                    const existing = this.editingProvider ? this.config.providers[this.editingProvider] : null;
-                    let apiKey = oauth ? '' : this.providerForm.apiKey;
-                    if (!apiKey && this.providerForm.apiKeyConfigured && !this.providerForm.clearApiKey) {
-                        apiKey = existing?.apiKey || '';
+                    let apiKey = '';
+                    let apiKeys;
+                    let keyCooldown;
+                    if (!oauth && this.providerForm.keyListMode) {
+                        const rows = this.providerKeysPayload(this.providerForm.apiKeys);
+                        if (rows.length) {
+                            apiKeys = rows.map((key) => {
+                                const source = this.providerForm.apiKeys.find((item) => item.id === key.id);
+                                return {
+                                    ...key,
+                                    valueConfigured: !!source?.valueConfigured || !!source?.value,
+                                    fingerprint: source?.fingerprint || ''
+                                };
+                            });
+                            keyCooldown = this.keyCooldownPayload(this.providerForm.keyCooldown);
+                        }
+                    } else if (!oauth) {
+                        const legacyKey = this.providerForm.apiKeys?.[0];
+                        apiKey = legacyKey?.value || (legacyKey?.valueConfigured ? '__AI_GATEWAY_KEEP_API_KEY__' : '');
                     }
-                    if (this.providerForm.clearApiKey) apiKey = '';
                     const snapshot = this.snapshotConfig();
                     this.config.providers[this.providerForm.name] = {
                         baseUrl: oauth ? 'https://chatgpt.com/backend-api/codex' : this.providerForm.baseUrl,
                         apiKey,
-                        apiKeyConfigured: apiKey !== '',
+                        apiKeyConfigured: apiKey !== '' || !!apiKeys?.length,
+                        apiKeys,
+                        keyCooldown,
                         format: oauth ? 'openai-responses' : this.providerForm.format,
                         authType: oauth ? 'chatgptOAuth' : undefined,
                         accountId: oauth ? this.providerForm.accountId : undefined,
@@ -6666,6 +7059,7 @@
                     // 等于同一件事确认两遍，实际结果是用户忘记第二步。
                     // 失败时回滚内存并留着弹窗，避免界面显示的和磁盘上的不一致。
                     if (await this.persistConfig()) {
+                        if (apiKeys?.length) await this.loadHealth(false);
                         this.showProviderModal = false;
                     } else {
                         this.restoreConfig(snapshot);
@@ -6982,31 +7376,54 @@
                         this.showStatus('ChatGPT OAuth 账户状态可在 Provider 页面查看', 'success');
                         return;
                     }
+                    await this.runProviderProbe(null);
+                },
+
+                async probeProviderKey(key) {
+                    if (!key?.value && !key?.valueConfigured) {
+                        this.showStatus('请先填写此密钥，再进行单行测试', 'error');
+                        return;
+                    }
+                    await this.runProviderProbe(key);
+                },
+
+                async runProviderProbe(testKey) {
                     if (this.probingProvider) return;
                     if (!this.providerForm.name || !this.providerForm.baseUrl) {
                         this.showStatus('名称和 URL 不能为空', 'error');
                         return;
                     }
-                    const existing = this.editingProvider ? this.config.providers[this.editingProvider] : null;
-                    let apiKey = this.providerForm.apiKey || '';
-                    if (!apiKey && this.providerForm.apiKeyConfigured && !this.providerForm.clearApiKey) {
-                        apiKey = existing?.apiKey || '__AI_GATEWAY_KEEP_API_KEY__';
+                    const input = {
+                        name: this.providerForm.name,
+                        baseUrl: this.providerForm.baseUrl,
+                        format: this.providerForm.format,
+                        userAgent: this.providerForm.userAgent || '',
+                        proxy: this.providerForm.proxy || ''
+                    };
+                    if (testKey || this.providerForm.keyListMode) {
+                        const rows = testKey
+                            ? (this.providerForm.keyListMode ? this.providerForm.apiKeys : [testKey])
+                            : this.providerForm.apiKeys;
+                        input.apiKeys = (rows || [])
+                            .filter((key) => key?.value || key?.valueConfigured)
+                            .map((key) => ({
+                                id: key.id,
+                                value: key.value || (key.valueConfigured ? '__AI_GATEWAY_KEEP_API_KEY__' : ''),
+                                enabled: key.enabled !== false
+                            }));
+                        if (testKey) input.testKeyId = testKey.id;
+                    } else {
+                        const key = this.providerForm.apiKeys?.[0];
+                        input.apiKey = key?.value || (key?.valueConfigured ? '__AI_GATEWAY_KEEP_API_KEY__' : '');
                     }
-                    if (this.providerForm.clearApiKey) apiKey = '';
                     this.probingProvider = true;
+                    this.providerProbeKeyId = testKey?.id || '';
                     this.providerProbeStatus = null;
                     try {
                         const res = await fetch('/api/providers/probe', {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({
-                                name: this.providerForm.name,
-                                baseUrl: this.providerForm.baseUrl,
-                                format: this.providerForm.format,
-                                apiKey,
-                                userAgent: this.providerForm.userAgent || '',
-                                proxy: this.providerForm.proxy || ''
-                            })
+                            body: JSON.stringify(input)
                         });
                         if (!res.ok) throw new Error(await this.errorText(res, '检测失败'));
                         const data = await res.json();
@@ -7017,6 +7434,7 @@
                         this.providerProbeStatus = { status: 'error', message: err.message || '检测失败' };
                     } finally {
                         this.probingProvider = false;
+                        this.providerProbeKeyId = '';
                     }
                 },
 
@@ -8216,6 +8634,7 @@
                 dragList(kind) {
                     if (kind === 'route') return this.config.routes;
                     if (kind === 'target') return this.routeForm.targets;
+                    if (kind === 'provider-key') return this.providerForm.apiKeys;
                     return null;
                 },
 
@@ -8251,7 +8670,9 @@
                 // 候选列表是 div、路由列表是 tr，而且两者外层容器都还有别的兄弟节点
                 // （表头行、空状态行）。属性选择器让模板结构以后怎么调都不影响这里。
                 dragRowElements(kind) {
-                    const root = kind === 'route' ? this.$refs.routeRows : this.$refs.targetRows;
+                    const root = kind === 'route'
+                        ? this.$refs.routeRows
+                        : kind === 'provider-key' ? this.$refs.providerKeyRows : this.$refs.targetRows;
                     if (!root) return [];
                     return Array.from(root.querySelectorAll('[data-drag-row]'));
                 },
@@ -8273,6 +8694,7 @@
                     // 取出后数组左移了一格：落点在 from 之后时下标要减 1。
                     const target = to > from ? to - 1 : to;
                     list.splice(target, 0, moved);
+                    if (kind === 'provider-key') this.providerKeyListChanged();
                 },
 
                 // ── 模板绑定用的小查询 ──────────────────────────────

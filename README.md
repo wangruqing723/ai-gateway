@@ -94,6 +94,40 @@ routes:
     model: "your-main-model"
 ```
 
+### Provider 多密钥与 Key 切换
+
+需要为同一个上游配置多把密钥时，用 `apiKeys` 列表替代 `apiKey`；两种写法不能同时配置。单值 `apiKey` 继续使用原行为，列表模式则按配置顺序选择已启用且未冷却的密钥：上游返回 401、402、403 或 429，且仍有下一把可选密钥时，网关会在当前 Provider 内立即切换。Key 切换不占候选 `maxAttempts` 或本地重试次数，每次请求会重新排队，并与同一切换链共用超时预算；列表模式不会回退到客户端请求头中的密钥。若只剩一把可选密钥，短暂 429 可先按本地重试规则重试。
+
+```yaml
+providers:
+  tabi:
+    baseUrl: "https://tabitoken.com"
+    format: anthropic
+    apiKeys:
+      - id: primary
+        name: 主密钥
+        value: "sk-xxx"
+      - id: backup
+        name: 备用密钥
+        value: "sk-yyy"
+    # keyCooldown:
+    #   authMs: 300000     # 401/403，默认 5 分钟
+    #   quotaMs: 60000     # 402，默认 1 分钟
+    #   rateLimitMs: 30000 # 429，默认 30 秒
+```
+
+密钥冷却时长可按类别配置，范围为 0–86400000 毫秒。402 和 429 响应带有效 `Retry-After` 时按该时长冷却；401 和 403 不读取该响应头。冷却到期前，管理页会显示密钥状态、失败原因和剩余时间；成功请求不会提前解除冷却。到期、在网页上手动「解除冷却」、替换密钥、修改连接设置、删除密钥或重启网关会结束对应冷却。提供商编辑页可新增、替换、停用、排序和删除密钥，也可逐把测试；密钥值不在列表中展示，只显示指纹。
+
+#### 手工合并重复 Provider
+
+如果 `TaBi1`、`TaBi2`、`TaBi3` 连接的是同一上游且只有密钥不同，可手工合并：
+
+1. 保留 `TaBi1` 的 Provider 设置，删除其单值 `apiKey`，把三把密钥分别放入 `apiKeys`，并为每项设置不同的 `id` 和可选 `name`。
+2. 删除 `providers` 下的 `TaBi2`、`TaBi3` 配置块。
+3. 检查 `routes` 中的 `targets`：删除指向 `TaBi2`、`TaBi3` 的目标，或把它们改为指向 `TaBi1`；旧式单 Provider 路由若引用它们，也改为 `TaBi1`。
+
+网关不会自动扫描、合并重复 Provider，也不会替您改写 `config.yaml`；合并时需手工调整 Provider 配置和路由引用。
+
 ### Provider 的 User-Agent
 
 每个 Provider 可选配 `userAgent`。取值优先级固定为：`provider.userAgent` 非空时使用该值；否则原样转发客户端请求中的 `User-Agent`；客户端也未携带时完全不设置该头，由 Go 自动填入 `Go-http-client/1.1`。
@@ -359,6 +393,7 @@ Go 版用真正的 SQLite（`modernc.org/sqlite`），会用文件锁保证并�
 | vision 图片识别 | 已实现 | 调用视觉模型 + SQLite 缓存复用 + 同图并发去重 |
 | SQLite 图片缓存 | 已实现 | 纯 Go SQLite，`CGO_ENABLED=0` 可编译 |
 | 健康检查 `/health` | 已实现 | 实际监听地址 + 队列状态 + Provider 状态 + 熔断状态 + 粘性映射数 + 缓存与内存 |
+| Provider 多密钥 | 已实现 | 顺序切换、冷却、网页管理与逐密钥测试 |
 
 实测收益：镜像约 20MB 级别，启动后内存约个位数 MB；历史 Node 版镜像约 150MB 级别。
 

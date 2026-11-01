@@ -1,8 +1,6 @@
 package main
 
 import (
-	"crypto/sha1"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -18,6 +16,7 @@ import (
 	"ai-gateway/internal/cache"
 	"ai-gateway/internal/config"
 	"ai-gateway/internal/httputil"
+	"ai-gateway/internal/keypool"
 )
 
 const (
@@ -267,6 +266,19 @@ func printBanner(cfg *config.Config, c *cache.Cache) {
 		if !p.IsEnabled() {
 			disabled = " [已禁用]"
 		}
+		if p.UsesKeyList() {
+			enabled := 0
+			for _, key := range p.APIKeys {
+				if key.IsEnabled() {
+					enabled++
+				}
+			}
+			logSystem("    %s: %s [%s] 密钥 启用 %d/%d 并发=%d%s", name, p.BaseURL, p.Format, enabled, len(p.APIKeys), p.MaxConcurrent, disabled)
+			for _, key := range p.APIKeys {
+				logSystem("      密钥指纹: %s", keypool.Fingerprint(key.Value))
+			}
+			continue
+		}
 		logSystem("    %s: %s [%s] key=%s 并发=%d%s", name, p.BaseURL, p.Format, mask(p.APIKey), p.MaxConcurrent, disabled)
 	}
 	logSystem("  Routes  : %d 条", len(cfg.Routes))
@@ -359,13 +371,5 @@ func clientIP(r *http.Request) string {
 }
 
 func keyFingerprint(apiKey string) string {
-	if apiKey == "" {
-		return ""
-	}
-	sum := sha1.Sum([]byte(apiKey))
-	encoded := strings.ToUpper(hex.EncodeToString(sum[:]))
-	if len(encoded) >= 8 {
-		return encoded[:8]
-	}
-	return encoded
+	return keypool.Fingerprint(apiKey)
 }

@@ -121,6 +121,7 @@ Go 源码注释、日志、README 主要使用中文；新增说明请保持这�
 - `internal/cache/`：基于 `modernc.org/sqlite` 的纯 Go 图片缓存。
 - `internal/metrics/`：内存环形请求日志与运行指标聚合，支持 P95、成功率、Provider 排行。
 - `internal/providerhealth/`：上游 Provider 健康检测，探测 `/v1/models` 端点。
+- `internal/keypool/`：Provider 多密钥的顺序选择、冷却状态与 ticket 管理；由 `applyRuntimeConfig` 调用 `Reconcile` 同步运行时状态。
 - `internal/breaker/`：per-provider 熔断器，自维护连续失败计数与 closed/open/half_open 状态机，供候选循环做准入过滤。
 - `internal/balancer/`：候选尝试顺序（`failover` / `round-robin` / `least-queue`）与 prompt cache 会话粘性。只认下标和身份字符串，不依赖 `router`、`config`，避免成环。
 - `cmd/gateway/web/`：嵌入式前端资源与固定版本 vendor 脚本，路径需匹配 `//go:embed web/index.html web/vendor/*`。
@@ -188,7 +189,7 @@ go test ./internal/<pkg>/ -run TestName -v
 `cmd/gateway/main.go` 的 `server.handle()` 按顺序处理：
 
 1. 特殊路由：`HEAD`、`GET /`、`/api/config*`、`GET /health`、`GET /v1/models`。
-- 观测 API：`GET /api/metrics`（聚合指标）、`GET /api/logs`（请求日志，支持筛选）、`POST /api/providers/health`（触发 Provider 健康检测）、`POST /api/providers/breaker/reset`（手动闭合熔断器，可带 `?provider=`）、`GET /api/providers/models?provider=`（用已落盘配置里的 apiKey 透传查询该 provider 上游的真实 `/v1/models` 模型列表，供前端配置路由时选择目标模型）。
+- 观测 API：`GET /api/metrics`（聚合指标）、`GET /api/logs`（请求日志，支持筛选）、`POST /api/providers/health`（触发 Provider 健康检测）、`POST /api/providers/breaker/reset`（手动闭合熔断器，可带 `?provider=`）、`GET /api/providers/models?provider=`（按已落盘配置中的单值 `apiKey` 或列表模式下的可选择密钥，查询该 provider 上游的真实 `/v1/models` 模型列表，供前端配置路由时选择目标模型）。
 2. HTTP 边界校验 method、Origin、`Content-Type` 和请求体大小；无 Origin 的本机 CLI 请求保持兼容。
 3. `converter.DetectClientFormat(urlPath)` 按路径识别客户端格式。
 4. `FromAnthropic`、`FromOpenAIChat`、`FromOpenAIResponses` 规范化为 `*converter.Internal`，转换错误必须在路由前返回。
@@ -196,14 +197,15 @@ go test ./internal/<pkg>/ -run TestName -v
 6. `balancer.StickyKey(internal.System, internal.Messages)` 取粘性键——必须在 vision 翻译之前取，翻译会把图片块换成随缓存命中情况变化的文字描述，掺进哈希会让同一会话算出两个键。随后 `server.candidateOrder` 调 `balancer.Selector.Select` 得到尝试顺序下标序列，长度恒等于候选数、不丢候选。
 7. 若配置 `vision` 且消息含图片，`vision.Translator.Translate` 先调用视觉模型替换图片块为文本描述。视觉翻译在候选循环外，产出的是文字描述，与目标无关。
 8. 视觉翻译完成后，若任一候选配置了 `contextWindow`，调用 `tokenest.Estimate` 对已翻译的内部请求估算一次输入 token，所有候选共享该值；未配置时不估算。随后按第 6 步的顺序遍历候选，真实尝试次数受 `failover.AttemptLimit()` 约束，每个候选在 `forwardAttempt` 之前完成窗口裁决：
-   1. 熔断准入 `breaker.Allow(name)`，被跳过的候选不消耗尝试额度。
-   2. `contextWindow` 裁决紧跟其后：`budget = contextWindow - estimatedInput - contextSafetyMargin`；低于 1024 的候选记 `context_skip` 并跳过，不消耗 `maxAttempts`，也不调用 `breaker.Report`（尚未进入 `forwardAttempt`、没有借出探针额度）。
-   3. `router.ResolveAPIKey` 优先使用 provider 配置，其次从 `x-api-key` 或 `Authorization: Bearer` 读取。
-   4. 按 provider `format` 通过 checked API 转为 Anthropic 或 OpenAI Chat 上游请求；该候选构建失败则跳过，全部失败才返回错误。
-   5. 非直通模式通过 `queue.Manager.Acquire` 获取执行槽，`release()` 必须 `defer` 在单次尝试函数内，否则循环里累积不释放。
-   6. `proxy.Forward` 转发请求，并把响应转换回客户端格式；`ShouldRetry` 按 failover/localRetry 判定返回 `ErrAttemptAbandoned` 且不写客户端。判定结果是 `failoverDecision`，其中 `freeAttempt` 表示本次放弃不消耗额度。流式响应在写出 200 头之前先进入预读阶段（`internal/proxy/preread.go`）：上游 200 之后、第一个内容事件之前出现的失败事件（`rate_limit_error`、`overloaded_error`、`response.failed` 等）按错误类型换算成等效状态码（限流→429、过载→529/5xx），走同一套 `ShouldRetry` 判定；读到第一个内容事件、等满 3 秒或上游结束时才向客户端提交 200 头并原样补写暂存的开场字节。
-   7. 同一候选的本地重试之间释放队列 slot；该候选内层循环结束后，`breaker.Report` 用最终结果上报一次。判据取 `OnUpstreamStatus` 回调拿到的真实上游状态码，并且**在任何状态码下都要看 `forwardErr`**——2xx 响应头之后才失败（流中途断开、活跃超时、响应转换失败）同样计入熔断。
-9. 成功或额度耗尽后写响应头 `x-ai-gateway-provider` / `x-ai-gateway-attempts`，并记一条请求日志（`Attempts`、`AttemptTrail`）。全部候选都装不下时返回 413 `context_window_exceeded`；熔断跳过优先于该终态。
+   1. 列表模式先检查是否有可选择密钥；没有则记 `key_skip` 并跳过，不消耗 `maxAttempts`、不排队、不调用 `breaker.Report`，同时汇总最早冷却恢复时间。
+   2. 熔断准入 `breaker.Allow(name)`，被跳过的候选不消耗尝试额度。
+   3. `contextWindow` 裁决紧跟其后：`budget = contextWindow - estimatedInput - contextSafetyMargin`；低于 1024 的候选记 `context_skip` 并跳过，不消耗 `maxAttempts`，也不调用 `breaker.Report`（尚未进入 `forwardAttempt`、没有借出探针额度）。
+   4. 列表模式由 `keypool` 按配置顺序选择密钥；单值模式使用 `router.ResolveAPIKey`，优先读取 provider 配置，其次读取 `x-api-key` 或 `Authorization: Bearer`。列表模式不回退客户端密钥。
+   5. 按 provider `format` 通过 checked API 转为 Anthropic 或 OpenAI Chat 上游请求；该候选构建失败则跳过，全部失败才返回错误。
+   6. 非直通模式通过 `queue.Manager.Acquire` 获取执行槽，`release()` 必须 `defer` 在单次尝试函数内，否则循环里累积不释放。
+   7. `proxy.Forward` 转发请求，并把响应转换回客户端格式；列表模式遇到 401/402/403/429（含流式预读阶段的等效状态码），若还有可选择密钥且切换链剩余预算至少 1 秒，就立即改用下一把密钥。切换不占 `maxAttempts` 或本地重试次数；每把密钥都重新 `Acquire` 队列槽，切换链共用一次超时预算。响应已提交给客户端后不再切换。其余情况沿用 `ShouldRetry` 的 failover/localRetry 判定并返回 `ErrAttemptAbandoned`，不写客户端。唯一例外是只剩一个可选择密钥时的短暂 429：未达到 `maxRetryAfterMs` 的 freeAttempt 条件且仍有本地重试额度时，可按本地重试间隔重试同一密钥，重试耗尽后再冷却。流式响应在写出 200 头之前先进入预读阶段（`internal/proxy/preread.go`）：上游 200 之后、第一个内容事件之前出现的失败事件（`rate_limit_error`、`overloaded_error`、`response.failed` 等）按错误类型换算成等效状态码（限流→429、过载→529/5xx），读到第一个内容事件、等满 3 秒或上游结束时才向客户端提交 200 头并原样补写暂存的开场字节。
+   8. 同一候选的本地重试之间释放队列 slot；该候选内层循环结束后，`breaker.Report` 用最终结果上报一次。判据取 `OnUpstreamStatus` 回调拿到的真实上游状态码，并且**在任何状态码下都要看 `forwardErr`**——2xx 响应头之后才失败（流中途断开、活跃超时、响应转换失败）同样计入熔断。
+9. 成功或额度耗尽后写响应头 `x-ai-gateway-provider` / `x-ai-gateway-attempts`，并记一条请求日志（`Attempts`、`AttemptTrail`）。若一个真实请求都未发出，终态优先级为：全部 Provider 停用 `all_candidates_disabled`（503）→ 无可选择密钥 `no_selectable_provider_key`（503，存在冷却项时按最早恢复时间附 `retry-after`）→ 熔断 `breaker_open`（503）→ 长时间限流 `all_candidates_rate_limited`（429）→ 上下文窗口不够 `context_window_exceeded`（413）→ 协议转换失败 `conversion_error`（400）。
 
 ## Key Mechanisms
 
@@ -213,6 +215,20 @@ go test ./internal/<pkg>/ -run TestName -v
 - **会话粘性**：`round-robin` / `least-queue` 下对可缓存前缀（system + 首条 user 消息文本）做 SHA-256 当近似会话身份，命中则把该目标提到队首，保住上游侧 prompt cache 前缀。TTL 5 分钟、LRU 上限 1000 条、前缀短于 256 字符不参与。只在候选**成功后**才 `Remember`，绝不在选中时绑定——绑定失败过的目标会把整条会话钉在坏上游上。映射值存 `provider/model` 而不是下标，热重载改 `targets` 顺序后下标会指向另一个上游。
 - **故障转移额度**：`maxAttempts` 只约束「真实尝试」。两类放弃不消耗额度：熔断跳过，以及 429 且 `Retry-After` 超过 `failover.maxRetryAfterMs`（上游自报这段时间不可用，与熔断跳过同等待遇）。否则一个自曝限流的上游会挤掉本来还能试的健康候选。`maxRetryAfterMs` 显式写 0 表示不设上限。最后一个候选 `allowFailoverTransfer=false`，它的 429 会原样透传给客户端，比网关合成终态更准确。
 - **本地重试**：`localRetry.maxRetries` 是同一候选的额外转发次数，间隔由 `intervalMs` 固定指定（默认 1000ms）；两字段在 provider / route / target 之间按字段级 target > route > provider 覆盖，显式 0 关闭本层。它复用 failover 的失败分类，但独立于 `failover.enabled`；本地子尝试不额外增加 `maxAttempts`，同一候选最终只计一次，且长 `Retry-After` 的 freeAttempt 不做本地重试。响应开始前的可转移失败才会重试；队列 slot 在两次请求间释放，客户端断开可中止等待，每候选最终结果只向 breaker 上报一次。
+- **Provider 多密钥与 Key 切换**：`apiKeys` 与 `apiKey` 互斥，列表最多 10 项；按配置顺序选用已启用且未冷却的密钥。列表模式下 401/403 属 `auth`（默认冷却 300000ms）、402 属 `quota`（60000ms）、429 属 `rateLimit`（30000ms）；`keyCooldown` 各项可设 0–86400000ms。`quota` / `rateLimit` 有效 `Retry-After` 直接决定冷却时长，不受 `maxRetryAfterMs` 限制；`auth` 忽略它。某类冷却值为 0 时关闭该类默认冷却，但仍遵守有效 `Retry-After`。切换仅在仍有下一个可选密钥且切换链剩余至少 1 秒时立即发生，不占候选额度或本地重试；其他错误按既有规则处理。只剩一个可选密钥时，短暂 429 若不是 `freeAttempt` 且仍有本地重试额度，可先在同一密钥上本地重试；重试耗尽后才冷却。熔断仍按每候选最终结果上报一次，密钥相关 4xx 的熔断结论为 `OutcomeIgnored`。
+
+  冷却仅在到期、手动解除、凭据替换、连接设置变化、密钥删除或进程重启时结束；成功不会清除冷却。冷却持续时间配置变化不重算已有 `until`。`auth` / `quota` 失败后的 `key_recovered` 只由之后新选择的 ticket（序号大于最近一次异常序号）成功触发；失败前已发出的请求后来成功、冷却到期本身都不算恢复。`rateLimit` 冷却不记 `key_cooldown`，也不触发 `key_recovered`。`applyRuntimeConfig` 调用 `keypool.Reconcile`；凭据变化清该密钥状态，连接指纹变化清该 Provider 全部密钥状态，配置移除则删除状态。
+
+  其他出网路径沿用以下口径：
+
+  | 路径 | 切换密钥 | 遵守已有冷却 | 更新冷却 | 预算 |
+  |---|---|---|---|---|
+  | 图片识别 | 是 | 是 | 是 | 共享 120s，换密钥不重置；每次重新排队 |
+  | 健康检测 | 是 | 是 | 否 | 单次 5s，换密钥不重置 |
+  | 已保存配置的模型查询 | 是 | 是 | 否 | 10s |
+  | 未保存表单的连接测试 | 是 | 否 | 否 | 5s |
+  | 单密钥测试 | 否 | 否 | 否 | 5s；停用密钥也可测 |
+
 - **上下文窗口与动态输出预算**：`Provider.ContextWindow`、`Route.ContextWindow`、`Target.ContextWindow` 按 **target > route > provider** 覆盖，三层都为 nil 时完全不启用。启用后在 vision 翻译之后估算输入 token，图片块按每张固定 1500 token 计值（不按 base64 长度，避免把图片文本严重高估；固定值也避免朝不安全方向低估），预算为 `contextWindow - estimatedInput - contextSafetyMargin`。预算低于 1024 的候选在 `forwardAttempt` 前跳过，不发网络请求、不调用 `breaker.Report`、不消耗 `maxAttempts`；全部候选装不下返回 413 `context_window_exceeded`。预算只对既有 maxTokens 优先级链做 `min` 向下压制，不向上抬；`[1M]` 标记会剥离并把窗口覆盖为 1000000，但不改变 maxTokens。
 - **可配置的转移边界**：非流式整体超时用独立的 `onRequestTimeout`（默认 **false**），不并入 `onTransportError`——后者覆盖的连接失败几乎不耗时、是 failover 最该管的场景，而整体超时每个候选都要等满一整个 `timeout` 预算，转移会让总耗时接近翻倍。流式活跃超时不可配置转移：那时字节已写给客户端。流式响应另有一个**提交前窗口**：上游 200 之后、第一个内容事件之前，网关还在预读开场事件，此时客户端一个字节都没收到，流内失败事件按等效状态码参与正常的 failover / 本地重试 / 熔断判定；预读最长等待 3 秒（读到内容事件即提交），只有「开场后一直无内容」的请求才会多等这一小段。
 - **配置零值语义**：`Failover` / `Breaker` 的数值项一律用 `*int`，`applyDefaults` 只在 `nil` 时填默认值。值类型分不清「写了 0」和「没写」：`maxRetryAfterMs: 0` 是合法的「不设上限」会被改掉，而 `maxAttempts` / `breaker` 三项写 0 本该报错，却会被静默改成默认值、让 `validate` 的下界检查变成死代码。读取统一走 accessor（`AttemptLimit()` / `RetryAfterCapMs()` / `FailureThreshold()` / `CooldownMs()` / `ProbeLimit()`），默认值只留一处来源。

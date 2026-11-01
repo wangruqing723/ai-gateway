@@ -103,6 +103,29 @@
                     return (Number(log?.attempts) || 0) > 1 ? `${log.attempts} 次尝试` : '--';
                 },
 
+                attemptOutcomeLabel(outcome) {
+                    if (outcome === 'key_switched') return '密钥切换';
+                    return outcome || '--';
+                },
+
+                attemptDetailExplanation(detail) {
+                    const reasonLabels = {
+                        key_auth: '鉴权失败',
+                        key_quota: '配额耗尽',
+                        key_rate_limit: '触发限流',
+                        '401/key_auth': '鉴权失败',
+                        '403/key_auth': '鉴权失败',
+                        '402/key_quota': '配额耗尽',
+                        '429/key_rate_limit': '触发限流',
+                        no_selectable_key: '没有可选择的密钥'
+                    };
+                    if (detail?.kind === 'key_skip') return '无可选择密钥，跳过该 Provider';
+                    if (detail?.outcome === 'key_switched') {
+                        return `当前密钥${reasonLabels[detail.reason] || '失败'}，已切换到下一密钥`;
+                    }
+                    return reasonLabels[detail?.reason] || detail?.reason || detail?.kind || '--';
+                },
+
                 // modelTrail 把客户端模型与上游目标模型做成对比短写：gpt-5.6-sol → glm-5.2。
                 // 路由映射改写模型名时一眼能看出实际打到上游的是哪个模型；
                 // 两侧相同或只一侧有值时退化为单值，不增噪声。
@@ -322,13 +345,15 @@
                         breaker_open: '熔断打开',
                         breaker_recovered: '熔断已恢复',
                         health_down: '健康异常',
-                        health_recovered: '健康已恢复'
+                        health_recovered: '健康已恢复',
+                        key_cooldown: '密钥冷却',
+                        key_recovered: '密钥恢复'
                     }[event?.kind] || '状态变化';
                 },
 
                 runEventClass(event) {
-                    if (event?.recovered) return 'border-good/20 bg-good/5 text-emerald-200/80';
-                    if (event?.kind === 'health_down') return 'border-danger/35 bg-danger/10 text-rose-100';
+                    if (event?.recovered || event?.kind === 'key_recovered') return 'border-good/20 bg-good/5 text-emerald-200/80';
+                    if (event?.kind === 'health_down' || event?.kind === 'key_cooldown') return 'border-danger/35 bg-danger/10 text-rose-100';
                     return 'border-warn/35 bg-warn/10 text-amber-100';
                 },
 

@@ -49,7 +49,7 @@ func (e *EventLog) Add(kind, provider, detail string) {
 		Kind:      kind,
 		Provider:  provider,
 		Detail:    detail,
-		Recovered: kind == "breaker_recovered" || kind == "health_recovered",
+		Recovered: kind == "breaker_recovered" || kind == "health_recovered" || kind == "key_recovered",
 	}
 	if len(e.items) < cap(e.items) {
 		e.items = append(e.items, event)

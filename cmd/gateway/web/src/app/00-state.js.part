@@ -20,9 +20,12 @@
                 // 弹窗临时探测与首页已落盘 provider 的健康缓存隔离，绝不复用 checkingProvider。
                 probingProvider: false,
                 providerProbeStatus: null,
+                providerProbeKeyId: '',
+                resettingProviderKey: '',
                 chatgptAccounts: [],
                 chatGPTNow: Date.now(),
                 _chatGPTExpiryTimer: null,
+                _providerKeyCountdownTimer: null,
                 loadingChatGPTAccounts: false,
                 refreshingChatGPTUsage: false,
                 refreshingChatGPTAccountId: '',
@@ -233,6 +236,10 @@
                     // JSON 解析（true / 20 / {...} 保留类型，解析失败按字符串），是 provider
                     // 重建点之一，漏字段会让绑定在保存时被静默丢弃。
                     extraBody: [],
+                    // 列表模式的密钥行与冷却时长；旧单值也在 apiKeys 中暂存为表单行。
+                    apiKeys: [],
+                    keyCooldown: { authMs: null, quotaMs: null, rateLimitMs: null },
+                    keyListMode: false,
                     // enabled 默认 true：新增 provider 默认启用；editProvider 回填既有值。
                     enabled: true,
                     apiKeyConfigured: false,

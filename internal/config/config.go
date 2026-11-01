@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"unicode"
 	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
@@ -62,6 +63,14 @@ const (
 	// 名称多为中文，按字节算一个汉字占 3 字节，100 字节只剩 33 个汉字可用。
 	// 名称会进日志、响应头 x-ai-gateway-provider 和前端表格，需要有个上限。
 	maxProviderNameRunes = 100
+	maxProviderKeys      = 10
+	maxProviderKeyID     = 32
+	maxProviderKeyName   = 64
+	maxKeyCooldownMs     = 86_400_000
+
+	defaultKeyAuthCooldownMs      = 300_000
+	defaultKeyQuotaCooldownMs     = 60_000
+	defaultKeyRateLimitCooldownMs = 30_000
 
 	// maxProviderUserAgentRunes User-Agent 长度上限，按字符（rune）而非字节计：
 	// 配置允许使用非 ASCII 的客户端标识，按字节计会不必要地缩短其可用长度。
@@ -162,19 +171,39 @@ type LocalRetry struct {
 	IntervalMs *int `yaml:"intervalMs,omitempty" json:"intervalMs,omitempty"`
 }
 
+// ProviderKey 是 Provider 列表模式中的一份 API 密钥。
+type ProviderKey struct {
+	ID      string `yaml:"id" json:"id"`
+	Name    string `yaml:"name,omitempty" json:"name,omitempty"`
+	Value   string `yaml:"value" json:"value"`
+	Enabled *bool  `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+}
+
+// IsEnabled 返回密钥是否启用；未配置时默认启用。
+func (k ProviderKey) IsEnabled() bool { return BoolOr(k.Enabled, true) }
+
+// KeyCooldown 保存各类密钥失败的冷却时长，单位为毫秒。
+type KeyCooldown struct {
+	AuthMs      *int `yaml:"authMs,omitempty" json:"authMs,omitempty"`
+	QuotaMs     *int `yaml:"quotaMs,omitempty" json:"quotaMs,omitempty"`
+	RateLimitMs *int `yaml:"rateLimitMs,omitempty" json:"rateLimitMs,omitempty"`
+}
+
 // Provider 上游 provider 定义
 type Provider struct {
-	Name          string `yaml:"-" json:"name,omitempty"`                        // 运行时填充（map 的 key）
-	BaseURL       string `yaml:"baseUrl" json:"baseUrl"`                         // 上游地址
-	APIKey        string `yaml:"apiKey" json:"apiKey"`                           // 密钥，留空则从客户端请求头提取
-	Format        string `yaml:"format" json:"format"`                           // anthropic | openai | openai-responses
-	AuthType      string `yaml:"authType,omitempty" json:"authType,omitempty"`   // 空值使用 API Key；chatgptOAuth 使用 ChatGPT OAuth 账户
-	AccountID     string `yaml:"accountId,omitempty" json:"accountId,omitempty"` // chatgptOAuth 账户管理器中的 ID
-	UserAgent     string `yaml:"userAgent,omitempty" json:"userAgent,omitempty"` // 上游请求 UA，留空则转发客户端值；两处 omitempty 见 validate 注释
-	Proxy         string `yaml:"proxy,omitempty" json:"proxy,omitempty"`         // 上游代理，留空继承全局代理；两处 omitempty 理由同 userAgent
-	MaxConcurrent int    `yaml:"maxConcurrent" json:"maxConcurrent"`             // 最大并发
-	MaxPerSecond  int    `yaml:"maxPerSecond" json:"maxPerSecond"`               // 每秒最多请求数，0 表示不限
-	MaxQueueWait  int    `yaml:"maxQueueWait" json:"maxQueueWait,omitempty"`     // 队列最大等待（毫秒）
+	Name          string        `yaml:"-" json:"name,omitempty"` // 运行时填充（map 的 key）
+	BaseURL       string        `yaml:"baseUrl" json:"baseUrl"`  // 上游地址
+	APIKey        string        `yaml:"apiKey" json:"apiKey"`    // 密钥，留空则从客户端请求头提取
+	APIKeys       []ProviderKey `yaml:"apiKeys,omitempty" json:"apiKeys,omitempty"`
+	KeyCooldown   *KeyCooldown  `yaml:"keyCooldown,omitempty" json:"keyCooldown,omitempty"`
+	Format        string        `yaml:"format" json:"format"`                           // anthropic | openai | openai-responses
+	AuthType      string        `yaml:"authType,omitempty" json:"authType,omitempty"`   // 空值使用 API Key；chatgptOAuth 使用 ChatGPT OAuth 账户
+	AccountID     string        `yaml:"accountId,omitempty" json:"accountId,omitempty"` // chatgptOAuth 账户管理器中的 ID
+	UserAgent     string        `yaml:"userAgent,omitempty" json:"userAgent,omitempty"` // 上游请求 UA，留空则转发客户端值；两处 omitempty 见 validate 注释
+	Proxy         string        `yaml:"proxy,omitempty" json:"proxy,omitempty"`         // 上游代理，留空继承全局代理；两处 omitempty 理由同 userAgent
+	MaxConcurrent int           `yaml:"maxConcurrent" json:"maxConcurrent"`             // 最大并发
+	MaxPerSecond  int           `yaml:"maxPerSecond" json:"maxPerSecond"`               // 每秒最多请求数，0 表示不限
+	MaxQueueWait  int           `yaml:"maxQueueWait" json:"maxQueueWait,omitempty"`     // 队列最大等待（毫秒）
 	// MaxTokens 覆盖转发给该 provider 的输出上限（Anthropic / Chat 的 max_tokens、
 	// Responses 的 max_output_tokens），nil 表示不覆盖。
 	//
@@ -362,6 +391,36 @@ func (p *Provider) IsEnabled() bool {
 		return false
 	}
 	return BoolOr(p.Enabled, true)
+}
+
+// UsesKeyList 表示 Provider 使用非空 apiKeys 列表模式。
+func (p *Provider) UsesKeyList() bool { return p != nil && len(p.APIKeys) > 0 }
+
+// KeyCooldownFor 返回指定类别的冷却时长（毫秒），未配置时使用默认值。
+func (p *Provider) KeyCooldownFor(class string) int {
+	var configured *int
+	defaultMs := 0
+	if p != nil && p.KeyCooldown != nil {
+		switch class {
+		case "auth":
+			configured = p.KeyCooldown.AuthMs
+		case "quota":
+			configured = p.KeyCooldown.QuotaMs
+		case "rateLimit":
+			configured = p.KeyCooldown.RateLimitMs
+		}
+	}
+	switch class {
+	case "auth":
+		defaultMs = defaultKeyAuthCooldownMs
+	case "quota":
+		defaultMs = defaultKeyQuotaCooldownMs
+	case "rateLimit":
+		defaultMs = defaultKeyRateLimitCooldownMs
+	default:
+		return 0
+	}
+	return IntOr(configured, defaultMs)
 }
 
 func boolPtr(v bool) *bool { return &v }
@@ -891,6 +950,10 @@ func redactProviderSecrets(node *yaml.Node, sentinel string, visited map[*yaml.N
 				redactAPIKeyValue(value, sentinel)
 				continue
 			}
+			if key.Kind == yaml.ScalarNode && key.Value == "apiKeys" {
+				redactProviderKeyValues(value, sentinel)
+				continue
+			}
 			if key.Kind == yaml.ScalarNode && key.Value == "proxy" {
 				redactProxyPasswordValue(value)
 				continue
@@ -901,6 +964,42 @@ func redactProviderSecrets(node *yaml.Node, sentinel string, visited map[*yaml.N
 	}
 	for _, child := range node.Content {
 		redactProviderSecrets(child, sentinel, visited)
+	}
+}
+
+func redactProviderKeyValues(value *yaml.Node, sentinel string) {
+	target := value
+	seen := make(map[*yaml.Node]bool)
+	for target != nil && target.Kind == yaml.AliasNode {
+		if seen[target] {
+			return
+		}
+		seen[target] = true
+		target = target.Alias
+	}
+	if target == nil || target.Kind != yaml.SequenceNode {
+		return
+	}
+	for _, item := range target.Content {
+		mapping := item
+		for mapping != nil && mapping.Kind == yaml.AliasNode {
+			if seen[mapping] {
+				mapping = nil
+				break
+			}
+			seen[mapping] = true
+			mapping = mapping.Alias
+		}
+		if mapping == nil || mapping.Kind != yaml.MappingNode {
+			continue
+		}
+		for i := 0; i+1 < len(mapping.Content); i += 2 {
+			key, entryValue := mapping.Content[i], mapping.Content[i+1]
+			if key.Kind == yaml.ScalarNode && key.Value == "value" {
+				redactAPIKeyValue(entryValue, sentinel)
+				break
+			}
+		}
 	}
 }
 
@@ -1126,6 +1225,18 @@ func validateProvider(name string, p *Provider, validateLimits bool) error {
 	if p.Format != "anthropic" && p.Format != "openai" && p.Format != "openai-responses" {
 		return fmt.Errorf("providers.%s.format 须为 anthropic、openai 或 openai-responses", name)
 	}
+	if p.APIKey != "" && p.UsesKeyList() {
+		return fmt.Errorf("providers.%s 不能同时配置 apiKey 与 apiKeys", name)
+	}
+	if p.AuthType == "chatgptOAuth" && p.UsesKeyList() {
+		return fmt.Errorf("providers.%s 使用 ChatGPT OAuth 时不能同时配置 apiKeys", name)
+	}
+	if p.KeyCooldown != nil && !p.UsesKeyList() {
+		return fmt.Errorf("providers.%s.keyCooldown 仅可与非空 apiKeys 一起使用", name)
+	}
+	if err := validateProviderKeys(name, p); err != nil {
+		return err
+	}
 	switch p.AuthType {
 	case "":
 		if p.AccountID != "" {
@@ -1214,6 +1325,87 @@ func validateProvider(name string, p *Provider, validateLimits bool) error {
 	// Enabled 无需校验：nil 与 true 同义（默认启用），false 是合法的软停用状态。
 	// 三种取值都合法，没有可报错的边界。
 	return nil
+}
+
+func validateProviderKeys(name string, p *Provider) error {
+	if len(p.APIKeys) > maxProviderKeys {
+		return fmt.Errorf("providers.%s.apiKeys 最多 %d 个（当前 %d）", name, maxProviderKeys, len(p.APIKeys))
+	}
+	seenIDs := make(map[string]struct{}, len(p.APIKeys))
+	for i, key := range p.APIKeys {
+		if !validProviderKeyID(key.ID) {
+			return fmt.Errorf("providers.%s.apiKeys[%d].id 须为 1-32 位字母、数字、下划线或连字符", name, i)
+		}
+		if _, exists := seenIDs[key.ID]; exists {
+			return fmt.Errorf("providers.%s.apiKeys[%d].id 重复: %s", name, i, key.ID)
+		}
+		seenIDs[key.ID] = struct{}{}
+		if count := utf8.RuneCountInString(key.Name); count > maxProviderKeyName {
+			return fmt.Errorf("providers.%s.apiKeys[%d].name 长度应不超过 %d 个字符（当前 %d）", name, i, maxProviderKeyName, count)
+		}
+		if hasControlCharacter(key.Name) {
+			return fmt.Errorf("providers.%s.apiKeys[%d].name 不能包含控制字符", name, i)
+		}
+	}
+	if p.KeyCooldown != nil {
+		for _, entry := range []struct {
+			name  string
+			value *int
+		}{{"authMs", p.KeyCooldown.AuthMs}, {"quotaMs", p.KeyCooldown.QuotaMs}, {"rateLimitMs", p.KeyCooldown.RateLimitMs}} {
+			if entry.value != nil && (*entry.value < 0 || *entry.value > maxKeyCooldownMs) {
+				return fmt.Errorf("providers.%s.keyCooldown.%s 应在 0-%d 之间", name, entry.name, maxKeyCooldownMs)
+			}
+		}
+	}
+	return ValidateProviderKeyValues(name, p)
+}
+
+// ValidateProviderKeyValues 校验列表密钥不能为空、不能含控制字符且不能重复。
+// sentinel 会跳过重复检查，供管理 API 在回填已存值之前先做结构校验。
+func ValidateProviderKeyValues(providerName string, p *Provider) error {
+	if p == nil {
+		return fmt.Errorf("providers.%s 不能为空", providerName)
+	}
+	seen := make(map[string]int, len(p.APIKeys))
+	for i, key := range p.APIKeys {
+		label := fmt.Sprintf("providers.%s.apiKeys[%d].value", providerName, i)
+		if key.Value == "" {
+			return fmt.Errorf("%s 不能为空", label)
+		}
+		if hasControlCharacter(key.Value) {
+			return fmt.Errorf("%s 不能包含控制字符", label)
+		}
+		if key.Value == APIKeyKeepSentinel {
+			continue
+		}
+		if previous, exists := seen[key.Value]; exists {
+			return fmt.Errorf("providers.%s.apiKeys[%d].value 与 apiKeys[%d] 重复", providerName, i, previous)
+		}
+		seen[key.Value] = i
+	}
+	return nil
+}
+
+func validProviderKeyID(id string) bool {
+	if len(id) < 1 || len(id) > maxProviderKeyID {
+		return false
+	}
+	for _, r := range id {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func hasControlCharacter(value string) bool {
+	for _, r := range value {
+		if unicode.IsControl(r) {
+			return true
+		}
+	}
+	return false
 }
 
 // validateOneMContext 校验 oneMContext 取值。空值合法（等同 strip），
