@@ -190,6 +190,46 @@
                     attemptOutcome: ''
                 },
                 yamlContent: '',
+                // ── 提供商 / 路由配置导入导出（两页共用弹窗）──────────────
+                // 导出取后端已保存且已加载的快照；导入原文、文件、预览与 token 只在
+                // 当次内存中存在，关闭弹窗立即清空，绝不写入 localStorage/sessionStorage。
+                showConfigTransferDialog: false,
+                configTransferTab: 'export',
+                // 导出：scope=all 时不使用选择项；selected 时路由下标统一存字符串，
+                // 避免 checkbox 的 :value 在不同浏览器里把数字变成字符串后比较失败。
+                configTransferExporting: false,
+                configTransferExportScope: 'all',
+                configTransferExportProviders: [],
+                configTransferExportRoutes: [],
+                configTransferExportError: '',
+                _configTransferObjectURL: '',
+                // 导入：catalog / preview / token 必须给出完整初始形状，
+                // 弹窗首次渲染时 x-show 就会求值这些字段。
+                configTransferPreviewing: false,
+                configTransferApplying: false,
+                configTransferImportFile: null,
+                configTransferImportFileName: '',
+                configTransferImportFileSize: 0,
+                configTransferImportContent: '',
+                configTransferImportMode: 'merge',
+                configTransferImportInsert: 'after',
+                configTransferImportCatalog: null,
+                configTransferImportPreview: null,
+                configTransferImportToken: '',
+                configTransferImportExpiresAt: '',
+                configTransferImportError: '',
+                configTransferImportNotice: '',
+                configTransferImportSelection: { providers: [], routes: [] },
+                // 首次预览前不带 selection（后端默认全部）；拿到 catalog 后才初始化，
+                // 保证「默认全部」与后续「显式全部」不会产生两份不同的选项摘要。
+                _configTransferSelectionInitialized: false,
+                configTransferImportConflicts: { providers: {}, routes: {} },
+                configTransferImportAccountMappings: {},
+                configTransferNow: Date.now(),
+                _configTransferExpiryTimer: null,
+                _configTransferPreviewController: null,
+                _configTransferFileReadVersion: 0,
+                _configTransferWatching: false,
                 showProviderModal: false,
                 // 提供商列表的快速筛选词：按名称、Base URL、格式做包含匹配，纯界面状态，不落盘。
                 providerFilter: '',

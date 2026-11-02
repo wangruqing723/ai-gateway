@@ -274,6 +274,12 @@
                                             <span class="material-symbols-outlined text-[16px]">add</span>
                                             添加路由
                                         </button>
+                                        <button type="button" @click="openConfigTransferDialog('export')"
+                                                data-testid="route-transfer-entry" class="btn btn-secondary h-8 px-3 text-xs"
+                                                title="导入或导出提供商与路由配置">
+                                            <span class="material-symbols-outlined text-[16px]">sync</span>
+                                            导入 / 导出
+                                        </button>
                                     </div>
                                 </div>
 
@@ -872,6 +878,12 @@
                                         <button @click="addProvider()" class="btn btn-secondary">
                                             <span class="material-symbols-outlined">add</span>
                                             添加 Provider
+                                        </button>
+                                        <button type="button" @click="openConfigTransferDialog('export')"
+                                                data-testid="provider-transfer-entry" class="btn btn-secondary"
+                                                title="导入或导出提供商与路由配置">
+                                            <span class="material-symbols-outlined">sync</span>
+                                            导入 / 导出
                                         </button>
                                     </div>
                                 </div>
@@ -3281,6 +3293,382 @@
          :style="`left: ${tip.x}px; top: ${tip.y}px;`"
          class="pointer-events-none fixed z-[70] max-w-xs -translate-x-1/2 -translate-y-full whitespace-pre-line rounded-lg border border-line bg-panel3 px-3 py-2 text-xs font-semibold leading-relaxed text-text shadow-glow"></div>
 
+    <!-- 提供商 / 路由配置导入导出共用弹窗。
+         导出取后端已保存快照；导入原文、文件、预览与 token 只在当次内存中存在，
+         关闭 / Esc 会清空这些引用并释放下载对象 URL。 -->
+    <div x-show="showConfigTransferDialog" x-transition.opacity x-cloak
+         @keydown.escape.window="closeConfigTransferDialog()"
+         data-testid="config-transfer-dialog"
+         class="fixed inset-0 z-[80] grid place-items-center overflow-y-auto bg-black/70 p-4">
+        <div class="glass my-4 max-h-[92vh] w-full max-w-4xl overflow-y-auto rounded-lg shadow-glow"
+             role="dialog" aria-modal="true" aria-labelledby="config-transfer-title">
+            <div class="flex items-start justify-between gap-4 border-b border-line p-5">
+                <div>
+                    <h3 id="config-transfer-title" class="text-lg font-bold text-white">配置导入 / 导出</h3>
+                    <p class="mt-1 text-sm text-muted">提供商页和路由页共用。导出取后端已保存且已加载的配置；导入先预览，确认后一次性保存并热重载。</p>
+                </div>
+                <button type="button" @click="closeConfigTransferDialog()"
+                        :disabled="configTransferExporting || configTransferApplying"
+                        data-testid="config-transfer-close"
+                        class="btn btn-secondary px-2 py-2 disabled:opacity-50" aria-label="关闭配置导入导出弹窗">
+                    <span class="material-symbols-outlined">close</span>
+                </button>
+            </div>
+            <div class="flex flex-wrap gap-2 border-b border-line px-5 py-3">
+                <button type="button" @click="configTransferTab = 'export'" data-testid="config-transfer-tab-export"
+                        class="btn px-3 py-2" :class="configTransferTab === 'export' ? 'btn-primary' : 'btn-secondary'">导出</button>
+                <button type="button" @click="configTransferTab = 'import'" data-testid="config-transfer-tab-import"
+                        class="btn px-3 py-2" :class="configTransferTab === 'import' ? 'btn-primary' : 'btn-secondary'">导入</button>
+            </div>
+
+            <!-- 导出 -->
+            <div x-show="configTransferTab === 'export'" class="space-y-4 p-5">
+                <div class="rounded-lg border border-warn/30 bg-warn/10 p-3 text-xs leading-relaxed text-amber-100">
+                    导出文件包含真实 API Key、列表密钥、代理密码和自定义请求头／请求体。仅在可信本机处理，下载后请妥善保管。
+                </div>
+                <div class="flex flex-wrap items-center gap-4 text-sm text-text">
+                    <label class="flex cursor-pointer items-center gap-2">
+                        <input type="radio" value="all" x-model="configTransferExportScope"
+                               data-testid="config-transfer-export-scope-all" class="h-4 w-4 text-cyan focus:ring-cyan">
+                        全部配置
+                    </label>
+                    <label class="flex cursor-pointer items-center gap-2">
+                        <input type="radio" value="selected" x-model="configTransferExportScope"
+                               data-testid="config-transfer-export-scope-selected" class="h-4 w-4 text-cyan focus:ring-cyan">
+                        选择部分条目
+                    </label>
+                </div>
+                <div x-show="configTransferExportScope === 'selected'" x-cloak class="grid gap-4 lg:grid-cols-2">
+                    <div class="rounded-lg border border-line">
+                        <div class="flex flex-wrap items-center justify-between gap-2 border-b border-line p-3">
+                            <span class="text-xs font-bold text-text">提供商</span>
+                            <div class="flex gap-2">
+                                <button type="button" @click="selectAllConfigTransferExportProviders()" class="btn btn-secondary px-2 py-1 text-xs">全选</button>
+                                <button type="button" @click="clearConfigTransferExportProviders()" class="btn btn-secondary px-2 py-1 text-xs">清空</button>
+                            </div>
+                        </div>
+                        <div class="max-h-64 space-y-1 overflow-y-auto p-2">
+                            <template x-for="name in configTransferExportProviderNames()" :key="name">
+                                <label class="flex cursor-pointer items-start gap-2 rounded-md px-2 py-1.5 hover:bg-panel2/70">
+                                    <input type="checkbox" x-model="configTransferExportProviders" :value="name"
+                                           :data-provider-name="name" data-testid="config-transfer-export-provider"
+                                           class="mt-0.5 h-4 w-4 rounded border-line bg-panel text-cyan focus:ring-cyan">
+                                    <span class="min-w-0 flex-1">
+                                        <span class="block truncate font-mono text-xs text-white" x-text="name"></span>
+                                        <span class="mt-0.5 block text-[11px] text-muted" x-text="configTransferProviderKeyCountText(name)"></span>
+                                    </span>
+                                    <span x-show="configTransferExportProviderDependent(name)" x-cloak
+                                          :data-dependency-provider="name" data-testid="config-transfer-export-dependency"
+                                          class="tag bg-cyan2/10 text-cyan2"
+                                          x-text="configTransferExportProviderAutoAdded(name) ? '路由依赖（自动包含）' : '路由依赖'"></span>
+                                </label>
+                            </template>
+                            <p x-show="configTransferExportProviderNames().length === 0" class="px-2 py-3 text-xs text-muted">当前没有提供商。</p>
+                        </div>
+                    </div>
+                    <div class="rounded-lg border border-line">
+                        <div class="flex flex-wrap items-center justify-between gap-2 border-b border-line p-3">
+                            <span class="text-xs font-bold text-text">路由</span>
+                            <div class="flex gap-2">
+                                <button type="button" @click="selectAllConfigTransferExportRoutes()" class="btn btn-secondary px-2 py-1 text-xs">全选</button>
+                                <button type="button" @click="clearConfigTransferExportRoutes()" class="btn btn-secondary px-2 py-1 text-xs">清空</button>
+                            </div>
+                        </div>
+                        <div class="max-h-64 space-y-1 overflow-y-auto p-2">
+                            <template x-for="(route, index) in (config.routes || [])" :key="index">
+                                <label class="flex cursor-pointer items-start gap-2 rounded-md px-2 py-1.5 hover:bg-panel2/70">
+                                    <input type="checkbox" x-model="configTransferExportRoutes" :value="String(index)"
+                                           :data-route-index="index" data-testid="config-transfer-export-route"
+                                           class="mt-0.5 h-4 w-4 rounded border-line bg-panel text-cyan focus:ring-cyan">
+                                    <span class="min-w-0 flex-1">
+                                        <span class="block truncate font-mono text-xs text-white" x-text="'#' + (index + 1) + ' ' + (route.match || '')"></span>
+                                        <span x-show="configTransferRouteDependencies(route).length" class="mt-0.5 block text-[11px] text-cyan2"
+                                              x-text="'依赖：' + configTransferRouteDependencies(route).join('、')"></span>
+                                    </span>
+                                </label>
+                            </template>
+                            <p x-show="(config.routes || []).length === 0" class="px-2 py-3 text-xs text-muted">当前没有路由。</p>
+                        </div>
+                    </div>
+                </div>
+                <div class="flex flex-wrap items-center justify-between gap-2 text-xs text-muted">
+                    <span x-text="configTransferExportScope === 'all' ? '将导出全部提供商与路由。' : '已选 ' + configTransferExportProviders.length + ' 个提供商、' + configTransferExportRoutes.length + ' 条路由；路由依赖的提供商会由后端自动包含。'"></span>
+                    <span x-show="configTransferExportHasOAuth()" x-cloak class="tag bg-cyan2/10 text-cyan2">包含 OAuth 提供商，账户令牌需另行迁移</span>
+                </div>
+                <p x-show="configTransferExportError" x-cloak data-testid="config-transfer-export-error"
+                   class="break-words text-sm text-danger" x-text="configTransferExportError"></p>
+                <div class="flex flex-wrap justify-end gap-2 border-t border-line pt-4">
+                    <button type="button" @click="closeConfigTransferDialog()" :disabled="configTransferExporting"
+                            class="btn btn-secondary disabled:opacity-50">取消</button>
+                    <button type="button" @click="exportConfigTransfer()"
+                            :disabled="configTransferExporting || !canExportConfigTransfer()"
+                            data-testid="config-transfer-export-submit"
+                            class="btn btn-primary disabled:cursor-not-allowed disabled:opacity-50">
+                        <span x-show="configTransferExporting" x-cloak class="material-symbols-outlined gw-spin text-[18px]">progress_activity</span>
+                        <span x-text="configTransferExporting ? '正在生成文件…' : '导出配置'"></span>
+                    </button>
+                </div>
+            </div>
+
+            <!-- 导入 -->
+            <div x-show="configTransferTab === 'import'" x-cloak class="space-y-4 p-5">
+                <div class="rounded-lg border border-warn/30 bg-warn/10 p-3 text-xs leading-relaxed text-amber-100">
+                    导入文件可能包含真实凭据。文件与原文只在当次弹窗内处理；预览不会写盘、不会访问上游，也不会自动保存。关闭后清空。
+                </div>
+                <label class="block space-y-2">
+                    <span class="text-xs font-bold text-muted">YAML 文件（最大 1 MiB）</span>
+                    <input x-ref="configTransferFileInput" type="file" accept=".yaml,.yml,text/yaml,text/plain,application/yaml,application/x-yaml"
+                           @change="onConfigTransferFileChange($event)" data-testid="config-transfer-import-file"
+                           class="field file:mr-3 file:rounded-md file:border-0 file:bg-panel2 file:px-3 file:py-2 file:text-xs file:font-semibold file:text-white">
+                </label>
+                <div x-show="configTransferImportFileName" x-cloak class="text-xs text-muted"
+                     x-text="configTransferImportFileName + ' · ' + Math.ceil(configTransferImportFileSize / 1024) + ' KiB'"></div>
+                <label class="block space-y-2">
+                    <span class="text-xs font-bold text-muted">或粘贴 YAML</span>
+                    <textarea x-model="configTransferImportContent" @input="onConfigTransferContentInput($event)"
+                              data-testid="config-transfer-import-content" rows="10" spellcheck="false"
+                              class="field font-mono text-xs"
+                              placeholder="kind: ai-gateway.provider-route-transfer&#10;version: 1&#10;providers: ...&#10;routes: ..."></textarea>
+                    <span class="text-[11px] text-muted" x-text="configTransferImportContentBytes() + ' / 1048576 字节'"></span>
+                </label>
+                <p x-show="configTransferImportError" x-cloak data-testid="config-transfer-import-error"
+                   class="break-words text-sm text-danger" x-text="configTransferImportError"></p>
+                <p x-show="configTransferImportNotice" x-cloak class="text-xs leading-relaxed text-muted" x-text="configTransferImportNotice"></p>
+
+                <div x-show="configTransferImportCatalog" x-cloak class="space-y-4">
+                    <div class="flex flex-wrap items-center gap-4 rounded-lg border border-line bg-panel/40 p-3 text-sm text-text">
+                        <span class="text-xs font-bold text-muted">导入方式</span>
+                        <label class="flex cursor-pointer items-center gap-2">
+                            <input type="radio" value="merge" x-model="configTransferImportMode" @change="onConfigTransferModeChanged()"
+                                   data-testid="config-transfer-mode-merge" class="h-4 w-4 text-cyan focus:ring-cyan">
+                            合并
+                        </label>
+                        <label class="flex cursor-pointer items-center gap-2">
+                            <input type="radio" value="replace" x-model="configTransferImportMode" @change="onConfigTransferModeChanged()"
+                                   :disabled="configTransferImportPreview && configTransferImportPreview.canReplace === false"
+                                   data-testid="config-transfer-mode-replace" class="h-4 w-4 text-cyan focus:ring-cyan disabled:opacity-50">
+                            整体替换
+                        </label>
+                        <span class="text-xs text-muted" x-text="configTransferImportMode === 'merge' ? '默认全部选中、冲突保留、新增路由后插。' : '删除未包含的提供商和路由，必须使用完整文件。'"></span>
+                    </div>
+                    <div x-show="configTransferImportMode === 'replace'" x-cloak
+                         class="rounded-lg border border-danger/40 bg-danger/10 p-3 text-xs leading-relaxed text-danger">
+                        整体替换不会保留目标中未包含的提供商和路由，也不会拼接旧密钥。建议先手动导出当前配置作为备份；应用前还会再次确认。
+                    </div>
+                    <div x-show="configTransferImportMode === 'merge'" class="grid gap-4 lg:grid-cols-2">
+                        <div class="rounded-lg border border-line">
+                            <div class="flex flex-wrap items-center justify-between gap-2 border-b border-line p-3">
+                                <span class="text-xs font-bold text-text">源提供商</span>
+                                <div class="flex gap-2">
+                                    <button type="button" @click="selectAllConfigTransferImportProviders()" class="btn btn-secondary px-2 py-1 text-xs">全选</button>
+                                    <button type="button" @click="clearConfigTransferImportProviders()" class="btn btn-secondary px-2 py-1 text-xs">清空</button>
+                                </div>
+                            </div>
+                            <div class="max-h-72 space-y-1 overflow-y-auto p-2">
+                                <template x-for="provider in configTransferCatalogProviders()" :key="provider.name">
+                                    <div class="rounded-md border border-line/60 px-2 py-2">
+                                        <label class="flex cursor-pointer items-start gap-2">
+                                            <input type="checkbox" x-model="configTransferImportSelection.providers" :value="provider.name"
+                                                   @change="invalidateConfigTransferPreview()"
+                                                   :data-provider-name="provider.name" data-testid="config-transfer-import-provider"
+                                                   class="mt-0.5 h-4 w-4 rounded border-line bg-panel text-cyan focus:ring-cyan">
+                                            <span class="min-w-0 flex-1">
+                                                <span class="block truncate font-mono text-xs text-white" x-text="provider.name"></span>
+                                                <span class="mt-0.5 block text-[11px] text-muted" x-text="configTransferImportProviderMeta(provider)"></span>
+                                                <span x-show="configTransferProviderDependedBySelectedRoutes(provider.name).length" x-cloak
+                                                      class="mt-1 inline-flex tag bg-cyan2/10 text-cyan2"
+                                                      x-text="'路由依赖：' + configTransferProviderDependedBySelectedRoutes(provider.name).join('、')"></span>
+                                            </span>
+                                        </label>
+                                        <label x-show="configTransferProviderConflict(provider)" x-cloak
+                                               class="mt-2 flex flex-wrap items-center justify-between gap-2 text-[11px] text-warn">
+                                            <span>目标已有同名提供商</span>
+                                            <select :value="configTransferProviderConflictAction(provider.name)"
+                                                    @change="setConfigTransferProviderConflict(provider.name, $event.target.value)"
+                                                    :data-provider-name="provider.name" data-testid="config-transfer-import-provider-conflict"
+                                                    class="field w-28 py-1 text-xs">
+                                                <option value="keep">保留目标</option>
+                                                <option value="overwrite">覆盖目标</option>
+                                            </select>
+                                        </label>
+                                    </div>
+                                </template>
+                            </div>
+                        </div>
+                        <div class="rounded-lg border border-line">
+                            <div class="flex flex-wrap items-center justify-between gap-2 border-b border-line p-3">
+                                <span class="text-xs font-bold text-text">源路由</span>
+                                <div class="flex gap-2">
+                                    <button type="button" @click="selectAllConfigTransferImportRoutes()" class="btn btn-secondary px-2 py-1 text-xs">全选</button>
+                                    <button type="button" @click="clearConfigTransferImportRoutes()" class="btn btn-secondary px-2 py-1 text-xs">清空</button>
+                                </div>
+                            </div>
+                            <div class="max-h-72 space-y-1 overflow-y-auto p-2">
+                                <template x-for="route in configTransferCatalogRoutes()" :key="route.index">
+                                    <div class="rounded-md border border-line/60 px-2 py-2">
+                                        <label class="flex cursor-pointer items-start gap-2">
+                                            <input type="checkbox" x-model="configTransferImportSelection.routes" :value="String(route.index)"
+                                                   @change="invalidateConfigTransferPreview()"
+                                                   :data-route-index="route.index" data-testid="config-transfer-import-route"
+                                                   class="mt-0.5 h-4 w-4 rounded border-line bg-panel text-cyan focus:ring-cyan">
+                                            <span class="min-w-0 flex-1">
+                                                <span class="block truncate font-mono text-xs text-white" x-text="'#' + (Number(route.index) + 1) + ' ' + (route.match || '')"></span>
+                                                <span class="mt-0.5 block text-[11px] text-muted"
+                                                      x-text="'依赖：' + ((route.providerDependencies || []).join('、') || '无')"></span>
+                                            </span>
+                                        </label>
+                                        <label x-show="configTransferRouteConflictTargets(route).length" x-cloak
+                                               class="mt-2 flex flex-wrap items-center justify-between gap-2 text-[11px] text-warn">
+                                            <span x-text="'目标已有 ' + configTransferRouteConflictTargets(route).length + ' 条同 match 路由'"></span>
+                                            <select :value="configTransferRouteConflictAction(route.index)"
+                                                    @change="setConfigTransferRouteConflict(route.index, $event.target.value)"
+                                                    :data-route-index="route.index" data-testid="config-transfer-import-route-conflict"
+                                                    class="field w-28 py-1 text-xs">
+                                                <option value="keep">保留目标</option>
+                                                <option value="overwrite">覆盖目标</option>
+                                            </select>
+                                        </label>
+                                    </div>
+                                </template>
+                            </div>
+                        </div>
+                    </div>
+                    <div x-show="configTransferImportMode === 'merge'" x-cloak
+                         class="flex flex-wrap items-center gap-4 rounded-lg border border-line bg-panel/40 p-3 text-sm text-text">
+                        <span class="text-xs font-bold text-muted">新增路由位置</span>
+                        <label class="flex cursor-pointer items-center gap-2">
+                            <input type="radio" value="after" x-model="configTransferImportInsert" @change="invalidateConfigTransferPreview()"
+                                   data-testid="config-transfer-insert-after" class="h-4 w-4 text-cyan focus:ring-cyan">
+                            追加到现有路由之后（默认）
+                        </label>
+                        <label class="flex cursor-pointer items-center gap-2">
+                            <input type="radio" value="before" x-model="configTransferImportInsert" @change="invalidateConfigTransferPreview()"
+                                   data-testid="config-transfer-insert-before" class="h-4 w-4 text-cyan focus:ring-cyan">
+                            插入到现有路由之前
+                        </label>
+                    </div>
+                    <div x-show="configTransferCatalogSourceAccounts().length" x-cloak class="rounded-lg border border-line">
+                        <div class="border-b border-line p-3">
+                            <div class="text-xs font-bold text-text">OAuth 账户映射</div>
+                            <p class="mt-1 text-[11px] text-muted">只绑定目标已有账户；同 ID 可自动匹配。不会按邮箱猜测，也不会新建账户。</p>
+                        </div>
+                        <div class="space-y-2 p-3">
+                            <template x-for="sourceId in configTransferCatalogSourceAccounts()" :key="sourceId">
+                                <label class="flex flex-col gap-1 text-xs sm:flex-row sm:items-center sm:justify-between">
+                                    <span class="min-w-0 break-all font-mono text-muted" x-text="sourceId"></span>
+                                    <select :value="configTransferImportAccountMappings[sourceId] || ''"
+                                            @change="setConfigTransferAccountMapping(sourceId, $event.target.value)"
+                                            :data-source-account-id="sourceId" data-testid="config-transfer-import-account-mapping"
+                                            class="field w-full py-1 text-xs sm:w-72">
+                                        <option value="">自动匹配同 ID / 请选择目标账户</option>
+                                        <template x-for="account in chatgptAccounts" :key="account.id">
+                                            <option :value="account.id" x-text="configTransferAccountLabel(account)"></option>
+                                        </template>
+                                    </select>
+                                </label>
+                            </template>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="flex flex-wrap items-center justify-between gap-2">
+                    <span class="text-[11px] leading-relaxed text-muted">修改文件、选择、冲突、账户映射、模式或插入位置后需重新预览；不会自动预览或自动保存。</span>
+                    <button type="button" @click="previewConfigTransfer()"
+                            :disabled="configTransferPreviewing || !configTransferImportContent.trim()"
+                            data-testid="config-transfer-preview"
+                            class="btn btn-primary disabled:cursor-not-allowed disabled:opacity-50">
+                        <span x-show="configTransferPreviewing" x-cloak class="material-symbols-outlined gw-spin text-[18px]">progress_activity</span>
+                        <span x-text="configTransferPreviewing ? '解析预览中…' : '解析并预览'"></span>
+                    </button>
+                </div>
+
+                <div x-show="configTransferImportPreview" x-cloak data-testid="config-transfer-preview-panel" class="space-y-4">
+                    <div class="flex flex-wrap items-center gap-2 text-xs">
+                        <span class="tag bg-white/[.06] text-text" x-text="'源格式：' + configTransferSourceFormatLabel(configTransferImportPreview?.sourceFormat)"></span>
+                        <span class="tag" :class="configTransferImportPreview?.canApply ? 'bg-good/10 text-good' : 'bg-warn/10 text-amber-100'"
+                              x-text="configTransferImportPreview?.canApply ? '可应用' : '当前不可应用'"></span>
+                        <span x-show="configTransferImportToken" class="tag bg-cyan2/10 text-cyan2" x-text="'凭证到期：' + configTransferExpiryText()"></span>
+                        <span x-show="configTransferPreviewExpired()" x-cloak class="tag bg-danger/10 text-danger">凭证已过期，请重新预览</span>
+                    </div>
+                    <div x-show="(configTransferImportPreview?.ignoredGlobalFields || []).length" x-cloak
+                         class="rounded-lg border border-line bg-panel/40 p-3 text-xs text-muted">
+                        不会导入的全局字段：
+                        <span class="font-mono text-text" x-text="(configTransferImportPreview?.ignoredGlobalFields || []).join('、')"></span>
+                    </div>
+                    <div class="grid gap-2 sm:grid-cols-2">
+                        <div class="rounded-lg border border-line bg-panel/40 p-3">
+                            <div class="text-xs font-bold text-text">提供商</div>
+                            <div class="mt-1 text-xs text-muted" x-text="configTransferSummaryText(configTransferImportPreview?.summary?.providers)"></div>
+                        </div>
+                        <div class="rounded-lg border border-line bg-panel/40 p-3">
+                            <div class="text-xs font-bold text-text">路由</div>
+                            <div class="mt-1 text-xs text-muted" x-text="configTransferSummaryText(configTransferImportPreview?.summary?.routes)"></div>
+                        </div>
+                    </div>
+                    <div x-show="(configTransferImportPreview?.warnings || []).length" x-cloak data-testid="config-transfer-warnings"
+                         class="rounded-lg border border-warn/40 bg-warn/10 p-3 text-xs text-amber-100">
+                        <div class="font-bold">提示</div>
+                        <ul class="mt-2 list-inside list-disc space-y-1">
+                            <template x-for="(item, index) in (configTransferImportPreview?.warnings || [])" :key="'w' + index">
+                                <li class="break-words" x-text="configTransferWarningText(item)"></li>
+                            </template>
+                        </ul>
+                    </div>
+                    <div x-show="(configTransferImportPreview?.blockers || []).length" x-cloak data-testid="config-transfer-blockers"
+                         class="rounded-lg border border-danger/40 bg-danger/10 p-3 text-xs text-danger">
+                        <div class="font-bold">阻止项（需调整后重新预览）</div>
+                        <ul class="mt-2 list-inside list-disc space-y-1">
+                            <template x-for="(item, index) in (configTransferImportPreview?.blockers || [])" :key="'b' + index">
+                                <li class="break-words" x-text="configTransferWarningText(item)"></li>
+                            </template>
+                        </ul>
+                    </div>
+                    <div x-show="(configTransferImportPreview?.changes?.providers || []).length || (configTransferImportPreview?.changes?.routes || []).length"
+                         x-cloak class="space-y-2">
+                        <div class="text-xs font-bold text-text">变更明细</div>
+                        <template x-for="(item, index) in (configTransferImportPreview?.changes?.providers || [])" :key="'cp' + index">
+                            <div class="rounded border border-line/60 bg-panel/30 px-2 py-1.5 text-xs">
+                                <span class="tag" :class="configTransferActionClass(item.action)" x-text="configTransferActionLabel(item.action)"></span>
+                                <span class="ml-2 break-all font-mono text-white" x-text="item.name"></span>
+                                <span class="ml-2 break-words text-muted" x-text="configTransferProviderChangeText(item)"></span>
+                            </div>
+                        </template>
+                        <template x-for="(item, index) in (configTransferImportPreview?.changes?.routes || [])" :key="'cr' + index">
+                            <div class="rounded border border-line/60 bg-panel/30 px-2 py-1.5 text-xs">
+                                <span class="tag" :class="configTransferActionClass(item.action)" x-text="configTransferActionLabel(item.action)"></span>
+                                <span class="ml-2 break-all font-mono text-white" x-text="item.match || '（空 match）'"></span>
+                                <span class="ml-2 break-words text-muted" x-text="configTransferRouteChangeText(item)"></span>
+                            </div>
+                        </template>
+                    </div>
+                    <div x-show="(configTransferImportPreview?.finalRouteOrder || []).length" x-cloak data-testid="config-transfer-final-order">
+                        <div class="text-xs font-bold text-text">最终路由顺序</div>
+                        <ol class="mt-2 space-y-1 text-xs text-muted">
+                            <template x-for="item in (configTransferImportPreview?.finalRouteOrder || [])" :key="item.position">
+                                <li class="break-words">
+                                    <span class="font-mono text-white" x-text="(Number(item.position) + 1) + '.'"></span>
+                                    <span class="ml-1 font-mono text-text" x-text="item.match"></span>
+                                    <span class="ml-1" x-text="'（' + configTransferRouteSourceLabel(item.source) + (item.index === null || item.index === undefined ? '' : ' #' + (Number(item.index) + 1)) + '）'"></span>
+                                </li>
+                            </template>
+                        </ol>
+                    </div>
+                </div>
+
+                <div class="flex flex-wrap justify-end gap-2 border-t border-line pt-4">
+                    <button type="button" @click="closeConfigTransferDialog()" :disabled="configTransferApplying"
+                            class="btn btn-secondary disabled:opacity-50">取消</button>
+                    <button type="button" @click="applyConfigTransfer()" :disabled="!configTransferCanApply()"
+                            data-testid="config-transfer-apply"
+                            class="btn btn-danger disabled:cursor-not-allowed disabled:opacity-50">
+                        <span x-show="configTransferApplying" x-cloak class="material-symbols-outlined gw-spin text-[18px]">progress_activity</span>
+                        <span x-text="configTransferApplying ? '应用中…' : (configTransferImportMode === 'replace' ? '整体替换并保存' : '应用导入')"></span>
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- 自定义确认弹窗，替代 window.confirm。
          原生 confirm 阻塞主线程、样式不可控、在部分浏览器里可被用户永久屏蔽
          （勾了「不再显示对话框」之后直接返回 false，删除会静默失效）。 -->
@@ -3499,6 +3887,46 @@
                     attemptOutcome: ''
                 },
                 yamlContent: '',
+                // ── 提供商 / 路由配置导入导出（两页共用弹窗）──────────────
+                // 导出取后端已保存且已加载的快照；导入原文、文件、预览与 token 只在
+                // 当次内存中存在，关闭弹窗立即清空，绝不写入 localStorage/sessionStorage。
+                showConfigTransferDialog: false,
+                configTransferTab: 'export',
+                // 导出：scope=all 时不使用选择项；selected 时路由下标统一存字符串，
+                // 避免 checkbox 的 :value 在不同浏览器里把数字变成字符串后比较失败。
+                configTransferExporting: false,
+                configTransferExportScope: 'all',
+                configTransferExportProviders: [],
+                configTransferExportRoutes: [],
+                configTransferExportError: '',
+                _configTransferObjectURL: '',
+                // 导入：catalog / preview / token 必须给出完整初始形状，
+                // 弹窗首次渲染时 x-show 就会求值这些字段。
+                configTransferPreviewing: false,
+                configTransferApplying: false,
+                configTransferImportFile: null,
+                configTransferImportFileName: '',
+                configTransferImportFileSize: 0,
+                configTransferImportContent: '',
+                configTransferImportMode: 'merge',
+                configTransferImportInsert: 'after',
+                configTransferImportCatalog: null,
+                configTransferImportPreview: null,
+                configTransferImportToken: '',
+                configTransferImportExpiresAt: '',
+                configTransferImportError: '',
+                configTransferImportNotice: '',
+                configTransferImportSelection: { providers: [], routes: [] },
+                // 首次预览前不带 selection（后端默认全部）；拿到 catalog 后才初始化，
+                // 保证「默认全部」与后续「显式全部」不会产生两份不同的选项摘要。
+                _configTransferSelectionInitialized: false,
+                configTransferImportConflicts: { providers: {}, routes: {} },
+                configTransferImportAccountMappings: {},
+                configTransferNow: Date.now(),
+                _configTransferExpiryTimer: null,
+                _configTransferPreviewController: null,
+                _configTransferFileReadVersion: 0,
+                _configTransferWatching: false,
                 showProviderModal: false,
                 // 提供商列表的快速筛选词：按名称、Base URL、格式做包含匹配，纯界面状态，不落盘。
                 providerFilter: '',
@@ -8913,6 +9341,789 @@
                 setRouteCompactView(compact) {
                     this.routeCompactView = !!compact;
                     this.expandedRoutes = {};
+                }
+// 本片段按文件名排在最后；上一片段（12-routes.js.part）最后一项没有尾逗号，
+                // 所以这里用一个前置逗号续接 gatewayApp 的对象字面量。
+                ,
+
+                // ── 提供商 / 路由配置导入导出 ─────────────────────────────
+                // 入口与提交前共用同一份草稿判据：不能只信 isDirty()。
+                // isDirty() 在可视化模式下不看 yamlContent，隐藏的 YAML 草稿会被漏掉；
+                // 已打开的 Provider / Route 编辑抽屉也还没把改动写回 this.config。
+                configTransferDraftDirty() {
+                    return JSON.stringify(this.configPayload()) !== this.originalConfig
+                        || this.yamlContent !== this.originalYaml
+                        || this.providerFormDirty()
+                        || this.routeFormDirty();
+                },
+
+                async guardConfigTransferDraft() {
+                    if (!this.configTransferDraftDirty()) return true;
+                    this.showStatus('当前有未保存的配置修改（含隐藏的 YAML 草稿或编辑表单），请先保存或取消后再导入／导出', 'error');
+                    return false;
+                },
+
+                async openConfigTransferDialog(tab = 'export') {
+                    if (!(await this.guardConfigTransferDraft())) return;
+                    this.configTransferTab = tab === 'import' ? 'import' : 'export';
+                    this.configTransferExportError = '';
+                    this.configTransferImportError = '';
+                    this.configTransferImportNotice = '';
+                    this.resetConfigTransferExportSelection();
+                    this.clearConfigTransferImportDraft();
+                    this.showConfigTransferDialog = true;
+                    // 配置基线与版本变更均使预览失效；watcher 只注册一次。
+                    this.$nextTick(() => this.ensureConfigTransferWatchers());
+                },
+
+                ensureConfigTransferWatchers() {
+                    if (this._configTransferWatching) return;
+                    this._configTransferWatching = true;
+                    this.$watch('revision', () => this.onConfigTransferExternalStateChange('配置版本已变化，请重新预览'));
+                    this.$watch('originalConfig', () => this.onConfigTransferExternalStateChange('已保存配置发生变化，请重新预览'));
+                    this.$watch('config', () => this.onConfigTransferExternalStateChange('当前配置发生变化，请处理草稿并重新预览'));
+                },
+
+                onConfigTransferExternalStateChange(notice) {
+                    if (this.showConfigTransferDialog
+                        && (this.configTransferImportToken || this.configTransferPreviewing || this.configTransferImportPreview)) {
+                        this.invalidateConfigTransferPreview(notice);
+                    }
+                },
+
+                closeConfigTransferDialog() {
+                    if (!this.showConfigTransferDialog) return;
+                    // 导出 / 应用请求已经发出时不让关闭，避免把「正在写入」误当成可撤销。
+                    if (this.configTransferApplying || this.configTransferExporting) return;
+                    // 确认框叠在弹窗之上时，ESC 只取消确认，不顺手关掉整个迁移弹窗。
+                    if (this.confirmDialog.open) return;
+                    this.configTransferRevokeObjectURL();
+                    this.clearConfigTransferImportDraft();
+                    this.resetConfigTransferExportSelection();
+                    this.configTransferExportError = '';
+                    this.showConfigTransferDialog = false;
+                },
+
+                configTransferRevokeObjectURL() {
+                    const url = this._configTransferObjectURL;
+                    this._configTransferObjectURL = '';
+                    if (!url) return;
+                    try {
+                        URL.revokeObjectURL(url);
+                    } catch (_) {
+                        // 对象 URL 已失效或浏览器不支持时无需处理
+                    }
+                },
+
+                configTransferAbortPreview() {
+                    const controller = this._configTransferPreviewController;
+                    this._configTransferPreviewController = null;
+                    if (controller) {
+                        try {
+                            controller.abort();
+                        } catch (_) {
+                            // 已结束的请求再次 abort 不会影响结果
+                        }
+                    }
+                    this.configTransferPreviewing = false;
+                },
+
+                configTransferStartExpiryTimer() {
+                    this.configTransferStopExpiryTimer();
+                    this.configTransferNow = Date.now();
+                    if (!this.configTransferImportExpiresAt) return;
+                    this._configTransferExpiryTimer = window.setInterval(() => {
+                        this.configTransferNow = Date.now();
+                    }, 1000);
+                },
+
+                configTransferStopExpiryTimer() {
+                    if (this._configTransferExpiryTimer !== null) {
+                        window.clearInterval(this._configTransferExpiryTimer);
+                        this._configTransferExpiryTimer = null;
+                    }
+                },
+
+                // 清空导入会话里所有可能与原文相关的引用。内容、文件、预览、token
+                // 都只活在这个函数执行前的当次弹窗里。
+                clearConfigTransferImportDraft() {
+                    this.configTransferAbortPreview();
+                    this.configTransferStopExpiryTimer();
+                    this._configTransferFileReadVersion += 1;
+                    this.configTransferImportFile = null;
+                    this.configTransferImportFileName = '';
+                    this.configTransferImportFileSize = 0;
+                    this.configTransferImportContent = '';
+                    this.configTransferImportError = '';
+                    this.configTransferImportNotice = '';
+                    this.configTransferResetPlan();
+                    this.$nextTick(() => {
+                        if (this.$refs.configTransferFileInput) this.$refs.configTransferFileInput.value = '';
+                    });
+                },
+
+                // 只重置「预览计划」，不动文件与原文。用户改选项时保留界面，
+                // 但旧 token 必须失效，且不自动重新预览。
+                configTransferResetPlan() {
+                    this.configTransferImportMode = 'merge';
+                    this.configTransferImportInsert = 'after';
+                    this.configTransferImportCatalog = null;
+                    this.configTransferImportPreview = null;
+                    this.configTransferImportToken = '';
+                    this.configTransferImportExpiresAt = '';
+                    this.configTransferImportSelection = { providers: [], routes: [] };
+                    this._configTransferSelectionInitialized = false;
+                    this.configTransferImportConflicts = { providers: {}, routes: {} };
+                    this.configTransferImportAccountMappings = {};
+                },
+
+                invalidateConfigTransferPreview(notice = '选项已更改，请重新预览后再应用') {
+                    // 选项在预览请求飞行途中被改动时，旧响应回来也不能再签发可应用的 token。
+                    this.configTransferAbortPreview();
+                    this.configTransferStopExpiryTimer();
+                    this.configTransferImportToken = '';
+                    this.configTransferImportExpiresAt = '';
+                    this.configTransferImportPreview = null;
+                    if (this.configTransferImportCatalog) this.configTransferImportNotice = notice;
+                },
+
+                configTransferImportContentBytes() {
+                    return new TextEncoder().encode(this.configTransferImportContent || '').length;
+                },
+
+                onConfigTransferContentInput(event) {
+                    // 不依赖 x-model 的监听顺序：直接从事件目标取值，避免读到上一帧内容。
+                    if (typeof event?.target?.value === 'string') {
+                        this.configTransferImportContent = event.target.value;
+                    }
+                    this.configTransferImportError = '';
+                    this.configTransferImportNotice = '';
+                    this._configTransferFileReadVersion += 1;
+                    this.configTransferImportFile = null;
+                    this.configTransferImportFileName = '';
+                    this.configTransferImportFileSize = 0;
+                    if (this.$refs.configTransferFileInput) this.$refs.configTransferFileInput.value = '';
+                    this.configTransferAbortPreview();
+                    this.configTransferStopExpiryTimer();
+                    this.configTransferResetPlan();
+                    if (this.configTransferImportContentBytes() > 1048576) {
+                        this.configTransferImportError = '粘贴内容超过 1 MiB 上限，请裁剪后再预览';
+                    }
+                },
+
+                async onConfigTransferFileChange(event) {
+                    const readVersion = ++this._configTransferFileReadVersion;
+                    const file = event?.target?.files?.[0] || null;
+                    this.configTransferImportFile = file;
+                    this.configTransferImportFileName = file?.name || '';
+                    this.configTransferImportFileSize = file?.size || 0;
+                    this.configTransferImportError = '';
+                    this.configTransferImportNotice = '';
+                    this.configTransferAbortPreview();
+                    this.configTransferStopExpiryTimer();
+                    this.configTransferResetPlan();
+                    this.configTransferImportContent = '';
+                    if (!file) return;
+                    if (file.size > 1048576) {
+                        this.configTransferImportError = '文件超过 1 MiB 上限，未读取';
+                        this.configTransferImportFile = null;
+                        this.configTransferImportFileName = '';
+                        this.configTransferImportFileSize = 0;
+                        if (this.$refs.configTransferFileInput) this.$refs.configTransferFileInput.value = '';
+                        return;
+                    }
+                    try {
+                        const bytes = await file.arrayBuffer();
+                        if (readVersion !== this._configTransferFileReadVersion || !this.showConfigTransferDialog) return;
+                        const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+                        if (new TextEncoder().encode(text).length > 1048576) {
+                            this.configTransferImportError = '文件内容超过 1 MiB 上限，未载入';
+                            return;
+                        }
+                        this.configTransferImportContent = text;
+                    } catch (_) {
+                        if (readVersion !== this._configTransferFileReadVersion || !this.showConfigTransferDialog) return;
+                        this.configTransferImportError = '读取文件失败，请重试或改为粘贴内容';
+                    }
+                },
+
+                // ── 导出 ────────────────────────────────────────────────
+
+                resetConfigTransferExportSelection() {
+                    this.configTransferExportScope = 'all';
+                    this.configTransferExportProviders = Object.keys(this.config?.providers || {}).sort();
+                    this.configTransferExportRoutes = (this.config?.routes || []).map((_, index) => String(index));
+                },
+
+                configTransferExportProviderNames() {
+                    return Object.keys(this.config?.providers || {}).sort();
+                },
+
+                configTransferProviderKeyCount(provider) {
+                    if (Array.isArray(provider?.apiKeys) && provider.apiKeys.length) return provider.apiKeys.length;
+                    return provider?.apiKeyConfigured || provider?.apiKey ? 1 : 0;
+                },
+
+                configTransferProviderKeyCountText(name) {
+                    const provider = this.config?.providers?.[name];
+                    if (!provider) return '不存在';
+                    if (provider.authType === 'chatgptOAuth' || provider.accountId) return 'OAuth 账户凭据';
+                    const count = this.configTransferProviderKeyCount(provider);
+                    if (Array.isArray(provider.apiKeys) && provider.apiKeys.length) return `列表密钥 ${count} 个`;
+                    return count === 0 ? '无密钥' : '单值密钥已配置';
+                },
+
+                configTransferRouteDependencies(route) {
+                    const names = [];
+                    const add = (name) => {
+                        if (name && !names.includes(name)) names.push(name);
+                    };
+                    if (Array.isArray(route?.targets) && route.targets.length) {
+                        route.targets.forEach((target) => add(target?.provider));
+                    } else {
+                        add(route?.provider);
+                    }
+                    add(route?.vision?.provider);
+                    return names;
+                },
+
+                configTransferExportSelectedRouteDependencies() {
+                    const names = [];
+                    if (this.configTransferExportScope !== 'selected') return names;
+                    this.configTransferExportRoutes.forEach((rawIndex) => {
+                        const route = this.config?.routes?.[Number(rawIndex)];
+                        if (!route) return;
+                        this.configTransferRouteDependencies(route).forEach((name) => {
+                            if (!names.includes(name)) names.push(name);
+                        });
+                    });
+                    return names;
+                },
+
+                configTransferExportProviderDependent(name) {
+                    return this.configTransferExportScope === 'selected'
+                        && this.configTransferExportSelectedRouteDependencies().includes(name);
+                },
+
+                configTransferExportProviderAutoAdded(name) {
+                    return this.configTransferExportProviderDependent(name)
+                        && !this.configTransferExportProviders.includes(name);
+                },
+
+                configTransferExportHasOAuth() {
+                    return Object.values(this.config?.providers || {}).some((provider) => (
+                        provider && (provider.authType === 'chatgptOAuth' || provider.accountId)
+                    ));
+                },
+
+                selectAllConfigTransferExportProviders() {
+                    this.configTransferExportProviders = this.configTransferExportProviderNames();
+                },
+
+                clearConfigTransferExportProviders() {
+                    this.configTransferExportProviders = [];
+                },
+
+                selectAllConfigTransferExportRoutes() {
+                    this.configTransferExportRoutes = (this.config?.routes || []).map((_, index) => String(index));
+                },
+
+                clearConfigTransferExportRoutes() {
+                    this.configTransferExportRoutes = [];
+                },
+
+                canExportConfigTransfer() {
+                    if (this.configTransferExporting) return false;
+                    if (this.configTransferExportScope === 'all') return true;
+                    return this.configTransferExportProviders.length > 0 || this.configTransferExportRoutes.length > 0;
+                },
+
+                configTransferExportPayload() {
+                    if (this.configTransferExportScope === 'all') return { scope: 'all' };
+                    return {
+                        scope: 'selected',
+                        selection: {
+                            providers: [...this.configTransferExportProviders],
+                            routes: this.configTransferExportRoutes.map((index) => Number(index))
+                        }
+                    };
+                },
+
+                configTransferIfMatchHeaders() {
+                    const headers = { 'Content-Type': 'application/json' };
+                    if (this.revision) headers['If-Match'] = `"${this.revision}"`;
+                    return headers;
+                },
+
+                async exportConfigTransfer() {
+                    if (this.configTransferExporting) return;
+                    // 导出取的是后端已保存快照，页面草稿必须先处理，否则导出内容与眼前看到的不一致。
+                    if (!(await this.guardConfigTransferDraft())) return;
+                    this.configTransferExportError = '';
+                    if (!this.revision) {
+                        this.configTransferExportError = '配置版本未知，请刷新页面后重试';
+                        return;
+                    }
+                    if (!this.canExportConfigTransfer()) {
+                        this.configTransferExportError = '请至少选择一个提供商或路由';
+                        return;
+                    }
+                    // 每次导出都单独确认：明文文件一旦落盘就脱离页面控制。
+                    const ok = await this.askConfirm(
+                        '导出文件包含真实 API Key、列表密钥、代理密码和自定义请求头／请求体等敏感配置。请只在可信本机使用，并妥善保管下载文件。',
+                        { title: '导出含凭据的配置', confirmText: '确认导出' }
+                    );
+                    if (!ok || !(await this.guardConfigTransferDraft())) return;
+                    this.configTransferExporting = true;
+                    try {
+                        const res = await fetch('/api/config/export', {
+                            method: 'POST',
+                            headers: this.configTransferIfMatchHeaders(),
+                            body: JSON.stringify(this.configTransferExportPayload())
+                        });
+                        if (!res.ok) throw new Error(await this.errorText(res, '导出配置失败'));
+                        const blob = await res.blob();
+                        const disposition = res.headers.get('Content-Disposition') || '';
+                        const matched = disposition.match(/filename\*?=(?:UTF-8''|")?([^;"]+)/i)?.[1] || '';
+                        let filename = 'ai-gateway-provider-routes.yaml';
+                        if (matched) {
+                            try {
+                                filename = decodeURIComponent(matched.replace(/^"|"$/g, ''));
+                            } catch (_) {
+                                filename = matched.replace(/^"|"$/g, '');
+                            }
+                        }
+                        const objectURL = URL.createObjectURL(blob);
+                        this._configTransferObjectURL = objectURL;
+                        const link = document.createElement('a');
+                        link.href = objectURL;
+                        link.download = filename;
+                        document.body.appendChild(link);
+                        link.click();
+                        link.remove();
+                        window.setTimeout(() => URL.revokeObjectURL(objectURL), 0);
+                        this._configTransferObjectURL = '';
+                        this.showStatus('配置已导出', 'success');
+                        this.configTransferExporting = false;
+                        this.closeConfigTransferDialog();
+                    } catch (err) {
+                        this.configTransferExportError = err.message;
+                    } finally {
+                        this.configTransferExporting = false;
+                    }
+                },
+
+                // ── 导入：选择、冲突、账户映射 ─────────────────────────
+
+                configTransferCatalogProviders() {
+                    return this.configTransferImportCatalog?.providers || [];
+                },
+
+                configTransferCatalogRoutes() {
+                    return this.configTransferImportCatalog?.routes || [];
+                },
+
+                configTransferCatalogSourceAccounts() {
+                    return this.configTransferImportCatalog?.sourceAccountIds || [];
+                },
+
+                configTransferAllCatalogSelected() {
+                    const providers = this.configTransferCatalogProviders();
+                    const routes = this.configTransferCatalogRoutes();
+                    const selectedProviders = new Set(this.configTransferImportSelection.providers);
+                    const selectedRoutes = new Set(this.configTransferImportSelection.routes);
+                    return providers.every((provider) => selectedProviders.has(provider.name))
+                        && routes.every((route) => selectedRoutes.has(String(route.index)));
+                },
+
+                selectAllConfigTransferImportProviders() {
+                    this.configTransferImportSelection = {
+                        ...this.configTransferImportSelection,
+                        providers: this.configTransferCatalogProviders().map((provider) => provider.name)
+                    };
+                    this.invalidateConfigTransferPreview();
+                },
+
+                clearConfigTransferImportProviders() {
+                    this.configTransferImportSelection = {
+                        ...this.configTransferImportSelection,
+                        providers: []
+                    };
+                    this.invalidateConfigTransferPreview();
+                },
+
+                selectAllConfigTransferImportRoutes() {
+                    this.configTransferImportSelection = {
+                        ...this.configTransferImportSelection,
+                        routes: this.configTransferCatalogRoutes().map((route) => String(route.index))
+                    };
+                    this.invalidateConfigTransferPreview();
+                },
+
+                clearConfigTransferImportRoutes() {
+                    this.configTransferImportSelection = {
+                        ...this.configTransferImportSelection,
+                        routes: []
+                    };
+                    this.invalidateConfigTransferPreview();
+                },
+
+                configTransferProviderConflict(provider) {
+                    return !!provider?.conflict;
+                },
+
+                configTransferRouteConflictTargets(route) {
+                    return Array.isArray(route?.targetIndexes) ? route.targetIndexes : [];
+                },
+
+                configTransferProviderConflictAction(name) {
+                    return this.configTransferImportConflicts.providers[name] || 'keep';
+                },
+
+                configTransferRouteConflictAction(index) {
+                    return this.configTransferImportConflicts.routes[String(index)] || 'keep';
+                },
+
+                setConfigTransferProviderConflict(name, action) {
+                    const providers = { ...this.configTransferImportConflicts.providers };
+                    if (action === 'overwrite') providers[name] = 'overwrite';
+                    else delete providers[name];
+                    this.configTransferImportConflicts = { ...this.configTransferImportConflicts, providers };
+                    this.invalidateConfigTransferPreview();
+                },
+
+                setConfigTransferRouteConflict(index, action) {
+                    const routes = { ...this.configTransferImportConflicts.routes };
+                    const key = String(index);
+                    if (action === 'overwrite') routes[key] = 'overwrite';
+                    else delete routes[key];
+                    this.configTransferImportConflicts = { ...this.configTransferImportConflicts, routes };
+                    this.invalidateConfigTransferPreview();
+                },
+
+                setConfigTransferAccountMapping(sourceId, targetId) {
+                    const mappings = { ...this.configTransferImportAccountMappings };
+                    if (targetId) mappings[sourceId] = targetId;
+                    else delete mappings[sourceId];
+                    this.configTransferImportAccountMappings = mappings;
+                    this.invalidateConfigTransferPreview();
+                },
+
+                configTransferAccountLabel(account) {
+                    const name = account?.email || account?.id || '未知账户';
+                    return account?.plan ? `${name} · ${account.plan}` : name;
+                },
+
+                configTransferProviderDependedBySelectedRoutes(name) {
+                    return this.configTransferCatalogRoutes()
+                        .filter((route) => this.configTransferImportSelection.routes.includes(String(route.index)))
+                        .filter((route) => (route.providerDependencies || []).includes(name))
+                        .map((route) => route.match || `#${Number(route.index) + 1}`);
+                },
+
+                configTransferImportProviderMeta(provider) {
+                    const parts = [];
+                    const count = Number(provider?.keyCount) || 0;
+                    if (count > 0) parts.push(`密钥 ${count} 个`);
+                    else if (provider?.apiKeyConfigured) parts.push('单值密钥已配置');
+                    else parts.push('无密钥');
+                    if (provider?.sourceAccountId) parts.push(`OAuth 账户 ${provider.sourceAccountId}`);
+                    return parts.join(' · ');
+                },
+
+                onConfigTransferModeChanged() {
+                    this.invalidateConfigTransferPreview('导入方式已更改，请重新预览后再应用');
+                },
+
+                // 首次预览不带 selection；拿到 catalog 后如果仍然是「全选」，继续省略，
+                // 这样预览与应用的规范化选项摘要不会因为「默认全部 vs 显式全部」而分叉。
+                configTransferOptionsPayload() {
+                    const options = { mode: this.configTransferImportMode === 'replace' ? 'replace' : 'merge' };
+                    if (options.mode === 'replace') {
+                        const mappings = { ...this.configTransferImportAccountMappings };
+                        if (Object.keys(mappings).length) options.accountMappings = mappings;
+                        return options;
+                    }
+                    options.insertNewRoutes = this.configTransferImportInsert === 'before' ? 'before' : 'after';
+                    const bothEmpty = this.configTransferImportSelection.providers.length === 0
+                        && this.configTransferImportSelection.routes.length === 0;
+                    if (this._configTransferSelectionInitialized && (!this.configTransferAllCatalogSelected() || bothEmpty)) {
+                        options.selection = {
+                            providers: [...this.configTransferImportSelection.providers],
+                            routes: this.configTransferImportSelection.routes.map((index) => Number(index))
+                        };
+                    }
+                    const providers = {};
+                    const routes = {};
+                    this.configTransferCatalogProviders().forEach((provider) => {
+                        if (this.configTransferImportSelection.providers.includes(provider.name)
+                            && this.configTransferImportConflicts.providers[provider.name] === 'overwrite') providers[provider.name] = 'overwrite';
+                    });
+                    this.configTransferCatalogRoutes().forEach((route) => {
+                        const key = String(route.index);
+                        if (this.configTransferImportSelection.routes.includes(key)
+                            && this.configTransferImportConflicts.routes[key] === 'overwrite') routes[key] = 'overwrite';
+                    });
+                    if (Object.keys(providers).length || Object.keys(routes).length) {
+                        options.conflicts = { providers, routes };
+                    }
+                    const mappings = { ...this.configTransferImportAccountMappings };
+                    if (Object.keys(mappings).length) options.accountMappings = mappings;
+                    return options;
+                },
+
+                async previewConfigTransfer() {
+                    if (this.configTransferPreviewing) return;
+                    if (!(await this.guardConfigTransferDraft())) return;
+                    this.configTransferImportError = '';
+                    this.configTransferImportNotice = '';
+                    if (!this.configTransferImportContent.trim()) {
+                        this.configTransferImportError = '请上传或粘贴 YAML 内容';
+                        return;
+                    }
+                    if (this.configTransferImportContentBytes() > 1048576) {
+                        this.configTransferImportError = '导入内容超过 1 MiB 上限，请裁剪后再预览';
+                        return;
+                    }
+                    const payloadOptions = this.configTransferOptionsPayload();
+                    if (this.configTransferImportMode === 'merge'
+                        && this._configTransferSelectionInitialized
+                        && this.configTransferImportSelection.providers.length === 0
+                        && this.configTransferImportSelection.routes.length === 0) {
+                        this.configTransferImportError = '请至少选择一个提供商或路由';
+                        return;
+                    }
+                    this.invalidateConfigTransferPreview('正在重新预览，旧凭证已失效');
+                    const controller = new AbortController();
+                    this._configTransferPreviewController = controller;
+                    this.configTransferPreviewing = true;
+                    try {
+                        const res = await fetch('/api/config/import/preview', {
+                            method: 'POST',
+                            headers: this.configTransferIfMatchHeaders(),
+                            body: JSON.stringify({
+                                content: this.configTransferImportContent,
+                                options: payloadOptions
+                            }),
+                            signal: controller.signal
+                        });
+                        if (!res.ok) throw new Error(await this.errorText(res, '预览导入配置失败'));
+                        const json = await res.json();
+                        // JSON 解析完成与状态赋值之间可能插入了选项变更事件；
+                        // 已 abort 的请求不得再把旧 token 写回界面。
+                        if (controller.signal.aborted) return;
+                        const data = json?.data || json || {};
+                        const catalog = data.catalog || { providers: [], routes: [], sourceAccountIds: [] };
+                        if (!this._configTransferSelectionInitialized) {
+                            this.configTransferImportSelection = {
+                                providers: (catalog.providers || [])
+                                    .filter((provider) => provider.selected !== false)
+                                    .map((provider) => provider.name),
+                                routes: (catalog.routes || [])
+                                    .filter((route) => route.selected !== false)
+                                    .map((route) => String(route.index))
+                            };
+                            this._configTransferSelectionInitialized = true;
+                        }
+                        this.configTransferImportCatalog = catalog;
+                        this.configTransferImportPreview = data;
+                        this.configTransferImportToken = data.previewToken || '';
+                        this.configTransferImportExpiresAt = data.expiresAt || '';
+                        if (this.configTransferImportToken) {
+                            this.configTransferImportNotice = '预览已生成；修改文件、选择、冲突、账户映射、模式或插入位置后需重新预览。';
+                            this.configTransferStartExpiryTimer();
+                        } else {
+                            this.configTransferImportNotice = '当前选项不能应用，请根据阻止项调整后重新预览。';
+                        }
+                    } catch (err) {
+                        if (controller.signal.aborted) return;
+                        this.configTransferImportError = err.message;
+                    } finally {
+                        if (this._configTransferPreviewController === controller) {
+                            this._configTransferPreviewController = null;
+                            this.configTransferPreviewing = false;
+                        }
+                    }
+                },
+
+                configTransferPreviewExpired() {
+                    if (!this.configTransferImportExpiresAt) return false;
+                    const expiresAt = Date.parse(this.configTransferImportExpiresAt);
+                    return Number.isFinite(expiresAt) && expiresAt <= this.configTransferNow;
+                },
+
+                configTransferCanApply() {
+                    return !this.configTransferApplying
+                        && !this.configTransferPreviewing
+                        && !!this.configTransferImportToken
+                        && !!this.configTransferImportPreview?.canApply
+                        && !this.configTransferPreviewExpired();
+                },
+
+                async applyConfigTransfer() {
+                    if (this.configTransferApplying) return;
+                    // 提交前再查一次：弹窗打开期间本页其他操作可能又产生草稿。
+                    if (!(await this.guardConfigTransferDraft())) return;
+                    if (!this.revision) {
+                        this.configTransferImportError = '配置版本未知，请刷新页面后重试';
+                        return;
+                    }
+                    if (!this.configTransferImportToken || !this.configTransferImportPreview?.canApply) {
+                        this.configTransferImportError = '当前没有可应用的有效预览，请重新预览';
+                        return;
+                    }
+                    if (this.configTransferPreviewExpired()) {
+                        this.invalidateConfigTransferPreview('预览凭证已过期，请重新预览后再应用');
+                        this.configTransferImportError = '预览凭证已过期，请重新预览后再应用';
+                        return;
+                    }
+                    // 整体替换是破坏性操作：独立二次确认，不复用合并模式的普通确认。
+                    if (this.configTransferImportMode === 'replace') {
+                        const ok = await this.askConfirm(
+                            '整体替换会删除未包含在导入文件中的提供商和路由，且不会保留目标旧密钥。建议先手动导出当前配置作为备份。',
+                            { title: '确认整体替换', confirmText: '确认替换' }
+                        );
+                        if (!ok) return;
+                    }
+                    if (!(await this.guardConfigTransferDraft()) || !this.configTransferCanApply()) return;
+                    this.configTransferApplying = true;
+                    this.configTransferImportError = '';
+                    let res;
+                    try {
+                        res = await fetch('/api/config/import/apply', {
+                            method: 'POST',
+                            headers: this.configTransferIfMatchHeaders(),
+                            body: JSON.stringify({
+                                previewToken: this.configTransferImportToken,
+                                content: this.configTransferImportContent,
+                                options: this.configTransferOptionsPayload()
+                            })
+                        });
+                    } catch (_) {
+                        // 请求可能已经被服务端保存，只是响应丢了。既不能谎报「未保存」，
+                        // 也不能自动重放；作废旧凭证并重新读取当前配置供人工核对。
+                        this.invalidateConfigTransferPreview();
+                        this.configTransferImportError = '应用请求的响应未收到，结果未确认。将尝试重新读取当前配置，请核对后重新预览再操作。';
+                        this.showStatus('导入结果未确认：未收到服务端响应，请核对当前配置', 'error');
+                        this.configTransferApplying = false;
+                        await this.loadConfig();
+                        return;
+                    }
+                    try {
+                        if (!res.ok) {
+                            const message = await this.errorText(res, '导入配置失败');
+                            if (res.status === 400 || res.status === 409) {
+                                // 凭证失效、配置版本变化或依赖变化都要求重新预览。
+                                this.invalidateConfigTransferPreview('预览已失效，请重新预览后再应用');
+                                if (res.status === 409) await this.loadConfig();
+                            }
+                            this.configTransferImportError = message;
+                            return;
+                        }
+                        const result = await res.json().catch(() => null);
+                        if (result?.status !== 'success') {
+                            this.invalidateConfigTransferPreview('应用响应无法确认，请重新读取配置核对');
+                            this.configTransferImportError = '应用响应不完整，结果未确认。请核对当前配置后重新预览。';
+                            this.showStatus(this.configTransferImportError, 'error');
+                            await this.loadConfig();
+                            return;
+                        }
+                        this.showStatus((result.message || '配置已导入、保存并热重载') + this.restartSuffix(result), 'success');
+                        this.configTransferApplying = false;
+                        this.closeConfigTransferDialog();
+                        await this.loadConfig();
+                        await this.loadChatGPTAccounts(false, false);
+                        if (this.editMode === 'yaml') await this.loadYamlConfig();
+                    } finally {
+                        this.configTransferApplying = false;
+                    }
+                },
+
+                // ── 安全展示辅助（全部按文本渲染，不拼接 HTML）──────────
+
+                configTransferActionLabel(action) {
+                    const labels = {
+                        add: '新增',
+                        overwrite: '覆盖',
+                        delete: '删除',
+                        keep: '保留',
+                        unchanged: '未变化'
+                    };
+                    return labels[action] || action || '未知';
+                },
+
+                configTransferActionClass(action) {
+                    if (action === 'add' || action === 'unchanged') return 'bg-good/10 text-good';
+                    if (action === 'overwrite') return 'bg-warn/10 text-amber-100';
+                    if (action === 'delete') return 'bg-danger/10 text-danger';
+                    return 'bg-white/[.06] text-muted';
+                },
+
+                configTransferSourceFormatLabel(format) {
+                    if (format === 'transfer-v1') return '迁移包 v1';
+                    if (format === 'config-yaml') return '原生配置 YAML';
+                    return format || '未知';
+                },
+
+                configTransferRouteSourceLabel(source) {
+                    if (source === 'existing') return '现有';
+                    if (source === 'imported') return '导入';
+                    if (source === 'overwritten') return '覆盖';
+                    return source || '未知';
+                },
+
+                configTransferSummaryText(summary) {
+                    if (!summary) return '无';
+                    return [
+                        `新增 ${summary.add || 0}`,
+                        `覆盖 ${summary.overwrite || 0}`,
+                        `删除 ${summary.delete || 0}`,
+                        `保留 ${summary.keep || 0}`,
+                        `未变化 ${summary.unchanged || 0}`
+                    ].join(' · ');
+                },
+
+                configTransferWarningText(item) {
+                    const parts = [];
+                    if (item?.code) parts.push(item.code);
+                    if (item?.message) parts.push(item.message);
+                    if (item?.provider) parts.push(`提供商：${item.provider}`);
+                    if (item?.routeIndex !== undefined && item?.routeIndex !== null) {
+                        parts.push(`路由 #${Number(item.routeIndex) + 1}`);
+                    }
+                    if (item?.field) parts.push(`字段：${item.field}`);
+                    return parts.join(' · ');
+                },
+
+                configTransferProviderChangeText(item) {
+                    const parts = [];
+                    if ((item?.changedFields || []).length) parts.push(`变化字段：${item.changedFields.join('、')}`);
+                    if (item?.beforeKeyCount !== undefined || item?.afterKeyCount !== undefined) {
+                        parts.push(`密钥 ${item?.beforeKeyCount ?? 0} → ${item?.afterKeyCount ?? 0}`);
+                    }
+                    if ((item?.affectedRoutes || []).length) {
+                        const routes = item.affectedRoutes
+                            .map((route) => `#${Number(route.index) + 1} ${route.match || ''}`.trim())
+                            .join('、');
+                        parts.push(`影响路由：${routes}`);
+                    }
+                    return parts.join(' · ');
+                },
+
+                configTransferRouteChangeText(item) {
+                    const parts = [];
+                    if (item?.sourceIndex !== undefined && item?.sourceIndex !== null) parts.push(`源 #${Number(item.sourceIndex) + 1}`);
+                    if (item?.targetIndex !== undefined && item?.targetIndex !== null) parts.push(`目标 #${Number(item.targetIndex) + 1}`);
+                    if ((item?.changedFields || []).length) parts.push(`变化字段：${item.changedFields.join('、')}`);
+                    if ((item?.providerDependencies || []).length) parts.push(`依赖：${item.providerDependencies.join('、')}`);
+                    return parts.join(' · ');
+                },
+
+                configTransferExpiryText() {
+                    if (!this.configTransferImportExpiresAt) return '无';
+                    const at = Date.parse(this.configTransferImportExpiresAt);
+                    if (!Number.isFinite(at)) return '未知';
+                    return new Date(at).toLocaleTimeString();
                 }
             };
         }

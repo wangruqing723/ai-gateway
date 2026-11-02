@@ -840,10 +840,13 @@ func overwriteAndSync(file *os.File, data []byte) error {
 	return file.Sync()
 }
 
+// ErrRestoreConfigFailed 表示直接写入失败后无法恢复原文件，磁盘状态需人工核验。
+var ErrRestoreConfigFailed = errors.New("恢复原配置失败")
+
 func restoreDirect(path string, original []byte, cause error) error {
 	file, err := os.OpenFile(path, os.O_WRONLY, 0o600)
 	if err != nil {
-		return fmt.Errorf("%w；恢复原配置失败: %v", cause, err)
+		return fmt.Errorf("%w；%w: %v", cause, ErrRestoreConfigFailed, err)
 	}
 	_, restoreErr := file.Seek(0, io.SeekStart)
 	if restoreErr == nil {
@@ -854,7 +857,7 @@ func restoreDirect(path string, original []byte, cause error) error {
 		restoreErr = closeErr
 	}
 	if restoreErr != nil {
-		return fmt.Errorf("%w；恢复原配置失败: %v", cause, restoreErr)
+		return fmt.Errorf("%w；%w: %v", cause, ErrRestoreConfigFailed, restoreErr)
 	}
 	return cause
 }
@@ -1158,39 +1161,8 @@ func validate(c *Config) error {
 		}
 	}
 	for _, r := range c.Routes {
-		if strings.TrimSpace(r.Match) == "" {
-			return fmt.Errorf("route 缺少 match 字段")
-		}
-		if err := validateRouteTargets(c, &r); err != nil {
+		if err := validateRoute(c, &r); err != nil {
 			return err
-		}
-		if err := validateRouteStrategy(&r); err != nil {
-			return err
-		}
-		if r.MaxTokens != nil {
-			if *r.MaxTokens < 1 || *r.MaxTokens > MaxOutputTokensCeiling {
-				return fmt.Errorf("route %q.maxTokens 应在 1-%d 之间", r.Match, MaxOutputTokensCeiling)
-			}
-		}
-		if err := validateContextWindow(fmt.Sprintf("route %q.contextWindow", r.Match), r.ContextWindow); err != nil {
-			return err
-		}
-		if err := validateExtraBody(fmt.Sprintf("route %q.extraBody", r.Match), r.ExtraBody); err != nil {
-			return err
-		}
-		if err := validateLocalRetry(fmt.Sprintf("route %q.localRetry", r.Match), r.LocalRetry); err != nil {
-			return err
-		}
-		if r.Vision != nil {
-			if strings.TrimSpace(r.Vision.Provider) == "" {
-				return fmt.Errorf("route %q.vision 缺少 provider 字段", r.Match)
-			}
-			if _, ok := c.Providers[r.Vision.Provider]; !ok {
-				return fmt.Errorf("route %q.vision 引用了未定义的 provider: %s", r.Match, r.Vision.Provider)
-			}
-			if strings.TrimSpace(r.Vision.Model) == "" {
-				return fmt.Errorf("route %q.vision 缺少 model 字段", r.Match)
-			}
 		}
 	}
 	if err := validateFailover(&c.Failover); err != nil {
@@ -1506,6 +1478,46 @@ func isHTTPHeaderToken(name string) bool {
 	return true
 }
 
+// validateRoute 校验单条路由；c 为 nil 时只校验形状，供迁移片段复用。
+// 普通加载与保存始终传入完整配置，引用完整性要求保持不变。
+func validateRoute(c *Config, r *Route) error {
+	if strings.TrimSpace(r.Match) == "" {
+		return fmt.Errorf("route 缺少 match 字段")
+	}
+	if err := validateRouteTargets(c, r); err != nil {
+		return err
+	}
+	if err := validateRouteStrategy(r); err != nil {
+		return err
+	}
+	if r.MaxTokens != nil && (*r.MaxTokens < 1 || *r.MaxTokens > MaxOutputTokensCeiling) {
+		return fmt.Errorf("route %q.maxTokens 应在 1-%d 之间", r.Match, MaxOutputTokensCeiling)
+	}
+	if err := validateContextWindow(fmt.Sprintf("route %q.contextWindow", r.Match), r.ContextWindow); err != nil {
+		return err
+	}
+	if err := validateExtraBody(fmt.Sprintf("route %q.extraBody", r.Match), r.ExtraBody); err != nil {
+		return err
+	}
+	if err := validateLocalRetry(fmt.Sprintf("route %q.localRetry", r.Match), r.LocalRetry); err != nil {
+		return err
+	}
+	if r.Vision != nil {
+		if strings.TrimSpace(r.Vision.Provider) == "" {
+			return fmt.Errorf("route %q.vision 缺少 provider 字段", r.Match)
+		}
+		if c != nil {
+			if _, ok := c.Providers[r.Vision.Provider]; !ok {
+				return fmt.Errorf("route %q.vision 引用了未定义的 provider: %s", r.Match, r.Vision.Provider)
+			}
+		}
+		if strings.TrimSpace(r.Vision.Model) == "" {
+			return fmt.Errorf("route %q.vision 缺少 model 字段", r.Match)
+		}
+	}
+	return nil
+}
+
 // validateRouteTargets 校验单条路由的目标写法：单目标（provider/model）与多目标（targets）互斥。
 func validateRouteTargets(c *Config, r *Route) error {
 	hasSingle := strings.TrimSpace(r.Provider) != ""
@@ -1519,8 +1531,10 @@ func validateRouteTargets(c *Config, r *Route) error {
 	}
 
 	if hasSingle {
-		if _, ok := c.Providers[r.Provider]; !ok {
-			return fmt.Errorf("route %q 引用了未定义的 provider: %s", r.Match, r.Provider)
+		if c != nil {
+			if _, ok := c.Providers[r.Provider]; !ok {
+				return fmt.Errorf("route %q 引用了未定义的 provider: %s", r.Match, r.Provider)
+			}
 		}
 		// 有意不校验该 provider 是否被禁用：禁用是软停用，任何时候都不该影响
 		// 启动或保存。validate 同时服务 Load 与 PUT /api/config，在这里报错会让
@@ -1544,8 +1558,10 @@ func validateRouteTargets(c *Config, r *Route) error {
 		if strings.TrimSpace(t.Provider) == "" {
 			return fmt.Errorf("route %q.targets[%d] 缺少 provider 字段", r.Match, i)
 		}
-		if _, ok := c.Providers[t.Provider]; !ok {
-			return fmt.Errorf("route %q.targets[%d] 引用了未定义的 provider: %s", r.Match, i, t.Provider)
+		if c != nil {
+			if _, ok := c.Providers[t.Provider]; !ok {
+				return fmt.Errorf("route %q.targets[%d] 引用了未定义的 provider: %s", r.Match, i, t.Provider)
+			}
 		}
 		if strings.TrimSpace(t.Model) == "" {
 			return fmt.Errorf("route %q.targets[%d] 缺少 model 字段", r.Match, i)

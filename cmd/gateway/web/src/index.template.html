@@ -274,6 +274,12 @@
                                             <span class="material-symbols-outlined text-[16px]">add</span>
                                             添加路由
                                         </button>
+                                        <button type="button" @click="openConfigTransferDialog('export')"
+                                                data-testid="route-transfer-entry" class="btn btn-secondary h-8 px-3 text-xs"
+                                                title="导入或导出提供商与路由配置">
+                                            <span class="material-symbols-outlined text-[16px]">sync</span>
+                                            导入 / 导出
+                                        </button>
                                     </div>
                                 </div>
 
@@ -872,6 +878,12 @@
                                         <button @click="addProvider()" class="btn btn-secondary">
                                             <span class="material-symbols-outlined">add</span>
                                             添加 Provider
+                                        </button>
+                                        <button type="button" @click="openConfigTransferDialog('export')"
+                                                data-testid="provider-transfer-entry" class="btn btn-secondary"
+                                                title="导入或导出提供商与路由配置">
+                                            <span class="material-symbols-outlined">sync</span>
+                                            导入 / 导出
                                         </button>
                                     </div>
                                 </div>
@@ -3280,6 +3292,382 @@
     <div id="immediate-tooltip" x-show="tip.show" x-cloak role="tooltip" x-text="tip.text"
          :style="`left: ${tip.x}px; top: ${tip.y}px;`"
          class="pointer-events-none fixed z-[70] max-w-xs -translate-x-1/2 -translate-y-full whitespace-pre-line rounded-lg border border-line bg-panel3 px-3 py-2 text-xs font-semibold leading-relaxed text-text shadow-glow"></div>
+
+    <!-- 提供商 / 路由配置导入导出共用弹窗。
+         导出取后端已保存快照；导入原文、文件、预览与 token 只在当次内存中存在，
+         关闭 / Esc 会清空这些引用并释放下载对象 URL。 -->
+    <div x-show="showConfigTransferDialog" x-transition.opacity x-cloak
+         @keydown.escape.window="closeConfigTransferDialog()"
+         data-testid="config-transfer-dialog"
+         class="fixed inset-0 z-[80] grid place-items-center overflow-y-auto bg-black/70 p-4">
+        <div class="glass my-4 max-h-[92vh] w-full max-w-4xl overflow-y-auto rounded-lg shadow-glow"
+             role="dialog" aria-modal="true" aria-labelledby="config-transfer-title">
+            <div class="flex items-start justify-between gap-4 border-b border-line p-5">
+                <div>
+                    <h3 id="config-transfer-title" class="text-lg font-bold text-white">配置导入 / 导出</h3>
+                    <p class="mt-1 text-sm text-muted">提供商页和路由页共用。导出取后端已保存且已加载的配置；导入先预览，确认后一次性保存并热重载。</p>
+                </div>
+                <button type="button" @click="closeConfigTransferDialog()"
+                        :disabled="configTransferExporting || configTransferApplying"
+                        data-testid="config-transfer-close"
+                        class="btn btn-secondary px-2 py-2 disabled:opacity-50" aria-label="关闭配置导入导出弹窗">
+                    <span class="material-symbols-outlined">close</span>
+                </button>
+            </div>
+            <div class="flex flex-wrap gap-2 border-b border-line px-5 py-3">
+                <button type="button" @click="configTransferTab = 'export'" data-testid="config-transfer-tab-export"
+                        class="btn px-3 py-2" :class="configTransferTab === 'export' ? 'btn-primary' : 'btn-secondary'">导出</button>
+                <button type="button" @click="configTransferTab = 'import'" data-testid="config-transfer-tab-import"
+                        class="btn px-3 py-2" :class="configTransferTab === 'import' ? 'btn-primary' : 'btn-secondary'">导入</button>
+            </div>
+
+            <!-- 导出 -->
+            <div x-show="configTransferTab === 'export'" class="space-y-4 p-5">
+                <div class="rounded-lg border border-warn/30 bg-warn/10 p-3 text-xs leading-relaxed text-amber-100">
+                    导出文件包含真实 API Key、列表密钥、代理密码和自定义请求头／请求体。仅在可信本机处理，下载后请妥善保管。
+                </div>
+                <div class="flex flex-wrap items-center gap-4 text-sm text-text">
+                    <label class="flex cursor-pointer items-center gap-2">
+                        <input type="radio" value="all" x-model="configTransferExportScope"
+                               data-testid="config-transfer-export-scope-all" class="h-4 w-4 text-cyan focus:ring-cyan">
+                        全部配置
+                    </label>
+                    <label class="flex cursor-pointer items-center gap-2">
+                        <input type="radio" value="selected" x-model="configTransferExportScope"
+                               data-testid="config-transfer-export-scope-selected" class="h-4 w-4 text-cyan focus:ring-cyan">
+                        选择部分条目
+                    </label>
+                </div>
+                <div x-show="configTransferExportScope === 'selected'" x-cloak class="grid gap-4 lg:grid-cols-2">
+                    <div class="rounded-lg border border-line">
+                        <div class="flex flex-wrap items-center justify-between gap-2 border-b border-line p-3">
+                            <span class="text-xs font-bold text-text">提供商</span>
+                            <div class="flex gap-2">
+                                <button type="button" @click="selectAllConfigTransferExportProviders()" class="btn btn-secondary px-2 py-1 text-xs">全选</button>
+                                <button type="button" @click="clearConfigTransferExportProviders()" class="btn btn-secondary px-2 py-1 text-xs">清空</button>
+                            </div>
+                        </div>
+                        <div class="max-h-64 space-y-1 overflow-y-auto p-2">
+                            <template x-for="name in configTransferExportProviderNames()" :key="name">
+                                <label class="flex cursor-pointer items-start gap-2 rounded-md px-2 py-1.5 hover:bg-panel2/70">
+                                    <input type="checkbox" x-model="configTransferExportProviders" :value="name"
+                                           :data-provider-name="name" data-testid="config-transfer-export-provider"
+                                           class="mt-0.5 h-4 w-4 rounded border-line bg-panel text-cyan focus:ring-cyan">
+                                    <span class="min-w-0 flex-1">
+                                        <span class="block truncate font-mono text-xs text-white" x-text="name"></span>
+                                        <span class="mt-0.5 block text-[11px] text-muted" x-text="configTransferProviderKeyCountText(name)"></span>
+                                    </span>
+                                    <span x-show="configTransferExportProviderDependent(name)" x-cloak
+                                          :data-dependency-provider="name" data-testid="config-transfer-export-dependency"
+                                          class="tag bg-cyan2/10 text-cyan2"
+                                          x-text="configTransferExportProviderAutoAdded(name) ? '路由依赖（自动包含）' : '路由依赖'"></span>
+                                </label>
+                            </template>
+                            <p x-show="configTransferExportProviderNames().length === 0" class="px-2 py-3 text-xs text-muted">当前没有提供商。</p>
+                        </div>
+                    </div>
+                    <div class="rounded-lg border border-line">
+                        <div class="flex flex-wrap items-center justify-between gap-2 border-b border-line p-3">
+                            <span class="text-xs font-bold text-text">路由</span>
+                            <div class="flex gap-2">
+                                <button type="button" @click="selectAllConfigTransferExportRoutes()" class="btn btn-secondary px-2 py-1 text-xs">全选</button>
+                                <button type="button" @click="clearConfigTransferExportRoutes()" class="btn btn-secondary px-2 py-1 text-xs">清空</button>
+                            </div>
+                        </div>
+                        <div class="max-h-64 space-y-1 overflow-y-auto p-2">
+                            <template x-for="(route, index) in (config.routes || [])" :key="index">
+                                <label class="flex cursor-pointer items-start gap-2 rounded-md px-2 py-1.5 hover:bg-panel2/70">
+                                    <input type="checkbox" x-model="configTransferExportRoutes" :value="String(index)"
+                                           :data-route-index="index" data-testid="config-transfer-export-route"
+                                           class="mt-0.5 h-4 w-4 rounded border-line bg-panel text-cyan focus:ring-cyan">
+                                    <span class="min-w-0 flex-1">
+                                        <span class="block truncate font-mono text-xs text-white" x-text="'#' + (index + 1) + ' ' + (route.match || '')"></span>
+                                        <span x-show="configTransferRouteDependencies(route).length" class="mt-0.5 block text-[11px] text-cyan2"
+                                              x-text="'依赖：' + configTransferRouteDependencies(route).join('、')"></span>
+                                    </span>
+                                </label>
+                            </template>
+                            <p x-show="(config.routes || []).length === 0" class="px-2 py-3 text-xs text-muted">当前没有路由。</p>
+                        </div>
+                    </div>
+                </div>
+                <div class="flex flex-wrap items-center justify-between gap-2 text-xs text-muted">
+                    <span x-text="configTransferExportScope === 'all' ? '将导出全部提供商与路由。' : '已选 ' + configTransferExportProviders.length + ' 个提供商、' + configTransferExportRoutes.length + ' 条路由；路由依赖的提供商会由后端自动包含。'"></span>
+                    <span x-show="configTransferExportHasOAuth()" x-cloak class="tag bg-cyan2/10 text-cyan2">包含 OAuth 提供商，账户令牌需另行迁移</span>
+                </div>
+                <p x-show="configTransferExportError" x-cloak data-testid="config-transfer-export-error"
+                   class="break-words text-sm text-danger" x-text="configTransferExportError"></p>
+                <div class="flex flex-wrap justify-end gap-2 border-t border-line pt-4">
+                    <button type="button" @click="closeConfigTransferDialog()" :disabled="configTransferExporting"
+                            class="btn btn-secondary disabled:opacity-50">取消</button>
+                    <button type="button" @click="exportConfigTransfer()"
+                            :disabled="configTransferExporting || !canExportConfigTransfer()"
+                            data-testid="config-transfer-export-submit"
+                            class="btn btn-primary disabled:cursor-not-allowed disabled:opacity-50">
+                        <span x-show="configTransferExporting" x-cloak class="material-symbols-outlined gw-spin text-[18px]">progress_activity</span>
+                        <span x-text="configTransferExporting ? '正在生成文件…' : '导出配置'"></span>
+                    </button>
+                </div>
+            </div>
+
+            <!-- 导入 -->
+            <div x-show="configTransferTab === 'import'" x-cloak class="space-y-4 p-5">
+                <div class="rounded-lg border border-warn/30 bg-warn/10 p-3 text-xs leading-relaxed text-amber-100">
+                    导入文件可能包含真实凭据。文件与原文只在当次弹窗内处理；预览不会写盘、不会访问上游，也不会自动保存。关闭后清空。
+                </div>
+                <label class="block space-y-2">
+                    <span class="text-xs font-bold text-muted">YAML 文件（最大 1 MiB）</span>
+                    <input x-ref="configTransferFileInput" type="file" accept=".yaml,.yml,text/yaml,text/plain,application/yaml,application/x-yaml"
+                           @change="onConfigTransferFileChange($event)" data-testid="config-transfer-import-file"
+                           class="field file:mr-3 file:rounded-md file:border-0 file:bg-panel2 file:px-3 file:py-2 file:text-xs file:font-semibold file:text-white">
+                </label>
+                <div x-show="configTransferImportFileName" x-cloak class="text-xs text-muted"
+                     x-text="configTransferImportFileName + ' · ' + Math.ceil(configTransferImportFileSize / 1024) + ' KiB'"></div>
+                <label class="block space-y-2">
+                    <span class="text-xs font-bold text-muted">或粘贴 YAML</span>
+                    <textarea x-model="configTransferImportContent" @input="onConfigTransferContentInput($event)"
+                              data-testid="config-transfer-import-content" rows="10" spellcheck="false"
+                              class="field font-mono text-xs"
+                              placeholder="kind: ai-gateway.provider-route-transfer&#10;version: 1&#10;providers: ...&#10;routes: ..."></textarea>
+                    <span class="text-[11px] text-muted" x-text="configTransferImportContentBytes() + ' / 1048576 字节'"></span>
+                </label>
+                <p x-show="configTransferImportError" x-cloak data-testid="config-transfer-import-error"
+                   class="break-words text-sm text-danger" x-text="configTransferImportError"></p>
+                <p x-show="configTransferImportNotice" x-cloak class="text-xs leading-relaxed text-muted" x-text="configTransferImportNotice"></p>
+
+                <div x-show="configTransferImportCatalog" x-cloak class="space-y-4">
+                    <div class="flex flex-wrap items-center gap-4 rounded-lg border border-line bg-panel/40 p-3 text-sm text-text">
+                        <span class="text-xs font-bold text-muted">导入方式</span>
+                        <label class="flex cursor-pointer items-center gap-2">
+                            <input type="radio" value="merge" x-model="configTransferImportMode" @change="onConfigTransferModeChanged()"
+                                   data-testid="config-transfer-mode-merge" class="h-4 w-4 text-cyan focus:ring-cyan">
+                            合并
+                        </label>
+                        <label class="flex cursor-pointer items-center gap-2">
+                            <input type="radio" value="replace" x-model="configTransferImportMode" @change="onConfigTransferModeChanged()"
+                                   :disabled="configTransferImportPreview && configTransferImportPreview.canReplace === false"
+                                   data-testid="config-transfer-mode-replace" class="h-4 w-4 text-cyan focus:ring-cyan disabled:opacity-50">
+                            整体替换
+                        </label>
+                        <span class="text-xs text-muted" x-text="configTransferImportMode === 'merge' ? '默认全部选中、冲突保留、新增路由后插。' : '删除未包含的提供商和路由，必须使用完整文件。'"></span>
+                    </div>
+                    <div x-show="configTransferImportMode === 'replace'" x-cloak
+                         class="rounded-lg border border-danger/40 bg-danger/10 p-3 text-xs leading-relaxed text-danger">
+                        整体替换不会保留目标中未包含的提供商和路由，也不会拼接旧密钥。建议先手动导出当前配置作为备份；应用前还会再次确认。
+                    </div>
+                    <div x-show="configTransferImportMode === 'merge'" class="grid gap-4 lg:grid-cols-2">
+                        <div class="rounded-lg border border-line">
+                            <div class="flex flex-wrap items-center justify-between gap-2 border-b border-line p-3">
+                                <span class="text-xs font-bold text-text">源提供商</span>
+                                <div class="flex gap-2">
+                                    <button type="button" @click="selectAllConfigTransferImportProviders()" class="btn btn-secondary px-2 py-1 text-xs">全选</button>
+                                    <button type="button" @click="clearConfigTransferImportProviders()" class="btn btn-secondary px-2 py-1 text-xs">清空</button>
+                                </div>
+                            </div>
+                            <div class="max-h-72 space-y-1 overflow-y-auto p-2">
+                                <template x-for="provider in configTransferCatalogProviders()" :key="provider.name">
+                                    <div class="rounded-md border border-line/60 px-2 py-2">
+                                        <label class="flex cursor-pointer items-start gap-2">
+                                            <input type="checkbox" x-model="configTransferImportSelection.providers" :value="provider.name"
+                                                   @change="invalidateConfigTransferPreview()"
+                                                   :data-provider-name="provider.name" data-testid="config-transfer-import-provider"
+                                                   class="mt-0.5 h-4 w-4 rounded border-line bg-panel text-cyan focus:ring-cyan">
+                                            <span class="min-w-0 flex-1">
+                                                <span class="block truncate font-mono text-xs text-white" x-text="provider.name"></span>
+                                                <span class="mt-0.5 block text-[11px] text-muted" x-text="configTransferImportProviderMeta(provider)"></span>
+                                                <span x-show="configTransferProviderDependedBySelectedRoutes(provider.name).length" x-cloak
+                                                      class="mt-1 inline-flex tag bg-cyan2/10 text-cyan2"
+                                                      x-text="'路由依赖：' + configTransferProviderDependedBySelectedRoutes(provider.name).join('、')"></span>
+                                            </span>
+                                        </label>
+                                        <label x-show="configTransferProviderConflict(provider)" x-cloak
+                                               class="mt-2 flex flex-wrap items-center justify-between gap-2 text-[11px] text-warn">
+                                            <span>目标已有同名提供商</span>
+                                            <select :value="configTransferProviderConflictAction(provider.name)"
+                                                    @change="setConfigTransferProviderConflict(provider.name, $event.target.value)"
+                                                    :data-provider-name="provider.name" data-testid="config-transfer-import-provider-conflict"
+                                                    class="field w-28 py-1 text-xs">
+                                                <option value="keep">保留目标</option>
+                                                <option value="overwrite">覆盖目标</option>
+                                            </select>
+                                        </label>
+                                    </div>
+                                </template>
+                            </div>
+                        </div>
+                        <div class="rounded-lg border border-line">
+                            <div class="flex flex-wrap items-center justify-between gap-2 border-b border-line p-3">
+                                <span class="text-xs font-bold text-text">源路由</span>
+                                <div class="flex gap-2">
+                                    <button type="button" @click="selectAllConfigTransferImportRoutes()" class="btn btn-secondary px-2 py-1 text-xs">全选</button>
+                                    <button type="button" @click="clearConfigTransferImportRoutes()" class="btn btn-secondary px-2 py-1 text-xs">清空</button>
+                                </div>
+                            </div>
+                            <div class="max-h-72 space-y-1 overflow-y-auto p-2">
+                                <template x-for="route in configTransferCatalogRoutes()" :key="route.index">
+                                    <div class="rounded-md border border-line/60 px-2 py-2">
+                                        <label class="flex cursor-pointer items-start gap-2">
+                                            <input type="checkbox" x-model="configTransferImportSelection.routes" :value="String(route.index)"
+                                                   @change="invalidateConfigTransferPreview()"
+                                                   :data-route-index="route.index" data-testid="config-transfer-import-route"
+                                                   class="mt-0.5 h-4 w-4 rounded border-line bg-panel text-cyan focus:ring-cyan">
+                                            <span class="min-w-0 flex-1">
+                                                <span class="block truncate font-mono text-xs text-white" x-text="'#' + (Number(route.index) + 1) + ' ' + (route.match || '')"></span>
+                                                <span class="mt-0.5 block text-[11px] text-muted"
+                                                      x-text="'依赖：' + ((route.providerDependencies || []).join('、') || '无')"></span>
+                                            </span>
+                                        </label>
+                                        <label x-show="configTransferRouteConflictTargets(route).length" x-cloak
+                                               class="mt-2 flex flex-wrap items-center justify-between gap-2 text-[11px] text-warn">
+                                            <span x-text="'目标已有 ' + configTransferRouteConflictTargets(route).length + ' 条同 match 路由'"></span>
+                                            <select :value="configTransferRouteConflictAction(route.index)"
+                                                    @change="setConfigTransferRouteConflict(route.index, $event.target.value)"
+                                                    :data-route-index="route.index" data-testid="config-transfer-import-route-conflict"
+                                                    class="field w-28 py-1 text-xs">
+                                                <option value="keep">保留目标</option>
+                                                <option value="overwrite">覆盖目标</option>
+                                            </select>
+                                        </label>
+                                    </div>
+                                </template>
+                            </div>
+                        </div>
+                    </div>
+                    <div x-show="configTransferImportMode === 'merge'" x-cloak
+                         class="flex flex-wrap items-center gap-4 rounded-lg border border-line bg-panel/40 p-3 text-sm text-text">
+                        <span class="text-xs font-bold text-muted">新增路由位置</span>
+                        <label class="flex cursor-pointer items-center gap-2">
+                            <input type="radio" value="after" x-model="configTransferImportInsert" @change="invalidateConfigTransferPreview()"
+                                   data-testid="config-transfer-insert-after" class="h-4 w-4 text-cyan focus:ring-cyan">
+                            追加到现有路由之后（默认）
+                        </label>
+                        <label class="flex cursor-pointer items-center gap-2">
+                            <input type="radio" value="before" x-model="configTransferImportInsert" @change="invalidateConfigTransferPreview()"
+                                   data-testid="config-transfer-insert-before" class="h-4 w-4 text-cyan focus:ring-cyan">
+                            插入到现有路由之前
+                        </label>
+                    </div>
+                    <div x-show="configTransferCatalogSourceAccounts().length" x-cloak class="rounded-lg border border-line">
+                        <div class="border-b border-line p-3">
+                            <div class="text-xs font-bold text-text">OAuth 账户映射</div>
+                            <p class="mt-1 text-[11px] text-muted">只绑定目标已有账户；同 ID 可自动匹配。不会按邮箱猜测，也不会新建账户。</p>
+                        </div>
+                        <div class="space-y-2 p-3">
+                            <template x-for="sourceId in configTransferCatalogSourceAccounts()" :key="sourceId">
+                                <label class="flex flex-col gap-1 text-xs sm:flex-row sm:items-center sm:justify-between">
+                                    <span class="min-w-0 break-all font-mono text-muted" x-text="sourceId"></span>
+                                    <select :value="configTransferImportAccountMappings[sourceId] || ''"
+                                            @change="setConfigTransferAccountMapping(sourceId, $event.target.value)"
+                                            :data-source-account-id="sourceId" data-testid="config-transfer-import-account-mapping"
+                                            class="field w-full py-1 text-xs sm:w-72">
+                                        <option value="">自动匹配同 ID / 请选择目标账户</option>
+                                        <template x-for="account in chatgptAccounts" :key="account.id">
+                                            <option :value="account.id" x-text="configTransferAccountLabel(account)"></option>
+                                        </template>
+                                    </select>
+                                </label>
+                            </template>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="flex flex-wrap items-center justify-between gap-2">
+                    <span class="text-[11px] leading-relaxed text-muted">修改文件、选择、冲突、账户映射、模式或插入位置后需重新预览；不会自动预览或自动保存。</span>
+                    <button type="button" @click="previewConfigTransfer()"
+                            :disabled="configTransferPreviewing || !configTransferImportContent.trim()"
+                            data-testid="config-transfer-preview"
+                            class="btn btn-primary disabled:cursor-not-allowed disabled:opacity-50">
+                        <span x-show="configTransferPreviewing" x-cloak class="material-symbols-outlined gw-spin text-[18px]">progress_activity</span>
+                        <span x-text="configTransferPreviewing ? '解析预览中…' : '解析并预览'"></span>
+                    </button>
+                </div>
+
+                <div x-show="configTransferImportPreview" x-cloak data-testid="config-transfer-preview-panel" class="space-y-4">
+                    <div class="flex flex-wrap items-center gap-2 text-xs">
+                        <span class="tag bg-white/[.06] text-text" x-text="'源格式：' + configTransferSourceFormatLabel(configTransferImportPreview?.sourceFormat)"></span>
+                        <span class="tag" :class="configTransferImportPreview?.canApply ? 'bg-good/10 text-good' : 'bg-warn/10 text-amber-100'"
+                              x-text="configTransferImportPreview?.canApply ? '可应用' : '当前不可应用'"></span>
+                        <span x-show="configTransferImportToken" class="tag bg-cyan2/10 text-cyan2" x-text="'凭证到期：' + configTransferExpiryText()"></span>
+                        <span x-show="configTransferPreviewExpired()" x-cloak class="tag bg-danger/10 text-danger">凭证已过期，请重新预览</span>
+                    </div>
+                    <div x-show="(configTransferImportPreview?.ignoredGlobalFields || []).length" x-cloak
+                         class="rounded-lg border border-line bg-panel/40 p-3 text-xs text-muted">
+                        不会导入的全局字段：
+                        <span class="font-mono text-text" x-text="(configTransferImportPreview?.ignoredGlobalFields || []).join('、')"></span>
+                    </div>
+                    <div class="grid gap-2 sm:grid-cols-2">
+                        <div class="rounded-lg border border-line bg-panel/40 p-3">
+                            <div class="text-xs font-bold text-text">提供商</div>
+                            <div class="mt-1 text-xs text-muted" x-text="configTransferSummaryText(configTransferImportPreview?.summary?.providers)"></div>
+                        </div>
+                        <div class="rounded-lg border border-line bg-panel/40 p-3">
+                            <div class="text-xs font-bold text-text">路由</div>
+                            <div class="mt-1 text-xs text-muted" x-text="configTransferSummaryText(configTransferImportPreview?.summary?.routes)"></div>
+                        </div>
+                    </div>
+                    <div x-show="(configTransferImportPreview?.warnings || []).length" x-cloak data-testid="config-transfer-warnings"
+                         class="rounded-lg border border-warn/40 bg-warn/10 p-3 text-xs text-amber-100">
+                        <div class="font-bold">提示</div>
+                        <ul class="mt-2 list-inside list-disc space-y-1">
+                            <template x-for="(item, index) in (configTransferImportPreview?.warnings || [])" :key="'w' + index">
+                                <li class="break-words" x-text="configTransferWarningText(item)"></li>
+                            </template>
+                        </ul>
+                    </div>
+                    <div x-show="(configTransferImportPreview?.blockers || []).length" x-cloak data-testid="config-transfer-blockers"
+                         class="rounded-lg border border-danger/40 bg-danger/10 p-3 text-xs text-danger">
+                        <div class="font-bold">阻止项（需调整后重新预览）</div>
+                        <ul class="mt-2 list-inside list-disc space-y-1">
+                            <template x-for="(item, index) in (configTransferImportPreview?.blockers || [])" :key="'b' + index">
+                                <li class="break-words" x-text="configTransferWarningText(item)"></li>
+                            </template>
+                        </ul>
+                    </div>
+                    <div x-show="(configTransferImportPreview?.changes?.providers || []).length || (configTransferImportPreview?.changes?.routes || []).length"
+                         x-cloak class="space-y-2">
+                        <div class="text-xs font-bold text-text">变更明细</div>
+                        <template x-for="(item, index) in (configTransferImportPreview?.changes?.providers || [])" :key="'cp' + index">
+                            <div class="rounded border border-line/60 bg-panel/30 px-2 py-1.5 text-xs">
+                                <span class="tag" :class="configTransferActionClass(item.action)" x-text="configTransferActionLabel(item.action)"></span>
+                                <span class="ml-2 break-all font-mono text-white" x-text="item.name"></span>
+                                <span class="ml-2 break-words text-muted" x-text="configTransferProviderChangeText(item)"></span>
+                            </div>
+                        </template>
+                        <template x-for="(item, index) in (configTransferImportPreview?.changes?.routes || [])" :key="'cr' + index">
+                            <div class="rounded border border-line/60 bg-panel/30 px-2 py-1.5 text-xs">
+                                <span class="tag" :class="configTransferActionClass(item.action)" x-text="configTransferActionLabel(item.action)"></span>
+                                <span class="ml-2 break-all font-mono text-white" x-text="item.match || '（空 match）'"></span>
+                                <span class="ml-2 break-words text-muted" x-text="configTransferRouteChangeText(item)"></span>
+                            </div>
+                        </template>
+                    </div>
+                    <div x-show="(configTransferImportPreview?.finalRouteOrder || []).length" x-cloak data-testid="config-transfer-final-order">
+                        <div class="text-xs font-bold text-text">最终路由顺序</div>
+                        <ol class="mt-2 space-y-1 text-xs text-muted">
+                            <template x-for="item in (configTransferImportPreview?.finalRouteOrder || [])" :key="item.position">
+                                <li class="break-words">
+                                    <span class="font-mono text-white" x-text="(Number(item.position) + 1) + '.'"></span>
+                                    <span class="ml-1 font-mono text-text" x-text="item.match"></span>
+                                    <span class="ml-1" x-text="'（' + configTransferRouteSourceLabel(item.source) + (item.index === null || item.index === undefined ? '' : ' #' + (Number(item.index) + 1)) + '）'"></span>
+                                </li>
+                            </template>
+                        </ol>
+                    </div>
+                </div>
+
+                <div class="flex flex-wrap justify-end gap-2 border-t border-line pt-4">
+                    <button type="button" @click="closeConfigTransferDialog()" :disabled="configTransferApplying"
+                            class="btn btn-secondary disabled:opacity-50">取消</button>
+                    <button type="button" @click="applyConfigTransfer()" :disabled="!configTransferCanApply()"
+                            data-testid="config-transfer-apply"
+                            class="btn btn-danger disabled:cursor-not-allowed disabled:opacity-50">
+                        <span x-show="configTransferApplying" x-cloak class="material-symbols-outlined gw-spin text-[18px]">progress_activity</span>
+                        <span x-text="configTransferApplying ? '应用中…' : (configTransferImportMode === 'replace' ? '整体替换并保存' : '应用导入')"></span>
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
 
     <!-- 自定义确认弹窗，替代 window.confirm。
          原生 confirm 阻塞主线程、样式不可控、在部分浏览器里可被用户永久屏蔽

@@ -248,6 +248,10 @@ type server struct {
 	healthSysMB       uint64
 	revision          string
 	revisionSource    func() (string, error)
+	transferOnce      sync.Once
+	transferKey       [32]byte
+	transferKeyErr    error
+	transferNow       func() time.Time // 测试可替换时钟；生产使用本机时间
 	listenHost        string
 	listenPort        int
 	qm                *queue.Manager
@@ -3690,6 +3694,8 @@ func (s *server) handleConfigAPI(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.handleGetConfigRaw(w, r)
+	case "/export", "/import/preview", "/import/apply":
+		s.handleConfigTransfer(w, r, path)
 	case "/reload":
 		if r.Method != http.MethodPost {
 			writeMethodNotAllowed(w, http.MethodPost)
