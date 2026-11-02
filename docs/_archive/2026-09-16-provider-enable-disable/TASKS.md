@@ -3,7 +3,7 @@
 > 委托给 Codex 实现。每条任务包含文件路径、接口约束与验收标准。
 >
 > **归档说明（2026-09-16）**：第一版任务清单。落地实现以
-> `docs/2026-09-16-provider-enabled/TASKS.md` 为准（该目录与代码对齐）。
+> `docs/_archive/2026-09-16-provider-enabled/TASKS.md` 为准（该目录与代码对齐）。
 
 ## 后端任务（Go）
 
