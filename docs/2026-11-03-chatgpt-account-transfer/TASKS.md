@@ -126,6 +126,21 @@ node scripts/verify-chatgpt-account-transfer.cjs
 
 修正后重新构建并检查：产物 760601 字节且与源码一致，`internal/webbuild`、`cmd/gateway` 测试通过；浏览器全部回归通过（新增「入口图标使用本地字体并正常渲染」），`git diff --check` 通过。此前弹窗截图验收未覆盖顶部入口，已用本项补齐。
 
+## CI 样式产物修复（2026-11-03）
+
+提交 `acb288b` 推送后，GitHub Actions 运行 `41654471419` 在 `Verify built stylesheet is up to date` 失败，镜像构建被跳过。此前验收只检查 HTML 产物，遗漏了独立的 CSS 产物一致性检查。
+
+执行项目既有 `make web-css` 重建后，仅新增 `.container`（含响应式规则）及 `.ease-out`，无删除规则。两名称来自此前页签滚动提交 `6d753ff` 的 JavaScript 片段，被 Tailwind 内容扫描识别；该提交随本次分支快进合入主分支。修复只同步生成的 `cmd/gateway/web/vendor/tailwind.css`，不修改依赖、业务逻辑或 CI 检查。
+
+复验结果：
+- 再次执行 `make web-css` 后产物完全相同，SHA-256 为 `fef0d4477d2486e411874af7f5d2b263ca2314d7624a84629be2c702afa7b77b`。
+- `webbuild -check` 通过，HTML 仍为 760601 字节。
+- `go test ./internal/webbuild ./cmd/gateway` 通过。
+- `scripts/verify-chatgpt-account-transfer.cjs` 全部交互与图标回归通过。
+- `git diff --check` 通过。
+- Browserslist 数据过期提示为构建警告，不影响命令成功；本次未升级依赖。
+- 修复尚未提交或推送，远端 CI 尚未重新验证。后续前端验收必须同时检查 CSS 与 HTML 两种产物，不能用 `webbuild -check` 代替 CSS 校验。
+
 ## 确认与提交
 
-用户已确认方案并授权实现及继续验证；任务已按实际验收结果勾选。尚未提交、合并、推送或归档，等待用户另行确认。
+功能提交 `acb288b` 已获用户批准并在 dev 提交、快进合入 master、推送远端。本次 CI 修复等待用户另行确认提交及推送；需求目录尚未归档。
