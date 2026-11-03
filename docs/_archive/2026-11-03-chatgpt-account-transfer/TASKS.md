@@ -3,7 +3,7 @@
 # ChatGPT OAuth 账户统一导入导出与文本导入
 
 创建日期：2026-11-03
-状态：实现及验收完成，等待用户确认提交。
+状态：实现及验收完成，功能与 CI 修复均已合并推送；经用户确认归档。
 
 ## 目标与范围
 
@@ -139,8 +139,11 @@ node scripts/verify-chatgpt-account-transfer.cjs
 - `scripts/verify-chatgpt-account-transfer.cjs` 全部交互与图标回归通过。
 - `git diff --check` 通过。
 - Browserslist 数据过期提示为构建警告，不影响命令成功；本次未升级依赖。
-- 修复尚未提交或推送，远端 CI 尚未重新验证。后续前端验收必须同时检查 CSS 与 HTML 两种产物，不能用 `webbuild -check` 代替 CSS 校验。
+- 修复已提交为 `cc40fcf`，在 dev 提交、快进合入 master 并推送远端。[GitHub Actions 运行 41656736359](https://github.com/wangruqing723/ai-gateway/actions/runs/41656736359) 成功：全量测试、Race、Vet、CSS 与 HTML 产物一致性、前端运行时及 Compose 校验全部通过，多平台镜像构建并推送 GHCR 成功。
+- 后续前端验收必须同时检查 CSS 与 HTML 两种产物，不能用 `webbuild -check` 代替 CSS 校验。
 
 ## 确认与提交
 
-功能提交 `acb288b` 已获用户批准并在 dev 提交、快进合入 master、推送远端。本次 CI 修复等待用户另行确认提交及推送；需求目录尚未归档。
+功能提交 `acb288b` 与 CI 修复提交 `cc40fcf` 均已获用户批准，在 dev 提交、快进合入 master 并推送远端；远程 CI/CD 已成功。本地运行服务未在本需求中更新。
+
+用户确认将本需求归档至 `docs/_archive/2026-11-03-chatgpt-account-transfer/`。本次归档同步最终验收记录，仅保留为未提交文档变更，不自动提交、合并或推送。
