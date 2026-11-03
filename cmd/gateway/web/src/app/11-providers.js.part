@@ -27,56 +27,89 @@
                     return loaded;
                 },
 
-                openChatGPTImportDialog() {
-                    this.chatGPTImportFile = null;
+                openChatGPTTransferDialog() {
+                    if (this.importingChatGPTAccounts || this.exportingChatGPTAccounts) return;
+                    this.clearChatGPTImportInput();
                     this.chatGPTImportResult = null;
-                    this.showChatGPTImportDialog = true;
-                    this.$nextTick(() => {
-                        if (this.$refs.chatGPTImportFileInput) this.$refs.chatGPTImportFileInput.value = '';
-                    });
+                    this.chatGPTImportError = '';
+                    this.chatGPTTransferTab = 'export';
+                    this.chatGPTExportAccountIds = this.chatgptAccounts.map(account => account.id);
+                    this.showChatGPTTransferDialog = true;
                 },
 
-                closeChatGPTImportDialog() {
-                    if (this.importingChatGPTAccounts) return;
-                    this.showChatGPTImportDialog = false;
+                clearChatGPTImportInput() {
                     this.chatGPTImportFile = null;
-                    this.$nextTick(() => {
+                    this.chatGPTImportText = '';
+                    if (this.$refs.chatGPTImportFileInput) this.$refs.chatGPTImportFileInput.value = '';
+                },
+
+                closeChatGPTTransferDialog() {
+                    if (this.importingChatGPTAccounts || this.exportingChatGPTAccounts) return;
+                    this.showChatGPTTransferDialog = false;
+                    this.clearChatGPTImportInput();
+                    this.chatGPTImportResult = null;
+                    this.chatGPTImportError = '';
+                },
+
+                switchChatGPTTransferTab(tab) {
+                    if (this.importingChatGPTAccounts || this.exportingChatGPTAccounts) return;
+                    if (tab === this.chatGPTTransferTab) return;
+                    this.clearChatGPTImportInput();
+                    this.chatGPTImportResult = null;
+                    this.chatGPTImportError = '';
+                    this.chatGPTTransferTab = tab;
+                },
+
+                onChatGPTImportFileChange(event) {
+                    this.chatGPTImportFile = event.target.files?.[0] || null;
+                    if (this.chatGPTImportFile) this.chatGPTImportText = '';
+                    this.chatGPTImportResult = null;
+                    this.chatGPTImportError = '';
+                },
+
+                onChatGPTImportTextInput(event) {
+                    this.chatGPTImportText = event.target.value;
+                    if (this.chatGPTImportText.trim()) {
+                        this.chatGPTImportFile = null;
                         if (this.$refs.chatGPTImportFileInput) this.$refs.chatGPTImportFileInput.value = '';
-                    });
+                    }
+                    this.chatGPTImportResult = null;
+                    this.chatGPTImportError = '';
                 },
 
                 async importChatGPTAccounts() {
                     const file = this.chatGPTImportFile;
-                    if (!file || this.importingChatGPTAccounts) return;
-                    const isZip = /\.zip$/i.test(file.name || '') || /application\/(x-)?zip/i.test(file.type || '');
+                    const text = this.chatGPTImportText;
+                    if ((!file && !text.trim()) || this.importingChatGPTAccounts || this.exportingChatGPTAccounts) return;
+                    const size = file ? file.size : new TextEncoder().encode(text).byteLength;
+                    if (size > 16 * 1024 * 1024) {
+                        this.chatGPTImportError = '导入内容超过 16 MiB 限制，请缩减后重试';
+                        return;
+                    }
+                    const isZip = file && (/\.zip$/i.test(file.name || '') || /application\/(x-)?zip/i.test(file.type || ''));
                     this.importingChatGPTAccounts = true;
                     this.chatGPTImportResult = null;
+                    this.chatGPTImportError = '';
                     try {
                         const res = await fetch('/api/chatgpt/accounts/import', {
                             method: 'POST',
                             headers: { 'Content-Type': isZip ? 'application/zip' : 'application/json' },
-                            body: file
+                            body: file || text
                         });
                         if (!res.ok) throw new Error(await this.errorText(res, '导入 ChatGPT 账户失败'));
                         const response = await res.json();
                         this.chatGPTImportResult = response.data || null;
-                        this.chatGPTImportFile = null;
-                        if (this.$refs.chatGPTImportFileInput) this.$refs.chatGPTImportFileInput.value = '';
+                        this.clearChatGPTImportInput();
                         await this.loadChatGPTAccounts(false, true);
                         const result = this.chatGPTImportResult || {};
                         this.showStatus(`导入完成：新增 ${result.imported || 0} 个，重复跳过 ${result.skippedDuplicates || 0} 个`, 'success');
                     } catch (err) {
-                        this.showStatus('导入 ChatGPT 账户失败：' + err.message, 'error');
+                        this.chatGPTImportError = '导入 ChatGPT 账户失败：' + err.message + '；请重新选择文件或粘贴内容后重试';
+                        this.showStatus(this.chatGPTImportError, 'error');
                     } finally {
                         this.importingChatGPTAccounts = false;
-                        this.chatGPTImportFile = null;
-                        if (this.$refs.chatGPTImportFileInput) this.$refs.chatGPTImportFileInput.value = '';
+                        this.clearChatGPTImportInput();
                     }
-                },
-
-                openChatGPTExportDialog() {
-                    this.chatGPTExportAccountIds = this.chatgptAccounts.map(account => account.id);
-                    this.showChatGPTExportDialog = true;
                 },
 
                 selectAllChatGPTExportAccounts() {
@@ -93,7 +126,7 @@
                 },
 
                 async exportChatGPTAccounts(accountIds = this.chatGPTExportAccountIds) {
-                    if (this.exportingChatGPTAccounts) return;
+                    if (this.exportingChatGPTAccounts || this.importingChatGPTAccounts) return;
                     const ids = Array.isArray(accountIds) ? [...accountIds] : [];
                     if (ids.length === 0) {
                         this.showStatus('请至少选择一个 ChatGPT 账户', 'error');
@@ -118,7 +151,10 @@
                         link.click();
                         link.remove();
                         window.setTimeout(() => URL.revokeObjectURL(objectURL), 0);
-                        this.showChatGPTExportDialog = false;
+                        this.showChatGPTTransferDialog = false;
+                        this.clearChatGPTImportInput();
+                        this.chatGPTImportResult = null;
+                        this.chatGPTImportError = '';
                         this.showStatus(`已导出 ${ids.length} 个 ChatGPT 账户`, 'success');
                     } catch (err) {
                         this.showStatus('导出 ChatGPT 账户失败：' + err.message, 'error');

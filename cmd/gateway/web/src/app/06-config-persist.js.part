@@ -206,8 +206,7 @@
                 onSaveShortcut(e) {
                     if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey) return;
                     if ((e.key || '').toLowerCase() !== 's') return;
-                    if (this.confirmDialog.open || this.showChatGPTImportDialog
-                        || this.showChatGPTExportDialog || this.showChatGPTOAuthDialog) {
+                    if (this.confirmDialog.open || this.showChatGPTTransferDialog || this.showChatGPTOAuthDialog) {
                         e.preventDefault();
                         return;
                     }
