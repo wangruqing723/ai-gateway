@@ -126,8 +126,9 @@
                 </template>
             </div>
 
-            <main class="flex-1 overflow-y-auto px-4 py-5 sm:px-6 lg:h-screen lg:overflow-hidden lg:px-8">
-                <section x-show="isConfigTab()" x-transition class="lg:flex lg:h-full lg:min-h-0 lg:flex-col">
+            <!-- 先恢复位置再统一淡入；页签本身不做离场动画，避免旧页与新页同时占高度。 -->
+            <main x-ref="mainScroll" :style="_navScrollRestoreTab ? 'visibility: hidden' : ''" class="flex-1 overflow-y-auto px-4 py-5 sm:px-6 lg:h-screen lg:overflow-hidden lg:px-8">
+                <section x-show="isConfigTab()" class="lg:flex lg:h-full lg:min-h-0 lg:flex-col">
                     <!-- 四张统计卡片改成轻量 chip，仍保留四个数值；sm 以下隐藏标签、保留图标和数值。 -->
                     <div class="mb-5 flex shrink-0 flex-col gap-3 rounded-xl border border-line bg-panel/70 p-2 lg:flex-row lg:items-center lg:justify-between">
                         <div class="flex flex-wrap items-center gap-2">
@@ -197,9 +198,9 @@
 
                     <!-- 历史布局曾用 9/3（更早是 8/4）给右侧预览让位，provider 和路由表因此容易横向滚动、操作列被裁掉。
                          预览现在是默认折叠的浮动抽屉，不再参与分栏，配置表格占满可用宽度。 -->
-                    <div x-show="editMode === 'visual'" x-transition class="lg:flex lg:min-h-0 lg:flex-1 lg:overflow-hidden">
-                        <div class="flex flex-col gap-5 lg:min-h-0 lg:flex-1 lg:overflow-y-auto lg:overscroll-contain lg:pr-2">
-                            <section x-show="activeTab === 'routes'" x-transition class="glass rounded-xl p-4 sm:p-5">
+                    <div x-show="editMode === 'visual'" class="lg:flex lg:min-h-0 lg:flex-1 lg:overflow-hidden">
+                        <div x-ref="configScroll" class="flex flex-col gap-5 lg:min-h-0 lg:flex-1 lg:overflow-y-auto lg:overscroll-contain lg:pr-2">
+                            <section x-show="activeTab === 'routes'" class="glass rounded-xl p-4 sm:p-5">
                                 <!-- 顶部工具栏：标题、副标题、右上角紧凑匹配测试框 + 添加按钮 -->
                                 <div class="mb-4 flex flex-col gap-3 border-b border-line pb-4 sm:flex-row sm:items-center sm:justify-between">
                                     <div>
@@ -640,7 +641,7 @@
                                 </div>
                             </section>
 
-                            <section x-show="activeTab === 'settings'" x-transition class="glass rounded-lg p-4">
+                            <section x-show="activeTab === 'settings'" class="glass rounded-lg p-4">
                                 <div class="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                                     <div>
                                         <h2 class="text-lg font-bold text-white">全局设置</h2>
@@ -728,7 +729,7 @@
                                 </div>
                             </section>
 
-                            <section x-show="activeTab === 'settings'" x-transition class="glass rounded-lg p-4">
+                            <section x-show="activeTab === 'settings'" class="glass rounded-lg p-4">
                                 <div class="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                                     <div>
                                         <h2 class="text-lg font-bold text-white">故障转移与熔断</h2>
@@ -828,7 +829,7 @@
                                 </p>
                             </section>
 
-                            <section id="chatgpt-provider-list" x-ref="chatGPTProviderList" x-data="{ providerListExpanded: true }" x-show="activeTab === 'providers'" x-transition class="glass rounded-lg">
+                            <section id="chatgpt-provider-list" x-ref="chatGPTProviderList" x-data="{ providerListExpanded: true }" x-show="activeTab === 'providers'" class="glass rounded-lg">
                                 <div class="flex flex-col gap-3 border-b border-line p-4 sm:flex-row sm:items-center sm:justify-between">
                                     <div>
                                         <div class="flex flex-wrap items-center gap-2">
@@ -1059,7 +1060,7 @@
 
                             <!-- ChatGPT OAuth 账户独立成卡：它不是 Provider 表的一部分，而是供 Provider 绑定的凭据来源。
                                  原先挂在 Provider 表底部、标题只有 14px，读起来像表格的脚注。 -->
-                            <section x-show="activeTab === 'providers'" x-transition class="glass rounded-lg">
+                            <section x-show="activeTab === 'providers'" class="glass rounded-lg">
                                 <div class="flex flex-wrap items-center justify-between gap-3 border-b border-line p-4">
                                     <div>
                                         <h2 class="text-lg font-bold text-white">ChatGPT OAuth 账户</h2>
@@ -1341,7 +1342,7 @@
                         </section>
                     </aside>
 
-                    <div x-show="editMode === 'yaml'" x-transition x-cloak class="glass rounded-lg lg:flex lg:min-h-0 lg:flex-1 lg:flex-col">
+                    <div x-show="editMode === 'yaml'" x-cloak class="glass rounded-lg lg:flex lg:min-h-0 lg:flex-1 lg:flex-col">
                         <div class="flex flex-col gap-3 border-b border-line p-4 sm:flex-row sm:items-center sm:justify-between">
                             <div>
                                 <h2 class="text-lg font-bold text-white">YAML 编辑器</h2>
@@ -1358,7 +1359,7 @@
                     </div>
                 </section>
 
-                <section x-show="activeTab === 'monitor'" x-transition x-cloak class="space-y-5 lg:h-full lg:min-h-0 lg:overflow-y-auto lg:pr-2">
+                <section x-ref="monitorScroll" x-show="activeTab === 'monitor'" x-cloak class="space-y-5 lg:h-full lg:min-h-0 lg:overflow-y-auto lg:pr-2">
                     <!-- 首屏骨架屏（_firstLoadDone === false 期间）。
                          骨架块的高度严格对齐它替换掉的那行文字的 line-height：
                          text-3xl 是 36px → h-9，text-xs 是 16px → h-4，外边距也照抄，
@@ -1901,7 +1902,7 @@
 
                 </section>
 
-                <section x-show="activeTab === 'logs'" x-transition x-cloak class="glass rounded-lg lg:flex lg:h-full lg:min-h-0 lg:flex-col lg:overflow-hidden">
+                <section x-show="activeTab === 'logs'" x-cloak class="glass rounded-lg lg:flex lg:h-full lg:min-h-0 lg:flex-col lg:overflow-hidden">
                     <div class="flex flex-col gap-3 border-b border-line p-4 lg:shrink-0">
                         <div class="flex flex-wrap items-center justify-between gap-3">
                             <div>
@@ -1983,7 +1984,7 @@
                          两列相邻才能互相解释——看到「非流式」标签就知道旁边为什么只有一个数。
                          转移轨迹 16%、错误 15%，空的时候也不会变成沙漠。
                          九列相加必须等于 100，改任一列都要在别处等量补回。 -->
-                    <div class="min-h-0 overflow-x-auto lg:flex-1 lg:overflow-y-auto">
+                    <div x-ref="logScroll" class="min-h-0 overflow-x-auto lg:flex-1 lg:overflow-y-auto">
                         <table class="w-full min-w-[930px] table-fixed border-collapse text-left">
                             <colgroup>
                                 <col style="width:8%">
@@ -3696,6 +3697,11 @@
         function gatewayApp() {
             return {
                 activeTab: 'monitor',
+                // 页签滚动快照只留在内存；恢复期间不把共享容器的过渡位置记给下一页。
+                _navScrollPositions: {},
+                _navScrollRestoreTab: '',
+                _navScrollRestoreSeq: 0,
+                _navFadeAnimation: null,
                 navItems: [
                     { id: 'monitor', label: '监控仪表盘', icon: 'monitoring', fillIcon: false },
                     { id: 'providers', label: '提供商', icon: 'dns', fillIcon: true },
@@ -4088,6 +4094,8 @@
                 },
 
                 destroy() {
+                    this._navScrollRestoreSeq++;
+                    this._navFadeAnimation?.cancel();
                     if (this._monitorPollTimer !== null) window.clearInterval(this._monitorPollTimer);
                     if (this._chatGPTExpiryTimer !== null) window.clearInterval(this._chatGPTExpiryTimer);
                     if (this._oauthPollTimer !== null) window.clearInterval(this._oauthPollTimer);
@@ -4876,12 +4884,48 @@
                 // 浏览器前进 / 后退也能切换。fromHistory 表示这次切换来自前进 / 后退或初始地址，
                 // 此时不能再 pushState，否则后退会原地打转。
                 selectNav(tab, closeMobile = false, fromHistory = false) {
+                    const changed = tab !== this.activeTab;
+                    if (changed) {
+                        // 快速切换时上一页可能还没恢复，不能把旧页的偏移覆盖它的快照。
+                        if (!this._navScrollRestoreTab) {
+                            this._navScrollPositions[this.activeTab] = this.navScrollContainers(this.activeTab)
+                                .map((container) => container.scrollTop);
+                        }
+                        this._navScrollRestoreTab = tab;
+                        this._navScrollRestoreSeq++;
+                        this._navFadeAnimation?.cancel();
+                        this._navFadeAnimation = null;
+                    }
                     this.activeTab = tab;
                     if (tab === 'providers' || tab === 'routes') this.editMode = 'visual';
                     if (closeMobile) this.mobileNavOpen = false;
                     if (!fromHistory && window.location.hash !== '#' + tab) {
                         window.history.pushState(null, '', '#' + tab);
                     }
+                    if (changed) this.restoreNavScroll(tab, this._navScrollRestoreSeq);
+                },
+
+                navScrollContainers(tab) {
+                    // 窄屏由 main 滚动，桌面由各页内容区滚动；两层都按页签隔离。
+                    const contentRef = tab === 'monitor' ? 'monitorScroll' : tab === 'logs' ? 'logScroll' : 'configScroll';
+                    return [this.$refs.mainScroll, this.$refs[contentRef]].filter(Boolean);
+                },
+
+                async restoreNavScroll(tab, sequence) {
+                    await this.$nextTick();
+                    // 页签没有离场动画；等一帧让 x-show 完成显隐即可，不等待淡入或页内动画。
+                    await new Promise((resolve) => requestAnimationFrame(resolve));
+                    if (sequence !== this._navScrollRestoreSeq) return;
+                    const positions = this._navScrollPositions[tab] || [];
+                    this.navScrollContainers(tab).forEach((container, index) => {
+                        container.scrollTo({ top: positions[index] || 0, behavior: 'instant' });
+                    });
+                    // 恢复前只隐藏绘制、不影响布局；正确位置就绪后从六成不透明度柔和淡入，避免明暗骤变。
+                    if (!window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+                        this._navFadeAnimation = this.$refs.mainScroll.animate(
+                            [{ opacity: 0.6 }, { opacity: 1 }], { duration: 250, easing: 'ease-out' });
+                    }
+                    this._navScrollRestoreTab = '';
                 },
 
                 // 地址栏里的页签名；不是已知页签（手输错了、旧书签）时返回 null，由调用方回落。

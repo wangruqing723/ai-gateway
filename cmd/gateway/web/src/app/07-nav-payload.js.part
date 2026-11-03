@@ -2,12 +2,48 @@
                 // 浏览器前进 / 后退也能切换。fromHistory 表示这次切换来自前进 / 后退或初始地址，
                 // 此时不能再 pushState，否则后退会原地打转。
                 selectNav(tab, closeMobile = false, fromHistory = false) {
+                    const changed = tab !== this.activeTab;
+                    if (changed) {
+                        // 快速切换时上一页可能还没恢复，不能把旧页的偏移覆盖它的快照。
+                        if (!this._navScrollRestoreTab) {
+                            this._navScrollPositions[this.activeTab] = this.navScrollContainers(this.activeTab)
+                                .map((container) => container.scrollTop);
+                        }
+                        this._navScrollRestoreTab = tab;
+                        this._navScrollRestoreSeq++;
+                        this._navFadeAnimation?.cancel();
+                        this._navFadeAnimation = null;
+                    }
                     this.activeTab = tab;
                     if (tab === 'providers' || tab === 'routes') this.editMode = 'visual';
                     if (closeMobile) this.mobileNavOpen = false;
                     if (!fromHistory && window.location.hash !== '#' + tab) {
                         window.history.pushState(null, '', '#' + tab);
                     }
+                    if (changed) this.restoreNavScroll(tab, this._navScrollRestoreSeq);
+                },
+
+                navScrollContainers(tab) {
+                    // 窄屏由 main 滚动，桌面由各页内容区滚动；两层都按页签隔离。
+                    const contentRef = tab === 'monitor' ? 'monitorScroll' : tab === 'logs' ? 'logScroll' : 'configScroll';
+                    return [this.$refs.mainScroll, this.$refs[contentRef]].filter(Boolean);
+                },
+
+                async restoreNavScroll(tab, sequence) {
+                    await this.$nextTick();
+                    // 页签没有离场动画；等一帧让 x-show 完成显隐即可，不等待淡入或页内动画。
+                    await new Promise((resolve) => requestAnimationFrame(resolve));
+                    if (sequence !== this._navScrollRestoreSeq) return;
+                    const positions = this._navScrollPositions[tab] || [];
+                    this.navScrollContainers(tab).forEach((container, index) => {
+                        container.scrollTo({ top: positions[index] || 0, behavior: 'instant' });
+                    });
+                    // 恢复前只隐藏绘制、不影响布局；正确位置就绪后从六成不透明度柔和淡入，避免明暗骤变。
+                    if (!window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+                        this._navFadeAnimation = this.$refs.mainScroll.animate(
+                            [{ opacity: 0.6 }, { opacity: 1 }], { duration: 250, easing: 'ease-out' });
+                    }
+                    this._navScrollRestoreTab = '';
                 },
 
                 // 地址栏里的页签名；不是已知页签（手输错了、旧书签）时返回 null，由调用方回落。

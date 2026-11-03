@@ -1,4 +1,9 @@
                 activeTab: 'monitor',
+                // 页签滚动快照只留在内存；恢复期间不把共享容器的过渡位置记给下一页。
+                _navScrollPositions: {},
+                _navScrollRestoreTab: '',
+                _navScrollRestoreSeq: 0,
+                _navFadeAnimation: null,
                 navItems: [
                     { id: 'monitor', label: '监控仪表盘', icon: 'monitoring', fillIcon: false },
                     { id: 'providers', label: '提供商', icon: 'dns', fillIcon: true },

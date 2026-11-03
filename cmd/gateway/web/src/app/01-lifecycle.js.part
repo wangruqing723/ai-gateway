@@ -69,6 +69,8 @@
                 },
 
                 destroy() {
+                    this._navScrollRestoreSeq++;
+                    this._navFadeAnimation?.cancel();
                     if (this._monitorPollTimer !== null) window.clearInterval(this._monitorPollTimer);
                     if (this._chatGPTExpiryTimer !== null) window.clearInterval(this._chatGPTExpiryTimer);
                     if (this._oauthPollTimer !== null) window.clearInterval(this._oauthPollTimer);
