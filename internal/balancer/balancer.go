@@ -103,9 +103,16 @@ func New() *Selector {
 // 而不是静默退回配置顺序（那等于用户选的策略被忽略）。
 // stickyKey 为空表示本次请求不参与粘性。
 func (s *Selector) Select(routeKey, strategy string, keys []string, stickyKey string, load func(int) int) []int {
+	order, _ := s.SelectWithSticky(routeKey, strategy, keys, stickyKey, load)
+	return order
+}
+
+// SelectWithSticky 与 Select 相同，另外返回被粘性提到队首的候选下标；未命中时为 -1。
+// 叠加排序层（如额度感知）据此保持粘性目标在队首。
+func (s *Selector) SelectWithSticky(routeKey, strategy string, keys []string, stickyKey string, load func(int) int) ([]int, int) {
 	n := len(keys)
 	if n <= 1 {
-		return identityOrder(n)
+		return identityOrder(n), -1
 	}
 	if strategy == "" {
 		strategy = StrategyFailover
@@ -113,7 +120,7 @@ func (s *Selector) Select(routeKey, strategy string, keys []string, stickyKey st
 	// failover 不轮转也不粘性：它的语义就是「按配置顺序」，
 	// 掺入状态会让「为什么这次先试第二个」无法解释。
 	if strategy == StrategyFailover {
-		return identityOrder(n)
+		return identityOrder(n), -1
 	}
 
 	offset := s.nextOffset(routeKey, n)
@@ -126,12 +133,14 @@ func (s *Selector) Select(routeKey, strategy string, keys []string, stickyKey st
 		order = rotatedOrder(n, offset)
 	}
 
+	hit := -1
 	if stickyKey != "" {
 		if target, ok := s.lookupSticky(routeKey, stickyKey); ok {
-			order = hoist(order, indexOf(keys, target))
+			hit = indexOf(keys, target)
+			order = hoist(order, hit)
 		}
 	}
-	return order
+	return order, hit
 }
 
 // Remember 把「该前缀下次仍走这个目标」记下来，只在候选真正成功后调用。

@@ -1,0 +1,522 @@
+// 本片段排在 13-config-transfer.js.part 之后；上一片段最后一项没有尾逗号，
+                // 所以这里同样用前置逗号续接 gatewayApp 的对象字面量。
+                ,
+
+                // ── ChatGPT 账户筛选、排序、选择、暂停与批量操作 ─────────────────────
+                // 筛选和排序只在页面内存中，不改账户数据，也不影响路由候选顺序。
+                // 选择按账户 ID 保存：列表刷新或排序变化不会把选择转移到同一下标的其他账户。
+
+                // 账户列表响应带 ETag（账户控制版本），暂停和批量应用都要用它做精确 If-Match。
+                rememberChatGPTAccountsETag(res) {
+                    const etag = res?.headers?.get('ETag') || '';
+                    if (etag) this.chatGPTAccountsETag = etag;
+                },
+
+                // 授权维度分类，与授权徽章 chatGPTAccountStatusInfo 同一口径。
+                chatGPTAuthorizationCategory(account) {
+                    const auth = account?.authorization || null;
+                    const state = auth?.state || (account?.status !== 'ready' ? 'reauthorization_required' : '');
+                    if (state === 'reauthorization_required') return 'reauthorization_required';
+                    if (auth?.credentialsUnsaved || auth?.lastRefreshError) return 'refresh_issue';
+                    if (state === 'refreshable') return 'refreshable';
+                    const expiresAt = Date.parse(account?.expiresAt || '');
+                    if (!Number.isFinite(expiresAt)) return 'unknown';
+                    if (expiresAt <= (this.chatGPTNow || Date.now())) return auth && !auth.canRefresh ? 'reauthorization_required' : 'refreshable';
+                    return 'valid';
+                },
+
+                chatGPTAccountPlan(account) {
+                    return String(account?.usage?.planType || account?.plan || '').trim();
+                },
+
+                chatGPTAccountTagKey(tag) {
+                    return String(tag || '').trim().toLowerCase();
+                },
+
+                // 筛选面板的套餐选项：只列现有账户真实出现的套餐，不假设固定套餐集合。
+                chatGPTAccountPlanOptions() {
+                    const plans = new Set();
+                    let unknown = false;
+                    for (const account of this.chatgptAccounts) {
+                        const plan = this.chatGPTAccountPlan(account);
+                        if (plan) plans.add(plan); else unknown = true;
+                    }
+                    const options = [...plans].sort((a, b) => a.localeCompare(b)).map(value => ({ value, label: value }));
+                    if (unknown) options.push({ value: '__unknown__', label: '类型未知' });
+                    return options;
+                },
+
+                // 标签选项按大小写不敏感去重，与后端标签规则一致；已选但当前没有账户使用的标签保留可见，计数为 0。
+                chatGPTAccountTagOptions() {
+                    const options = new Map();
+                    for (const account of this.chatgptAccounts) {
+                        for (const tag of (Array.isArray(account.tags) ? account.tags : [])) {
+                            const key = this.chatGPTAccountTagKey(tag);
+                            if (!key) continue;
+                            const item = options.get(key) || { key, label: tag, count: 0 };
+                            item.count++;
+                            options.set(key, item);
+                        }
+                    }
+                    for (const key of this.chatGPTAccountFilters.tags) {
+                        if (!options.has(key)) options.set(key, { key, label: key, count: 0 });
+                    }
+                    return [...options.values()].sort((a, b) => a.label.localeCompare(b.label));
+                },
+
+                toggleChatGPTAccountTagFilter(key) {
+                    const tags = this.chatGPTAccountFilters.tags;
+                    this.chatGPTAccountFilters.tags = tags.includes(key) ? tags.filter(item => item !== key) : [...tags, key];
+                },
+
+                // 维度筛选个数（不含关键词）；非默认排序另算一项，供「筛选与排序」按钮角标使用。
+                chatGPTAccountFilterCount() {
+                    const f = this.chatGPTAccountFilters;
+                    return ['authorization', 'enabled', 'invocation', 'binding', 'plan'].filter(name => f[name]).length + (f.tags.length ? 1 : 0);
+                },
+
+                chatGPTAccountControlCount() {
+                    return this.chatGPTAccountFilterCount() + (this.chatGPTAccountSort !== 'identity' ? 1 : 0);
+                },
+
+                chatGPTAccountFiltersActive() {
+                    return !!this.chatGPTAccountFilter.trim() || this.chatGPTAccountFilterCount() > 0;
+                },
+
+                resetChatGPTAccountFilters() {
+                    this.chatGPTAccountFilter = '';
+                    this.chatGPTAccountFilters = { authorization: '', enabled: '', invocation: '', binding: '', plan: '', tags: [] };
+                },
+
+                // 七个维度之间 AND，标签之内 OR。
+                chatGPTAccountMatchesFilter(account) {
+                    const f = this.chatGPTAccountFilters;
+                    if (f.authorization && this.chatGPTAuthorizationCategory(account) !== f.authorization) return false;
+                    if (f.enabled === 'active' && account?.enabled === false) return false;
+                    if (f.enabled === 'paused' && account?.enabled !== false) return false;
+                    if (f.invocation) {
+                        const state = ['success', 'failure'].includes(account?.invocation?.state) ? account.invocation.state : 'unknown';
+                        if (state !== f.invocation) return false;
+                    }
+                    const bound = Array.isArray(account?.providers) && account.providers.length > 0;
+                    if (f.binding === 'bound' && !bound) return false;
+                    if (f.binding === 'unbound' && bound) return false;
+                    if (f.plan) {
+                        const plan = this.chatGPTAccountPlan(account);
+                        if (f.plan === '__unknown__' ? plan : plan !== f.plan) return false;
+                    }
+                    if (f.tags.length) {
+                        const tags = (Array.isArray(account?.tags) ? account.tags : []).map(tag => this.chatGPTAccountTagKey(tag));
+                        if (!f.tags.some(key => tags.includes(key))) return false;
+                    }
+                    const q = (this.chatGPTAccountFilter || '').trim().toLowerCase();
+                    if (!q) return true;
+                    const values = [
+                        account?.email,
+                        account?.id,
+                        account?.plan,
+                        account?.usage?.planType,
+                        account?.note,
+                        ...(Array.isArray(account?.tags) ? account.tags : []),
+                        ...(Array.isArray(account?.providers) ? account.providers : [])
+                    ];
+                    return values.some(value => String(value || '').toLowerCase().includes(q));
+                },
+
+                filteredChatGPTAccountCount() {
+                    return this.chatgptAccounts.filter(account => this.chatGPTAccountMatchesFilter(account)).length;
+                },
+
+                filteredChatGPTAccounts() {
+                    return this.sortChatGPTAccounts(this.chatgptAccounts.filter(account => this.chatGPTAccountMatchesFilter(account)));
+                },
+
+                // 排序值：没有该窗口、快照不新鲜、重置已到待复查或数值无效都返回 null（未知）。
+                // 只认普通模型的 primary / secondary 窗口；代码审查和其他额外窗口不参与排序。
+                chatGPTAccountSortValue(account, sort) {
+                    if (sort === 'lastSuccess') {
+                        // 第四阶段起取账户统计的最后成功时间：只算真实调用、不含诊断，最近一次失败也不清空。
+                        const at = Date.parse(account?.invocation?.lastSuccessAt || '');
+                        return Number.isFinite(at) ? at : null;
+                    }
+                    const [windowName, field] = {
+                        primaryRemaining: ['primary', 'remaining'], secondaryRemaining: ['secondary', 'remaining'],
+                        primaryReset: ['primary', 'reset'], secondaryReset: ['secondary', 'reset']
+                    }[sort] || [];
+                    if (!windowName) return null;
+                    const usageState = account?.usageState;
+                    if (usageState?.freshness !== 'fresh') return null;
+                    if ((usageState.resetPendingWindows || []).includes(windowName)) return null;
+                    const window = (account?.usage?.windows || []).find(item => item?.name === windowName);
+                    if (!window) return null;
+                    if (field === 'remaining') {
+                        const value = Number(window.remainingPercent);
+                        return window.remainingPercent === null || window.remainingPercent === undefined || !Number.isFinite(value) ? null : value;
+                    }
+                    const at = Date.parse(window.resetAt || '');
+                    return Number.isFinite(at) ? at : null;
+                },
+
+                // 与后端列表同一默认顺序：邮箱，其次本地 ID，按码点比较保证稳定。
+                compareChatGPTAccountIdentity(a, b) {
+                    const ea = String(a?.email || ''), eb = String(b?.email || '');
+                    if (ea !== eb) return ea < eb ? -1 : 1;
+                    const ia = String(a?.id || ''), ib = String(b?.id || '');
+                    return ia === ib ? 0 : (ia < ib ? -1 : 1);
+                },
+
+                // 未知值不论升降序都排在最后；相同值按邮箱和 ID 升序，不随方向翻转。
+                sortChatGPTAccounts(accounts) {
+                    const sort = this.chatGPTAccountSort;
+                    const descending = this.chatGPTAccountSortDirection === 'desc';
+                    const items = accounts.map(account => ({ account, value: sort === 'identity' ? null : this.chatGPTAccountSortValue(account, sort) }));
+                    items.sort((x, y) => {
+                        if (sort === 'identity') {
+                            const order = this.compareChatGPTAccountIdentity(x.account, y.account);
+                            return descending ? -order : order;
+                        }
+                        if (x.value === null || y.value === null) {
+                            if (x.value !== y.value) return x.value === null ? 1 : -1;
+                        } else if (x.value !== y.value) {
+                            return descending ? y.value - x.value : x.value - y.value;
+                        }
+                        return this.compareChatGPTAccountIdentity(x.account, y.account);
+                    });
+                    return items.map(item => item.account);
+                },
+
+                chatGPTAccountSortUnknownCount() {
+                    if (this.chatGPTAccountSort === 'identity') return 0;
+                    return this.chatgptAccounts.filter(account => this.chatGPTAccountMatchesFilter(account)
+                        && this.chatGPTAccountSortValue(account, this.chatGPTAccountSort) === null).length;
+                },
+
+                // ── 选择 ──
+                isChatGPTAccountSelected(account) {
+                    return !!account?.id && this.chatGPTSelectedAccountIds.includes(account.id);
+                },
+
+                toggleChatGPTAccountSelection(account) {
+                    if (!account?.id) return;
+                    const ids = this.chatGPTSelectedAccountIds;
+                    this.chatGPTSelectedAccountIds = ids.includes(account.id) ? ids.filter(id => id !== account.id) : [...ids, account.id];
+                },
+
+                // 「选择当前筛选结果」只加入可见账户；已选但被筛选隐藏的账户保持原样并单独计数。
+                selectFilteredChatGPTAccounts() {
+                    const ids = new Set(this.chatGPTSelectedAccountIds);
+                    for (const account of this.filteredChatGPTAccounts()) ids.add(account.id);
+                    this.chatGPTSelectedAccountIds = [...ids];
+                },
+
+                selectAllChatGPTAccounts() {
+                    this.chatGPTSelectedAccountIds = this.chatgptAccounts.map(account => account.id);
+                },
+
+                clearChatGPTAccountSelection() {
+                    this.chatGPTSelectedAccountIds = [];
+                },
+
+                clearHiddenChatGPTAccountSelection() {
+                    const visible = new Set(this.filteredChatGPTAccounts().map(account => account.id));
+                    this.chatGPTSelectedAccountIds = this.chatGPTSelectedAccountIds.filter(id => visible.has(id));
+                },
+
+                // 表头复选框：可见账户全选时取消可见部分，否则选中全部可见账户。
+                toggleVisibleChatGPTAccountSelection() {
+                    if (this.visibleChatGPTSelectionState() === 'all') {
+                        const visible = new Set(this.filteredChatGPTAccounts().map(account => account.id));
+                        this.chatGPTSelectedAccountIds = this.chatGPTSelectedAccountIds.filter(id => !visible.has(id));
+                    } else {
+                        this.selectFilteredChatGPTAccounts();
+                    }
+                },
+
+                visibleChatGPTSelectionState() {
+                    const visible = this.filteredChatGPTAccounts();
+                    if (!visible.length) return 'none';
+                    const selected = visible.filter(account => this.chatGPTSelectedAccountIds.includes(account.id)).length;
+                    return selected === 0 ? 'none' : selected === visible.length ? 'all' : 'some';
+                },
+
+                chatGPTSelectionSummary() {
+                    const visible = new Set(this.filteredChatGPTAccounts().map(account => account.id));
+                    const total = this.chatGPTSelectedAccountIds.length;
+                    const hidden = this.chatGPTSelectedAccountIds.filter(id => !visible.has(id)).length;
+                    return { total, hidden, visible: total - hidden };
+                },
+
+                // 列表刷新后丢弃已不存在的账户 ID，不把选择挪给其他账户。
+                pruneChatGPTAccountSelection() {
+                    const ids = new Set(this.chatgptAccounts.map(account => account.id));
+                    const kept = this.chatGPTSelectedAccountIds.filter(id => ids.has(id));
+                    if (kept.length !== this.chatGPTSelectedAccountIds.length) this.chatGPTSelectedAccountIds = kept;
+                },
+
+                // ── 暂停与恢复 ──
+                // 影响清单只按已落盘配置计算；页面上未保存的 Provider 改动不代表当前转发状态。
+                chatGPTAccountSavedProviders(account) {
+                    return Object.entries(this._serverConfigData?.providers || {})
+                        .filter(([, provider]) => provider?.authType === 'chatgptOAuth' && provider.accountId === account?.id)
+                        .sort(([a], [b]) => a.localeCompare(b))
+                        .map(([name, provider]) => ({ name, configEnabled: provider.enabled !== false }));
+                },
+
+                chatGPTAccountProviderState(account, providerName) {
+                    const provider = this._serverConfigData?.providers?.[providerName];
+                    if (provider && provider.enabled === false) {
+                        return { effective: 'provider_disabled', label: '已停用', dotClass: 'bg-line', title: `Provider ${providerName} 在配置中已停用，不参与转发` };
+                    }
+                    if (account?.enabled === false) {
+                        return { effective: 'account_paused', label: '账户暂停', dotClass: 'bg-warn', title: `Provider ${providerName} 配置启用，但绑定账户已暂停，不参与转发` };
+                    }
+                    return { effective: 'active', label: '', dotClass: 'bg-good', title: `Provider ${providerName} 配置启用，参与转发` };
+                },
+
+                // Provider 表 OAuth 标记：配置启用但绑定账户暂停时提示实际不可用。
+                providerChatGPTAccountPaused(provider) {
+                    if (provider?.authType !== 'chatgptOAuth' || !provider.accountId || provider.enabled === false) return false;
+                    return this.chatgptAccounts.some(account => account.id === provider.accountId && account.enabled === false);
+                },
+
+                chatGPTAccountPauseImpactText(account, pause) {
+                    const providers = this.chatGPTAccountSavedProviders(account);
+                    const name = account.email || account.id;
+                    if (!providers.length) {
+                        return pause
+                            ? `暂停 ${name} 后网关不再经此账户转发新请求。该账户当前没有绑定 Provider，暂停不改动任何配置。`
+                            : `恢复 ${name} 后，之后绑定的 Provider 可以经此账户转发。该账户当前没有绑定 Provider。`;
+                    }
+                    const enabled = providers.filter(item => item.configEnabled).map(item => item.name);
+                    const disabled = providers.filter(item => !item.configEnabled).map(item => item.name);
+                    const parts = [];
+                    if (pause) {
+                        parts.push(`暂停 ${name} 后，已开始的请求继续完成，新请求和排队中的请求不再经此账户转发。`);
+                        if (enabled.length) parts.push(`受影响的 Provider：${enabled.join('、')}。它们的配置仍为启用，但实际不参与转发，路由会尝试其他候选。`);
+                        if (disabled.length) parts.push(`已停用的 Provider：${disabled.join('、')}，保持停用。`);
+                        parts.push('绑定和 Provider 启停设置都不会改动。');
+                    } else {
+                        parts.push(`恢复 ${name} 后，账户重新参与转发。`);
+                        if (enabled.length) parts.push(`恢复转发的 Provider：${enabled.join('、')}。`);
+                        if (disabled.length) parts.push(`已停用的 Provider：${disabled.join('、')}，恢复账户不会启用它们，需要在 Provider 配置中单独启用。`);
+                    }
+                    return parts.join('');
+                },
+
+                async changeChatGPTAccountState(account) {
+                    if (!account?.id || this.changingChatGPTAccountState) return;
+                    const pause = account.enabled !== false;
+                    this.changingChatGPTAccountState = account.id;
+                    try {
+                        if (!(await this.askConfirm(this.chatGPTAccountPauseImpactText(account, pause), {
+                            title: pause ? '暂停账户' : '恢复账户', confirmText: pause ? '确认暂停' : '确认恢复'
+                        }))) return;
+                        // 版本缺失时先读一次列表；读取失败就停下，不在没有 If-Match 的情况下写入。
+                        if (!this.chatGPTAccountsETag && !(await this.loadChatGPTAccounts(true, false))) return;
+                        const etag = this.chatGPTAccountsETag;
+                        const res = await fetch('/api/chatgpt/accounts/' + encodeURIComponent(account.id) + '/state', {
+                            method: 'POST', headers: { 'Content-Type': 'application/json', 'If-Match': etag },
+                            body: JSON.stringify({ state: pause ? 'paused' : 'active' })
+                        });
+                        if (!res.ok) {
+                            const message = await this.errorText(res, '账户状态更新失败');
+                            if (res.status === 409) await this.loadChatGPTAccounts(true, false);
+                            throw new Error(message);
+                        }
+                        const data = await res.json();
+                        this.rememberChatGPTAccountsETag(res);
+                        this.chatgptAccounts = this.chatgptAccounts.map(item => item.id === account.id ? data.data.account : item);
+                        this.showStatus(pause ? '账户已暂停，绑定保持不变' : '账户已恢复，原已停用的 Provider 保持停用', 'success');
+                    } catch (err) {
+                        this.showStatus(err.message, 'error');
+                    } finally {
+                        this.changingChatGPTAccountState = '';
+                    }
+                },
+
+                chatGPTBatchOperationLabel(operation = this.chatGPTBatchOperation) {
+                    return { tags: '批量标签', pause: '批量暂停', resume: '批量恢复', delete: '批量删除', usage: '刷新所选用量' }[operation] || '';
+                },
+
+                openChatGPTBatchDialog(operation, event) {
+                    if (this.chatGPTBatchBusy || !this.chatGPTSelectedAccountIds.length) return;
+                    const limit = operation === 'usage' ? 50 : 100;
+                    if (this.chatGPTSelectedAccountIds.length > limit) {
+                        this.showStatus(`此操作每批最多 ${limit} 个账户，请减少选择`, 'error');
+                        return;
+                    }
+                    this._chatGPTBatchOpener = event?.currentTarget || document.activeElement;
+                    this.chatGPTBatchOperation = operation;
+                    this.chatGPTBatchAccountIds = [...this.chatGPTSelectedAccountIds];
+                    this.chatGPTBatchHiddenCount = this.chatGPTSelectionSummary().hidden;
+                    this.chatGPTBatchAddTags = '';
+                    this.chatGPTBatchRemoveTags = '';
+                    this.chatGPTBatchRefreshMode = 'auto';
+                    this.resetChatGPTBatchPlan();
+                    this.showChatGPTBatchDialog = true;
+                    this.$nextTick(() => this.$refs.chatGPTBatchClose?.focus());
+                },
+
+                resetChatGPTBatchPlan() {
+                    this.chatGPTBatchPlan = null;
+                    this.chatGPTBatchPlanETag = '';
+                    this.chatGPTBatchPlanInput = null;
+                    this.chatGPTBatchResult = null;
+                    this.chatGPTBatchError = '';
+                },
+
+                chatGPTBatchInput() {
+                    const input = { operation: this.chatGPTBatchOperation, accountIds: [...this.chatGPTBatchAccountIds] };
+                    if (input.operation === 'tags') {
+                        input.addTags = this.chatGPTBatchAddTags.split(',').map(tag => tag.trim()).filter(Boolean);
+                        input.removeTags = this.chatGPTBatchRemoveTags.split(',').map(tag => tag.trim()).filter(Boolean);
+                    }
+                    return input;
+                },
+
+                async runChatGPTBatch(stage) {
+                    if (this.chatGPTBatchBusy) return;
+                    const usage = this.chatGPTBatchOperation === 'usage';
+                    if (stage === 'apply' && !this.chatGPTBatchPlan?.canApply) return;
+                    const controller = new AbortController();
+                    this._chatGPTBatchController = controller;
+                    const sequence = ++this._chatGPTBatchSequence;
+                    this.chatGPTBatchBusy = stage;
+                    this.chatGPTBatchError = '';
+                    const timer = window.setTimeout(() => controller.abort(), usage ? 65000 : 20000);
+                    try {
+                        const input = stage === 'apply' ? { ...this.chatGPTBatchPlanInput, previewToken: this.chatGPTBatchPlan.previewToken }
+                            : usage ? { accountIds: [...this.chatGPTBatchAccountIds], refreshMode: this.chatGPTBatchRefreshMode } : this.chatGPTBatchInput();
+                        const headers = { 'Content-Type': 'application/json' };
+                        if (stage === 'apply') headers['If-Match'] = this.chatGPTBatchPlanETag;
+                        const res = await fetch('/api/chatgpt/accounts/' + (usage ? 'usage/batch-refresh' : 'batch/' + stage), {
+                            method: 'POST', headers, body: JSON.stringify(input), signal: controller.signal
+                        });
+                        if (!res.ok) {
+                            const message = await this.errorText(res, '批量操作失败');
+                            // 浮层已关闭或已发起新一轮时，迟到的错误不能再改写当前批次。
+                            if (sequence !== this._chatGPTBatchSequence) return;
+                            if ([404, 409, 410].includes(res.status)) {
+                                this.chatGPTBatchPlan = null;
+                                await this.loadChatGPTAccounts(true, false);
+                                // 已被删除的账户移出本批次并明确告知，不悄悄换成其他账户。
+                                const existing = new Set(this.chatgptAccounts.map(account => account.id));
+                                const kept = this.chatGPTBatchAccountIds.filter(id => existing.has(id));
+                                if (kept.length !== this.chatGPTBatchAccountIds.length) {
+                                    const removed = this.chatGPTBatchAccountIds.length - kept.length;
+                                    this.chatGPTBatchAccountIds = kept;
+                                    throw new Error(`${message}；已从本次批次移除 ${removed} 个不存在的账户，请重新预检`);
+                                }
+                                throw new Error(`${message}；账户数据已刷新，请重新预检`);
+                            }
+                            throw new Error(message);
+                        }
+                        const response = await res.json();
+                        if (sequence !== this._chatGPTBatchSequence) return;
+                        if (!usage && stage === 'preview') {
+                            this.chatGPTBatchPlan = response.data;
+                            this.chatGPTBatchPlanETag = res.headers.get('ETag') || '';
+                            this.chatGPTBatchPlanInput = input;
+                        } else {
+                            this.chatGPTBatchResult = response.data;
+                            this.chatGPTBatchPlan = null;
+                            this.rememberChatGPTAccountsETag(res);
+                            await this.loadChatGPTAccounts(true, false);
+                            this.$nextTick(() => this.$refs.chatGPTBatchResults?.focus());
+                        }
+                    } catch (err) {
+                        if (sequence === this._chatGPTBatchSequence) this.chatGPTBatchError = controller.signal.aborted
+                            ? '等待已取消或超时，已执行的操作不会回滚。请刷新账户后确认结果。' : err.message;
+                    } finally {
+                        window.clearTimeout(timer);
+                        if (sequence === this._chatGPTBatchSequence) {
+                            this.chatGPTBatchBusy = '';
+                            this._chatGPTBatchController = null;
+                            // 提交被拒后确认按钮随计划一起消失，把焦点交给重新预检按钮，避免键盘焦点落回页面顶部。
+                            if (stage === 'apply' && !this.chatGPTBatchPlan && !this.chatGPTBatchResult) {
+                                this.$nextTick(() => this.$refs.chatGPTBatchPreview?.focus());
+                            }
+                        }
+                    }
+                },
+
+                closeChatGPTBatchDialog(returnFocus = true) {
+                    // 写入期间保持浮层，避免把关闭误解为事务撤销。
+                    if (this.chatGPTBatchBusy === 'apply') return;
+                    this._chatGPTBatchSequence++;
+                    this._chatGPTBatchController?.abort();
+                    this._chatGPTBatchController = null;
+                    this.chatGPTBatchBusy = '';
+                    this.showChatGPTBatchDialog = false;
+                    this.resetChatGPTBatchPlan();
+                    const opener = this._chatGPTBatchOpener;
+                    if (returnFocus) this.$nextTick(() => { if (opener?.isConnected) opener.focus(); });
+                },
+
+                chatGPTBatchCanPreview() {
+                    if (this.chatGPTBatchBusy || this.chatGPTBatchOperation === 'usage') return false;
+                    if (this.chatGPTBatchOperation !== 'tags') return true;
+                    const input = this.chatGPTBatchInput();
+                    return input.addTags.length > 0 || input.removeTags.length > 0;
+                },
+
+                chatGPTBatchAccountLabel(accountId, email = '') {
+                    return email || this.chatgptAccounts.find(account => account.id === accountId)?.email || accountId;
+                },
+
+                chatGPTBatchEntryChange(entry, operation = this.chatGPTBatchOperation) {
+                    if (!entry) return '';
+                    if (operation === 'delete') return entry.action === 'change' ? '删除账户和本机保存的凭据' : '';
+                    if (operation === 'pause' || operation === 'resume') {
+                        const state = enabled => enabled ? '启用中' : '已暂停';
+                        return entry.action === 'unchanged' ? `已是${state(entry.after?.enabled)}` : `${state(entry.before?.enabled)} → ${state(entry.after?.enabled)}`;
+                    }
+                    const before = entry.before?.tags || [], after = entry.after?.tags || [];
+                    const key = tag => this.chatGPTAccountTagKey(tag);
+                    const added = after.filter(tag => !before.some(item => key(item) === key(tag)));
+                    const removed = before.filter(tag => !after.some(item => key(item) === key(tag)));
+                    const parts = [];
+                    if (added.length) parts.push('添加 ' + added.join('、'));
+                    if (removed.length) parts.push('移除 ' + removed.join('、'));
+                    return parts.join('；') || '标签不变';
+                },
+
+                chatGPTBatchActionInfo(action) {
+                    return {
+                        change: { label: '将变更', badgeClass: 'bg-cyan2/10 text-cyan2' },
+                        unchanged: { label: '无变化', badgeClass: 'bg-white/[.06] text-muted' },
+                        blocked: { label: '阻断', badgeClass: 'bg-danger/10 text-danger' }
+                    }[action] || { label: action || '未知', badgeClass: 'bg-white/[.06] text-muted' };
+                },
+
+                chatGPTBatchUsageStatusInfo(status) {
+                    return {
+                        success: { label: '已刷新', badgeClass: 'bg-good/10 text-good' },
+                        cached: { label: '沿用缓存', badgeClass: 'bg-cyan2/10 text-cyan2' },
+                        failure: { label: '失败', badgeClass: 'bg-danger/10 text-danger' },
+                        cancelled: { label: '已取消', badgeClass: 'bg-warn/10 text-amber-100' },
+                        not_found: { label: '账户不存在', badgeClass: 'bg-white/[.06] text-muted' }
+                    }[status] || { label: status || '未知', badgeClass: 'bg-white/[.06] text-muted' };
+                },
+
+                chatGPTBatchSummaryText(summary, applied = false) {
+                    if (!summary) return '';
+                    const change = applied ? `已变更 ${summary.change || 0}` : `将变更 ${summary.change || 0}`;
+                    return `共 ${summary.total || 0} 个 · ${change} · 无变化 ${summary.unchanged || 0}` + (summary.blocked ? ` · 阻断 ${summary.blocked}` : '');
+                },
+
+                chatGPTBatchUsageSummaryText() {
+                    const results = this.chatGPTBatchResult?.results || [];
+                    const count = status => results.filter(item => item.status === status).length;
+                    return `已刷新 ${count('success')} · 沿用缓存 ${count('cached')} · 失败 ${count('failure')} · 已取消 ${count('cancelled')}`
+                        + (count('not_found') ? ` · 不存在 ${count('not_found')}` : '');
+                },
+
+                trapChatGPTBatchFocus(event) {
+                    const controls = [...this.$refs.chatGPTBatchDialog.querySelectorAll('button, input, select, textarea, [tabindex]')]
+                        .filter(el => !el.disabled && el.tabIndex >= 0 && el.getClientRects().length);
+                    const first = controls[0], last = controls.at(-1);
+                    if (!first) return;
+                    if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+                    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+                },

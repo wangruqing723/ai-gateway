@@ -1,0 +1,1 @@
+{"format":"ai-gateway-chatgpt-backup","version":1,"kdf":{"name":"pbkdf2-hmac-sha256","iterations":600000,"salt":"MDEyMzQ1Njc4OWFiY2RlZg=="},"cipher":{"name":"aes-256-gcm","nonce":"MDEyMzQ1Njc4OWFi"},"ciphertext":"VYoQzQqXLqAi2H31OPoYY/JMWTRflvNkNHQuDvh1qUrZUvZDBehyI1MFfQ=="}

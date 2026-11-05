@@ -1,0 +1,121 @@
+                // 本片段排在 15-chatgpt-observe.js.part 之后；上一片段末尾已带尾逗号，这里直接续写成员，
+                // 本片段最后一项同样保留尾逗号。
+
+                // ── ChatGPT 后台令牌预刷新与用量刷新 ─────────────────────────────
+                // 配置读写见 normalizeChatGPTBackground / chatGPTBackgroundPayload；这里只负责
+                // 后台状态行与账户详情里的「后台计划」。
+
+                // 由设置页区块的 x-init 调用：进入设置页、以及配置 revision 变化（保存成功或重载）时读取状态。
+                // 首次加载时 revision 还是空串，等 loadConfig 写入 revision 再读，避免同一时刻读两次。
+                watchChatGPTBackgroundStatus() {
+                    if (this.activeTab === 'settings' && this.revision) this.loadChatGPTBackgroundStatus();
+                    this.$watch('activeTab', (tab, oldTab) => {
+                        if (tab === 'settings' && tab !== oldTab) this.loadChatGPTBackgroundStatus();
+                    });
+                    this.$watch('revision', (value, oldValue) => {
+                        if (value !== oldValue && this.activeTab === 'settings') this.loadChatGPTBackgroundStatus();
+                    });
+                },
+
+                // 读取失败、超时、旧后端 404 或响应形状不对时清空状态，不显示状态行，也不弹错误。
+                async loadChatGPTBackgroundStatus() {
+                    const sequence = ++this._chatGPTBackgroundStatusSequence;
+                    const controller = new AbortController();
+                    const timeoutId = window.setTimeout(() => controller.abort(), 15_000);
+                    let next = null;
+                    try {
+                        const res = await fetch('/api/chatgpt/background', { signal: controller.signal });
+                        if (res.ok) {
+                            const body = await res.json();
+                            const data = body?.data;
+                            if (data && typeof data === 'object' && typeof data.running === 'boolean') next = data;
+                        }
+                    } catch (_) {
+                        next = null;
+                    } finally {
+                        window.clearTimeout(timeoutId);
+                    }
+                    if (sequence !== this._chatGPTBackgroundStatusSequence) return;
+                    this.chatGPTBackgroundStatus = next;
+                },
+
+                // 状态行：运行中 / 平台不支持跨进程锁未启动 / 未启用 / 未运行，附最近检查时间。
+                chatGPTBackgroundStatusInfo() {
+                    const status = this.chatGPTBackgroundStatus;
+                    if (!status) return null;
+                    const lastTick = status.lastTickAt ? '最近检查 ' + this.formatChatGPTDate(status.lastTickAt) : '尚未检查';
+                    if (status.reason === 'unsupported_platform') {
+                        return { key: 'unsupported', label: '未启动', badgeClass: 'bg-warn/10 text-amber-100', detail: '当前平台不支持跨进程文件锁，后台刷新未启动' };
+                    }
+                    if (status.running) {
+                        const parts = [];
+                        if (status.tokenRefresh) parts.push('令牌预刷新');
+                        if (status.usageRefresh) parts.push('用量刷新');
+                        return { key: 'running', label: '运行中', badgeClass: 'bg-good/10 text-good', detail: `${parts.join('、') || '后台循环'} · ${lastTick}` };
+                    }
+                    if (!status.tokenRefresh && !status.usageRefresh) {
+                        return { key: 'disabled', label: '未启用', badgeClass: 'bg-white/[.06] text-muted', detail: '两项后台刷新均已关闭，不产生后台请求' };
+                    }
+                    return { key: 'stopped', label: '未运行', badgeClass: 'bg-warn/10 text-amber-100', detail: (status.reason ? `原因：${status.reason} · ` : '') + lastTick };
+                },
+
+                chatGPTBackgroundSkipText(skipped) {
+                    return {
+                        inactive: '闲置（活跃窗口内没有真实上游调用）',
+                        paused: '账户已暂停',
+                        reauthorization_required: '需要重新授权',
+                        no_refresh_token: '缺少 refresh token'
+                    }[skipped] || `已跳过（${skipped}）`;
+                },
+
+                chatGPTBackgroundResultText(result) {
+                    return { ok: '成功', error: '失败', cancelled: '已取消' }[result] || result || '';
+                },
+
+                // 令牌或用量一项的说明：上次结果、下次计划与连续失败次数。字段缺失时按「尚未运行 / 未计划」显示。
+                chatGPTBackgroundTaskText(task) {
+                    const parts = [];
+                    if (task.lastRunAt) {
+                        const result = this.chatGPTBackgroundResultText(task.lastResult);
+                        parts.push(`上次 ${this.formatChatGPTDate(task.lastRunAt)}${result ? ' ' + result : ''}`);
+                    } else {
+                        parts.push('尚未运行');
+                    }
+                    if (task.lastMessage) parts.push(String(task.lastMessage));
+                    parts.push(task.nextAt ? `下次 ${this.formatChatGPTDate(task.nextAt)}` : '未计划');
+                    const failures = Number(task.failures) || 0;
+                    if (failures > 0) parts.push(`连续失败 ${failures} 次`);
+                    return parts.join(' · ');
+                },
+
+                chatGPTBackgroundOf(account) {
+                    const background = account?.background;
+                    return background && typeof background === 'object' ? background : null;
+                },
+
+                // 后台计划说明行；账户没有 background 字段（后台全关或旧后端）时返回空数组。
+                chatGPTBackgroundRows(account) {
+                    const background = this.chatGPTBackgroundOf(account);
+                    if (!background) return [];
+                    const skipped = typeof background.skipped === 'string' ? background.skipped : '';
+                    const rows = [{
+                        key: 'state',
+                        label: '调度',
+                        value: skipped ? '跳过：' + this.chatGPTBackgroundSkipText(skipped) : (background.active ? '参与后台刷新（活跃账户）' : '参与后台刷新'),
+                        tone: skipped ? 'muted' : 'good'
+                    }, {
+                        key: 'lastUsed',
+                        label: '最近使用',
+                        value: background.lastUsedAt ? this.formatChatGPTDate(background.lastUsedAt) : '本次启动后尚无真实调用'
+                    }];
+                    for (const [key, label] of [['token', '令牌预刷新'], ['usage', '用量刷新']]) {
+                        const task = background[key];
+                        if (!task || typeof task !== 'object') continue;
+                        rows.push({ key, label, value: this.chatGPTBackgroundTaskText(task), tone: task.lastResult === 'error' ? 'warn' : '' });
+                    }
+                    return rows;
+                },
+
+                chatGPTBackgroundRowClass(row) {
+                    return { good: 'text-good', warn: 'text-amber-100', muted: 'text-muted' }[row?.tone] || 'text-text';
+                },

@@ -1,0 +1,397 @@
+                // 本片段排在 16-chatgpt-background.js.part 之后；上一片段末尾已带尾逗号，这里直接续写成员，
+                // 本片段最后一项同样保留尾逗号。
+
+                // ── ChatGPT 账户加密备份与恢复 ─────────────────────────────
+                // 加密备份是网关原生格式，带标签、备注、授权时间与暂停状态，只能由本网关用密码恢复；
+                // 与第三方兼容的明文导出（exportChatGPTAccounts）互不替代。
+                // 密码、备份原文和预检凭证只放在组件内存中：不写浏览器存储、不进 URL、不打控制台；
+                // 关闭弹窗、切换页签、导出成功、恢复应用成功时立即清空。
+
+                // resetChatGPTBackupState 清空备份与恢复流程的全部敏感输入和计划。
+                // 只保留账户选择和交给配置迁移的映射（映射只含账户 ID，不含凭据）。
+                resetChatGPTBackupState() {
+                    this.chatGPTBackupPassword = '';
+                    this.chatGPTBackupPasswordConfirm = '';
+                    this.chatGPTBackupError = '';
+                    this.chatGPTBackupNotice = '';
+                    this.clearChatGPTRestoreInput();
+                    this.chatGPTRestoreMetadata = 'keep';
+                    this.chatGPTRestorePaused = false;
+                    this.chatGPTRestoreResult = null;
+                    this.chatGPTRestoreError = '';
+                    this.chatGPTRestoreNotice = '';
+                },
+
+                // clearChatGPTRestoreInput 丢弃备份原文、密码与计划；正在读取的文件结果也会被作废。
+                clearChatGPTRestoreInput() {
+                    this._chatGPTRestoreFileReadVersion += 1;
+                    this.chatGPTRestoreFileName = '';
+                    this.chatGPTRestoreFileSize = 0;
+                    this.chatGPTRestoreBackupText = '';
+                    this.chatGPTRestorePassword = '';
+                    this.chatGPTRestorePlanActions = {};
+                    this.resetChatGPTRestorePlan();
+                    if (this.$refs.chatGPTRestoreFileInput) this.$refs.chatGPTRestoreFileInput.value = '';
+                },
+
+                resetChatGPTRestorePlan() {
+                    this.chatGPTRestorePlan = null;
+                    this.chatGPTRestorePlanETag = '';
+                },
+
+                // 密码按 UTF-8 字节计上限；长度按字符（码点）计，与后端「至少 12 个字符」一致。
+                chatGPTBackupPasswordBytes(value) {
+                    return new TextEncoder().encode(value || '').byteLength;
+                },
+
+                chatGPTBackupPasswordChecks() {
+                    const value = this.chatGPTBackupPassword || '';
+                    return {
+                        length: [...value].length >= 12,
+                        match: value !== '' && value === this.chatGPTBackupPasswordConfirm,
+                        bytes: this.chatGPTBackupPasswordBytes(value) <= 1024,
+                        nul: !value.includes('\u0000')
+                    };
+                },
+
+                chatGPTBackupSelectedIds() {
+                    const known = new Set(this.chatgptAccounts.map(account => account.id));
+                    return this.chatGPTBackupAccountIds.filter(id => known.has(id));
+                },
+
+                canExportChatGPTBackup() {
+                    const checks = this.chatGPTBackupPasswordChecks();
+                    return !this.chatGPTBackupBusy && !this.importingChatGPTAccounts && !this.exportingChatGPTAccounts
+                        && this.chatGPTBackupSelectedIds().length > 0
+                        && checks.length && checks.match && checks.bytes && checks.nul;
+                },
+
+                selectAllChatGPTBackupAccounts() {
+                    this.chatGPTBackupAccountIds = this.chatgptAccounts.map(account => account.id);
+                },
+
+                clearChatGPTBackupAccounts() {
+                    this.chatGPTBackupAccountIds = [];
+                },
+
+                // readChatGPTBackupError 读取 {error:{type,message}}；拿不到类型时按纯文本或 HTTP 状态兜底。
+                async readChatGPTBackupError(res, fallback) {
+                    const raw = await res.text().catch(() => '');
+                    try {
+                        const data = JSON.parse(raw);
+                        const type = typeof data?.error?.type === 'string' ? data.error.type : '';
+                        const message = data?.error?.message || data?.message || (typeof data?.error === 'string' ? data.error : '');
+                        if (type || message) return { type, status: res.status, message: String(message || fallback) };
+                    } catch (_) {
+                        // 不是 JSON：反向代理页面或纯文本，按下方 HTTP 状态兜底
+                    }
+                    const text = raw.trim().replace(/\s+/g, ' ');
+                    return { type: '', status: res.status, message: text ? (text.length > 300 ? text.slice(0, 300) + '…' : text) : `${fallback}（HTTP ${res.status}）` };
+                },
+
+                // 恢复错误统一换算成可操作的说明：密码问题与「需重新预检」两类单独给文案，其余用后端 message。
+                chatGPTRestoreErrorMessage(info) {
+                    if (info.type === 'backup_decrypt_failed') return '密码错误或备份已损坏';
+                    if (['preview_expired', 'preview_mismatch', 'invalid_preview_token'].includes(info.type)) return '预检已失效（' + info.message + '），请重新预检后再应用';
+                    if (info.type === 'account_conflict') return '账户已变化，请重新预检后再应用';
+                    if (info.type === 'config_conflict') return 'Provider 配置已变化，请重新预检后再应用';
+                    if (info.type === 'precondition_required') return '缺少账户版本，请重新预检后再应用';
+                    return info.message;
+                },
+
+                // exportChatGPTBackup 用 If-Match 绑定当前账户版本；版本缺失时先读一次列表，读取失败就停下。
+                async exportChatGPTBackup() {
+                    if (!this.canExportChatGPTBackup()) return;
+                    const ids = this.chatGPTBackupSelectedIds();
+                    this.chatGPTBackupBusy = 'export';
+                    this.chatGPTBackupError = '';
+                    this.chatGPTBackupNotice = '';
+                    try {
+                        if (!this.chatGPTAccountsETag && !(await this.loadChatGPTAccounts(true, false))) {
+                            this.chatGPTBackupError = '无法读取账户版本，请刷新账户列表后重试';
+                            return;
+                        }
+                        const res = await fetch('/api/chatgpt/accounts/backup/export', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json', 'If-Match': this.chatGPTAccountsETag },
+                            body: JSON.stringify({ accountIds: ids, password: this.chatGPTBackupPassword })
+                        });
+                        if (!res.ok) {
+                            const info = await this.readChatGPTBackupError(res, '生成加密备份失败');
+                            if (res.status === 409 || info.type === 'account_conflict') {
+                                this.chatGPTBackupError = '账户已变化，请刷新后重试';
+                                await this.loadChatGPTAccounts(true, false);
+                                this.chatGPTBackupAccountIds = this.chatGPTBackupSelectedIds();
+                                return;
+                            }
+                            this.chatGPTBackupError = '生成加密备份失败：' + info.message;
+                            return;
+                        }
+                        const blob = await res.blob();
+                        const disposition = res.headers.get('Content-Disposition') || '';
+                        const matched = disposition.match(/filename\*?=(?:UTF-8''|")?([^;"]+)/i)?.[1] || '';
+                        let filename = 'chatgpt-accounts.aigw-backup';
+                        try {
+                            if (matched.trim()) filename = decodeURIComponent(matched.trim());
+                        } catch (_) {
+                            // 文件名编码异常时使用默认名
+                        }
+                        const objectURL = URL.createObjectURL(blob);
+                        const link = document.createElement('a');
+                        link.href = objectURL;
+                        link.download = filename;
+                        document.body.appendChild(link);
+                        link.click();
+                        link.remove();
+                        window.setTimeout(() => URL.revokeObjectURL(objectURL), 0);
+                        this.chatGPTBackupPassword = '';
+                        this.chatGPTBackupPasswordConfirm = '';
+                        this.chatGPTBackupNotice = `已下载 ${ids.length} 个账户的加密备份：${filename}。网关不保存密码，忘记密码将无法恢复。`;
+                        this.showStatus(`已导出 ${ids.length} 个账户的加密备份`, 'success');
+                    } catch (err) {
+                        this.chatGPTBackupError = '生成加密备份失败：' + err.message;
+                    } finally {
+                        this.chatGPTBackupBusy = '';
+                    }
+                },
+
+                // 只把文件读成文本；超过 16 MiB 直接拒绝，不读入内存。
+                async onChatGPTRestoreFileChange(event) {
+                    const input = event?.target;
+                    const file = input?.files?.[0] || null;
+                    this._chatGPTRestoreFileReadVersion += 1;
+                    this.chatGPTRestoreFileName = '';
+                    this.chatGPTRestoreFileSize = 0;
+                    this.chatGPTRestoreBackupText = '';
+                    this.chatGPTRestorePlanActions = {};
+                    this.resetChatGPTRestorePlan();
+                    this.chatGPTRestoreResult = null;
+                    this.chatGPTRestoreError = '';
+                    this.chatGPTRestoreNotice = '';
+                    if (!file) return;
+                    if (file.size > 16 * 1024 * 1024) {
+                        this.chatGPTRestoreError = '备份文件超过 16 MiB 上限，无法恢复';
+                        if (input) input.value = '';
+                        return;
+                    }
+                    const version = this._chatGPTRestoreFileReadVersion;
+                    try {
+                        const text = await file.text();
+                        // 读取期间换了文件、切换页签或关闭弹窗：丢弃这次结果。
+                        if (version !== this._chatGPTRestoreFileReadVersion) return;
+                        this.chatGPTRestoreBackupText = text;
+                        this.chatGPTRestoreFileName = file.name || '未命名备份';
+                        this.chatGPTRestoreFileSize = file.size;
+                    } catch (err) {
+                        if (version !== this._chatGPTRestoreFileReadVersion) return;
+                        this.chatGPTRestoreError = '读取备份文件失败：' + err.message;
+                        if (input) input.value = '';
+                    }
+                },
+
+                // 密码或选项变化都作废旧计划：应用会重新解密，旧凭证绑定的是旧选项。逐项动作保留，重新预检时沿用。
+                onChatGPTRestoreOptionChange() {
+                    if (!this.chatGPTRestorePlan) return;
+                    this.resetChatGPTRestorePlan();
+                    this.chatGPTRestoreNotice = '选项已更改，请重新预检';
+                },
+
+                chatGPTRestorePasswordProblem() {
+                    const value = this.chatGPTRestorePassword || '';
+                    if (!value) return '请输入备份密码';
+                    if (this.chatGPTBackupPasswordBytes(value) > 1024) return '密码超过 1024 字节上限';
+                    if (value.includes('\u0000')) return '密码不能包含 NUL 字符';
+                    return '';
+                },
+
+                canPreviewChatGPTRestore() {
+                    return !this.chatGPTBackupBusy && !!this.chatGPTRestoreBackupText && !this.chatGPTRestorePasswordProblem();
+                },
+
+                chatGPTRestoreActionList() {
+                    return Object.entries(this.chatGPTRestorePlanActions)
+                        .map(([index, item]) => item.action === 'update'
+                            ? { index: Number(index), action: 'update', targetAccountId: item.targetAccountId }
+                            : { index: Number(index), action: item.action })
+                        .sort((a, b) => a.index - b.index);
+                },
+
+                chatGPTRestoreRequestBody() {
+                    return {
+                        backup: this.chatGPTRestoreBackupText,
+                        password: this.chatGPTRestorePassword,
+                        metadata: this.chatGPTRestoreMetadata === 'replace' ? 'replace' : 'keep',
+                        restorePaused: !!this.chatGPTRestorePaused,
+                        actions: this.chatGPTRestoreActionList()
+                    };
+                },
+
+                // previewChatGPTRestore 只读预检：解密、匹配本地账户并给出计划，不落盘。每次改选都重新预检。
+                async previewChatGPTRestore() {
+                    if (!this.canPreviewChatGPTRestore()) return;
+                    this.chatGPTBackupBusy = 'preview';
+                    this.chatGPTRestoreError = '';
+                    this.chatGPTRestoreNotice = '';
+                    this.chatGPTRestoreResult = null;
+                    // 重新预检期间保留旧计划供阅读，但立即作废其凭证，避免误用旧凭证应用。
+                    if (this.chatGPTRestorePlan) this.chatGPTRestorePlan = { ...this.chatGPTRestorePlan, canApply: false, previewToken: null };
+                    try {
+                        const res = await fetch('/api/chatgpt/accounts/backup/preview', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(this.chatGPTRestoreRequestBody())
+                        });
+                        if (!res.ok) {
+                            const info = await this.readChatGPTBackupError(res, '备份预检失败');
+                            this.resetChatGPTRestorePlan();
+                            this.chatGPTRestoreError = '备份预检失败：' + this.chatGPTRestoreErrorMessage(info);
+                            return;
+                        }
+                        const data = await res.json();
+                        this.chatGPTRestorePlan = data?.data || null;
+                        this.chatGPTRestorePlanETag = res.headers.get('ETag') || '';
+                    } catch (err) {
+                        this.resetChatGPTRestorePlan();
+                        this.chatGPTRestoreError = '备份预检失败：' + err.message;
+                    } finally {
+                        this.chatGPTBackupBusy = '';
+                    }
+                },
+
+                async setChatGPTRestoreAction(entry, action) {
+                    if (!entry || !action || this.chatGPTBackupBusy) return;
+                    this.chatGPTRestorePlanActions = {
+                        ...this.chatGPTRestorePlanActions,
+                        [entry.index]: { action, targetAccountId: entry.matchedAccountId || '' }
+                    };
+                    // 旧计划立即作废，避免在重新预检返回前误用旧凭证应用。
+                    this.chatGPTRestorePlan = { ...this.chatGPTRestorePlan, canApply: false, previewToken: null };
+                    await this.previewChatGPTRestore();
+                },
+
+                // applyChatGPTRestore 携带预检凭证与预检响应的账户版本；成功后清空密码与备份原文。
+                // 失败时保留文件与密码，便于直接重新预检。
+                async applyChatGPTRestore() {
+                    const plan = this.chatGPTRestorePlan;
+                    if (!plan?.canApply || !plan.previewToken || this.chatGPTBackupBusy) return;
+                    if (!this.chatGPTRestorePlanETag) {
+                        this.resetChatGPTRestorePlan();
+                        this.chatGPTRestoreError = '预检结果缺少账户版本，请重新预检';
+                        return;
+                    }
+                    this.chatGPTBackupBusy = 'apply';
+                    this.chatGPTRestoreError = '';
+                    this.chatGPTRestoreNotice = '';
+                    let res;
+                    try {
+                        res = await fetch('/api/chatgpt/accounts/backup/apply', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json', 'If-Match': this.chatGPTRestorePlanETag },
+                            body: JSON.stringify({ ...this.chatGPTRestoreRequestBody(), previewToken: plan.previewToken })
+                        });
+                    } catch (_) {
+                        // 请求可能已被保存，只是响应丢了：不重放，作废计划并重新读取账户供核对。
+                        this.resetChatGPTRestorePlan();
+                        this.chatGPTRestoreError = '未收到恢复结果，是否已保存未确认。请核对账户列表后重新预检。';
+                        this.chatGPTBackupBusy = '';
+                        await this.loadChatGPTAccounts(true, false);
+                        return;
+                    }
+                    try {
+                        if (!res.ok) {
+                            const info = await this.readChatGPTBackupError(res, '应用恢复失败');
+                            this.resetChatGPTRestorePlan();
+                            this.chatGPTRestoreError = '应用恢复失败：' + this.chatGPTRestoreErrorMessage(info);
+                            if (res.status === 409) await this.loadChatGPTAccounts(true, false);
+                            return;
+                        }
+                        const data = await res.json();
+                        this.chatGPTRestoreResult = data?.data || { imported: 0, updated: 0, skipped: 0, mappings: [] };
+                        this.rememberChatGPTAccountsETag(res);
+                        this.clearChatGPTRestoreInput();
+                        await this.loadChatGPTAccounts(false, false);
+                        this.showStatus('恢复完成：' + this.chatGPTRestoreResultText(this.chatGPTRestoreResult), 'success');
+                    } catch (err) {
+                        this.resetChatGPTRestorePlan();
+                        this.chatGPTRestoreError = '应用恢复失败：' + err.message + '；请核对账户列表后重新预检';
+                    } finally {
+                        this.chatGPTBackupBusy = '';
+                    }
+                },
+
+                chatGPTRestoreActionLabel(action) {
+                    return { add: '新增', skip: '跳过', update: '更新' }[action] || action;
+                },
+
+                chatGPTRestorePlanSummaryText() {
+                    const s = this.chatGPTRestorePlan?.summary || {};
+                    let text = `共 ${s.total || 0} 条 · 新增 ${s.add || 0} · 更新 ${s.update || 0} · 跳过 ${s.skip || 0}`;
+                    if (s.invalid) text += ` · 无效 ${s.invalid}`;
+                    if (s.blocked) text += ` · 阻断 ${s.blocked}`;
+                    return text;
+                },
+
+                // 逐条变化提示：只描述将发生什么，不回显任何凭据。
+                chatGPTRestoreEntryNotes(entry) {
+                    const notes = [];
+                    if (entry?.remapped) {
+                        notes.push(entry.action === 'add' || !entry.action
+                            ? `源 ID ${entry.sourceAccountId} 已被占用或不可用，新增时生成新 ID`
+                            : `源 ID ${entry.sourceAccountId} 将映射到本地其他 ID`);
+                    } else if (entry?.action === 'add' && entry.targetAccountId) {
+                        notes.push(`保留源 ID ${entry.targetAccountId}`);
+                    }
+                    if (entry?.metadataChanges) notes.push(this.chatGPTRestoreMetadata === 'replace' ? '标签与备注将用备份值覆盖' : '标签与备注将写入');
+                    if (entry?.pausedChange) notes.push(entry.paused ? '恢复后为暂停状态' : '恢复后取消暂停');
+                    return notes;
+                },
+
+                chatGPTRestoreResultText(result) {
+                    if (!result) return '';
+                    return `新增 ${result.imported || 0} 个，更新 ${result.updated || 0} 个，跳过 ${result.skipped || 0} 个`;
+                },
+
+                chatGPTRestoreResultMappings() {
+                    const mappings = this.chatGPTRestoreResult?.mappings;
+                    return Array.isArray(mappings) ? mappings.filter(item => item?.sourceAccountId) : [];
+                },
+
+                // 只把 {源 ID: 目标 ID} 交给配置迁移；在配置迁移导入里预填，用户可逐条修改。
+                async useChatGPTRestoreMappingsForConfigTransfer() {
+                    const mappings = {};
+                    for (const item of this.chatGPTRestoreResultMappings()) {
+                        if (item.targetAccountId) mappings[item.sourceAccountId] = item.targetAccountId;
+                    }
+                    if (!Object.keys(mappings).length) {
+                        this.showStatus('恢复结果中没有可用于配置迁移的账户映射', 'error');
+                        return;
+                    }
+                    this.chatGPTRestoreAccountMappings = mappings;
+                    // 有未保存草稿时停在当前弹窗，映射已记下，处理草稿后可再次点击。
+                    if (!(await this.guardConfigTransferDraft())) return;
+                    this.closeChatGPTTransferDialog();
+                    await this.loadChatGPTAccounts(false, false);
+                    await this.openConfigTransferDialog('import');
+                    this.configTransferImportNotice = '已记下备份恢复的账户映射。上传或粘贴配置迁移文件并预览后，会自动预填对应账户。';
+                },
+
+                // 配置迁移导入预检拿到 catalog 后调用：对尚无映射、且恢复结果中有目标的源 ID 预填一次。
+                // 每个源 ID 在本次草稿里只预填一次，用户手动改选或清空后不会被再次覆盖。
+                prefillConfigTransferAccountMappingsFromRestore() {
+                    const restored = this.chatGPTRestoreAccountMappings || {};
+                    if (!Object.keys(restored).length) return false;
+                    const known = new Set(this.chatgptAccounts.map(account => account.id));
+                    const done = new Set(this.configTransferPrefilledAccountIds);
+                    const filled = [];
+                    for (const sourceId of this.configTransferCatalogSourceAccounts()) {
+                        if (done.has(sourceId) || this.configTransferImportAccountMappings[sourceId]) continue;
+                        const targetId = restored[sourceId];
+                        if (!targetId || !known.has(targetId)) continue;
+                        this.setConfigTransferAccountMapping(sourceId, targetId);
+                        filled.push(sourceId);
+                    }
+                    if (!filled.length) return false;
+                    this.configTransferPrefilledAccountIds = [...this.configTransferPrefilledAccountIds, ...filled];
+                    this.configTransferImportNotice = '已按备份恢复结果预填账户映射，请核对后重新预览再应用。';
+                    return true;
+                },

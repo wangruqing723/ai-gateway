@@ -99,6 +99,28 @@ cache:
 metrics:
   windowMinutes: 15    # 统计窗口分钟数（默认 15，范围 1-60）
 
+# ── ChatGPT OAuth 账户共享约束（可选，默认整段不写）────────────
+# 每个账户各有一个共享桶，同一账户绑定的全部 Provider 共用，
+# 不会因为多建几个 Provider 就多出账户额度。只有账户与 Provider 同时有空位才放行，
+# 等待期间不占任何一方的槽位，等待时间共用 Provider 的 maxQueueWait。
+# 直通模式（directMode: true）跳过本地排队，并发与速率在该模式下不生效。
+# chatgptAccountLimits:
+#   maxConcurrent: 2       # 账户级并发；省略表示不限制，显式写 1-100（写 0 会报错）
+#   maxPerSecond: 0        # 账户级每秒准入数，0 表示不限制（范围 0-100）
+#   sharedCooldown: false  # 上游明确报告账户用量上限（429 usage_limit_reached）时，
+#                          # 冷却该账户的全部 Provider 到上游给出的重置时间；直通模式下同样生效
+
+# ── ChatGPT OAuth 后台刷新（可选，默认全部关闭）────────────────
+# 只处理活跃账户：本进程在 activeWindowMinutes 内为它发起过真实上游调用（不含诊断），
+# 且未暂停、不需重新授权、有 refresh token。闲置、暂停和需要重新授权的账户不产生后台请求。
+# 跨实例协调依赖同一内核上的 flock：两个容器绑定挂载同一宿主目录可以互斥；
+# 宿主机进程与容器混合部署不在同一内核，不保证互斥，不支持这种部署。
+# chatgptBackground:
+#   tokenRefresh: false        # 活跃账户在访问令牌到期前 10 分钟预刷新
+#   usageRefresh: false        # 活跃账户按 usageIntervalMinutes 周期刷新用量
+#   usageIntervalMinutes: 30   # 用量刷新周期，省略为默认 30，显式写 30-1440（写 0 会报错）
+#   activeWindowMinutes: 60    # 活跃账户判定窗口，省略为默认 60，显式写 5-1440（写 0 会报错）
+
 # ── Provider 定义 ────────────────────────────────────────
 # format: anthropic | openai（Chat Completions）| openai-responses（Responses API）
 # ChatGPT OAuth Provider 使用 authType: chatgptOAuth 与 accountId，并固定 Responses 格式。
@@ -226,6 +248,9 @@ routes:
   # round-robin / least-queue 会按可缓存前缀（system + 首条 user 消息）做 5 分钟
   # 粘性，让同一会话尽量固定在一个上游，避免上游侧 prompt cache 反复失效。
   # 注意 directMode: true 时没有队列，负载恒为 0，least-queue 会退化成 round-robin。
+  # quotaAware: true 可叠加在任一策略之后，只对 2 个及以上候选的路由有效：
+  # 按 ChatGPT OAuth 账户已缓存的新鲜用量把候选分成正常、偏低（≤10%）、已耗尽三层，
+  # 层内保持原策略顺序；用量未知视为正常，不丢候选、不发网络请求，粘性命中的目标保持在前。
   # - match: "claude-sonnet-4*"
   #   strategy: round-robin
   #   targets:

@@ -68,7 +68,10 @@
                             .filter((name) => this.config.providers?.[name]?.enabled !== false);
                         const total = checked.length;
                         const ok = checked.filter((name) => providers[name]?.status === 'ok').length;
-                        this.showStatus(`Provider 检测完成：${ok}/${total} 可用`, ok === total ? 'success' : 'error');
+                        // OAuth Provider 没有真实调用记录时返回 unverified：单列出来，不算失败也不冒充可用。
+                        const unverified = checked.filter((name) => providers[name]?.status === 'unverified').length;
+                        const suffix = unverified > 0 ? `，${unverified} 个凭据可用但尚未实测` : '';
+                        this.showStatus(`Provider 检测完成：${ok}/${total} 可用${suffix}`, ok + unverified === total ? 'success' : 'error');
                     } catch (err) {
                         this.showStatus('Provider 健康检测失败: ' + err.message, 'error');
                     } finally {
@@ -92,7 +95,8 @@
                         // 新建对象而不是原地改：Alpine 要靠引用变化触发这一行重渲染
                         this.health.providerHealth = { ...(this.health.providerHealth || {}), [name]: status };
                         const detail = status.message || status.status;
-                        this.showStatus(`「${name}」检测完成：${detail}`, status.status === 'ok' ? 'success' : 'error');
+                        // unverified 不是失败：凭据可用、只是还没有真实调用结果，不用错误提示吓人。
+                        this.showStatus(`「${name}」检测完成：${detail}`, status.status === 'ok' || status.status === 'unverified' ? 'success' : 'error');
                     } catch (err) {
                         this.showStatus(`「${name}」检测失败: ` + err.message, 'error');
                     } finally {

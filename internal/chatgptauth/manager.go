@@ -21,14 +21,15 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 )
 
 const (
 	oauthClientID        = "app_EMoamEEZ73f0CkXaXp7hrann"
-	oauthBaseURL         = "https://auth.openai.com"
-	usageURL             = "https://chatgpt.com/backend-api/wham/usage"
+	defaultOAuthBaseURL  = "https://auth.openai.com"
+	defaultUsageURL      = "https://chatgpt.com/backend-api/wham/usage"
 	chatGPTIssuer        = "https://api.openai.com/auth"
 	loginTTL             = 10 * time.Minute
 	refreshBefore        = 2 * time.Minute
@@ -47,6 +48,15 @@ var ErrInvalidOAuthCallback = errors.New("ChatGPT OAuth 回调链接无效或与
 var ErrInvalidAccountMetadata = errors.New("ChatGPT OAuth 账户标签或备注无效")
 var ErrAccountMetadataPersist = errors.New("ChatGPT OAuth 账户元数据保存失败")
 
+// ErrReauthorizationRequired 表示账户没有可用的刷新凭据或已被标记需要重新授权，不发起网络请求。
+var ErrReauthorizationRequired = errors.New("ChatGPT OAuth 账户需要重新授权")
+
+// ErrCredentialsReplaced 表示刷新交换期间凭据被导入更新或重新授权替换，且替换后的访问令牌不可直接使用。
+var ErrCredentialsReplaced = errors.New("ChatGPT OAuth 凭据在刷新期间已被替换，请重试")
+
+// errRefreshPersist 包装刷新成功但新令牌写盘失败的情况；新令牌仍保留在内存中。
+var errRefreshPersist = errors.New("保存刷新后的 ChatGPT OAuth 令牌失败")
+
 // AccountView 是不含任何令牌的账户管理视图。
 type AccountView struct {
 	ID                      string         `json:"id"`
@@ -62,6 +72,18 @@ type AccountView struct {
 	Note                    string         `json:"note,omitempty"`
 	Usage                   *UsageSnapshot `json:"usage,omitempty"`
 	Providers               []string       `json:"providers,omitempty"`
+
+	// 以下三个维度分别描述授权、用量查询和真实调用；旧 status 字段保留原兼容含义。
+	Authorization AuthorizationView `json:"authorization"`
+	UsageState    UsageStateView    `json:"usageState"`
+	Invocation    InvocationView    `json:"invocation"`
+	// Enabled 是管理启停状态：false 表示账户已暂停，不准入新请求；不改变 Provider 的 enabled。
+	Enabled  bool   `json:"enabled"`
+	PausedAt string `json:"pausedAt,omitempty"`
+	// CooldownUntil 是共享额度冷却的截止时间，只在冷却未到期时出现。
+	CooldownUntil string `json:"cooldownUntil,omitempty"`
+	// Background 是后台刷新调度状态，只在任一后台功能运行时出现。
+	Background *BackgroundView `json:"background,omitempty"`
 }
 
 // AccountMetadataPatch 是对账户本地标签与备注的部分更新。
@@ -127,8 +149,79 @@ type account struct {
 	Note                    string         `json:"note,omitempty"`
 	Usage                   *UsageSnapshot `json:"usage,omitempty"`
 	NeedsReauth             bool           `json:"needsReauth,omitempty"`
-	refreshMu               sync.Mutex
-	usageMu                 sync.Mutex
+	// Paused 是用户显式设置的管理暂停；旧文件缺失时按启用兼容。不由网络错误自动修改。
+	Paused    bool       `json:"paused,omitempty"`
+	PausedAt  *time.Time `json:"pausedAt,omitempty"`
+	refreshMu contextMutex
+	usageMu   contextMutex
+	// watchers 是等待准入的暂停监听，只属于当前进程。
+	watchers pauseWatchers
+	// cooldownUntil 是共享额度冷却截止时间，cooldownFloor 是手动解除或关闭冷却时的请求序号下限，
+	// 不大于它的请求迟到的额度错误不再生效。两者只在内存中，由 m.mu 保护。
+	cooldownUntil time.Time
+	cooldownFloor uint64
+
+	// 以下是只属于当前进程的运行状态，不写入账户文件（未导出字段不参与 JSON）。
+	// lastRefreshFailure 与 credentialsUnsaved 由 m.mu 保护。
+	lastRefreshFailure *refreshFailure
+	credentialsUnsaved bool
+	// 调用记录由 m.invocationMu 保护，与 m.mu 分开：每次真实上游尝试都会写，
+	// 不能排在账户文件 fsync 后面。
+	invocation          *invocationRecord
+	providerInvocations map[string]*invocationRecord
+	// invocationFloor 是凭据被外部替换（重新授权）时的序号；不大于它的在途尝试结果
+	// 属于旧凭据，迟到后不能写进新凭据的调用状态。
+	invocationFloor uint64
+	// awaitingRecovery 表示异常账户已替换凭据，等待之后的第一次成功调用产生恢复事件。由 m.invocationMu 保护。
+	awaitingRecovery bool
+	// alertKind 是当前授权或刷新告警，用于只在状态转移时产生事件。由 m.mu 保护。
+	alertKind string
+	// stats 是当前进程内的调用统计，由 m.statsMu 保护。
+	stats *accountStats
+	// credentialVersion 在每次凭据写入（自动轮换、重新授权、显式导入更新）时递增，由 m.mu 保护。
+	// 刷新写回与导入应用都按它做比较后交换，避免在途刷新把新导入的凭据覆盖回旧值。
+	credentialVersion uint64
+	// background 是后台调度状态，由 m.bgMu 保护。
+	background backgroundState
+}
+
+// refreshFailure 记录最近一次自动刷新失败的安全类别，不含上游正文或令牌。
+type refreshFailure struct {
+	At         time.Time
+	Category   string
+	HTTPStatus int
+}
+
+func refreshFailureOf(err error, at time.Time) refreshFailure {
+	failure := refreshFailure{At: at, Category: "unknown"}
+	var exchangeErr *oauthExchangeFailure
+	if errors.As(err, &exchangeErr) {
+		failure.Category = exchangeErr.category
+		failure.HTTPStatus = exchangeErr.httpStatus
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		failure.Category = "timeout"
+	}
+	return failure
+}
+
+// refreshFailureMessage 把刷新失败类别转换成管理页面可展示的固定文案。
+func refreshFailureMessage(failure *refreshFailure) string {
+	switch failure.Category {
+	case "invalid_grant":
+		return "刷新凭据已被 ChatGPT 拒绝，需要重新授权"
+	case "transport":
+		return "最近一次自动刷新无法连接 OAuth 服务，可能是网络或代理问题；下次使用时会重试"
+	case "timeout":
+		return "最近一次自动刷新超时；下次使用时会重试"
+	case "missing_tokens", "invalid_response", "response_read":
+		return "最近一次自动刷新收到无法识别的 OAuth 响应；下次使用时会重试"
+	}
+	message := "最近一次自动刷新失败"
+	if failure.HTTPStatus > 0 {
+		message += fmt.Sprintf("（HTTP %d）", failure.HTTPStatus)
+	}
+	return message + "；下次使用时会重试"
 }
 
 type diskStore struct {
@@ -157,6 +250,106 @@ type Manager struct {
 	client      *http.Client
 	callback    string
 	callbackErr error
+
+	// invocationMu 保护各账户的调用记录；锁顺序为先 mu 后 invocationMu。
+	invocationMu  sync.Mutex
+	invocationSeq atomic.Uint64
+
+	// statsMu 保护各账户统计与窗口设置，是叶子锁：持有时不再获取其他锁。
+	statsMu            sync.Mutex
+	statsWindowMinutes int
+	statsSince         time.Time
+	// sharedCooldown 是共享额度冷却开关，由 m.mu 保护。
+	sharedCooldown bool
+
+	// 后台刷新（background.go）。bgCtlMu 串行化启停；bgMu 是叶子锁，保护 bg 与各账户 background；
+	// bgSettings 是正在运行的设置，未运行时为 nil，供视图无锁读取。
+	bgCtlMu    sync.Mutex
+	bgMu       sync.Mutex
+	bg         backgroundRuntime
+	bgSettings atomic.Pointer[BackgroundSettings]
+
+	// activeWatches 是正在等待准入的监听数；watchPolling 表示共享文件轮询正在运行，由 watchPollMu 保护。
+	activeWatches atomic.Int64
+	watchPollMu   sync.Mutex
+	watchPolling  bool
+	// eventHandler 接收账户状态事件，由网关写入运行事件流。
+	eventHandler atomic.Pointer[func(Event)]
+
+	// versionEpoch 每次进程启动随机生成，versionSeq 在账户集合、元数据或凭据被显式替换时递增，
+	// 两者组成账户控制版本。用量轮询和普通令牌轮换不推进它。均由 mu 保护。
+	versionEpoch string
+	versionSeq   uint64
+
+	// 跨进程存储协调（store.go）。storeMu 是进程内存储锁，storeHeld 与 lockFile 只在持有它时改写；
+	// diskSum、diskLoaded 由存储锁与 m.mu 共同保护；diskStamp、lastSharedSync 供只读路径无锁读取。
+	storeMu        contextMutex
+	storeHeld      atomic.Bool
+	lockFile       *os.File
+	diskSum        [32]byte
+	diskLoaded     bool
+	diskStamp      atomic.Pointer[storeStamp]
+	lastSharedSync atomic.Int64
+
+	// 以下字段只在包内测试中替换：时钟、OAuth 与用量端点、落盘替换前的故障注入、
+	// 共享文件检查间隔（负数表示每次都检查）与存储锁等待上限。
+	syncIntervalOverride time.Duration
+	storeWaitOverride    time.Duration
+	// lockingOverride 模拟平台是否支持跨进程锁，tickOverride 替换后台检查周期。
+	lockingOverride *bool
+	tickOverride    time.Duration
+	// backupIterations 降低测试中的备份密钥派生次数；零值使用 backupcrypto.DefaultIterations。
+	backupIterations int
+	// 生产路径保持零值，由对应 helper 回落到真实时钟和固定上游地址。
+	clock         func() time.Time
+	oauthBase     string
+	usageEndpoint string
+	beforeReplace func() error
+}
+
+func (m *Manager) now() time.Time {
+	if m.clock != nil {
+		return m.clock()
+	}
+	return time.Now()
+}
+
+// Version 返回账户控制版本，作为账户管理接口的 ETag。值不含任何凭据信息，进程重启后必然变化。
+func (m *Manager) Version() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.versionLocked()
+}
+
+// ListWithVersion 在同一把读锁内返回账户列表和对应的控制版本。
+func (m *Manager) ListWithVersion(references map[string][]string) ([]AccountView, string) {
+	m.syncShared()
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.listLocked(references), m.versionLocked()
+}
+
+func (m *Manager) versionLocked() string {
+	return fmt.Sprintf("%s.%d", m.versionEpoch, m.versionSeq)
+}
+
+// bumpVersionLocked 在账户控制状态成功落盘后调用。调用方持有 m.mu 写锁。
+func (m *Manager) bumpVersionLocked() {
+	m.versionSeq++
+}
+
+func (m *Manager) oauthBaseURL() string {
+	if m.oauthBase != "" {
+		return m.oauthBase
+	}
+	return defaultOAuthBaseURL
+}
+
+func (m *Manager) usageURL() string {
+	if m.usageEndpoint != "" {
+		return m.usageEndpoint
+	}
+	return defaultUsageURL
 }
 
 // New 从路径加载 OAuth 账户。令牌文件只允许当前进程用户读写。
@@ -167,27 +360,37 @@ func New(path string, client *http.Client) (*Manager, error) {
 	if client == nil {
 		client = &http.Client{Timeout: 20 * time.Second}
 	}
+	epoch, err := randomHex(8)
+	if err != nil {
+		return nil, err
+	}
 	m := &Manager{
-		path:      path,
-		accounts:  make(map[string]*account),
-		sessions:  make(map[string]*loginSession),
-		stateToID: make(map[string]string),
-		client:    client,
+		path:         path,
+		accounts:     make(map[string]*account),
+		sessions:     make(map[string]*loginSession),
+		stateToID:    make(map[string]string),
+		client:       client,
+		versionEpoch: epoch,
+		versionSeq:   1,
+
+		statsWindowMinutes: defaultStatsWindowMinutes,
+		statsSince:         time.Now().UTC(),
 	}
-	data, err := os.ReadFile(path)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("读取 ChatGPT OAuth 账户文件失败: %w", err)
-	}
-	if err == nil {
-		var store diskStore
-		if err := json.Unmarshal(data, &store); err != nil {
-			return nil, fmt.Errorf("解析 ChatGPT OAuth 账户文件失败: %w", err)
+	} else if err == nil {
+		// 与写入入口共用同一条加锁读取链路，避免读到另一实例正在替换的中间状态。
+		ctx, cancel := context.WithTimeout(context.Background(), defaultStoreWait)
+		defer cancel()
+		if err := m.acquireStore(ctx); err != nil {
+			return nil, err
 		}
-		for _, item := range store.Accounts {
-			if item == nil || item.ID == "" || item.AccountID == "" || (item.AccessToken == "" && item.RefreshToken == "") {
-				continue
-			}
-			m.accounts[item.ID] = item
+		m.mu.Lock()
+		err := m.syncFromDiskLocked()
+		m.mu.Unlock()
+		m.releaseStore()
+		if err != nil {
+			return nil, err
 		}
 		if err := os.Chmod(path, 0o600); err != nil {
 			return nil, fmt.Errorf("设置 ChatGPT OAuth 账户文件权限失败: %w", err)
@@ -231,7 +434,7 @@ func (m *Manager) StartCallbackServer(bindHost string) (*http.Server, error) {
 func (m *Manager) StartLogin() (LoginStart, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.cleanupSessionsLocked(time.Now())
+	m.cleanupSessionsLocked(m.now())
 	if m.callback == "" {
 		if m.callbackErr != nil {
 			return LoginStart{}, fmt.Errorf("OAuth 回调服务不可用: %w", m.callbackErr)
@@ -250,7 +453,7 @@ func (m *Manager) StartLogin() (LoginStart, error) {
 	if err != nil {
 		return LoginStart{}, err
 	}
-	expiresAt := time.Now().Add(loginTTL)
+	expiresAt := m.now().Add(loginTTL)
 	challenge := sha256.Sum256([]byte(verifier))
 	query := url.Values{
 		"response_type":              {"code"},
@@ -264,7 +467,7 @@ func (m *Manager) StartLogin() (LoginStart, error) {
 		"id_token_add_organizations": {"true"},
 		"originator":                 {"codex_cli_rs"},
 	}
-	authURL := oauthBaseURL + "/oauth/authorize?" + query.Encode()
+	authURL := m.oauthBaseURL() + "/oauth/authorize?" + query.Encode()
 	m.sessions[sessionID] = &loginSession{
 		ID: sessionID, State: state, Verifier: verifier, RedirectURI: m.callback,
 		ExpiresAt: expiresAt, Status: "pending",
@@ -277,7 +480,7 @@ func (m *Manager) StartLogin() (LoginStart, error) {
 func (m *Manager) Status(sessionID string) (LoginStatus, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.cleanupSessionsLocked(time.Now())
+	m.cleanupSessionsLocked(m.now())
 	session, ok := m.sessions[sessionID]
 	if !ok {
 		return LoginStatus{}, false
@@ -287,11 +490,16 @@ func (m *Manager) Status(sessionID string) (LoginStatus, bool) {
 
 // List 返回账户元信息及各账户绑定的 Provider 名称。
 func (m *Manager) List(references map[string][]string) []AccountView {
+	m.syncShared()
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+	return m.listLocked(references)
+}
+
+func (m *Manager) listLocked(references map[string][]string) []AccountView {
 	out := make([]AccountView, 0, len(m.accounts))
 	for _, item := range m.accounts {
-		view := viewOf(item)
+		view := m.viewOf(item)
 		view.Providers = append([]string(nil), references[item.ID]...)
 		sort.Strings(view.Providers)
 		out = append(out, view)
@@ -347,18 +555,25 @@ func (m *Manager) RefreshAccountUsage(ctx context.Context, id string, force bool
 	if m.accounts[id] != item {
 		return AccountView{}, ErrAccountNotFound
 	}
-	return viewOf(item), nil
+	return m.viewOf(item), nil
 }
 
-func (m *Manager) refreshAccountUsage(ctx context.Context, item *account, force bool) {
-	item.usageMu.Lock()
+// refreshAccountUsage 查询并保存单账户用量，返回不含令牌与上游正文的安全结论。
+// 调用方主动取消（客户端断开、诊断取消）时不改写已有快照：取消不说明用量服务有问题。
+func (m *Manager) refreshAccountUsage(ctx context.Context, item *account, force bool) CheckOutcome {
+	if err := item.usageMu.Lock(ctx); err != nil {
+		if errors.Is(err, context.Canceled) {
+			return CheckOutcome{Category: "cancelled", Message: "等待同账户用量查询时已取消，保留原有快照"}
+		}
+		return CheckOutcome{Category: "timeout", Message: "等待同账户用量查询超时，保留原有快照"}
+	}
 	defer item.usageMu.Unlock()
 
-	now := time.Now().UTC()
+	now := m.now().UTC()
 	m.mu.RLock()
 	if m.accounts[item.ID] != item {
 		m.mu.RUnlock()
-		return
+		return CheckOutcome{Category: "not_found", Message: "ChatGPT OAuth 账户不存在"}
 	}
 	lastUsage := cloneUsage(item.Usage)
 	m.mu.RUnlock()
@@ -368,42 +583,57 @@ func (m *Manager) refreshAccountUsage(ctx context.Context, item *account, force 
 			lastAttemptAt = lastUsage.LastCheckedAt
 		}
 		if checkedAt, err := time.Parse(time.RFC3339, lastAttemptAt); err == nil && now.Sub(checkedAt) < usageCacheTTL {
-			return
+			return CheckOutcome{Message: "缓存周期内复用已有用量快照，未重新查询", Cached: true}
 		}
 	}
 
 	requestCtx, cancel := context.WithTimeout(ctx, usageTimeout)
 	defer cancel()
-	accessToken, accountID, err := m.AccessToken(requestCtx, item.ID, m.client)
+	accessToken, accountID, exchanged, err := m.accessToken(requestCtx, item.ID, m.client, false)
 	if err != nil {
+		if errors.Is(ctx.Err(), context.Canceled) {
+			return CheckOutcome{Category: "cancelled", Message: "用量查询已取消，保留原有用量快照", Exchanged: exchanged}
+		}
 		message := "无法获取访问令牌，请检查 OAuth 代理或网络设置后重试"
-		if errors.Is(err, errInvalidGrant) || strings.Contains(err.Error(), "需要重新授权") {
+		if errors.Is(err, errInvalidGrant) || errors.Is(err, ErrReauthorizationRequired) {
 			message = "OAuth 刷新凭据已失效，请重新授权"
 		}
-		m.setUsageError(item, message)
-		return
+		m.setUsageError(item, message, 0)
+		outcome := DescribeCredentialError(err)
+		outcome.Exchanged = exchanged
+		return outcome
 	}
 	usage, err := m.fetchUsage(requestCtx, accessToken, accountID)
 	if err != nil {
-		m.setUsageError(item, usageErrorMessage(err))
-		return
+		if errors.Is(ctx.Err(), context.Canceled) {
+			return CheckOutcome{Category: "cancelled", Message: "用量查询已取消，保留原有用量快照", Exchanged: exchanged}
+		}
+		m.recordStat(item, func(c *statCounters) { c.usageFailures++ })
+		m.setUsageError(item, usageErrorMessage(err), usageRetryAfterOf(err))
+		outcome := usageFailureOutcome(err)
+		outcome.Exchanged = exchanged
+		return outcome
 	}
-	checkedAt := time.Now().UTC().Format(time.RFC3339)
+	m.recordStat(item, func(c *statCounters) { c.usageSuccesses++ })
+	checkedAt := m.now().UTC().Format(time.RFC3339)
 	usage.LastAttemptAt = checkedAt
 	usage.LastCheckedAt = checkedAt
 	usage.LastSuccessAt = checkedAt
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	unlock := m.lockForCommit()
+	defer unlock()
 	if m.accounts[item.ID] != item {
-		return
+		return CheckOutcome{Category: "not_found", Message: "ChatGPT OAuth 账户在查询期间已被删除", Exchanged: exchanged}
 	}
 	item.Usage = &usage
 	m.persistUsageLocked()
+	m.noteUsageResult(item, true, 0)
+	return CheckOutcome{Message: usageSuccessMessage(usage), Exchanged: exchanged}
 }
 
-func (m *Manager) setUsageError(item *account, message string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+func (m *Manager) setUsageError(item *account, message string, retryAfter time.Duration) {
+	m.noteUsageResult(item, false, retryAfter)
+	unlock := m.lockForCommit()
+	defer unlock()
 	if m.accounts[item.ID] != item {
 		return
 	}
@@ -411,7 +641,7 @@ func (m *Manager) setUsageError(item *account, message string) {
 	if usage == nil {
 		usage = &UsageSnapshot{}
 	}
-	checkedAt := time.Now().UTC().Format(time.RFC3339)
+	checkedAt := m.now().UTC().Format(time.RFC3339)
 	usage.LastAttemptAt = checkedAt
 	usage.LastCheckedAt = checkedAt
 	usage.Error = message
@@ -419,9 +649,25 @@ func (m *Manager) setUsageError(item *account, message string) {
 	m.persistUsageLocked()
 }
 
+// lockForCommit 为已完成的网络结果（用量快照、令牌交换结果）写回取得写锁，不再受请求 context 约束。
+// 等不到跨进程存储锁时只持有 m.mu、不写盘：用量快照只更新内存，交换得到的新凭据标记为未保存，
+// 都不会因另一实例的长写入而丢失。
+func (m *Manager) lockForCommit() func() {
+	if unlock, err := m.lockForWrite(context.Background()); err == nil {
+		return unlock
+	} else {
+		fmt.Fprintf(os.Stderr, "[system] ChatGPT OAuth account store busy, keeping result in memory: %v\n", err)
+	}
+	m.mu.Lock()
+	return m.mu.Unlock
+}
+
 // persistUsageLocked 将不含凭据的额度快照与账户状态一起原子保存。
 // 当前调用方持有 m.mu 写锁；缓存落盘失败不影响刚查询到的内存快照。
 func (m *Manager) persistUsageLocked() {
+	if !m.storeHeld.Load() {
+		return
+	}
 	if err := m.persistLocked(); err != nil {
 		fmt.Fprintf(os.Stderr, "[system] ChatGPT usage cache persistence failed: %v\n", err)
 	}
@@ -429,6 +675,8 @@ func (m *Manager) persistUsageLocked() {
 
 type usageHTTPError struct {
 	status int
+	// retryAfter 是上游 Retry-After，推迟后台下一次用量刷新。
+	retryAfter time.Duration
 }
 
 func (e *usageHTTPError) Error() string {
@@ -450,7 +698,7 @@ func usageErrorMessage(err error) string {
 }
 
 func (m *Manager) fetchUsage(ctx context.Context, accessToken, accountID string) (UsageSnapshot, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, usageURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, m.usageURL(), nil)
 	if err != nil {
 		return UsageSnapshot{}, err
 	}
@@ -464,7 +712,7 @@ func (m *Manager) fetchUsage(ctx context.Context, accessToken, accountID string)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return UsageSnapshot{}, &usageHTTPError{status: resp.StatusCode}
+		return UsageSnapshot{}, &usageHTTPError{status: resp.StatusCode, retryAfter: usageRetryAfter(resp.Header.Get("Retry-After"), m.now())}
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxUsageBody+1))
 	if err != nil {
@@ -477,7 +725,7 @@ func (m *Manager) fetchUsage(ctx context.Context, accessToken, accountID string)
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return UsageSnapshot{}, errors.New("invalid usage response")
 	}
-	return payload.snapshot(time.Now().UTC()), nil
+	return payload.snapshot(m.now().UTC()), nil
 }
 
 type usageResponse struct {
@@ -633,19 +881,27 @@ func cloneUsage(usage *UsageSnapshot) *UsageSnapshot {
 
 // Account 返回不含令牌的单账户状态。
 func (m *Manager) Account(id string) (AccountView, bool) {
+	m.syncShared()
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	item, ok := m.accounts[id]
 	if !ok {
 		return AccountView{}, false
 	}
-	return viewOf(item), true
+	return m.viewOf(item), true
 }
 
 // UpdateMetadata 修改账户标签和备注，并通过原子文件替换持久化。
 func (m *Manager) UpdateMetadata(id string, patch AccountMetadataPatch) (AccountView, error) {
+	view, _, err := m.UpdateMetadataVersioned(id, patch)
+	return view, err
+}
+
+// UpdateMetadataVersioned 与 UpdateMetadata 相同，另外返回写入后的账户控制版本。
+// 版本在同一把写锁内读取，不会混入之后并发写入推进的版本。
+func (m *Manager) UpdateMetadataVersioned(id string, patch AccountMetadataPatch) (AccountView, string, error) {
 	if patch.Tags == nil && patch.Note == nil {
-		return AccountView{}, ErrInvalidAccountMetadata
+		return AccountView{}, "", ErrInvalidAccountMetadata
 	}
 
 	var tags []string
@@ -653,18 +909,21 @@ func (m *Manager) UpdateMetadata(id string, patch AccountMetadataPatch) (Account
 		var err error
 		tags, err = normalizeAccountTags(*patch.Tags)
 		if err != nil {
-			return AccountView{}, err
+			return AccountView{}, "", err
 		}
 	}
 	if patch.Note != nil && utf8.RuneCountInString(*patch.Note) > maxAccountNoteLength {
-		return AccountView{}, fmt.Errorf("%w: 备注最多 %d 个字符", ErrInvalidAccountMetadata, maxAccountNoteLength)
+		return AccountView{}, "", fmt.Errorf("%w: 备注最多 %d 个字符", ErrInvalidAccountMetadata, maxAccountNoteLength)
 	}
 
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	unlock, err := m.lockForWrite(context.Background())
+	if err != nil {
+		return AccountView{}, "", fmt.Errorf("%w: %w", ErrAccountMetadataPersist, err)
+	}
+	defer unlock()
 	item := m.accounts[id]
 	if item == nil {
-		return AccountView{}, ErrAccountNotFound
+		return AccountView{}, "", ErrAccountNotFound
 	}
 
 	previousTags := append([]string(nil), item.Tags...)
@@ -678,9 +937,10 @@ func (m *Manager) UpdateMetadata(id string, patch AccountMetadataPatch) (Account
 	if err := m.persistLocked(); err != nil {
 		item.Tags = previousTags
 		item.Note = previousNote
-		return AccountView{}, fmt.Errorf("%w: %v", ErrAccountMetadataPersist, err)
+		return AccountView{}, "", fmt.Errorf("%w: %v", ErrAccountMetadataPersist, err)
 	}
-	return viewOf(item), nil
+	m.bumpVersionLocked()
+	return m.viewOf(item), m.versionLocked(), nil
 }
 
 func normalizeAccountTags(input []string) ([]string, error) {
@@ -713,8 +973,11 @@ func normalizeAccountTags(input []string) ([]string, error) {
 
 // Delete 删除本地 OAuth 凭据。调用方负责先确认账户未被 Provider 引用。
 func (m *Manager) Delete(id string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	unlock, err := m.lockForWrite(context.Background())
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	if _, ok := m.accounts[id]; !ok {
 		return ErrAccountNotFound
 	}
@@ -724,37 +987,106 @@ func (m *Manager) Delete(id string) error {
 		m.accounts[id] = item
 		return err
 	}
+	m.bumpVersionLocked()
 	return nil
 }
 
 // AccessToken 返回可用的 access token 与 ChatGPT 账户请求头值，必要时刷新并持久化。
 func (m *Manager) AccessToken(ctx context.Context, id string, client *http.Client) (string, string, error) {
+	token, accountID, _, err := m.accessToken(ctx, id, client, false)
+	return token, accountID, err
+}
+
+// RefreshCredentials 供管理诊断使用：force 为 true 时即使访问令牌仍有效也执行一次刷新交换。
+// 返回值 exchanged 表示本次是否真的向 OAuth 服务交换了令牌。
+func (m *Manager) RefreshCredentials(ctx context.Context, id string, client *http.Client, force bool) (bool, error) {
+	_, _, exchanged, err := m.accessToken(ctx, id, client, force)
+	return exchanged, err
+}
+
+func (m *Manager) accessToken(ctx context.Context, id string, client *http.Client, force bool) (string, string, bool, error) {
+	return m.accessTokenLead(ctx, id, client, force, refreshBefore)
+}
+
+// tokenState 是一次取令牌判断所需的凭据快照。
+type tokenState struct {
+	access, refresh, accountID string
+	expiresAt                  time.Time
+	needsReauth                bool
+	version                    uint64
+}
+
+// readTokenState 在读锁内读取凭据快照；账户已删除或被替换为新对象时返回 false。
+func (m *Manager) readTokenState(id string, item *account) (tokenState, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.accounts[id] != item {
+		return tokenState{}, false
+	}
+	return tokenState{
+		access: item.AccessToken, refresh: item.RefreshToken, accountID: item.AccountID,
+		expiresAt: item.ExpiresAt, needsReauth: item.NeedsReauth, version: item.credentialVersion,
+	}, true
+}
+
+// usable 判断不交换也能直接使用的访问令牌。lead 是提前刷新的余量：请求路径用 refreshBefore，
+// 后台预刷新用更长的余量。force 只对有 refresh token 的账户生效（诊断强制交换）。
+func (s tokenState) usable(now time.Time, force bool, lead time.Duration) bool {
+	if s.needsReauth || s.access == "" || (force && s.refresh != "") {
+		return false
+	}
+	if s.refresh == "" {
+		return now.Before(s.expiresAt)
+	}
+	return s.expiresAt.Sub(now) > lead
+}
+
+// accessTokenLead 是取令牌的完整链路。需要交换时在跨进程存储锁内完成「重新读取 → 判断 → 交换 → 写回」：
+// 另一实例已经轮换过时直接使用新令牌，不再用已被消费的旧 refresh token 交换（DESIGN 7.1）。
+func (m *Manager) accessTokenLead(ctx context.Context, id string, client *http.Client, force bool, lead time.Duration) (string, string, bool, error) {
+	m.syncShared()
 	m.mu.RLock()
 	item, ok := m.accounts[id]
 	m.mu.RUnlock()
 	if !ok {
-		return "", "", ErrAccountNotFound
+		return "", "", false, ErrAccountNotFound
 	}
-	item.refreshMu.Lock()
+	if err := item.refreshMu.Lock(ctx); err != nil {
+		return "", "", false, err
+	}
 	defer item.refreshMu.Unlock()
-	m.mu.RLock()
-	if m.accounts[id] != item {
-		m.mu.RUnlock()
-		return "", "", ErrAccountNotFound
+	state, ok := m.readTokenState(id, item)
+	if !ok {
+		return "", "", false, ErrAccountNotFound
 	}
-	accessToken, refreshToken, accountID, expiresAt, needsReauth := item.AccessToken, item.RefreshToken, item.AccountID, item.ExpiresAt, item.NeedsReauth
-	m.mu.RUnlock()
-	if !needsReauth && accessToken != "" {
-		if refreshToken == "" && time.Now().Before(expiresAt) {
-			return accessToken, accountID, nil
-		}
-		if refreshToken != "" && time.Until(expiresAt) > refreshBefore {
-			return accessToken, accountID, nil
-		}
+	if state.usable(m.now(), force, lead) {
+		return state.access, state.accountID, false, nil
 	}
-	if refreshToken == "" || needsReauth {
-		return "", "", errors.New("ChatGPT OAuth 账户需要重新授权")
+	if state.refresh == "" || state.needsReauth {
+		return "", "", false, ErrReauthorizationRequired
 	}
+	releaseLease, err := m.acquireRefreshLease(ctx, id)
+	if err != nil {
+		return "", "", false, err
+	}
+	defer releaseLease()
+	if err := m.syncStore(ctx); err != nil {
+		return "", "", false, err
+	}
+	// 合并磁盘后再判断一次：另一实例可能刚刚完成轮换。force 的诊断交换仍执行一次真实交换。
+	state, ok = m.readTokenState(id, item)
+	if !ok {
+		return "", "", false, ErrAccountNotFound
+	}
+	if state.usable(m.now(), force, lead) {
+		return state.access, state.accountID, false, nil
+	}
+	if state.refresh == "" || state.needsReauth {
+		return "", "", false, ErrReauthorizationRequired
+	}
+	// readVersion 是本次读取的凭据世代；交换期间凭据若被导入更新或重新授权替换，写回时放弃。
+	refreshToken, accountID, readVersion := state.refresh, state.accountID, state.version
+	now := m.now()
 	refreshCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	tokens, err := m.exchange(refreshCtx, url.Values{
@@ -763,27 +1095,56 @@ func (m *Manager) AccessToken(ctx context.Context, id string, client *http.Clien
 		"client_id":     {oauthClientID},
 	}, client)
 	if err != nil {
-		if errors.Is(err, errInvalidGrant) {
-			m.mu.Lock()
+		// 调用方自己取消（客户端断开、诊断取消）不代表刷新链路有问题，不记失败。
+		// 交换期间凭据已被替换时，失败属于旧凭据，同样不能记到新凭据上。
+		if ctx.Err() == nil {
+			m.recordStat(item, func(c *statCounters) { c.refreshFailures++ })
+			failure := refreshFailureOf(err, m.now().UTC())
+			unlock := m.lockForCommit()
 			if m.accounts[id] == item {
-				item.NeedsReauth = true
-				_ = m.persistLocked()
+				if item.credentialVersion != readVersion {
+					// 失败属于已被替换的旧凭据；替换后的访问令牌可用时直接使用。
+					if !item.NeedsReauth && item.AccessToken != "" && item.ExpiresAt.After(m.now()) {
+						token, remoteID := item.AccessToken, item.AccountID
+						unlock()
+						return token, remoteID, true, nil
+					}
+				} else {
+					item.lastRefreshFailure = &failure
+					if errors.Is(err, errInvalidGrant) {
+						item.NeedsReauth = true
+						m.persistOrMarkUnsavedLocked(item)
+						m.raiseAlertLocked(item, alertReauth)
+					} else {
+						m.raiseAlertLocked(item, alertRefresh)
+					}
+				}
 			}
-			m.mu.Unlock()
+			unlock()
 		}
-		return "", "", fmt.Errorf("刷新 ChatGPT OAuth 令牌失败: %w", err)
+		return "", "", true, fmt.Errorf("刷新 ChatGPT OAuth 令牌失败: %w", err)
 	}
+	m.recordStat(item, func(c *statCounters) { c.refreshSuccesses++ })
 	claims := tokenClaims(tokens.IDToken, tokens.AccessToken)
 	refreshedAccountID := firstString(claims.Auth["chatgpt_account_id"], claims.Auth["account_id"], claims.Root["chatgpt_account_id"])
 	metadata := metadataFromClaims(claims)
 	if refreshedAccountID == "" {
 		refreshedAccountID = accountID
 	}
-	now := time.Now().UTC()
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	now = m.now().UTC()
+	// 写回前合并磁盘：交换期间另一实例的导入或重新授权会推进凭据世代，下面按世代放弃本次结果。
+	unlock := m.lockForCommit()
+	defer unlock()
 	if m.accounts[id] != item {
-		return "", "", ErrAccountNotFound
+		return "", "", true, ErrAccountNotFound
+	}
+	if item.credentialVersion != readVersion {
+		// 交换期间凭据被显式替换（导入更新或重新授权）：新凭据优先，丢弃本次交换结果。
+		// 替换后的访问令牌仍有效时直接使用它，否则让调用方按失败处理并稍后重试。
+		if !item.NeedsReauth && item.AccessToken != "" && item.ExpiresAt.After(now) {
+			return item.AccessToken, item.AccountID, true, nil
+		}
+		return "", "", true, ErrCredentialsReplaced
 	}
 	item.AccessToken = tokens.AccessToken
 	if tokens.IDToken != "" {
@@ -810,10 +1171,27 @@ func (m *Manager) AccessToken(ctx context.Context, id string, client *http.Clien
 	item.ExpiresAt = now.Add(time.Duration(tokens.ExpiresIn) * time.Second)
 	item.LastRefresh = now
 	item.NeedsReauth = false
+	item.lastRefreshFailure = nil
+	m.clearRefreshAlertLocked(item)
+	// 普通轮换只推进凭据世代，不推进账户控制版本：用户看到的账户集合与元数据没有变化。
+	item.credentialVersion++
+	// 上游可能已轮换 refresh token，落盘失败时不能回滚到旧凭据：内存保留新令牌，
+	// 并标记「凭据未保存」，直到之后任一次落盘成功；本次调用仍按失败返回。
 	if err := m.persistLocked(); err != nil {
-		return "", "", fmt.Errorf("保存刷新后的 ChatGPT OAuth 令牌失败: %w", err)
+		item.credentialsUnsaved = true
+		return "", "", true, fmt.Errorf("%w: %w", errRefreshPersist, err)
 	}
-	return item.AccessToken, item.AccountID, nil
+	m.noteTokenSuccess(item)
+	return item.AccessToken, item.AccountID, true, nil
+}
+
+// persistOrMarkUnsavedLocked 落盘失败时只标记账户凭据状态未保存，不回滚内存。
+// 调用方持有 m.mu 写锁。
+func (m *Manager) persistOrMarkUnsavedLocked(item *account) {
+	if err := m.persistLocked(); err != nil {
+		item.credentialsUnsaved = true
+		fmt.Fprintf(os.Stderr, "[system] ChatGPT OAuth account state persistence failed: %v\n", err)
+	}
 }
 
 func (m *Manager) handleCallback(w http.ResponseWriter, r *http.Request) {
@@ -873,7 +1251,7 @@ func (m *Manager) CompleteLoginFromCallback(ctx context.Context, callbackURL str
 
 func (m *Manager) processLoginCallback(ctx context.Context, callbackURI, state, code, oauthError string) (LoginStatus, error) {
 	m.mu.Lock()
-	_ = m.cleanupSessionsLocked(time.Now())
+	_ = m.cleanupSessionsLocked(m.now())
 	sessionID := m.stateToID[state]
 	session := m.sessions[sessionID]
 	if state == "" || session == nil || session.State != state || !sameCallbackURI(callbackURI, session.RedirectURI) {
@@ -1012,7 +1390,7 @@ func publicOAuthCodeExchangeFailure(err error) string {
 }
 
 func (m *Manager) exchange(ctx context.Context, form url.Values, override ...*http.Client) (tokenResponse, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, oauthBaseURL+"/oauth/token", strings.NewReader(form.Encode()))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, m.oauthBaseURL()+"/oauth/token", strings.NewReader(form.Encode()))
 	if err != nil {
 		return tokenResponse{}, newOAuthExchangeFailure("request_build", 0, errors.New("无法构建 OAuth 令牌请求"))
 	}
@@ -1079,9 +1457,12 @@ func metadataFromClaims(claims jwtClaims) accountMetadata {
 }
 
 func (m *Manager) saveTokens(tokens tokenResponse, meta accountMetadata) (*account, error) {
-	now := time.Now().UTC()
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	now := m.now().UTC()
+	unlock, err := m.lockForWrite(context.Background())
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	var item *account
 	for _, existing := range m.accounts {
 		if existing.AccountID == meta.AccountID {
@@ -1131,7 +1512,10 @@ func (m *Manager) saveTokens(tokens tokenResponse, meta accountMetadata) (*accou
 	item.ExpiresAt = now.Add(time.Duration(tokens.ExpiresIn) * time.Second)
 	item.LastRefresh = now
 	item.NeedsReauth = false
+	previousFailure := item.lastRefreshFailure
+	item.lastRefreshFailure = nil
 	if err := m.persistLocked(); err != nil {
+		item.lastRefreshFailure = previousFailure
 		if created {
 			delete(m.accounts, item.ID)
 		} else {
@@ -1150,6 +1534,15 @@ func (m *Manager) saveTokens(tokens tokenResponse, meta accountMetadata) (*accou
 		}
 		return nil, err
 	}
+	if !created {
+		// 重新授权是外部凭据替换：旧凭据的调用结果不再描述当前凭据。
+		m.resetInvocationsLocked(item)
+	}
+	item.credentialVersion++
+	m.bumpVersionLocked()
+	if !created {
+		m.emitCredentialsUpdatedLocked([]*account{item}, "重新授权")
+	}
 	return item, nil
 }
 
@@ -1167,10 +1560,14 @@ func (m *Manager) finishLogin(sessionID string, view *AccountView, message strin
 		session.Status = "error"
 		session.Message = message
 	}
-	session.ExpiresAt = time.Now().Add(loginTTL)
+	session.ExpiresAt = m.now().Add(loginTTL)
 }
 
 func (m *Manager) persistLocked() error {
+	if !m.storeHeld.Load() {
+		// 写入前必须经 lockForWrite 合并磁盘内容，否则会覆盖另一实例的修改。
+		return errors.New("内部错误：写入 ChatGPT OAuth 账户文件前未取得存储锁")
+	}
 	if err := os.MkdirAll(filepath.Dir(m.path), 0o700); err != nil {
 		return fmt.Errorf("创建账户数据目录失败: %w", err)
 	}
@@ -1204,11 +1601,21 @@ func (m *Manager) persistLocked() error {
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("关闭账户文件失败: %w", err)
 	}
+	if m.beforeReplace != nil {
+		if err := m.beforeReplace(); err != nil {
+			return fmt.Errorf("替换账户文件失败: %w", err)
+		}
+	}
 	if err := os.Rename(tmpName, m.path); err != nil {
 		return fmt.Errorf("替换账户文件失败: %w", err)
 	}
 	if err := os.Chmod(m.path, 0o600); err != nil {
 		return fmt.Errorf("设置账户文件权限失败: %w", err)
+	}
+	m.rememberDiskLocked(data)
+	// 每次落盘写入全部账户的当前内存状态，之前未保存的凭据此刻也已落盘。
+	for _, item := range m.accounts {
+		item.credentialsUnsaved = false
 	}
 	return nil
 }
@@ -1223,9 +1630,11 @@ func (m *Manager) cleanupSessionsLocked(now time.Time) error {
 	return nil
 }
 
-func viewOf(item *account) AccountView {
+// viewOf 生成不含令牌的账户视图。调用方持有 m.mu（读锁或写锁）。
+func (m *Manager) viewOf(item *account) AccountView {
+	now := m.now()
 	status := "ready"
-	if item.NeedsReauth || (item.RefreshToken == "" && (item.ExpiresAt.IsZero() || !item.ExpiresAt.After(time.Now()))) {
+	if item.NeedsReauth || (item.RefreshToken == "" && (item.ExpiresAt.IsZero() || !item.ExpiresAt.After(now))) {
 		status = "reauthorization_required"
 	}
 	plan := item.Plan
@@ -1235,7 +1644,18 @@ func viewOf(item *account) AccountView {
 	view := AccountView{
 		ID: item.ID, Email: item.Email, Plan: plan, Status: status,
 		Tags: append([]string(nil), item.Tags...), Note: item.Note, Usage: cloneUsage(item.Usage),
+		Authorization: authorizationViewOf(item, now),
+		UsageState:    usageStateViewOf(item.Usage, now),
+		Invocation:    m.invocationViewLocked(item),
+		Enabled:       !item.Paused,
 	}
+	if item.Paused && item.PausedAt != nil && !item.PausedAt.IsZero() {
+		view.PausedAt = item.PausedAt.UTC().Format(time.RFC3339)
+	}
+	if until := m.cooldownUntilLocked(item); !until.IsZero() {
+		view.CooldownUntil = until.UTC().Format(time.RFC3339)
+	}
+	view.Background = m.backgroundViewLocked(item, now)
 	if !item.ExpiresAt.IsZero() {
 		view.ExpiresAt = item.ExpiresAt.UTC().Format(time.RFC3339)
 	}

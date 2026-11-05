@@ -79,7 +79,7 @@
                 // 所以先判自己是否打开：没开就直接 return，把事件让给真正开着的那个抽屉。
                 escapeProviderModal(e) {
                     if (!this.showProviderModal) return;
-                    if (this.confirmDialog.open || this.showChatGPTOAuthDialog) return;
+                    if (this.confirmDialog.open || this.showChatGPTOAuthDialog || this.showChatGPTDiagnoseDialog || this.showChatGPTBatchDialog) return;
                     if (this.providerChatGPTAccountPickerOpen) {
                         e?.preventDefault();
                         e?.stopImmediatePropagation();
@@ -97,7 +97,7 @@
                 // 候选行与视觉字段共用一份下拉状态（modelPicker），收它就够了。
                 escapeRouteModal(e) {
                     if (!this.showRouteModal) return;
-                    if (this.confirmDialog.open) return;
+                    if (this.confirmDialog.open || this.showChatGPTDiagnoseDialog || this.showChatGPTBatchDialog) return;
                     if (this.modelPicker.open) {
                         e?.preventDefault();
                         e?.stopImmediatePropagation();
@@ -206,7 +206,7 @@
                 onSaveShortcut(e) {
                     if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey) return;
                     if ((e.key || '').toLowerCase() !== 's') return;
-                    if (this.confirmDialog.open || this.showChatGPTTransferDialog || this.showChatGPTOAuthDialog) {
+                    if (this.confirmDialog.open || this.showChatGPTTransferDialog || this.showChatGPTOAuthDialog || this.showChatGPTDiagnoseDialog || this.showChatGPTBatchDialog) {
                         e.preventDefault();
                         return;
                     }

@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -58,6 +59,13 @@ type Manager struct {
 	mu              sync.Mutex
 	queues          map[string]*providerQueue
 	activeProviders map[string]Limits
+	// groupWaiting 记录各 provider 上仍在共享资源组中排队的请求数，由 mu 保护。
+	groupWaiting map[string]int
+	groupWaiters atomic.Int64
+
+	groupsMu    sync.Mutex
+	groups      map[string]*groupQueue
+	groupLimits GroupLimits
 }
 
 // NewManager 创建队列管理器
@@ -196,6 +204,7 @@ func (q *providerQueue) newRelease() func() {
 			q.admitLocked(time.Now())
 			q.mu.Unlock()
 			q.cleanupRetired()
+			q.m.kickGroups()
 		})
 	}
 }
@@ -218,6 +227,7 @@ func (q *providerQueue) cancel(target *waiter) bool {
 	q.admitLocked(time.Now())
 	q.mu.Unlock()
 	q.cleanupRetired()
+	q.m.kickGroups()
 	return true
 }
 
@@ -289,6 +299,7 @@ func (q *providerQueue) scheduleRateWakeLocked(delay time.Duration) {
 		q.admitLocked(time.Now())
 		q.mu.Unlock()
 		q.cleanupRetired()
+		q.m.kickGroups()
 	})
 	q.rateTimer = timer
 }
@@ -328,16 +339,17 @@ func (q *providerQueue) cleanupRetired() {
 func (m *Manager) StatusOf(name string, maxConcurrent, maxPerSecond int) Status {
 	m.mu.Lock()
 	q, ok := m.queues[name]
+	groupQueued := m.groupWaiting[name]
 	m.mu.Unlock()
 	if !ok {
-		return Status{MaxConcurrent: maxConcurrent, MaxPerSecond: maxPerSecond}
+		return Status{Queued: groupQueued, MaxConcurrent: maxConcurrent, MaxPerSecond: maxPerSecond}
 	}
 
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	return Status{
 		Running:       q.running,
-		Queued:        q.waiters.Len(),
+		Queued:        q.waiters.Len() + groupQueued,
 		MaxConcurrent: q.maxConcurrent,
 		MaxPerSecond:  q.maxPerSecond,
 	}
@@ -362,11 +374,18 @@ func (m *Manager) UpdateProvider(name string, maxConcurrent, maxPerSecond int) {
 		q.mu.Unlock()
 	}
 	m.mu.Unlock()
+	m.kickGroups()
 }
 
 // Reconcile 记录当前 active provider 集。删除项拒绝新的 Acquire；有在途状态时
 // 暂时保留原队列，排空后按 map 指针身份回收；排空前重新加入则原位复用。
 func (m *Manager) Reconcile(limits map[string]Limits) {
+	m.reconcileProviders(limits)
+	// 删除的 provider 让组内等待者放弃，限制变化让被挡住的等待者重新判断。
+	m.kickGroups()
+}
+
+func (m *Manager) reconcileProviders(limits map[string]Limits) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 

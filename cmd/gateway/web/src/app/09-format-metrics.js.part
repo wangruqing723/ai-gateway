@@ -117,9 +117,17 @@
                         '403/key_auth': '鉴权失败',
                         '402/key_quota': '配额耗尽',
                         '429/key_rate_limit': '触发限流',
-                        no_selectable_key: '没有可选择的密钥'
+                        no_selectable_key: '没有可选择的密钥',
+                        account_paused: '绑定账户已暂停',
+                        account_cooldown: '绑定账户额度冷却中'
                     };
                     if (detail?.kind === 'key_skip') return '无可选择密钥，跳过该 Provider';
+                    if (detail?.kind === 'account_cooldown') {
+                        const seconds = Math.ceil(Number(detail.retryAfterMs) / 1000);
+                        return Number.isFinite(seconds) && seconds > 0
+                            ? `绑定账户额度冷却中，约 ${seconds} 秒后可重试`
+                            : '绑定账户额度冷却中，跳过该 Provider';
+                    }
                     if (detail?.outcome === 'key_switched') {
                         return `当前密钥${reasonLabels[detail.reason] || '失败'}，已切换到下一密钥`;
                     }
@@ -347,18 +355,30 @@
                         health_down: '健康异常',
                         health_recovered: '健康已恢复',
                         key_cooldown: '密钥冷却',
-                        key_recovered: '密钥恢复'
+                        key_recovered: '密钥恢复',
+                        account_reauth_required: '需重新授权',
+                        account_refresh_failed: '刷新失败',
+                        account_refresh_recovered: '刷新已恢复',
+                        account_credentials_updated: '凭据已更新',
+                        account_binding_changed: '绑定变化',
+                        account_paused: '账户暂停',
+                        account_resumed: '取消暂停',
+                        account_recovered: '账户已恢复',
+                        account_cooldown: '额度冷却',
+                        account_cooldown_cleared: '解除冷却'
                     }[event?.kind] || '状态变化';
                 },
 
+                // 账户的凭据更新、绑定变化和暂停取消暂停是管理动作，不是异常，用中性色。
                 runEventClass(event) {
                     if (event?.recovered || event?.kind === 'key_recovered') return 'border-good/20 bg-good/5 text-emerald-200/80';
-                    if (event?.kind === 'health_down' || event?.kind === 'key_cooldown') return 'border-danger/35 bg-danger/10 text-rose-100';
+                    if (['health_down', 'key_cooldown', 'account_reauth_required'].includes(event?.kind)) return 'border-danger/35 bg-danger/10 text-rose-100';
+                    if (['account_credentials_updated', 'account_binding_changed', 'account_paused', 'account_resumed', 'account_cooldown_cleared'].includes(event?.kind)) return 'border-line bg-white/[.04] text-text';
                     return 'border-warn/35 bg-warn/10 text-amber-100';
                 },
 
                 runEventTip(event) {
-                    return [event?.time, event?.provider, event?.detail].filter(Boolean).join(' · ') || '状态变化';
+                    return [event?.time, event?.provider, event?.account, event?.detail].filter(Boolean).join(' · ') || '状态变化';
                 },
 
                 metricDuration(key) {
@@ -513,7 +533,8 @@
                 //   半开虽然放探针，但此刻仍在受限状态，混进正常会掩盖故障。
                 // - 正常 / 异常取健康检测（providerHealth），它要手动触发，
                 //   所以 unchecked 既不算正常也不算异常，单独一档，否则「从没检测过」
-                //   会被误报成全部健康。
+                //   会被误报成全部健康。OAuth Provider 的 unverified（凭据可用但未经真实调用）
+                //   同样落在这一档。
                 // - 已禁用是使用者显式声明，只从「正常」「未检测」里扣：网关不会向它转发，
                 //   计进正常会虚报可用容量，计进未检测又像是漏了检测没做。异常保留，
                 //   禁用前测出来的 error 是真实结论，往往正是禁用它的理由。
@@ -541,10 +562,13 @@
                     return { total: names.length, ok, error, unchecked, tripped, disabled, breakerEnabled: !!breakers };
                 },
 
+                // unverified 只出现在 ChatGPT OAuth Provider：凭据条件满足，但还没有经网关的真实调用结果。
+                // 它不是健康结论，计数时与未检测同档，不能显示成「健康」。
                 providerHealthLabel(health) {
                     if (health.status === 'ok') return '健康';
                     if (health.status === 'warn') return '可达';
                     if (health.status === 'error') return '异常';
+                    if (health.status === 'unverified') return '未实测';
                     return '未检测';
                 },
 
@@ -552,6 +576,7 @@
                     if (status === 'ok') return 'border-good/35 bg-good/10 text-emerald-100';
                     if (status === 'warn') return 'border-warn/35 bg-warn/10 text-amber-100';
                     if (status === 'error') return 'border-danger/35 bg-danger/10 text-rose-100';
+                    if (status === 'unverified') return 'border-cyan2/30 bg-cyan2/10 text-cyan2';
                     return 'bg-white/[.05] text-muted';
                 },
 

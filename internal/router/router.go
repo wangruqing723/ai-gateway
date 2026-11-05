@@ -35,7 +35,9 @@ type Candidate struct {
 type Match struct {
 	RouteMatch string
 	// Strategy 该路由的候选选择策略，空字符串等同 failover（按配置顺序）。
-	Strategy       string
+	Strategy string
+	// QuotaAware 表示在策略顺序之后按账户额度做稳定分层，只对多候选路由有效。
+	QuotaAware     bool
 	Candidates     []Candidate
 	VisionProvider *config.Provider // 可能为 nil
 	VisionModel    string
@@ -100,7 +102,7 @@ func MatchRoute(model string, cfg *config.Config) *Match {
 		if len(candidates) == 0 {
 			continue
 		}
-		m := &Match{RouteMatch: route.Match, Strategy: route.Strategy, Candidates: candidates}
+		m := &Match{RouteMatch: route.Match, Strategy: route.Strategy, QuotaAware: route.QuotaAware, Candidates: candidates}
 		if route.Vision != nil {
 			if vSrc := cfg.Providers[route.Vision.Provider]; vSrc != nil {
 				if vSrc.IsEnabled() {

@@ -1,4 +1,4 @@
-// 本片段按文件名排在最后；上一片段（12-routes.js.part）最后一项没有尾逗号，
+// 上一片段（12-routes.js.part）最后一项没有尾逗号，
                 // 所以这里用一个前置逗号续接 gatewayApp 的对象字面量。
                 ,
 
@@ -131,6 +131,7 @@
                     this._configTransferSelectionInitialized = false;
                     this.configTransferImportConflicts = { providers: {}, routes: {} };
                     this.configTransferImportAccountMappings = {};
+                    this.configTransferPrefilledAccountIds = [];
                 },
 
                 invalidateConfigTransferPreview(notice = '选项已更改，请重新预览后再应用') {
@@ -591,6 +592,9 @@
                         } else {
                             this.configTransferImportNotice = '当前选项不能应用，请根据阻止项调整后重新预览。';
                         }
+                        // 备份恢复交来的账户映射在这里预填；预填等同改动映射，会作废刚拿到的预览凭证，
+                        // 需要用户核对后重新预览（不自动预览，也不覆盖已有映射）。
+                        this.prefillConfigTransferAccountMappingsFromRestore();
                     } catch (err) {
                         if (controller.signal.aborted) return;
                         this.configTransferImportError = err.message;
@@ -685,6 +689,8 @@
                             return;
                         }
                         this.showStatus((result.message || '配置已导入、保存并热重载') + this.restartSuffix(result), 'success');
+                        // 备份恢复交来的映射只服务这一次迁移；保存成功后丢弃，避免预填到之后无关的导入。
+                        this.chatGPTRestoreAccountMappings = {};
                         this.configTransferApplying = false;
                         this.closeConfigTransferDialog();
                         await this.loadConfig();

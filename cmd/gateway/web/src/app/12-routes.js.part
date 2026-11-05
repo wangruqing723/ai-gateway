@@ -80,6 +80,8 @@
                     if (route.targets.length === 1 && route.strategy && route.strategy !== 'failover') {
                         delete route.strategy;
                     }
+                    // 只剩一个候选时 quotaAware 不会生效，后端会拒绝，同 strategy 一并删掉。
+                    if (route.targets.length === 1) delete route.quotaAware;
                     if (!(await this.persistConfig())) this.restoreConfig(snapshot);
                 },
 
@@ -92,6 +94,7 @@
                         targets: [this.newRouteTarget(providers[0] || '')],
                         // 存真实枚举值而不是空字符串，保证下拉的 DOM 值总能匹配到一个 option
                         strategy: 'failover',
+                        quotaAware: false,
                         maxTokens: null,
                         contextWindow: null,
                         localRetry: { maxRetries: null, intervalMs: null },
@@ -115,6 +118,7 @@
                         // 配置里没写 strategy 就是默认 failover；这里补成真实枚举值，
                         // 留空会让下拉匹配不到 option、显示回落到第一项
                         strategy: route.strategy || 'failover',
+                        quotaAware: route.quotaAware === true,
                         maxTokens: route.maxTokens ?? null,
                         contextWindow: route.contextWindow ?? null,
                         localRetry: this.localRetryForm(route.localRetry),
@@ -143,6 +147,7 @@
                         enabled: true,
                         targets: this.routeTargets(route).map((t) => this.newRouteTarget(t.provider || '', t.model || '', t.maxTokens ?? null, t.contextWindow ?? null, this.bodyToRows(t.extraBody), this.localRetryForm(t.localRetry))),
                         strategy: route.strategy || 'failover',
+                        quotaAware: route.quotaAware === true,
                         maxTokens: route.maxTokens ?? null,
                         contextWindow: route.contextWindow ?? null,
                         localRetry: this.localRetryForm(route.localRetry),
@@ -512,6 +517,8 @@
                     if (targets.length > 1 && this.routeForm.strategy && this.routeForm.strategy !== 'failover') {
                         route.strategy = this.routeForm.strategy;
                     }
+                    // quotaAware 同 strategy：只对多候选有效，单候选写 true 会被后端拒绝。
+                    if (targets.length > 1 && this.routeForm.quotaAware === true) route.quotaAware = true;
                     // 多候选保留路由级默认与每个候选覆盖；单候选采用扁平 provider/model 形状，
                     // 因此按字段把 target 值合入 route，target 非空值优先，空值继续继承 route。
                     const routeLocalRetry = this.localRetryPayload(this.routeForm.localRetry);
@@ -1355,7 +1362,8 @@
                     const healthValue = health || { status: 'unchecked', message: '尚未检测' };
                     const healthLabel = healthValue.status === 'ok' ? '正常'
                         : healthValue.status === 'error' ? '异常'
-                            : healthValue.status === 'warn' ? '可达（有提示）' : '尚未检测';
+                            : healthValue.status === 'warn' ? '可达（有提示）'
+                                : healthValue.status === 'unverified' ? '凭据可用，尚未实测' : '尚未检测';
                     const details = [
                         providerDisabled ? 'Provider 已停用，路由会跳过此目标' : `健康状态：${healthLabel}`,
                         hasHealth ? this.providerHealthTitle(healthValue) : '',

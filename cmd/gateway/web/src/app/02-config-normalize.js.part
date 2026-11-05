@@ -70,6 +70,8 @@
                         if (enabled === false) route.enabled = false;
                         // strategy 必须读出来：漏读会让手写的策略在下次保存时被静默抹掉
                         if (strategy) route.strategy = strategy;
+                        // quotaAware 同 strategy：漏读会让额度感知排序在下次保存时被静默关闭。
+                        if (pick(r, 'quotaAware', 'QuotaAware') === true) route.quotaAware = true;
                         // route 级 maxTokens，同 provider 级：*int 未配时为 null，不用 || 兜底。
                         const routeMaxTokens = pick(r, 'maxTokens', 'MaxTokens') ?? null;
                         if (routeMaxTokens !== null) route.maxTokens = routeMaxTokens;
@@ -137,7 +139,35 @@
                         breaker: this.normalizeBreaker(pick(data, 'breaker', 'Breaker')),
                         providerHealth: {
                             checkIntervalSeconds: pick(providerHealth, 'checkIntervalSeconds', 'CheckIntervalSeconds') ?? 0
-                        }
+                        },
+                        // 账户共享约束同 failover：PUT 是全量替换，漏读会让一次表单保存把它抹掉。
+                        chatgptAccountLimits: this.normalizeChatGPTAccountLimits(pick(data, 'chatgptAccountLimits', 'ChatGPTAccountLimits')),
+                        // 后台刷新同理；旧后端整体缺失时回落为全部关闭。
+                        chatgptBackground: this.normalizeChatGPTBackground(pick(data, 'chatgptBackground', 'ChatGPTBackground'))
+                    };
+                },
+
+                // 两个周期都是可选整数：缺省或非数字为 null，表示使用后端默认值（30 / 60 分钟）。
+                normalizeChatGPTBackground(raw) {
+                    const value = raw && typeof raw === 'object' ? raw : {};
+                    const minutes = v => typeof v === 'number' && Number.isFinite(v) ? v : null;
+                    return {
+                        tokenRefresh: (value.tokenRefresh ?? value.TokenRefresh) === true,
+                        usageRefresh: (value.usageRefresh ?? value.UsageRefresh) === true,
+                        usageIntervalMinutes: minutes(value.usageIntervalMinutes ?? value.UsageIntervalMinutes),
+                        activeWindowMinutes: minutes(value.activeWindowMinutes ?? value.ActiveWindowMinutes)
+                    };
+                },
+
+                // maxConcurrent 是 *int：未配置为 null 表示不限制，显式值 1–100。
+                normalizeChatGPTAccountLimits(raw) {
+                    const value = raw && typeof raw === 'object' ? raw : {};
+                    const maxConcurrent = value.maxConcurrent ?? value.MaxConcurrent;
+                    const maxPerSecond = value.maxPerSecond ?? value.MaxPerSecond;
+                    return {
+                        maxConcurrent: typeof maxConcurrent === 'number' && Number.isFinite(maxConcurrent) ? maxConcurrent : null,
+                        maxPerSecond: typeof maxPerSecond === 'number' && Number.isFinite(maxPerSecond) ? maxPerSecond : 0,
+                        sharedCooldown: (value.sharedCooldown ?? value.SharedCooldown) === true
                     };
                 },
 
@@ -221,6 +251,7 @@
                     this.config.breaker = this.config.breaker || this.normalizeBreaker(null);
                     this.config.providerHealth = this.config.providerHealth || { checkIntervalSeconds: 0 };
                     if (this.config.providerHealth.checkIntervalSeconds == null) this.config.providerHealth.checkIntervalSeconds = 0;
+                    this.config.chatgptBackground = this.config.chatgptBackground || this.normalizeChatGPTBackground(null);
                     this.config.directTimeoutNoStream = this.config.directTimeoutNoStream || 60000;
                     this.config.directTimeoutStreamHeader = this.config.directTimeoutStreamHeader || 60000;
                     this.config.directTimeoutStreamActive = this.config.directTimeoutStreamActive || 120000;

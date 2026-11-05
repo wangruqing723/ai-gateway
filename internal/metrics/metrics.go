@@ -70,6 +70,24 @@ func (h latencyHistogram) percentile(p int) int64 {
 	return latencyBounds[len(latencyBounds)-1]
 }
 
+// LatencyHistogram 是对外复用的固定桶延迟直方图，与请求指标使用同一组桶上界，
+// 让账户统计与全局统计的分位数口径一致。零值可直接使用。
+type LatencyHistogram struct {
+	h latencyHistogram
+}
+
+// Add 记录一个毫秒延迟样本。
+func (l *LatencyHistogram) Add(ms int64) { l.h.add(ms) }
+
+// Merge 合并另一个直方图。
+func (l *LatencyHistogram) Merge(other LatencyHistogram) { l.h.merge(other.h) }
+
+// Count 返回样本数。
+func (l LatencyHistogram) Count() int { return l.h.total }
+
+// Percentile 返回分位数所在桶的上界；没有样本时返回 0，调用方应先看 Count。
+func (l LatencyHistogram) Percentile(p int) int64 { return l.h.percentile(p) }
+
 type providerBucket struct {
 	requests int
 	errors   int
@@ -191,11 +209,13 @@ type RequestLog struct {
 // AttemptDetail 是一次候选决策的结构化可观测性记录。Kind/Outcome/Reason 使用稳定
 // 枚举，避免前端或外部诊断脚本依赖自由格式的 AttemptTrail 文本。
 type AttemptDetail struct {
-	Sequence           int    `json:"sequence"`
-	AttemptNumber      int    `json:"attemptNumber,omitempty"`
-	KeyID              string `json:"keyId,omitempty"`
-	KeyName            string `json:"keyName,omitempty"`
-	KeyFingerprint     string `json:"keyFingerprint,omitempty"`
+	Sequence       int    `json:"sequence"`
+	AttemptNumber  int    `json:"attemptNumber,omitempty"`
+	KeyID          string `json:"keyId,omitempty"`
+	KeyName        string `json:"keyName,omitempty"`
+	KeyFingerprint string `json:"keyFingerprint,omitempty"`
+	// AccountID 是 ChatGPT OAuth 候选在准入前取得的本地账户快照；换绑后旧尝试仍归属原账户。
+	AccountID          string `json:"accountId,omitempty"`
 	Kind               string `json:"kind"`
 	Provider           string `json:"provider"`
 	TargetModel        string `json:"targetModel,omitempty"`

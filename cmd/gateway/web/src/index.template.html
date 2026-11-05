@@ -17,7 +17,7 @@
     <script defer src="/vendor/alpine.min.js"></script>
 </head>
 <body class="h-screen overflow-hidden font-sans antialiased" x-data="gatewayApp()" x-init="init()">
-    <div class="flex h-screen overflow-hidden">
+    <div class="flex h-screen overflow-hidden" :inert="showChatGPTDiagnoseDialog || showChatGPTBatchDialog">
         <aside class="flex h-screen w-64 shrink-0 flex-col border-r border-line bg-panel/85 backdrop-blur-xl">
             <div class="h-16 border-b border-line px-6 flex items-center gap-3">
                 <div class="grid h-9 w-9 place-items-center rounded-lg bg-cyan2 text-ink">
@@ -829,6 +829,80 @@
                                 </p>
                             </section>
 
+                            <section x-show="activeTab === 'settings'" class="glass rounded-lg p-4" data-testid="chatgpt-account-limits">
+                                <div class="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                                    <div>
+                                        <h2 class="text-lg font-bold text-white">ChatGPT 账户共享约束</h2>
+                                        <p class="mt-1 text-xs text-muted">同一 OAuth 账户绑定的全部 Provider 共用这些上限，所有账户使用同一组设置</p>
+                                    </div>
+                                    <label class="flex cursor-pointer items-center gap-3 rounded-lg border border-line bg-ink px-3 py-2">
+                                        <input autocomplete="off" type="checkbox" x-model="config.chatgptAccountLimits.sharedCooldown" data-testid="chatgpt-shared-cooldown" class="h-4 w-4 rounded border-line bg-panel text-cyan2 focus:ring-cyan2">
+                                        <span class="text-sm font-bold">共享额度冷却</span>
+                                    </label>
+                                </div>
+                                <div class="grid grid-cols-1 gap-4 md:grid-cols-2" :class="config.directMode ? 'opacity-70' : ''">
+                                    <label class="block">
+                                        <span class="mb-1.5 block text-xs font-bold text-muted">每账户最大并发</span>
+                                        <input autocomplete="off" type="number" min="1" max="100" x-model.number="config.chatgptAccountLimits.maxConcurrent" data-testid="chatgpt-account-max-concurrent" placeholder="留空 = 不限制" class="field">
+                                        <span class="mt-1.5 block text-xs text-muted">范围 1-100。账户与 Provider 同时有空位才发出请求，等待时间计入该 Provider 的 maxQueueWait。</span>
+                                    </label>
+                                    <label class="block">
+                                        <span class="mb-1.5 block text-xs font-bold text-muted">每账户每秒请求数</span>
+                                        <input autocomplete="off" type="number" min="0" max="100" x-model.number="config.chatgptAccountLimits.maxPerSecond" data-testid="chatgpt-account-max-per-second" placeholder="0 = 不限制" class="field">
+                                        <span class="mt-1.5 block text-xs text-muted">范围 0-100，0 表示不限制。</span>
+                                    </label>
+                                </div>
+                                <p x-show="config.directMode" x-cloak class="mt-2 text-xs text-amber-300">直通模式跳过本地排队，并发与速率上限不生效；共享额度冷却仍然生效。</p>
+                                <p class="mt-2 text-xs text-muted">
+                                    共享额度冷却：上游返回 HTTP 429 且错误类型为 usage_limit_reached 时，账户按上游给出的重置时间冷却（未给出时 60 秒，最长 30 天），
+                                    同账户全部 Provider 暂停准入。冷却只在本进程内存中，可在账户详情手动解除；关闭此开关会清除全部冷却。
+                                </p>
+                            </section>
+
+                            <!-- 后台刷新默认全部关闭；状态行来自 GET /api/chatgpt/background，读取失败或旧后端时不显示。 -->
+                            <section x-show="activeTab === 'settings'" x-init="watchChatGPTBackgroundStatus()" class="glass rounded-lg p-4" data-testid="chatgpt-background">
+                                <div class="mb-4">
+                                    <h2 class="text-lg font-bold text-white">ChatGPT 后台刷新</h2>
+                                    <p class="mt-1 text-xs text-muted">为活跃的 ChatGPT OAuth 账户在后台预刷新访问令牌、定期刷新用量；默认全部关闭，关闭时不产生任何后台请求</p>
+                                </div>
+                                <div x-show="chatGPTBackgroundStatusInfo()" x-cloak class="mb-4 flex flex-wrap items-center gap-2 rounded-lg border border-line bg-ink px-3 py-2 text-xs" role="status" data-testid="chatgpt-background-status" :data-status="chatGPTBackgroundStatusInfo()?.key || ''">
+                                    <span class="font-bold text-muted">后台状态</span>
+                                    <span class="tag" :class="chatGPTBackgroundStatusInfo()?.badgeClass" x-text="chatGPTBackgroundStatusInfo()?.label"></span>
+                                    <span class="min-w-0 break-words text-muted" x-text="chatGPTBackgroundStatusInfo()?.detail"></span>
+                                </div>
+                                <div class="grid grid-cols-1 gap-4 md:grid-cols-2">
+                                    <label class="flex cursor-pointer items-center gap-3 rounded-lg border border-line bg-ink px-3 py-2">
+                                        <input autocomplete="off" type="checkbox" x-model="config.chatgptBackground.tokenRefresh" data-testid="chatgpt-background-token-refresh" class="h-4 w-4 rounded border-line bg-panel text-cyan2 focus:ring-cyan2">
+                                        <span class="min-w-0">
+                                            <span class="block text-sm font-bold">令牌预刷新</span>
+                                            <span class="block text-xs text-muted">访问令牌到期前 10 分钟在后台刷新</span>
+                                        </span>
+                                    </label>
+                                    <label class="flex cursor-pointer items-center gap-3 rounded-lg border border-line bg-ink px-3 py-2">
+                                        <input autocomplete="off" type="checkbox" x-model="config.chatgptBackground.usageRefresh" data-testid="chatgpt-background-usage-refresh" class="h-4 w-4 rounded border-line bg-panel text-cyan2 focus:ring-cyan2">
+                                        <span class="min-w-0">
+                                            <span class="block text-sm font-bold">用量刷新</span>
+                                            <span class="block text-xs text-muted">按下方周期在后台刷新剩余用量</span>
+                                        </span>
+                                    </label>
+                                    <label class="block">
+                                        <span class="mb-1.5 block text-xs font-bold text-muted">用量刷新周期（分钟）</span>
+                                        <input autocomplete="off" type="number" min="30" max="1440" x-model.number="config.chatgptBackground.usageIntervalMinutes" data-testid="chatgpt-background-usage-interval" placeholder="留空用默认值 30，范围 30-1440" class="field">
+                                        <span class="mt-1.5 block text-xs text-muted">各账户按 ID 错开最多十分之一周期，避免同时发出。</span>
+                                    </label>
+                                    <label class="block">
+                                        <span class="mb-1.5 block text-xs font-bold text-muted">活跃窗口（分钟）</span>
+                                        <input autocomplete="off" type="number" min="5" max="1440" x-model.number="config.chatgptBackground.activeWindowMinutes" data-testid="chatgpt-background-active-window" placeholder="留空用默认值 60，范围 5-1440" class="field">
+                                        <span class="mt-1.5 block text-xs text-muted">只对窗口内本进程发起过真实上游调用的账户执行，诊断调用不算。</span>
+                                    </label>
+                                </div>
+                                <div class="mt-3 space-y-1.5 text-xs leading-relaxed text-muted">
+                                    <p>活跃账户：本进程在活跃窗口内为它发起过真实上游调用，且未暂停、不需要重新授权、有 refresh token。闲置、暂停和需要重新授权的账户不产生后台请求。</p>
+                                    <p>失败退避：令牌从 1 分钟起翻倍，最长 60 分钟；用量从一个周期起翻倍，最长 24 小时，上游给出更长的 Retry-After 时以它为准。网络故障不会标记重新授权；人工刷新、诊断和请求路径的按需刷新不受退避限制，任何一次成功都会清零失败计数。</p>
+                                    <p class="text-amber-300">多个实例共享账户文件时依靠文件锁互斥；宿主机进程与容器混合部署共享同一账户文件时不保证互斥，请避免这种部署。</p>
+                                </div>
+                            </section>
+
                             <section id="chatgpt-provider-list" x-ref="chatGPTProviderList" x-data="{ providerListExpanded: true }" x-show="activeTab === 'providers'" class="glass rounded-lg">
                                 <div class="flex flex-col gap-3 border-b border-line p-4 sm:flex-row sm:items-center sm:justify-between">
                                     <div>
@@ -994,12 +1068,13 @@
                                                     </td>
                                                     <td class="w-px whitespace-nowrap px-2 py-2.5 text-center">
                                                 <span x-show="provider.authType === 'chatgptOAuth'"
-                                                      class="tag bg-cyan2/10 text-cyan"
-                                                      @mouseenter="showTip('ChatGPT OAuth 账户', $event)"
+                                                      class="tag" :class="providerChatGPTAccountPaused(provider) ? 'bg-warn/10 text-amber-100' : 'bg-cyan2/10 text-cyan'"
+                                                      data-testid="provider-oauth-badge"
+                                                      @mouseenter="showTip(providerChatGPTAccountPaused(provider) ? '配置启用，但绑定的 ChatGPT 账户已暂停，不参与转发' : 'ChatGPT OAuth 账户', $event)"
                                                       @mouseleave="hideTip()"
-                                                      @focus="showTip('ChatGPT OAuth 账户', $event)"
+                                                      @focus="showTip(providerChatGPTAccountPaused(provider) ? '配置启用，但绑定的 ChatGPT 账户已暂停，不参与转发' : 'ChatGPT OAuth 账户', $event)"
                                                       @blur="hideTip()"
-                                                      tabindex="0">OAuth</span>
+                                                      tabindex="0" x-text="providerChatGPTAccountPaused(provider) ? 'OAuth · 账户暂停' : 'OAuth'"></span>
                                                 <span x-show="provider.authType !== 'chatgptOAuth' && hasProviderKeyList(provider)"
                                                       class="tag bg-cyan2/10 text-cyan"
                                                       :title="providerKeyListBadge(name, provider)"
@@ -1067,7 +1142,7 @@
                                         <p class="mt-1 text-xs text-muted">通过 Codex OAuth 授权，令牌保存在本机 data 目录中。</p>
                                     </div>
                                     <div class="flex flex-wrap items-center gap-2">
-                                        <span x-show="chatGPTAccountFilter.trim()" x-cloak class="text-xs tabular-nums text-muted"
+                                        <span x-show="chatGPTAccountFiltersActive()" x-cloak class="text-xs tabular-nums text-muted"
                                               x-text="'匹配 ' + filteredChatGPTAccountCount() + ' / ' + chatgptAccounts.length"></span>
                                         <div class="relative">
                                             <span class="material-symbols-outlined pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-[18px] text-muted">search</span>
@@ -1081,11 +1156,16 @@
                                                 <span class="material-symbols-outlined text-[16px]">close</span>
                                             </button>
                                         </div>
+                                        <button type="button" @click="chatGPTAccountFiltersOpen = !chatGPTAccountFiltersOpen" :aria-expanded="String(chatGPTAccountFiltersOpen)" aria-controls="chatgpt-account-filters" data-testid="chatgpt-filter-toggle" class="btn btn-secondary px-3 py-2" :class="chatGPTAccountControlCount() ? 'border-cyan2/50 bg-cyan2/10 text-cyan' : ''">
+                                            <span class="material-symbols-outlined text-[18px]" aria-hidden="true">tune</span>
+                                            筛选与排序
+                                            <span x-show="chatGPTAccountControlCount()" x-cloak class="chip ml-0.5 bg-cyan2/15 px-1.5 py-0 text-[11px] text-cyan" x-text="chatGPTAccountControlCount()"></span>
+                                        </button>
                                         <button @click="openChatGPTTransferDialog()" :disabled="importingChatGPTAccounts || exportingChatGPTAccounts" data-testid="chatgpt-transfer-open" class="btn btn-secondary px-3 py-2 disabled:cursor-not-allowed disabled:opacity-50">
                                             <span class="material-symbols-outlined text-[18px]" aria-hidden="true">sync</span>
                                             导入 / 导出
                                         </button>
-                                        <button @click="refreshChatGPTAccounts()" :disabled="!!(loadingChatGPTAccounts || refreshingChatGPTUsage || refreshingChatGPTAccountId)" class="btn btn-secondary px-3 py-2">
+                                        <button @click="refreshChatGPTAccounts()" :disabled="!!(loadingChatGPTAccounts || refreshingChatGPTUsage || refreshingChatGPTAccountId || chatGPTBatchBusy === 'usage')" class="btn btn-secondary px-3 py-2">
                                             <span class="material-symbols-outlined text-[18px]" :class="(loadingChatGPTAccounts || refreshingChatGPTUsage) && 'gw-spin'">refresh</span>
                                             刷新全部用量
                                         </button>
@@ -1095,34 +1175,123 @@
                                         </button>
                                     </div>
                                 </div>
+                                <!-- 筛选只影响当前页面显示：维度之间同时满足，标签之间满足任一个。排序不改变路由候选顺序。 -->
+                                <div id="chatgpt-account-filters" x-show="chatGPTAccountFiltersOpen" x-cloak data-testid="chatgpt-filter-panel" class="border-b border-line bg-ink/45 p-4">
+                                    <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
+                                        <label class="min-w-0 text-xs font-bold text-muted">授权状态
+                                            <select x-model="chatGPTAccountFilters.authorization" data-testid="chatgpt-filter-authorization" class="field mt-1.5 w-full text-sm">
+                                                <option value="">全部</option><option value="valid">令牌有效</option><option value="refreshable">可自动刷新</option><option value="refresh_issue">刷新异常</option><option value="reauthorization_required">需重新授权</option><option value="unknown">到期时间未知</option>
+                                            </select>
+                                        </label>
+                                        <label class="min-w-0 text-xs font-bold text-muted">管理状态
+                                            <select x-model="chatGPTAccountFilters.enabled" data-testid="chatgpt-filter-enabled" class="field mt-1.5 w-full text-sm"><option value="">全部</option><option value="active">启用中</option><option value="paused">已暂停</option></select>
+                                        </label>
+                                        <label class="min-w-0 text-xs font-bold text-muted">最近实际调用
+                                            <select x-model="chatGPTAccountFilters.invocation" data-testid="chatgpt-filter-invocation" class="field mt-1.5 w-full text-sm"><option value="">全部</option><option value="success">成功</option><option value="failure">失败</option><option value="unknown">尚未实测</option></select>
+                                        </label>
+                                        <label class="min-w-0 text-xs font-bold text-muted">绑定
+                                            <select x-model="chatGPTAccountFilters.binding" data-testid="chatgpt-filter-binding" class="field mt-1.5 w-full text-sm"><option value="">全部</option><option value="bound">已绑定</option><option value="unbound">未绑定</option></select>
+                                        </label>
+                                        <label class="min-w-0 text-xs font-bold text-muted">套餐
+                                            <select x-model="chatGPTAccountFilters.plan" data-testid="chatgpt-filter-plan" class="field mt-1.5 w-full text-sm">
+                                                <option value="">全部</option>
+                                                <template x-for="option in chatGPTAccountPlanOptions()" :key="option.value"><option :value="option.value" x-text="option.label"></option></template>
+                                            </select>
+                                        </label>
+                                        <div class="min-w-0 text-xs font-bold text-muted">排序
+                                            <div class="mt-1.5 flex gap-2">
+                                                <select x-model="chatGPTAccountSort" aria-label="账户排序依据" data-testid="chatgpt-sort" class="field min-w-0 flex-1 text-sm">
+                                                    <option value="identity">邮箱与 ID</option><option value="primaryRemaining">主要窗口剩余</option><option value="secondaryRemaining">次要窗口剩余</option><option value="primaryReset">主要窗口重置时间</option><option value="secondaryReset">次要窗口重置时间</option><option value="lastSuccess">最近调用成功时间</option>
+                                                </select>
+                                                <button type="button" @click="chatGPTAccountSortDirection = chatGPTAccountSortDirection === 'asc' ? 'desc' : 'asc'" data-testid="chatgpt-sort-direction" class="btn btn-secondary shrink-0 px-3 py-2 text-xs" :aria-label="chatGPTAccountSortDirection === 'asc' ? '当前升序，切换为降序' : '当前降序，切换为升序'" x-text="chatGPTAccountSortDirection === 'asc' ? '升序' : '降序'"></button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div class="mt-3 flex flex-wrap items-center gap-2">
+                                        <span class="text-xs font-bold text-muted">标签（满足任一）</span>
+                                        <template x-for="tag in chatGPTAccountTagOptions()" :key="tag.key">
+                                            <button type="button" @click="toggleChatGPTAccountTagFilter(tag.key)" :aria-pressed="String(chatGPTAccountFilters.tags.includes(tag.key))" class="chip transition" :class="chatGPTAccountFilters.tags.includes(tag.key) ? 'border-cyan2/50 bg-cyan2/15 text-cyan' : 'text-muted hover:text-text'">
+                                                <span class="max-w-40 truncate" x-text="tag.label"></span><span class="tabular-nums" x-text="tag.count"></span>
+                                            </button>
+                                        </template>
+                                        <span x-show="chatGPTAccountTagOptions().length === 0" class="text-xs text-muted">账户尚未添加标签</span>
+                                        <button type="button" x-show="chatGPTAccountFiltersActive()" @click="resetChatGPTAccountFilters()" class="btn btn-secondary ml-auto px-3 py-1.5 text-xs">
+                                            <span class="material-symbols-outlined text-[16px]" aria-hidden="true">filter_alt_off</span>清除筛选
+                                        </button>
+                                    </div>
+                                    <p x-show="chatGPTAccountSortUnknownCount()" class="mt-2 text-xs text-muted" x-text="chatGPTAccountSortUnknownCount() + (chatGPTAccountSort === 'lastSuccess' ? ' 个账户本次启动后尚无成功的真实调用，统一排在最后。' : ' 个账户缺少可靠的排序数据（窗口缺失、快照过时或重置待复查），统一排在最后。')"></p>
+                                </div>
+                                <!-- 需要关注：只在页面内提醒，不发浏览器系统通知或外部通知。已读按「条件 + 证据时间」记在本机，证据变化后重新提醒。 -->
+                                <section x-show="unreadChatGPTReminders().length > 0" x-cloak data-testid="chatgpt-reminders" aria-labelledby="chatgpt-reminders-title" class="border-b border-line bg-ink/45 px-4 py-3">
+                                    <div class="flex flex-wrap items-center justify-between gap-2">
+                                        <h3 id="chatgpt-reminders-title" class="flex items-center gap-2 text-sm font-bold text-white">
+                                            需要关注
+                                            <span class="chip bg-warn/10 px-1.5 py-0 text-xs text-amber-100" data-testid="chatgpt-reminder-count" x-text="unreadChatGPTReminders().length"></span>
+                                        </h3>
+                                        <button type="button" @click="markChatGPTRemindersRead(unreadChatGPTReminders())" data-testid="chatgpt-reminders-read-all" class="btn btn-secondary px-3 py-1.5 text-xs">全部标为已读</button>
+                                    </div>
+                                    <ul class="mt-2 max-h-56 divide-y divide-line overflow-y-auto pr-1" aria-label="需要关注的账户">
+                                        <template x-for="item in unreadChatGPTReminders()" :key="item.key">
+                                            <li class="flex flex-wrap items-start gap-x-3 gap-y-1 py-2 text-xs" data-testid="chatgpt-reminder">
+                                                <span class="tag shrink-0" :class="chatGPTReminderClass(item)" x-text="item.title"></span>
+                                                <div class="min-w-0 flex-1">
+                                                    <button type="button" @click="locateChatGPTReminder(item)" class="max-w-full truncate rounded text-left font-semibold text-cyan transition hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan2" :title="'定位到账户 ' + item.account" x-text="item.account"></button>
+                                                    <p class="mt-0.5 break-words text-muted" x-text="item.detail"></p>
+                                                </div>
+                                                <span x-show="chatGPTReminderTime(item)" class="shrink-0 tabular-nums text-muted" x-text="chatGPTReminderTime(item)"></span>
+                                                <button type="button" @click="markChatGPTRemindersRead(item)" data-testid="chatgpt-reminder-read" class="shrink-0 rounded text-muted transition hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan2" :aria-label="'将 ' + item.account + ' 的「' + item.title + '」标为已读'">已读</button>
+                                            </li>
+                                        </template>
+                                    </ul>
+                                </section>
                                 <div x-show="chatgptAccounts.length === 0" x-cloak class="m-4 rounded-lg border border-dashed border-line px-4 py-5 text-center text-sm text-muted">
                                     尚未连接 ChatGPT 账户。连接后可在 Provider 配置中绑定。
                                 </div>
                                 <!-- 固定高度的账户列表区：筛选结果和账户数变化时高度不变，超出内容在区域内滚动。
                                      点行展开低频信息，一次只展开一行；账户信息与标签备注分区呈现。
                                      操作列 stop 掉冒泡：点按钮不会顺带展开 / 收起这一行。 -->
+                                <!-- 批量操作栏只在有选择时出现；被筛选隐藏的已选账户单独计数，避免悄悄操作看不见的账户。 -->
+                                <div x-show="chatGPTSelectedAccountIds.length > 0" x-cloak data-testid="chatgpt-batch-bar" role="region" aria-label="批量操作" class="flex flex-wrap items-center gap-2 border-b border-line bg-cyan2/[.06] px-4 py-3">
+                                    <span class="text-sm font-semibold text-white" data-testid="chatgpt-selection-count" x-text="'已选 ' + chatGPTSelectionSummary().total + ' 个账户'"></span>
+                                    <span x-show="chatGPTSelectionSummary().hidden" class="text-xs text-amber-100" data-testid="chatgpt-selection-hidden" x-text="'其中 ' + chatGPTSelectionSummary().hidden + ' 个被当前筛选隐藏'"></span>
+                                    <button type="button" x-show="chatGPTSelectionSummary().hidden" @click="clearHiddenChatGPTAccountSelection()" class="rounded text-xs text-cyan transition hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan2">取消隐藏项</button>
+                                    <button type="button" x-show="chatGPTSelectionSummary().total < chatgptAccounts.length" @click="selectAllChatGPTAccounts()" class="rounded text-xs text-cyan transition hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan2" x-text="'选择全部 ' + chatgptAccounts.length + ' 个账户'"></button>
+                                    <div class="ml-auto flex flex-wrap items-center gap-2">
+                                        <button type="button" @click="openChatGPTBatchDialog('tags', $event)" :disabled="!!chatGPTBatchBusy" data-testid="chatgpt-batch-tags" class="btn btn-secondary px-3 py-1.5 text-xs">标签</button>
+                                        <button type="button" @click="openChatGPTBatchDialog('pause', $event)" :disabled="!!chatGPTBatchBusy" data-testid="chatgpt-batch-pause" class="btn btn-secondary px-3 py-1.5 text-xs">暂停</button>
+                                        <button type="button" @click="openChatGPTBatchDialog('resume', $event)" :disabled="!!chatGPTBatchBusy" data-testid="chatgpt-batch-resume" class="btn btn-secondary px-3 py-1.5 text-xs">恢复</button>
+                                        <button type="button" @click="openChatGPTBatchDialog('usage', $event)" :disabled="!!chatGPTBatchBusy || refreshingChatGPTUsage || !!refreshingChatGPTAccountId" data-testid="chatgpt-batch-usage" class="btn btn-secondary px-3 py-1.5 text-xs">刷新用量</button>
+                                        <button type="button" @click="openChatGPTBatchDialog('delete', $event)" :disabled="!!chatGPTBatchBusy" data-testid="chatgpt-batch-delete" class="btn btn-danger px-3 py-1.5 text-xs">删除</button>
+                                        <button type="button" @click="clearChatGPTAccountSelection()" class="btn btn-ghost px-2 py-1.5 text-xs">清除选择</button>
+                                    </div>
+                                </div>
                                 <div x-show="chatgptAccounts.length > 0" class="h-[47rem] overflow-y-auto">
                                     <div x-show="filteredChatGPTAccountCount() === 0" x-cloak class="m-4 rounded-lg border border-dashed border-line px-4 py-5 text-center text-sm text-muted">
                                         没有匹配的 ChatGPT OAuth 账户。
+                                        <button type="button" @click="resetChatGPTAccountFilters()" class="ml-2 rounded text-cyan transition hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan2">清除筛选</button>
                                     </div>
                                     <table x-show="filteredChatGPTAccountCount() > 0" class="w-full table-fixed border-collapse text-left">
                                         <colgroup>
-                                            <col style="width:32%">
-                                            <col style="width:40%">
+                                            <col style="width:2.75rem">
+                                            <col style="width:31%">
+                                            <col style="width:36%">
+                                            <col style="width:17%">
                                             <col style="width:16%">
-                                            <col style="width:12%">
                                         </colgroup>
                                         <thead class="sticky top-0 z-10 bg-panel2 text-xs text-muted">
                                             <tr>
-                                                <th scope="col" class="px-4 py-2.5 font-bold">账户</th>
+                                                <th scope="col" class="py-2.5 pl-4 pr-1">
+                                                    <input type="checkbox" @change="toggleVisibleChatGPTAccountSelection()" :checked="visibleChatGPTSelectionState() === 'all'" :indeterminate="visibleChatGPTSelectionState() === 'some'" data-testid="chatgpt-select-visible" aria-label="选择或取消当前筛选显示的全部账户" class="h-4 w-4 cursor-pointer">
+                                                </th>
+                                                <th scope="col" class="px-3 py-2.5 font-bold">账户</th>
                                                 <th scope="col" class="px-3 py-2.5 font-bold">剩余用量</th>
                                                 <th scope="col" class="px-3 py-2.5 font-bold">绑定 Provider</th>
-                                                <th scope="col" class="px-4 py-2.5 text-right font-bold">操作</th>
+                                                <th scope="col" class="px-2 py-2.5 text-right font-bold">操作</th>
                                             </tr>
                                         </thead>
                                         <template x-for="account in filteredChatGPTAccounts()" :key="account.id">
                                             <tbody class="[&:not(:first-of-type)]:border-t border-line">
-                                                <tr @click="toggleChatGPTAccount(account)"
+                                                <tr @click="toggleChatGPTAccount(account)" :data-chatgpt-account-row="account.id"
                                                     @keydown.enter.prevent="toggleChatGPTAccount(account)"
                                                     @keydown.space.prevent="toggleChatGPTAccount(account)"
                                                     :aria-expanded="isChatGPTAccountExpanded(account)"
@@ -1130,7 +1299,10 @@
                                                     :class="isChatGPTAccountExpanded(account) ? 'bg-cyan2/[.06]' : 'bg-panel/35'"
                                                     class="cursor-pointer align-top transition hover:bg-white/[.04] focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-cyan2"
                                                     role="button" tabindex="0">
-                                                    <td class="px-4 py-3">
+                                                    <td class="py-3 pl-4 pr-1" @click.stop @keydown.stop>
+                                                        <input type="checkbox" :checked="isChatGPTAccountSelected(account)" @change="toggleChatGPTAccountSelection(account)" data-testid="chatgpt-select-account" :aria-label="'选择 ' + (account.email || account.id)" class="h-4 w-4 cursor-pointer">
+                                                    </td>
+                                                    <td class="px-3 py-3">
                                                         <div class="flex min-w-0 items-start gap-2">
                                                             <span class="material-symbols-outlined mt-0.5 shrink-0 text-[18px] text-muted"
                                                                   x-text="isChatGPTAccountExpanded(account) ? 'keyboard_arrow_up' : 'keyboard_arrow_down'"></span>
@@ -1139,6 +1311,10 @@
                                                                 <div class="mt-1 flex flex-wrap items-center gap-1.5">
                                                                     <span class="tag bg-white/[.06] text-muted" x-text="account.usage?.planType || account.plan || '类型未知'"></span>
                                                                     <span class="tag" :class="chatGPTAccountStatusInfo(account).badgeClass" :title="chatGPTAccountStatusInfo(account).title" x-text="chatGPTAccountStatusInfo(account).label"></span>
+                                                                    <!-- 授权徽章只说明凭据条件；这枚徽章才是经网关发出的真实调用结果。 -->
+                                                                    <span x-show="chatGPTCooldownActive(account)" x-cloak class="tag bg-danger/10 text-rose-100" data-testid="chatgpt-cooldown-badge" :title="'上游报告用量额度已耗尽，账户冷却至 ' + formatChatGPTDate(account.cooldownUntil) + '：同账户全部 Provider 暂停准入，可在详情中手动解除'">额度冷却</span>
+                                                                    <span x-show="account.enabled === false" class="tag bg-warn/10 text-amber-100" data-testid="chatgpt-paused-badge" :title="'账户已暂停' + (account.pausedAt ? '（' + formatChatGPTDate(account.pausedAt) + '）' : '') + '：网关不再经此账户转发新请求，绑定与 Provider 启停设置保持不变'">已暂停</span>
+                                                                    <span class="tag" data-testid="chatgpt-invocation-badge" :class="chatGPTInvocationInfo(account).badgeClass" :title="chatGPTInvocationInfo(account).title" x-text="chatGPTInvocationInfo(account).label"></span>
                                                                 </div>
                                                                 <div x-show="Array.isArray(account.tags) && account.tags.length > 0" class="mt-1 flex min-w-0 flex-wrap items-center gap-1">
                                                                     <template x-for="tag in (Array.isArray(account.tags) ? account.tags : [])" :key="tag">
@@ -1157,9 +1333,16 @@
                                                                         <div class="h-full rounded-full transition-[width]" :class="window.remainingPercent <= 10 ? 'bg-danger' : window.remainingPercent <= 30 ? 'bg-warn' : 'bg-good'" :style="'width: ' + Math.max(0, Math.min(100, Number(window.remainingPercent) || 0)) + '%' "></div>
                                                                     </div>
                                                                     <span class="w-10 shrink-0 text-right font-semibold tabular-nums" :class="window.remainingPercent <= 10 ? 'text-danger' : window.remainingPercent <= 30 ? 'text-amber-100' : 'text-good'" x-text="Math.round(window.remainingPercent) + '%'"></span>
-                                                                    <span class="w-[6.5rem] shrink-0 text-right tabular-nums text-muted" x-text="formatUsageResetShort(window.resetAt)"></span>
+                                                                    <span class="w-[6.5rem] shrink-0 text-right tabular-nums"
+                                                                          :class="chatGPTUsageFreshnessInfo(account).pendingNames.includes(window.name) ? 'text-cyan2' : 'text-muted'"
+                                                                          x-text="chatGPTUsageFreshnessInfo(account).pendingNames.includes(window.name) ? '已到重置 待复查' : formatUsageResetShort(window.resetAt)"></span>
                                                                 </div>
                                                             </template>
+                                                            <!-- 快照过期或重置时间已到都不代表额度恢复，只提示需要刷新复查。 -->
+                                                            <div x-show="chatGPTUsageFreshnessInfo(account).stale || chatGPTUsageFreshnessInfo(account).resetPending" class="flex flex-wrap gap-1.5">
+                                                                <span x-show="chatGPTUsageFreshnessInfo(account).stale" data-testid="chatgpt-usage-stale" class="tag bg-warn/10 text-amber-100" :title="chatGPTUsageFreshnessInfo(account).staleTitle">数据已过时</span>
+                                                                <span x-show="chatGPTUsageFreshnessInfo(account).resetPending" data-testid="chatgpt-usage-reset-pending" class="tag bg-cyan2/10 text-cyan2" :title="chatGPTUsageFreshnessInfo(account).resetPendingTitle">重置已到，待复查</span>
+                                                            </div>
                                                             <div x-show="refreshingChatGPTUsage || refreshingChatGPTAccountId === account.id" class="text-xs text-muted">正在刷新…</div>
                                                             <span x-show="account.usage?.error" class="tag bg-warn/10 text-amber-100" :title="account.usage?.error">额度同步失败，展开查看原因</span>
                                                             <div x-show="(account.usage?.lastAttemptAt || account.usage?.lastCheckedAt) && !account.usage?.windows?.length && !account.usage?.error" class="text-xs text-muted">上游暂未返回可显示的额度窗口</div>
@@ -1183,9 +1366,10 @@
                                                             </template>
                                                             <template x-for="providerName in (Array.isArray(account.providers) ? account.providers : [])" :key="providerName">
                                                                 <div class="flex min-w-0 flex-wrap items-center gap-1.5">
-                                                                    <span class="h-1.5 w-1.5 shrink-0 rounded-full bg-good"></span>
-                                                                    <span class="min-w-0 max-w-36 truncate font-mono text-text" x-text="providerName" :title="providerName"></span>
-                                                                    <button type="button" @click.stop="unbindChatGPTAccountProvider(account, providerName)" :disabled="loading || !!unbindingChatGPTProvider || !!bindingChatGPTAccountId" :title="'解除绑定并停用 Provider ' + providerName" class="rounded text-amber-100 transition hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan2 disabled:opacity-40" :aria-label="'解除 Provider ' + providerName + ' 的账户绑定并停用">解绑</button>
+                                                                    <span class="h-1.5 w-1.5 shrink-0 rounded-full" :class="chatGPTAccountProviderState(account, providerName).dotClass" aria-hidden="true"></span>
+                                                                    <span class="min-w-0 max-w-36 truncate font-mono text-text" x-text="providerName" :title="chatGPTAccountProviderState(account, providerName).title"></span>
+                                                                    <span x-show="chatGPTAccountProviderState(account, providerName).label" class="text-[11px] text-muted" data-testid="chatgpt-provider-effective" :title="chatGPTAccountProviderState(account, providerName).title" x-text="chatGPTAccountProviderState(account, providerName).label"></span>
+                                                                    <button type="button" @click.stop="unbindChatGPTAccountProvider(account, providerName)" :disabled="loading || !!unbindingChatGPTProvider || !!bindingChatGPTAccountId" :title="'解除绑定并停用 Provider ' + providerName" class="rounded text-amber-100 transition hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan2 disabled:opacity-40" :aria-label="'解除 Provider ' + providerName + ' 的账户绑定并停用'">解绑</button>
                                                                 </div>
                                                             </template>
                                                             <button type="button" @click.stop="openChatGPTAccountBindDialog(account)"
@@ -1201,10 +1385,15 @@
                                                                     x-text="account.status !== 'ready' ? '需授权' : (Array.isArray(account.providers) && account.providers.length > 0 ? '+ 新增 Provider' : '+ 创建 Provider')"></button>
                                                         </div>
                                                     </td>
-                                                    <td class="px-4 py-2.5" @click.stop @keydown.stop>
-                                                        <div class="flex justify-end gap-0.5">
-                                                            <button type="button" @click="refreshChatGPTAccountUsage(account)" :disabled="refreshingChatGPTUsage || !!refreshingChatGPTAccountId" :title="'刷新 ' + (account.email || '此账户') + ' 的额度'" class="btn btn-ghost disabled:cursor-not-allowed disabled:opacity-50" :aria-label="'刷新 ' + (account.email || '此账户') + ' 的额度'">
+                                                    <!-- 四个行内操作在 1280px 下放不进一行；允许换行，避免按钮越过单元格压住绑定列。 -->
+                                                    <td class="px-2 py-2.5" @click.stop @keydown.stop>
+                                                        <div class="flex flex-wrap items-center justify-end gap-0.5">
+                                                            <button type="button" @click="changeChatGPTAccountState(account)" :disabled="!!changingChatGPTAccountState || !!chatGPTBatchBusy" data-testid="chatgpt-account-state" :aria-label="(account.enabled === false ? '恢复 ' : '暂停 ') + (account.email || account.id)" :title="account.enabled === false ? '恢复账户，原已停用的 Provider 不会自动启用' : '暂停账户，不改动绑定与 Provider 启停设置'" class="btn btn-ghost px-2 text-xs disabled:cursor-not-allowed disabled:opacity-50" x-text="changingChatGPTAccountState === account.id ? '处理中…' : (account.enabled === false ? '恢复' : '暂停')"></button>
+                                                            <button type="button" @click="refreshChatGPTAccountUsage(account)" :disabled="refreshingChatGPTUsage || !!refreshingChatGPTAccountId || chatGPTBatchBusy === 'usage'" :title="'刷新 ' + (account.email || '此账户') + ' 的额度'" class="btn btn-ghost disabled:cursor-not-allowed disabled:opacity-50" :aria-label="'刷新 ' + (account.email || '此账户') + ' 的额度'">
                                                                 <span class="material-symbols-outlined text-[18px]" :class="refreshingChatGPTAccountId === account.id && 'gw-spin'">refresh</span>
+                                                            </button>
+                                                            <button type="button" @click="openChatGPTDiagnoseDialog(account, $event)" :disabled="diagnosingChatGPTAccount" data-testid="chatgpt-diagnose-open" :title="'诊断 ' + (account.email || '此账户')" :aria-label="'诊断 ' + (account.email || '此账户')" class="btn btn-ghost disabled:cursor-not-allowed disabled:opacity-50">
+                                                                <span class="material-symbols-outlined text-[18px]" aria-hidden="true">monitor_heart</span>
                                                             </button>
                                                             <button type="button" @click="exportChatGPTAccount(account)" :disabled="exportingChatGPTAccounts" :title="'导出 ' + (account.email || '此账户')" class="btn btn-ghost disabled:cursor-not-allowed disabled:opacity-50" aria-label="导出 ChatGPT 账户">
                                                                 <span class="material-symbols-outlined text-[18px]">save</span>
@@ -1216,7 +1405,7 @@
                                                     </td>
                                                 </tr>
                                                 <tr x-show="isChatGPTAccountExpanded(account)" x-cloak class="bg-ink/50">
-                                                    <td colspan="4" class="px-4 pb-4 pt-3">
+                                                    <td colspan="5" class="px-4 pb-4 pt-3">
                                                         <div class="grid grid-cols-1 gap-3 md:grid-cols-5">
                                                             <section class="min-w-0 rounded-lg border border-line bg-panel/60 p-4 md:col-span-3">
                                                                 <h4 class="text-sm font-bold text-white">账户信息</h4>
@@ -1240,6 +1429,20 @@
                                                                         <dt class="text-muted">凭据最近更新</dt>
                                                                         <dd class="mt-1 break-words text-sm font-semibold text-white" :title="account.lastRefresh ? formatChatGPTDate(account.lastRefresh) : '未记录'" x-text="formatChatGPTDate(account.lastRefresh)"></dd>
                                                                     </div>
+                                                                    <div class="min-w-0" data-testid="chatgpt-authorization-detail">
+                                                                        <dt class="text-muted" title="只说明本地凭据能否拿到访问令牌，不证明模型调用可用。">授权状态</dt>
+                                                                        <dd class="mt-1 flex flex-wrap items-center gap-2">
+                                                                            <span class="tag" :class="chatGPTAccountStatusInfo(account).badgeClass" x-text="chatGPTAccountStatusInfo(account).label"></span>
+                                                                            <span class="min-w-0 break-words text-xs text-muted" x-text="account.authorization?.lastRefreshError || account.authorization?.message || ''"></span>
+                                                                        </dd>
+                                                                    </div>
+                                                                    <div class="min-w-0" data-testid="chatgpt-invocation-detail">
+                                                                        <dt class="text-muted" title="只统计本次网关启动后经此账户发出的真实上游调用。">最近实际调用</dt>
+                                                                        <dd class="mt-1 flex flex-wrap items-center gap-2">
+                                                                            <span class="tag" :class="chatGPTInvocationInfo(account).badgeClass" x-text="chatGPTInvocationInfo(account).label"></span>
+                                                                            <span class="min-w-0 break-words text-xs text-muted" x-text="chatGPTInvocationInfo(account).detail"></span>
+                                                                        </dd>
+                                                                    </div>
                                                                     <template x-if="account.subscriptionActiveStart || account.subscriptionActiveUntil">
                                                                         <div class="min-w-0">
                                                                             <dt class="text-muted">订阅周期</dt>
@@ -1251,7 +1454,11 @@
                                                                         <dd class="mt-1 break-words text-sm font-semibold text-white" x-text="account.usage?.credits?.balance"></dd>
                                                                     </div>
                                                                 </dl>
-                                                                <p class="mt-3 border-t border-line pt-3 text-[11px] leading-relaxed text-muted">访问令牌会自动续期；显示的到期时间不代表 ChatGPT 订阅到期时间。</p>
+                                                                <p class="mt-3 border-t border-line pt-3 text-[11px] leading-relaxed text-muted">访问令牌会自动续期；显示的到期时间不代表 ChatGPT 订阅到期时间。授权状态只说明凭据条件，模型能否调用以「最近实际调用」为准。</p>
+                                                                <div x-show="chatGPTUsageFreshnessInfo(account).stale || chatGPTUsageFreshnessInfo(account).resetPending" class="mt-3 rounded border border-line bg-white/[.03] px-3 py-2 text-xs text-muted">
+                                                                    <div x-show="chatGPTUsageFreshnessInfo(account).stale" x-text="chatGPTUsageFreshnessInfo(account).staleTitle"></div>
+                                                                    <div x-show="chatGPTUsageFreshnessInfo(account).resetPending" x-text="chatGPTUsageFreshnessInfo(account).resetPendingTitle"></div>
+                                                                </div>
                                                                 <div x-show="account.usage?.error" class="mt-3 rounded border border-warn/30 bg-warn/10 px-3 py-2 text-xs text-amber-100">
                                                                     <div><span class="font-semibold">额度同步失败：</span><span x-text="account.usage?.error"></span></div>
                                                                     <div x-show="account.usage?.windows?.length || account.usage?.credits" class="mt-1 text-muted">列表里的额度是缓存数据，最后一次成功查询的时间见「剩余用量」列。</div>
@@ -1300,6 +1507,98 @@
                                                                     </div>
                                                                 </div>
                                                             </section>
+                                                            <!-- 调用统计只覆盖当前网关进程：真实调用、诊断与管理请求分开计数，没有样本时不以 0 冒充。 -->
+                                                            <section class="min-w-0 rounded-lg border border-line bg-panel/60 p-4 md:col-span-5" @click.stop data-testid="chatgpt-account-stats" :aria-busy="String(!!chatGPTStatsOf(account).loading)">
+                                                                <div class="flex flex-wrap items-center justify-between gap-2">
+                                                                    <div class="flex flex-wrap items-center gap-2">
+                                                                        <h4 class="text-sm font-bold text-white">调用统计</h4>
+                                                                        <span x-show="chatGPTStatsOf(account).data" class="text-xs text-muted" x-text="'统计起点 ' + formatChatGPTDate(chatGPTStatsOf(account).data?.since) + '，网关重启后清零'"></span>
+                                                                    </div>
+                                                                    <div class="flex items-center gap-2">
+                                                                        <span x-show="chatGPTStatsLoadedText(chatGPTStatsOf(account))" class="text-xs tabular-nums text-muted" x-text="chatGPTStatsLoadedText(chatGPTStatsOf(account))"></span>
+                                                                        <button type="button" @click.stop="loadChatGPTAccountMetrics(account)" :disabled="!!chatGPTStatsOf(account).loading" data-testid="chatgpt-stats-refresh" class="btn btn-secondary px-2.5 py-1.5 text-xs disabled:cursor-wait disabled:opacity-60" :aria-label="'刷新 ' + (account.email || account.id) + ' 的调用统计'">
+                                                                            <span class="material-symbols-outlined text-[16px]" :class="chatGPTStatsOf(account).loading && 'gw-spin'" aria-hidden="true">refresh</span>
+                                                                            刷新统计
+                                                                        </button>
+                                                                    </div>
+                                                                </div>
+                                                                <p x-show="chatGPTStatsOf(account).loading && !chatGPTStatsOf(account).data" role="status" class="mt-3 text-xs text-muted">正在读取调用统计…</p>
+                                                                <p x-show="chatGPTStatsOf(account).error" role="alert" class="mt-3 break-words text-xs text-amber-100" data-testid="chatgpt-stats-error" x-text="chatGPTStatsOf(account).error + (chatGPTStatsOf(account).data ? '；下方为上次读取的结果' : '')"></p>
+                                                                <template x-if="chatGPTStatsOf(account).data">
+                                                                    <div>
+                                                                        <div class="mt-3 overflow-x-auto">
+                                                                            <table class="w-full min-w-[34rem] text-left text-xs">
+                                                                                <thead class="text-muted">
+                                                                                    <tr class="border-b border-line">
+                                                                                        <th scope="col" class="py-2 pr-3 font-bold">指标</th>
+                                                                                        <th scope="col" class="py-2 pr-3 font-bold" x-text="chatGPTStatsWindowText(chatGPTStatsOf(account))"></th>
+                                                                                        <th scope="col" class="py-2 font-bold">本次启动以来</th>
+                                                                                    </tr>
+                                                                                </thead>
+                                                                                <tbody class="divide-y divide-line">
+                                                                                    <template x-for="row in chatGPTStatRows(account)" :key="row.key">
+                                                                                        <tr data-testid="chatgpt-stat-row" :data-stat="row.key">
+                                                                                            <th scope="row" class="py-2 pr-3 font-semibold text-muted" :title="row.tip" x-text="row.label"></th>
+                                                                                            <td class="py-2 pr-3 tabular-nums" :class="row.window === '暂无样本' ? 'text-muted' : 'text-text'" x-text="row.window"></td>
+                                                                                            <td class="py-2 tabular-nums" :class="row.total === '暂无样本' ? 'text-muted' : 'text-text'" x-text="row.total"></td>
+                                                                                        </tr>
+                                                                                    </template>
+                                                                                </tbody>
+                                                                            </table>
+                                                                        </div>
+                                                                        <dl class="mt-3 flex flex-wrap gap-x-6 gap-y-1 text-xs">
+                                                                            <div class="flex gap-1.5"><dt class="text-muted">最后成功</dt><dd class="tabular-nums text-text" data-testid="chatgpt-stats-last-success" x-text="chatGPTStatsOf(account).data.lastSuccessAt ? formatChatGPTDate(chatGPTStatsOf(account).data.lastSuccessAt) : '本次启动后尚无'"></dd></div>
+                                                                            <div class="flex gap-1.5"><dt class="text-muted">最后失败</dt><dd class="tabular-nums text-text" x-text="chatGPTStatsOf(account).data.lastFailureAt ? formatChatGPTDate(chatGPTStatsOf(account).data.lastFailureAt) : '本次启动后尚无'"></dd></div>
+                                                                        </dl>
+                                                                        <p class="mt-2 text-xs leading-relaxed text-muted">按真实上游尝试计数，每次本地重试和故障转移分别计入实际使用的账户。延迟是上游响应头延迟，不含排队和正文生成。诊断、令牌刷新和用量查询单独计数，不进入成功率。</p>
+                                                                        <div x-show="chatGPTAdmissionRows(account).length > 0" class="mt-3 border-t border-line pt-3" data-testid="chatgpt-account-admission">
+                                                                            <div class="flex flex-wrap items-center justify-between gap-2">
+                                                                                <div class="text-xs font-bold text-muted">准入与冷却</div>
+                                                                                <button type="button" x-show="chatGPTCooldownActive(account)" x-cloak @click.stop="clearChatGPTCooldown(account)" :disabled="clearingChatGPTCooldown === account.id" data-testid="chatgpt-cooldown-clear" class="btn btn-secondary px-2.5 py-1.5 text-xs disabled:cursor-wait disabled:opacity-60" :aria-label="'解除 ' + (account.email || account.id) + ' 的额度冷却'">
+                                                                                    解除冷却
+                                                                                </button>
+                                                                            </div>
+                                                                            <dl class="mt-2 space-y-1 text-xs">
+                                                                                <template x-for="row in chatGPTAdmissionRows(account)" :key="row.key">
+                                                                                    <div class="flex flex-wrap gap-x-3 gap-y-0.5" data-testid="chatgpt-admission-row" :data-admission="row.key">
+                                                                                        <dt class="text-muted" x-text="row.label"></dt>
+                                                                                        <dd class="tabular-nums text-text" x-text="row.value"></dd>
+                                                                                    </div>
+                                                                                </template>
+                                                                            </dl>
+                                                                        </div>
+                                                                        <div class="mt-3 border-t border-line pt-3">
+                                                                            <div class="text-xs font-bold text-muted">最近账户事件</div>
+                                                                            <ul x-show="(chatGPTStatsOf(account).data.events || []).length > 0" class="mt-2 divide-y divide-line" aria-label="最近账户事件">
+                                                                                <template x-for="event in (chatGPTStatsOf(account).data.events || [])" :key="event.id + '-' + event.time">
+                                                                                    <li class="flex flex-wrap items-center gap-x-3 gap-y-1 py-2 text-xs" data-testid="chatgpt-account-event">
+                                                                                        <span class="shrink-0 font-mono text-muted" x-text="event.time || '--'"></span>
+                                                                                        <span class="tag w-fit shrink-0" :class="runEventClass(event)" :title="runEventTip(event)" x-text="runEventLabel(event)"></span>
+                                                                                        <span x-show="event.provider" class="shrink-0 font-mono text-text" x-text="event.provider"></span>
+                                                                                        <span class="min-w-0 flex-1 break-words text-muted" x-text="event.detail || ''"></span>
+                                                                                    </li>
+                                                                                </template>
+                                                                            </ul>
+                                                                            <p x-show="(chatGPTStatsOf(account).data.events || []).length === 0" class="mt-2 text-xs text-muted">本次启动后暂无该账户的状态事件</p>
+                                                                        </div>
+                                                                    </div>
+                                                                </template>
+                                                            </section>
+                                                            <!-- 后台计划只在后端下发 background 字段时显示（任一后台刷新开启）；旧后端或全部关闭时整块不渲染。 -->
+                                                            <template x-if="chatGPTBackgroundOf(account)">
+                                                                <section class="min-w-0 rounded-lg border border-line bg-panel/60 p-4 md:col-span-5" @click.stop data-testid="chatgpt-account-background">
+                                                                    <h4 class="text-sm font-bold text-white">后台计划</h4>
+                                                                    <dl class="mt-2 space-y-1 text-xs">
+                                                                        <template x-for="row in chatGPTBackgroundRows(account)" :key="row.key">
+                                                                            <div class="flex flex-wrap gap-x-3 gap-y-0.5" data-testid="chatgpt-background-row" :data-background="row.key">
+                                                                                <dt class="text-muted" x-text="row.label"></dt>
+                                                                                <dd class="min-w-0 break-words tabular-nums" :class="chatGPTBackgroundRowClass(row)" x-text="row.value"></dd>
+                                                                            </div>
+                                                                        </template>
+                                                                    </dl>
+                                                                    <p class="mt-2 text-[11px] leading-relaxed text-muted">后台刷新只针对活跃账户；失败按退避推迟下次计划，人工刷新与按需刷新不受影响。</p>
+                                                                </section>
+                                                            </template>
                                                         </div>
                                                     </td>
                                                 </tr>
@@ -1473,9 +1772,9 @@
                                              不必长期占位。 -->
                                         <span x-show="providerStateCounts().unchecked > 0"
                                               class="chip bg-white/[.05] px-1.5 text-[11px] text-muted"
-                                              @mouseenter="showTip('尚未做过健康检测的 Provider 数，点右侧检测按钮更新', $event)"
+                                              @mouseenter="showTip('尚未做过健康检测的 Provider 数，点右侧检测按钮更新；ChatGPT OAuth Provider 在有真实调用结果前也计入这里', $event)"
                                               @mouseleave="hideTip()"
-                                              @focus="showTip('尚未做过健康检测的 Provider 数，点右侧检测按钮更新', $event)"
+                                              @focus="showTip('尚未做过健康检测的 Provider 数，点右侧检测按钮更新；ChatGPT OAuth Provider 在有真实调用结果前也计入这里', $event)"
                                               @blur="hideTip()"
                                               tabindex="0" aria-describedby="immediate-tooltip"
                                               x-text="'未检测 ' + providerStateCounts().unchecked"></span>
@@ -1858,7 +2157,7 @@
                                                 <span class="tag w-fit" :class="runEventClass(event)"
                                                       :title="runEventTip(event)" x-text="runEventLabel(event)"></span>
                                                 <span class="truncate font-mono text-text" x-text="event.provider || '--'"></span>
-                                                <span class="truncate text-muted" :title="event.detail || ''" x-text="event.detail || '--'"></span>
+                                                <span class="truncate text-muted" :title="[event.account, event.detail].filter(Boolean).join(' · ')" x-text="[event.account, event.detail].filter(Boolean).join(' · ') || '--'"></span>
                                             </div>
                                         </template>
                                     </div>
@@ -2756,6 +3055,13 @@
                         <p x-show="routeForm.strategy === 'least-queue' && config.directMode" x-cloak class="mt-1 text-[11px] text-amber-300">
                             直通模式下无本地队列，最少队列策略将自然退化为轮询。
                         </p>
+                        <label class="mt-3 flex cursor-pointer items-start gap-2 border-t border-line/60 pt-3">
+                            <input autocomplete="off" type="checkbox" x-model="routeForm.quotaAware" data-testid="route-quota-aware" class="mt-0.5 h-4 w-4 rounded border-line bg-panel text-cyan2 focus:ring-cyan2">
+                            <span class="text-xs">
+                                <span class="font-bold text-text">额度感知排序</span>
+                                <span class="mt-0.5 block text-[11px] leading-relaxed text-muted">在上面的策略顺序之后，按 ChatGPT 账户最近一次用量快照把额度偏低（≤10%）和已耗尽的候选放到后面。不发网络请求，不丢候选，会话粘性命中的目标保持在首位。</span>
+                            </span>
+                        </label>
                     </div>
 
                     <!-- 候选列表容器：采用轻量卡片流替代原单行挤压 -->
@@ -3050,6 +3356,227 @@
         </div>
     </div>
 
+    <!-- 账户诊断需要保护模型消费确认和请求生命周期；关闭会取消等待，不承诺撤回已完成的副作用。 -->
+    <div x-show="showChatGPTDiagnoseDialog" x-transition.opacity.duration.200ms x-cloak
+         @keydown.escape.window="escapeChatGPTDiagnoseDialog($event)" @keydown.tab="trapChatGPTDiagnoseFocus($event)"
+         data-testid="chatgpt-diagnose-dialog" class="fixed inset-0 z-[80] grid place-items-center bg-black/70 p-4">
+        <section x-ref="chatGPTDiagnoseDialog" class="glass flex max-h-[92vh] w-full max-w-2xl flex-col overflow-hidden rounded-lg shadow-glow"
+                 role="dialog" aria-modal="true" aria-labelledby="chatgpt-diagnose-title" aria-describedby="chatgpt-diagnose-description">
+            <header class="flex shrink-0 items-start justify-between gap-4 border-b border-line p-5">
+                <div class="min-w-0">
+                    <h3 id="chatgpt-diagnose-title" class="text-lg font-bold text-white">账户诊断</h3>
+                    <p class="mt-1 break-all text-sm text-text" x-text="chatGPTDiagnoseAccount()?.email || chatGPTDiagnoseAccountId"></p>
+                    <p id="chatgpt-diagnose-description" class="mt-2 text-sm leading-relaxed text-muted">本地检查始终执行。出网步骤由你选择，实际模型调用需要确认额度消耗。</p>
+                </div>
+                <button type="button" @click="closeChatGPTDiagnoseDialog()" class="btn btn-secondary shrink-0 px-2 py-2" aria-label="关闭账户诊断">
+                    <span class="material-symbols-outlined" aria-hidden="true">close</span>
+                </button>
+            </header>
+            <div class="min-h-0 overflow-y-auto p-5">
+                <fieldset :disabled="diagnosingChatGPTAccount" class="min-w-0">
+                    <legend class="text-sm font-bold text-white">选择检查步骤</legend>
+                    <div class="mt-3 divide-y divide-line">
+                        <div class="flex items-start gap-3 pb-3">
+                            <span class="material-symbols-outlined shrink-0 text-good" aria-hidden="true">check_circle</span>
+                            <div>
+                                <p class="text-sm font-semibold text-text">本地检查 <span class="ml-1 text-xs font-normal text-muted">必选 · 不出网</span></p>
+                                <p class="mt-1 text-xs leading-relaxed text-muted">检查授权、绑定和历史结果，不能证明模型调用成功。</p>
+                            </div>
+                        </div>
+                        <div class="py-3">
+                            <label class="flex cursor-pointer items-start gap-3">
+                                <input type="checkbox" x-model="chatGPTDiagnoseChecks.refresh" @change="resetChatGPTDiagnoseResult()" class="mt-1 h-4 w-4 shrink-0" data-testid="chatgpt-diagnose-refresh">
+                                <span>
+                                    <span class="block text-sm font-semibold text-text">刷新链路</span>
+                                    <span class="mt-1 block text-xs leading-relaxed text-muted">检查能否取得访问令牌，可能交换并保存新凭据。</span>
+                                </span>
+                            </label>
+                            <div x-show="chatGPTDiagnoseChecks.refresh" x-cloak class="ml-7 mt-3">
+                                <label for="chatgpt-diagnose-refresh-mode" class="mb-1.5 block text-xs font-bold text-muted">刷新方式</label>
+                                <select id="chatgpt-diagnose-refresh-mode" x-model="chatGPTDiagnoseRefreshMode" @change="resetChatGPTDiagnoseResult()" class="field text-sm">
+                                    <option value="auto">按需刷新，有效时不交换令牌</option>
+                                    <option value="force">强制刷新，会尝试轮换刷新凭据</option>
+                                </select>
+                            </div>
+                        </div>
+                        <label class="flex cursor-pointer items-start gap-3 py-3">
+                            <input type="checkbox" x-model="chatGPTDiagnoseChecks.usage" @change="resetChatGPTDiagnoseResult()" class="mt-1 h-4 w-4 shrink-0" data-testid="chatgpt-diagnose-usage">
+                            <span>
+                                <span class="block text-sm font-semibold text-text">用量查询</span>
+                                <span class="mt-1 block text-xs leading-relaxed text-muted">重新查询并保存额度快照，查询失败不等于账户整体失效。</span>
+                            </span>
+                        </label>
+                        <div class="pt-3">
+                            <label class="flex cursor-pointer items-start gap-3">
+                                <input type="checkbox" x-model="chatGPTDiagnoseChecks.inference" @change="resetChatGPTDiagnoseResult()" class="mt-1 h-4 w-4 shrink-0" data-testid="chatgpt-diagnose-inference">
+                                <span>
+                                    <span class="block text-sm font-semibold text-text">实际模型调用 <span class="ml-1 text-xs font-normal text-warn">会消耗额度</span></span>
+                                    <span class="mt-1 block text-xs leading-relaxed text-muted">经已保存的 Provider 发起一次最小请求，沿用其代理和排队设置。</span>
+                                </span>
+                            </label>
+                            <div x-show="chatGPTDiagnoseChecks.inference" x-cloak class="ml-7 mt-3 space-y-3">
+                                <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                                    <div class="min-w-0">
+                                        <label for="chatgpt-diagnose-provider" class="mb-1.5 block text-xs font-bold text-muted">已绑定的 Provider</label>
+                                        <select id="chatgpt-diagnose-provider" x-model="chatGPTDiagnoseProvider" @change="resetChatGPTDiagnoseResult()" class="field text-sm" data-testid="chatgpt-diagnose-provider">
+                                            <option value="">选择已保存的绑定</option>
+                                            <template x-for="item in chatGPTDiagnoseProviders()" :key="item.name">
+                                                <option :value="item.name" x-text="item.name + (item.enabled ? '' : ' · 已停用，将跳过')"></option>
+                                            </template>
+                                        </select>
+                                    </div>
+                                    <div class="min-w-0">
+                                        <label for="chatgpt-diagnose-model" class="mb-1.5 block text-xs font-bold text-muted">测试模型</label>
+                                        <input id="chatgpt-diagnose-model" autocomplete="off" spellcheck="false" type="text" x-model="chatGPTDiagnoseModel" @input="resetChatGPTDiagnoseResult()" placeholder="输入此账户可调用的模型名" maxlength="200" class="field font-mono text-sm" data-testid="chatgpt-diagnose-model">
+                                    </div>
+                                </div>
+                                <p x-show="chatGPTDiagnoseProviders().length === 0" class="text-xs leading-relaxed text-warn">此账户没有已保存的 OAuth Provider 绑定。请先绑定并保存，其他检查仍可执行。</p>
+                                <p class="text-xs leading-relaxed text-muted">只验证所选模型，不自动遍历其他模型。停用的 Provider 不会调用。测试输出上限为 256 token，总预算为 45 秒。</p>
+                                <label class="flex cursor-pointer items-start gap-3 rounded-lg border border-warn/30 bg-warn/10 p-3">
+                                    <input type="checkbox" x-model="chatGPTDiagnoseConfirmed" class="mt-1 h-4 w-4 shrink-0" data-testid="chatgpt-diagnose-confirm">
+                                    <span class="text-xs leading-relaxed text-amber-100">我确认发起实际调用并消耗账户额度。关闭或取消不能撤回已经发送的请求，调用结果会写入账户的最近调用记录。</span>
+                                </label>
+                            </div>
+                        </div>
+                    </div>
+                </fieldset>
+                <p x-show="diagnosingChatGPTAccount" x-cloak role="status" class="mt-5 text-sm leading-relaxed text-muted" data-testid="chatgpt-diagnose-busy">正在按顺序执行所选检查，总预算为 45 秒。可随时取消等待，已经执行的操作不会回滚。</p>
+                <p x-show="chatGPTDiagnoseError" x-cloak role="alert" class="mt-5 text-sm leading-relaxed text-danger" x-text="chatGPTDiagnoseError"></p>
+                <p x-show="chatGPTDiagnoseNotice" x-cloak role="status" class="mt-5 text-sm leading-relaxed text-warn" x-text="chatGPTDiagnoseNotice" data-testid="chatgpt-diagnose-notice"></p>
+                <section x-show="chatGPTDiagnoseReport" x-cloak x-ref="chatGPTDiagnoseResults" tabindex="-1" aria-label="诊断结果" class="mt-6 border-t border-line pt-5 focus:outline-none" data-testid="chatgpt-diagnose-results">
+                    <div class="flex flex-wrap items-baseline justify-between gap-2">
+                        <h4 class="text-sm font-bold text-white">诊断结果</h4>
+                        <span class="text-xs tabular-nums text-muted" x-text="chatGPTDiagnoseReport ? '耗时 ' + formatMs(chatGPTDiagnoseReport.durationMs) : ''"></span>
+                    </div>
+                    <p class="mt-1 text-xs tabular-nums text-muted" x-text="chatGPTDiagnoseSummary()"></p>
+                    <ol class="mt-3 divide-y divide-line">
+                        <template x-for="step in (chatGPTDiagnoseReport?.steps || [])" :key="step.name">
+                            <li class="py-3" data-testid="chatgpt-diagnose-step">
+                                <div class="flex flex-wrap items-center gap-2">
+                                    <!-- 图标字体按名称子集化，只能用已收录的图标；跳过与未知状态用圆点，文字标签始终给出状态。 -->
+                                    <span x-show="chatGPTDiagnoseStatusInfo(step.status).icon" class="material-symbols-outlined text-[18px]" :class="chatGPTDiagnoseStatusInfo(step.status).className" x-text="chatGPTDiagnoseStatusInfo(step.status).icon" aria-hidden="true"></span>
+                                    <span x-show="!chatGPTDiagnoseStatusInfo(step.status).icon" class="mx-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-muted" aria-hidden="true"></span>
+                                    <h5 class="text-sm font-semibold text-text" x-text="chatGPTDiagnoseStepLabel(step.name)"></h5>
+                                    <span class="text-xs font-semibold" :class="chatGPTDiagnoseStatusInfo(step.status).className" x-text="chatGPTDiagnoseStatusInfo(step.status).label"></span>
+                                    <span x-show="step.category" class="text-xs text-muted" x-text="chatGPTDiagnoseCategoryLabel(step.category)"></span>
+                                    <span x-show="step.httpStatus" class="ml-auto font-mono text-xs text-muted" x-text="'HTTP ' + step.httpStatus"></span>
+                                </div>
+                                <p class="mt-2 break-words text-sm leading-relaxed text-text" x-text="step.message"></p>
+                                <div class="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs tabular-nums text-muted">
+                                    <span x-show="step.proxySource" x-text="chatGPTDiagnoseProxyLabel(step.proxySource)"></span>
+                                    <span x-show="step.startedAt" x-text="formatMs(step.durationMs)"></span>
+                                    <span x-show="step.tokenExchanged" class="text-warn">已尝试交换令牌</span>
+                                    <span x-show="step.provider" class="break-all font-mono" x-text="[step.provider, step.model].filter(Boolean).join(' · ')"></span>
+                                </div>
+                                <ul x-show="step.details?.length" class="mt-2 space-y-1 pl-4 text-xs leading-relaxed text-muted">
+                                    <template x-for="(detail, index) in (step.details || [])" :key="index"><li class="list-disc break-words" x-text="detail"></li></template>
+                                </ul>
+                            </li>
+                        </template>
+                    </ol>
+                    <p class="mt-3 border-t border-line pt-3 text-xs leading-relaxed text-muted" x-text="chatGPTDiagnoseReport?.actualCall ? '已发起实际模型调用，可能消耗额度；诊断不计入普通请求统计。' : '没有发起实际模型调用。'"></p>
+                    <p x-show="chatGPTDiagnoseReport?.tokenExchanged" class="mt-1 text-xs leading-relaxed text-warn">诊断期间已尝试交换令牌或凭据发生变化，已经完成的轮换不会回滚。</p>
+                </section>
+            </div>
+            <footer class="flex shrink-0 flex-wrap items-center justify-between gap-3 border-t border-line p-5">
+                <button type="button" @click="closeChatGPTDiagnoseDialog()" class="btn btn-secondary" x-text="diagnosingChatGPTAccount ? '取消并关闭' : '关闭'"></button>
+                <div class="flex flex-wrap items-center gap-2">
+                    <button x-show="diagnosingChatGPTAccount" x-cloak type="button" @click="cancelChatGPTDiagnose()" class="btn btn-secondary" data-testid="chatgpt-diagnose-cancel">取消诊断</button>
+                    <button x-ref="chatGPTDiagnoseStart" type="button" @click="startChatGPTDiagnose()" :disabled="!canStartChatGPTDiagnose()" class="btn btn-primary" data-testid="chatgpt-diagnose-start">
+                        <span x-show="diagnosingChatGPTAccount" x-cloak class="material-symbols-outlined gw-spin text-[18px]" aria-hidden="true">progress_activity</span>
+                        <span x-text="diagnosingChatGPTAccount ? '诊断中…' : chatGPTDiagnoseReport ? '重新诊断' : '开始诊断'"></span>
+                    </button>
+                </div>
+            </footer>
+        </section>
+    </div>
+
+    <!-- 账户批量操作：先预检影响再一次提交。关闭只取消等待，不宣称回滚已经完成的写入或出网查询。 -->
+    <div x-show="showChatGPTBatchDialog" x-transition.opacity.duration.200ms x-cloak
+         @keydown.escape.window="if (showChatGPTBatchDialog && !confirmDialog.open) { $event.preventDefault(); $event.stopImmediatePropagation(); closeChatGPTBatchDialog(); }"
+         @keydown.tab="trapChatGPTBatchFocus($event)"
+         data-testid="chatgpt-batch-dialog" class="fixed inset-0 z-[80] grid place-items-center bg-black/70 p-4">
+        <section x-ref="chatGPTBatchDialog" class="glass flex max-h-[92vh] w-full max-w-2xl flex-col overflow-hidden rounded-lg shadow-glow"
+                 role="dialog" aria-modal="true" aria-labelledby="chatgpt-batch-title" aria-describedby="chatgpt-batch-description">
+            <header class="flex shrink-0 items-start justify-between gap-4 border-b border-line p-5">
+                <div class="min-w-0">
+                    <h3 id="chatgpt-batch-title" class="text-lg font-bold text-white" x-text="chatGPTBatchOperationLabel()"></h3>
+                    <p id="chatgpt-batch-description" class="mt-1 text-sm leading-relaxed text-muted" x-text="'本次处理 ' + chatGPTBatchAccountIds.length + ' 个已选账户。' + (chatGPTBatchOperation === 'usage' ? '用量查询会访问上游，并发 3 个，总等待 60 秒，不自动重试。' : '先预检影响，确认后在账户文件中一次提交，失败则整批不生效。')"></p>
+                    <p x-show="chatGPTBatchHiddenCount" class="mt-2 text-sm text-amber-100" data-testid="chatgpt-batch-hidden" x-text="'其中 ' + chatGPTBatchHiddenCount + ' 个账户被当前筛选隐藏，同样会被处理。'"></p>
+                </div>
+                <button type="button" x-ref="chatGPTBatchClose" @click="closeChatGPTBatchDialog()" :disabled="chatGPTBatchBusy === 'apply'" class="btn btn-secondary shrink-0 px-2 py-2" aria-label="关闭批量操作">
+                    <span class="material-symbols-outlined" aria-hidden="true">close</span>
+                </button>
+            </header>
+            <div class="min-h-0 overflow-y-auto p-5">
+                <fieldset x-show="chatGPTBatchOperation === 'tags'" :disabled="!!chatGPTBatchBusy || !!chatGPTBatchResult" class="grid min-w-0 grid-cols-1 gap-3 sm:grid-cols-2">
+                    <label class="min-w-0 text-xs font-bold text-muted">添加标签
+                        <input type="text" x-model="chatGPTBatchAddTags" @input="resetChatGPTBatchPlan()" data-testid="chatgpt-batch-add-tags" placeholder="例如：工作, 备用" autocomplete="off" class="field mt-1.5 w-full text-sm">
+                    </label>
+                    <label class="min-w-0 text-xs font-bold text-muted">移除标签
+                        <input type="text" x-model="chatGPTBatchRemoveTags" @input="resetChatGPTBatchPlan()" data-testid="chatgpt-batch-remove-tags" placeholder="例如：旧标签" autocomplete="off" class="field mt-1.5 w-full text-sm">
+                    </label>
+                    <p class="text-xs leading-relaxed text-muted sm:col-span-2">用逗号分隔，只添加或移除所填标签，不覆盖账户的其他标签和备注。同一账户最多 20 个标签。</p>
+                </fieldset>
+                <div x-show="chatGPTBatchOperation === 'usage' && !chatGPTBatchResult">
+                    <label for="chatgpt-batch-refresh-mode" class="mb-1.5 block text-xs font-bold text-muted">刷新方式</label>
+                    <select id="chatgpt-batch-refresh-mode" x-model="chatGPTBatchRefreshMode" :disabled="!!chatGPTBatchBusy" data-testid="chatgpt-batch-refresh-mode" class="field text-sm">
+                        <option value="auto">30 分钟内查询过的沿用缓存</option>
+                        <option value="force">全部重新查询</option>
+                    </select>
+                    <p class="mt-2 text-xs leading-relaxed text-muted">暂停的账户同样可以查询用量。取消只停止等待，已经发出的查询可能仍会完成。</p>
+                </div>
+                <p x-show="chatGPTBatchOperation === 'delete' && !chatGPTBatchResult" class="mt-0 rounded-lg border border-danger/30 bg-danger/10 p-3 text-sm leading-relaxed text-rose-100">删除会清除本机保存的 OAuth 凭据。被任何 Provider 绑定的账户（包括已停用的 Provider）都会阻断整批删除，需要先解除绑定，网关不会自动解绑。</p>
+                <p x-show="chatGPTBatchBusy" x-cloak role="status" class="mt-4 text-sm text-muted" data-testid="chatgpt-batch-busy" x-text="{ preview: '正在预检影响…', apply: '正在提交，请勿关闭页面…', usage: '正在查询用量，可取消等待…' }[chatGPTBatchBusy] || ''"></p>
+                <p x-show="chatGPTBatchError" x-cloak role="alert" class="mt-4 break-words text-sm leading-relaxed text-danger" data-testid="chatgpt-batch-error" x-text="chatGPTBatchError"></p>
+                <section x-show="chatGPTBatchPlan" x-cloak class="mt-5 border-t border-line pt-4" aria-label="预检结果" data-testid="chatgpt-batch-plan">
+                    <p class="text-sm font-semibold text-white" x-text="chatGPTBatchSummaryText(chatGPTBatchPlan?.summary)"></p>
+                    <ul x-show="chatGPTBatchPlan?.blockers?.length" class="mt-2 space-y-1 text-sm text-danger">
+                        <template x-for="(blocker, index) in (chatGPTBatchPlan?.blockers || [])" :key="index"><li class="break-words" x-text="blocker"></li></template>
+                    </ul>
+                    <p x-show="chatGPTBatchPlan?.noChanges" class="mt-2 text-sm text-muted">所选账户都已是目标状态，没有需要提交的变更。</p>
+                    <ol class="mt-3 max-h-72 divide-y divide-line overflow-y-auto pr-1">
+                        <template x-for="entry in (chatGPTBatchPlan?.entries || [])" :key="entry.accountId">
+                            <li class="py-2.5" data-testid="chatgpt-batch-entry">
+                                <div class="flex flex-wrap items-center gap-2">
+                                    <span class="min-w-0 max-w-full truncate text-sm font-semibold text-text" x-text="chatGPTBatchAccountLabel(entry.accountId, entry.email)"></span>
+                                    <span class="tag" :class="chatGPTBatchActionInfo(entry.action).badgeClass" x-text="chatGPTBatchActionInfo(entry.action).label"></span>
+                                </div>
+                                <p class="mt-1 break-words text-xs text-muted" x-text="chatGPTBatchEntryChange(entry)"></p>
+                                <p x-show="entry.providers?.length" class="mt-1 break-words text-xs text-muted" x-text="'绑定 Provider：' + (entry.providers || []).join('、')"></p>
+                                <template x-for="(message, index) in (entry.errors || [])" :key="index"><p class="mt-1 break-words text-xs text-danger" x-text="message"></p></template>
+                            </li>
+                        </template>
+                    </ol>
+                </section>
+                <section x-show="chatGPTBatchResult" x-cloak x-ref="chatGPTBatchResults" tabindex="-1" class="mt-5 border-t border-line pt-4 focus:outline-none" aria-label="执行结果" data-testid="chatgpt-batch-result">
+                    <p class="text-sm font-semibold text-white" x-text="chatGPTBatchOperation === 'usage' ? chatGPTBatchUsageSummaryText() : chatGPTBatchSummaryText(chatGPTBatchResult?.summary, true)"></p>
+                    <p x-show="chatGPTBatchOperation === 'usage'" class="mt-1 text-xs tabular-nums text-muted" x-text="'耗时 ' + formatMs(chatGPTBatchResult?.durationMs || 0) + ' / 预算 ' + formatMs(chatGPTBatchResult?.budgetMs || 0)"></p>
+                    <ol class="mt-3 max-h-72 divide-y divide-line overflow-y-auto pr-1">
+                        <template x-for="item in (chatGPTBatchOperation === 'usage' ? (chatGPTBatchResult?.results || []) : (chatGPTBatchResult?.entries || []))" :key="item.accountId">
+                            <li class="py-2.5" data-testid="chatgpt-batch-result-item">
+                                <div class="flex flex-wrap items-center gap-2">
+                                    <span class="min-w-0 max-w-full truncate text-sm font-semibold text-text" x-text="chatGPTBatchAccountLabel(item.accountId, item.email)"></span>
+                                    <span class="tag" :class="chatGPTBatchOperation === 'usage' ? chatGPTBatchUsageStatusInfo(item.status).badgeClass : chatGPTBatchActionInfo(item.action).badgeClass" x-text="chatGPTBatchOperation === 'usage' ? chatGPTBatchUsageStatusInfo(item.status).label : chatGPTBatchActionInfo(item.action).label"></span>
+                                    <span x-show="chatGPTBatchOperation === 'usage' && item.category" class="text-xs text-muted" x-text="chatGPTDiagnoseCategoryLabel(item.category)"></span>
+                                </div>
+                                <p class="mt-1 break-words text-xs text-muted" x-text="chatGPTBatchOperation === 'usage' ? (item.message || '') : chatGPTBatchEntryChange(item)"></p>
+                            </li>
+                        </template>
+                    </ol>
+                </section>
+            </div>
+            <footer class="flex shrink-0 flex-wrap items-center justify-between gap-3 border-t border-line p-5">
+                <button type="button" @click="closeChatGPTBatchDialog()" :disabled="chatGPTBatchBusy === 'apply'" class="btn btn-secondary" x-text="chatGPTBatchBusy && chatGPTBatchBusy !== 'apply' ? '取消等待并关闭' : '关闭'"></button>
+                <div class="flex flex-wrap items-center gap-2">
+                    <button x-show="chatGPTBatchOperation !== 'usage' && !chatGPTBatchResult" type="button" @click="runChatGPTBatch('preview')" :disabled="!chatGPTBatchCanPreview()" x-ref="chatGPTBatchPreview" data-testid="chatgpt-batch-preview" class="btn btn-secondary" x-text="chatGPTBatchPlan ? '重新预检' : '预检影响'"></button>
+                    <button x-show="chatGPTBatchOperation !== 'usage' && chatGPTBatchPlan?.canApply && !chatGPTBatchResult" type="button" @click="runChatGPTBatch('apply')" :disabled="!!chatGPTBatchBusy" data-testid="chatgpt-batch-apply" class="btn" :class="chatGPTBatchOperation === 'delete' ? 'btn-danger' : 'btn-primary'" x-text="chatGPTBatchBusy === 'apply' ? '提交中…' : (chatGPTBatchOperation === 'delete' ? '确认删除 ' + (chatGPTBatchPlan?.summary?.change || 0) + ' 个账户' : '确认提交')"></button>
+                    <button x-show="chatGPTBatchOperation === 'usage' && !chatGPTBatchResult" type="button" @click="runChatGPTBatch('usage')" :disabled="!!chatGPTBatchBusy" data-testid="chatgpt-batch-usage-start" class="btn btn-primary" x-text="chatGPTBatchBusy === 'usage' ? '查询中…' : '开始刷新'"></button>
+                </div>
+            </footer>
+        </section>
+    </div>
+
     <!-- ChatGPT 账户统一导入导出；原文仅在本次弹窗内处理。 -->
     <div x-show="showChatGPTTransferDialog" x-transition.opacity x-cloak
          @keydown.escape.window="closeChatGPTTransferDialog()"
@@ -3059,20 +3586,22 @@
             <div class="flex items-start justify-between gap-4 border-b border-line p-5">
                 <div>
                     <h3 id="chatgpt-transfer-title" class="text-lg font-bold text-white">ChatGPT 账户导入 / 导出</h3>
-                    <p class="mt-1 text-sm text-muted">支持 Cockpit Tools、CLIProxyAPI、sub2api 和官方 Codex auth.json。导出文件包含 OAuth 凭据，请妥善保管。</p>
+                    <p class="mt-1 text-sm text-muted">导出 / 导入支持 Cockpit Tools、CLIProxyAPI、sub2api 和官方 Codex auth.json；加密备份 / 备份恢复用于在本网关之间完整迁移。文件都包含 OAuth 凭据，请妥善保管。</p>
                 </div>
-                <button type="button" @click="closeChatGPTTransferDialog()" :disabled="importingChatGPTAccounts || exportingChatGPTAccounts" class="btn btn-secondary px-2 py-2 disabled:opacity-50" aria-label="关闭账户导入导出弹窗">
+                <button type="button" @click="closeChatGPTTransferDialog()" :disabled="importingChatGPTAccounts || exportingChatGPTAccounts || !!chatGPTBackupBusy" class="btn btn-secondary px-2 py-2 disabled:opacity-50" aria-label="关闭账户导入导出弹窗">
                     <span class="material-symbols-outlined">close</span>
                 </button>
             </div>
             <div class="flex flex-wrap gap-2 border-b border-line px-5 py-3">
-                <button type="button" @click="switchChatGPTTransferTab('export')" :disabled="importingChatGPTAccounts || exportingChatGPTAccounts" :aria-pressed="chatGPTTransferTab === 'export'" class="btn px-3 py-2 disabled:opacity-50" :class="chatGPTTransferTab === 'export' ? 'btn-primary' : 'btn-secondary'">导出</button>
-                <button type="button" @click="switchChatGPTTransferTab('import')" :disabled="importingChatGPTAccounts || exportingChatGPTAccounts" :aria-pressed="chatGPTTransferTab === 'import'" class="btn px-3 py-2 disabled:opacity-50" :class="chatGPTTransferTab === 'import' ? 'btn-primary' : 'btn-secondary'">导入</button>
+                <button type="button" @click="switchChatGPTTransferTab('export')" :disabled="importingChatGPTAccounts || exportingChatGPTAccounts || !!chatGPTBackupBusy" :aria-pressed="chatGPTTransferTab === 'export'" class="btn px-3 py-2 disabled:opacity-50" :class="chatGPTTransferTab === 'export' ? 'btn-primary' : 'btn-secondary'">导出</button>
+                <button type="button" @click="switchChatGPTTransferTab('import')" :disabled="importingChatGPTAccounts || exportingChatGPTAccounts || !!chatGPTBackupBusy" :aria-pressed="chatGPTTransferTab === 'import'" class="btn px-3 py-2 disabled:opacity-50" :class="chatGPTTransferTab === 'import' ? 'btn-primary' : 'btn-secondary'">导入</button>
+                <button type="button" @click="switchChatGPTTransferTab('backup')" data-testid="chatgpt-backup-tab" :disabled="importingChatGPTAccounts || exportingChatGPTAccounts || !!chatGPTBackupBusy" :aria-pressed="chatGPTTransferTab === 'backup'" class="btn px-3 py-2 disabled:opacity-50" :class="chatGPTTransferTab === 'backup' ? 'btn-primary' : 'btn-secondary'">加密备份</button>
+                <button type="button" @click="switchChatGPTTransferTab('restore')" data-testid="chatgpt-restore-tab" :disabled="importingChatGPTAccounts || exportingChatGPTAccounts || !!chatGPTBackupBusy" :aria-pressed="chatGPTTransferTab === 'restore'" class="btn px-3 py-2 disabled:opacity-50" :class="chatGPTTransferTab === 'restore' ? 'btn-primary' : 'btn-secondary'">备份恢复</button>
             </div>
             <div x-show="chatGPTTransferTab === 'import'" x-cloak>
             <div class="space-y-4 p-5">
                 <div class="rounded-lg border border-warn/30 bg-warn/10 p-3 text-xs leading-relaxed text-amber-100">
-                    文件或文本包含可用的 OAuth 凭据。仅在可信本机操作；提交结束或关闭后清空输入。导入后令牌保存在本机网关账户存储中。重复账户会跳过，不会覆盖现有令牌或 Provider 绑定。
+                    文件或文本包含可用的 OAuth 凭据。仅在可信本机操作；提交结束或关闭后清空输入。导入后令牌保存在本机网关账户存储中。「导入账户」直接跳过重复账户；需要用新凭据更新已有账户时，请用「预检并逐项选择」并显式选择更新。
                 </div>
                 <label class="block space-y-2">
                     <span class="text-xs font-bold text-muted">JSON 或 ZIP 文件（最大 16 MiB）</span>
@@ -3088,9 +3617,51 @@
                               class="field font-mono text-xs" placeholder="在此粘贴完整的账户 JSON 内容"></textarea>
                 </label>
                 <p x-show="chatGPTImportError" x-cloak role="alert" class="break-words text-sm text-danger" x-text="chatGPTImportError"></p>
+                <!-- 导入预检：逐条显示匹配关系与建议动作；改选后自动重新预检，旧计划立即作废。 -->
+                <section x-show="chatGPTImportPlan" x-cloak data-testid="chatgpt-import-plan" class="rounded-lg border border-line bg-panel/60" aria-labelledby="chatgpt-import-plan-title">
+                    <div class="flex flex-wrap items-baseline justify-between gap-2 border-b border-line px-4 py-3">
+                        <h4 id="chatgpt-import-plan-title" class="text-sm font-bold text-white">导入预检</h4>
+                        <span class="text-xs tabular-nums text-muted" x-text="chatGPTImportPlanSummaryText()"></span>
+                    </div>
+                    <ul class="max-h-72 divide-y divide-line overflow-y-auto">
+                        <template x-for="entry in (chatGPTImportPlan?.entries || [])" :key="entry.index">
+                            <li class="flex flex-col gap-2 px-4 py-3 sm:flex-row sm:items-start sm:justify-between" data-testid="chatgpt-import-plan-entry">
+                                <div class="min-w-0 space-y-1">
+                                    <div class="flex flex-wrap items-center gap-1.5">
+                                        <span class="text-xs tabular-nums text-muted" x-text="'第 ' + entry.index + ' 条'"></span>
+                                        <span class="min-w-0 break-all text-sm font-semibold text-white" x-text="entry.email || entry.matchedEmail || '未提供邮箱'"></span>
+                                        <span class="tag" :class="chatGPTImportEntryStatus(entry).badgeClass" x-text="chatGPTImportEntryStatus(entry).label"></span>
+                                    </div>
+                                    <p x-show="entry.invalidReason" class="text-xs text-danger" x-text="entry.invalidReason"></p>
+                                    <p x-show="entry.affectedProviders?.length" class="text-xs text-muted" x-text="'绑定 Provider：' + (entry.affectedProviders || []).join('、')"></p>
+                                    <template x-for="(message, i) in (entry.warnings || [])" :key="'w' + i">
+                                        <p class="text-xs text-amber-100" x-text="message"></p>
+                                    </template>
+                                    <template x-for="(message, i) in (entry.errors || [])" :key="'e' + i">
+                                        <p class="text-xs font-semibold text-danger" x-text="message"></p>
+                                    </template>
+                                </div>
+                                <label class="shrink-0 sm:w-36">
+                                    <span class="sr-only" x-text="'第 ' + entry.index + ' 条的导入动作'"></span>
+                                    <select class="field py-1.5 text-xs" :disabled="importingChatGPTAccounts"
+                                            :data-testid="'chatgpt-import-action-' + entry.index"
+                                            @change="setChatGPTImportAction(entry, $event.target.value)">
+                                        <template x-if="!entry.action">
+                                            <option value="" selected disabled>请选择</option>
+                                        </template>
+                                        <template x-for="action in (entry.allowedActions || [])" :key="action">
+                                            <option :value="action" :selected="entry.action === action" x-text="chatGPTImportActionLabel(action)"></option>
+                                        </template>
+                                    </select>
+                                </label>
+                            </li>
+                        </template>
+                    </ul>
+                    <p class="border-t border-line px-4 py-2.5 text-[11px] leading-relaxed text-muted">「更新凭据」整组替换该账户的 OAuth 凭据，保留本地 ID、标签备注、首次授权时间和 Provider 绑定；只有上游身份一致的已有账户可以更新。</p>
+                </section>
                 <div x-show="chatGPTImportResult" x-cloak class="rounded-lg border border-good/30 bg-good/5 p-3 text-sm">
                     <div class="font-semibold text-good" x-text="'导入完成 · ' + (chatGPTImportResult?.detectedFormat || '未知格式')"></div>
-                    <div class="mt-1 text-xs text-muted" x-text="'新增 ' + (chatGPTImportResult?.imported || 0) + ' 个，重复跳过 ' + (chatGPTImportResult?.skippedDuplicates || 0) + ' 个' "></div>
+                    <div class="mt-1 text-xs text-muted" x-text="chatGPTImportResultText(chatGPTImportResult)"></div>
                     <ul x-show="chatGPTImportResult?.warnings?.length" class="mt-2 list-inside list-disc space-y-1 text-xs text-amber-100">
                         <template x-for="(warning, index) in (chatGPTImportResult?.warnings || [])" :key="index">
                             <li x-text="warning"></li>
@@ -3100,14 +3671,30 @@
             </div>
             <div class="flex flex-wrap justify-end gap-2 border-t border-line p-5">
                 <button type="button" @click="closeChatGPTTransferDialog()" :disabled="importingChatGPTAccounts" class="btn btn-secondary disabled:opacity-50">关闭</button>
-                <button type="button" @click="importChatGPTAccounts()" :disabled="(!chatGPTImportFile && !chatGPTImportText.trim()) || importingChatGPTAccounts" class="btn btn-primary disabled:cursor-not-allowed disabled:opacity-50">
-                    <span x-show="importingChatGPTAccounts" x-cloak class="material-symbols-outlined gw-spin text-[18px]">progress_activity</span>
-                    <span x-text="importingChatGPTAccounts ? '校验并导入…' : '导入账户'"></span>
+                <!-- 有预检计划时只保留「应用导入」，避免同一份输入走两条提交路径。 -->
+                <button x-show="!chatGPTImportPlan" type="button" @click="previewChatGPTImport()" data-testid="chatgpt-import-preview"
+                        :disabled="(!chatGPTImportFile && !chatGPTImportText.trim()) || importingChatGPTAccounts"
+                        title="只读解析并逐条选择新增、跳过或更新凭据，确认后再应用"
+                        class="btn btn-secondary disabled:cursor-not-allowed disabled:opacity-50">
+                    <span x-show="chatGPTImportStage === 'preview'" x-cloak class="material-symbols-outlined gw-spin text-[18px]">progress_activity</span>
+                    <span x-text="chatGPTImportStage === 'preview' ? '预检中…' : '预检并逐项选择'"></span>
+                </button>
+                <button x-show="!chatGPTImportPlan" type="button" @click="importChatGPTAccounts()" :disabled="(!chatGPTImportFile && !chatGPTImportText.trim()) || importingChatGPTAccounts" class="btn btn-primary disabled:cursor-not-allowed disabled:opacity-50">
+                    <span x-show="chatGPTImportStage === 'direct'" x-cloak class="material-symbols-outlined gw-spin text-[18px]">progress_activity</span>
+                    <span x-text="chatGPTImportStage === 'direct' ? '校验并导入…' : '导入账户'"></span>
+                </button>
+                <button x-show="chatGPTImportPlan" x-cloak type="button" @click="applyChatGPTImport()" data-testid="chatgpt-import-apply"
+                        :disabled="!chatGPTImportPlan?.canApply || !chatGPTImportPlan?.previewToken || importingChatGPTAccounts"
+                        :title="chatGPTImportPlan?.canApply ? '按当前选择一次保存全部变更' : (chatGPTImportPlan?.noChanges ? '当前选择没有需要应用的变更' : '请先处理标红的条目')"
+                        class="btn btn-primary disabled:cursor-not-allowed disabled:opacity-50">
+                    <span x-show="chatGPTImportStage === 'apply' || chatGPTImportStage === 'preview'" x-cloak class="material-symbols-outlined gw-spin text-[18px]">progress_activity</span>
+                    <span x-text="chatGPTImportStage === 'apply' ? '应用中…' : chatGPTImportStage === 'preview' ? '重新预检…' : '应用导入（新增 ' + (chatGPTImportPlan?.summary?.add || 0) + '，更新 ' + (chatGPTImportPlan?.summary?.update || 0) + '）'"></span>
                 </button>
             </div>
             </div>
             <div x-show="chatGPTTransferTab === 'export'">
             <div class="space-y-4 p-5">
+                <p data-testid="chatgpt-export-note" class="text-xs leading-relaxed text-muted">导出生成第三方工具可读的<strong class="font-semibold text-text">明文凭据文件</strong>，不含本地标签、备注和暂停状态。需要在网关之间完整迁移时，请用「加密备份」。</p>
                 <label class="block space-y-2">
                     <span class="text-xs font-bold text-muted">导出格式</span>
                     <select :disabled="exportingChatGPTAccounts" x-model="chatGPTExportFormat" class="field">
@@ -3144,6 +3731,180 @@
                 </button>
             </div>
             </div>
+            <!-- 网关原生加密备份：密码仅存本次弹窗内存，成功或离开时清空。 -->
+            <div x-show="chatGPTTransferTab === 'backup'" x-cloak class="space-y-4 p-5">
+                <p data-testid="chatgpt-backup-note" class="rounded-lg border border-cyan2/30 bg-cyan2/10 p-3 text-xs leading-relaxed text-cyan2">加密备份是网关原生格式，包含凭据、标签、备注、授权时间与暂停状态，只能由本网关用密码恢复。与第三方兼容的明文导出不同；备份不含 Provider 绑定、用量或调用记录。</p>
+                <div class="flex flex-wrap items-center justify-between gap-2">
+                    <span class="text-xs font-semibold text-muted" x-text="'已选 ' + chatGPTBackupSelectedIds().length + ' / ' + chatgptAccounts.length + ' 个账户'"></span>
+                    <div class="flex gap-2">
+                        <button type="button" @click="selectAllChatGPTBackupAccounts()" data-testid="chatgpt-backup-select-all" :disabled="!!chatGPTBackupBusy" class="btn btn-secondary px-2 py-1.5 text-xs disabled:opacity-50">全选</button>
+                        <button type="button" @click="clearChatGPTBackupAccounts()" data-testid="chatgpt-backup-select-none" :disabled="!!chatGPTBackupBusy" class="btn btn-secondary px-2 py-1.5 text-xs disabled:opacity-50">清空</button>
+                    </div>
+                </div>
+                <p x-show="chatgptAccounts.length === 0" class="text-sm text-muted">暂无可备份的账户，请先导入或连接账户。</p>
+                <div class="max-h-52 space-y-1 overflow-y-auto rounded-lg border border-line bg-panel/60 p-2">
+                    <template x-for="account in chatgptAccounts" :key="account.id">
+                        <label class="flex cursor-pointer items-center gap-3 rounded-md px-2 py-2 hover:bg-panel2/70">
+                            <input type="checkbox" :disabled="!!chatGPTBackupBusy" x-model="chatGPTBackupAccountIds" :value="account.id" data-testid="chatgpt-backup-account" :data-account-id="account.id" class="h-4 w-4 rounded border-line bg-panel text-cyan focus:ring-cyan">
+                            <span class="min-w-0 flex-1 truncate text-sm text-white" x-text="account.email || account.id"></span>
+                            <span class="chip border-line px-2 text-[11px] text-muted" x-text="account.plan || '类型未知'"></span>
+                        </label>
+                    </template>
+                </div>
+                <div class="grid gap-3 sm:grid-cols-2">
+                    <label class="block space-y-2">
+                        <span class="text-xs font-bold text-muted">备份密码</span>
+                        <input type="password" autocomplete="new-password" x-model="chatGPTBackupPassword" :disabled="!!chatGPTBackupBusy" data-testid="chatgpt-backup-password" aria-describedby="chatgpt-backup-password-rules" class="field" placeholder="至少 12 个字符">
+                    </label>
+                    <label class="block space-y-2">
+                        <span class="text-xs font-bold text-muted">再次输入密码</span>
+                        <input type="password" autocomplete="new-password" x-model="chatGPTBackupPasswordConfirm" :disabled="!!chatGPTBackupBusy" data-testid="chatgpt-backup-password-confirm" aria-describedby="chatgpt-backup-password-rules" class="field" placeholder="再次输入相同密码">
+                    </label>
+                </div>
+                <div id="chatgpt-backup-password-rules" data-testid="chatgpt-backup-password-rules" role="status" aria-live="polite" class="space-y-1 text-xs">
+                    <p :class="chatGPTBackupPasswordChecks().length ? 'text-good' : 'text-muted'" x-text="chatGPTBackupPasswordChecks().length ? '已满足：至少 12 个字符' : '至少 12 个字符'"></p>
+                    <p :class="chatGPTBackupPasswordChecks().match ? 'text-good' : 'text-muted'" x-text="chatGPTBackupPasswordChecks().match ? '已满足：两次输入一致' : '两次输入需一致'"></p>
+                    <p x-show="!chatGPTBackupPasswordChecks().bytes || !chatGPTBackupPasswordChecks().nul" class="text-danger">密码最多 1024 字节，不能包含 NUL 字符。</p>
+                </div>
+                <p class="text-xs leading-relaxed text-muted">请使用独立强密码并妥善保管。网关不保存密码，忘记后无法恢复；密码只随本机同源请求提交，不写入浏览器存储。</p>
+                <p x-show="chatGPTBackupError" x-cloak role="alert" data-testid="chatgpt-backup-error" class="break-words text-sm text-danger" x-text="chatGPTBackupError"></p>
+                <p x-show="chatGPTBackupNotice" x-cloak role="status" data-testid="chatgpt-backup-notice" class="break-words text-xs leading-relaxed text-good" x-text="chatGPTBackupNotice"></p>
+                <div class="flex flex-wrap justify-end gap-2 border-t border-line pt-4">
+                    <button type="button" @click="closeChatGPTTransferDialog()" :disabled="!!chatGPTBackupBusy" data-testid="chatgpt-backup-close" class="btn btn-secondary disabled:opacity-50">关闭</button>
+                    <button type="button" @click="exportChatGPTBackup()" :disabled="!canExportChatGPTBackup()" data-testid="chatgpt-backup-export" class="btn btn-primary disabled:cursor-not-allowed disabled:opacity-50">
+                        <span x-show="chatGPTBackupBusy === 'export'" x-cloak class="material-symbols-outlined gw-spin text-[18px]">progress_activity</span>
+                        <span x-text="chatGPTBackupBusy === 'export' ? '正在生成备份…' : '下载加密备份'"></span>
+                    </button>
+                </div>
+            </div>
+            <!-- 备份恢复：只读预检 → 逐项选择 → 确认保存；与配置迁移分别落盘。
+                 用 x-if 只在本页签渲染：离开页签即销毁文件框，不在 DOM 中残留已选文件，也不与导入页签的文件框并存。 -->
+            <template x-if="chatGPTTransferTab === 'restore'">
+            <div class="space-y-4 p-5">
+                <p data-testid="chatgpt-restore-note" class="rounded-lg border border-cyan2/30 bg-cyan2/10 p-3 text-xs leading-relaxed text-cyan2">仅恢复本网关导出的 .aigw-backup 加密备份。先用密码在本机解密预检，确认后再保存；更新账户会整组替换凭据，不改变本地 ID 和 Provider 绑定。</p>
+                <label class="block space-y-2">
+                    <span class="text-xs font-bold text-muted">加密备份文件（最大 16 MiB）</span>
+                    <input x-ref="chatGPTRestoreFileInput" type="file" accept=".aigw-backup" @change="onChatGPTRestoreFileChange($event)" :disabled="!!chatGPTBackupBusy" data-testid="chatgpt-restore-file" class="field file:mr-3 file:rounded-md file:border-0 file:bg-panel2 file:px-3 file:py-2 file:text-xs file:font-semibold file:text-white">
+                </label>
+                <p x-show="chatGPTRestoreFileName" x-cloak data-testid="chatgpt-restore-file-name" class="break-all text-xs text-muted" x-text="chatGPTRestoreFileName + ' · ' + Math.ceil(chatGPTRestoreFileSize / 1024) + ' KiB'"></p>
+                <label class="block space-y-2">
+                    <span class="text-xs font-bold text-muted">备份密码</span>
+                    <input type="password" autocomplete="off" x-model="chatGPTRestorePassword" @input="onChatGPTRestoreOptionChange()" :disabled="!!chatGPTBackupBusy" data-testid="chatgpt-restore-password" aria-describedby="chatgpt-restore-password-help" class="field" placeholder="输入创建备份时的密码">
+                    <span id="chatgpt-restore-password-help" class="text-[11px] text-muted">恢复只要求密码非空，最多 1024 字节；不会按导出规则拒绝旧密码。</span>
+                </label>
+                <fieldset :disabled="!!chatGPTBackupBusy" class="space-y-2">
+                    <legend class="mb-2 text-xs font-bold text-muted">已有账户的标签与备注</legend>
+                    <label class="flex cursor-pointer items-center gap-2 text-sm text-text"><input type="radio" value="keep" x-model="chatGPTRestoreMetadata" @change="onChatGPTRestoreOptionChange()" data-testid="chatgpt-restore-metadata-keep" class="h-4 w-4 text-cyan focus:ring-cyan">保留本地标签备注（默认）</label>
+                    <label class="flex cursor-pointer items-center gap-2 text-sm text-text"><input type="radio" value="replace" x-model="chatGPTRestoreMetadata" @change="onChatGPTRestoreOptionChange()" data-testid="chatgpt-restore-metadata-replace" class="h-4 w-4 text-cyan focus:ring-cyan">用备份覆盖标签备注</label>
+                </fieldset>
+                <label class="flex cursor-pointer items-start gap-2 text-sm text-text"><input type="checkbox" x-model="chatGPTRestorePaused" @change="onChatGPTRestoreOptionChange()" :disabled="!!chatGPTBackupBusy" data-testid="chatgpt-restore-paused" class="mt-0.5 h-4 w-4 rounded border-line bg-panel text-cyan focus:ring-cyan"><span>恢复暂停状态<span class="mt-1 block text-[11px] leading-relaxed text-muted">默认不勾选，已有账户保持本地状态；勾选后使用备份的暂停状态。</span></span></label>
+                <p x-show="chatGPTRestoreError" x-cloak role="alert" data-testid="chatgpt-restore-error" class="break-words text-sm text-danger" x-text="chatGPTRestoreError"></p>
+                <p x-show="chatGPTRestoreNotice" x-cloak role="status" data-testid="chatgpt-restore-notice" class="break-words text-xs text-muted" x-text="chatGPTRestoreNotice"></p>
+                <section x-show="chatGPTRestorePlan" x-cloak data-testid="chatgpt-restore-plan" class="rounded-lg border border-line bg-panel/60" aria-labelledby="chatgpt-restore-plan-title">
+                    <div class="flex flex-wrap items-baseline justify-between gap-2 border-b border-line px-4 py-3">
+                        <h4 id="chatgpt-restore-plan-title" class="text-sm font-bold text-white">恢复预检</h4>
+                        <span data-testid="chatgpt-restore-summary" class="text-xs tabular-nums text-muted" x-text="chatGPTRestorePlanSummaryText()"></span>
+                    </div>
+                    <p x-show="chatGPTRestorePlan?.createdAt" class="border-b border-line px-4 py-2 text-[11px] text-muted" x-text="'备份创建于 ' + formatChatGPTDate(chatGPTRestorePlan?.createdAt)"></p>
+                    <ul x-show="chatGPTRestorePlan?.blockers?.length" class="space-y-1 border-b border-line px-4 py-2.5">
+                        <template x-for="(blocker, i) in (chatGPTRestorePlan?.blockers || [])" :key="'b' + i">
+                            <li class="text-xs font-semibold text-danger" x-text="typeof blocker === 'string' ? blocker : (blocker?.message || '存在阻断项')"></li>
+                        </template>
+                    </ul>
+                    <ul class="max-h-80 divide-y divide-line overflow-y-auto">
+                        <template x-for="entry in (chatGPTRestorePlan?.entries || [])" :key="entry.index">
+                            <li class="flex flex-col gap-2 px-4 py-3 sm:flex-row sm:items-start sm:justify-between" data-testid="chatgpt-restore-entry" :data-entry-index="entry.index">
+                                <div class="min-w-0 space-y-1">
+                                    <div class="flex flex-wrap items-center gap-1.5">
+                                        <span class="text-xs tabular-nums text-muted" x-text="'第 ' + entry.index + ' 条'"></span>
+                                        <span class="min-w-0 break-all text-sm font-semibold text-white" x-text="entry.email || entry.matchedEmail || '未提供邮箱'"></span>
+                                        <span class="chip border-line px-2 text-[11px] text-muted" x-text="entry.plan || '类型未知'"></span>
+                                        <span class="tag" :class="chatGPTImportEntryStatus(entry).badgeClass" x-text="chatGPTImportEntryStatus(entry).label"></span>
+                                        <span x-show="entry.remapped" class="tag bg-warn/10 text-amber-100">重映射</span>
+                                        <span x-show="entry.paused" class="tag bg-panel2 text-muted">备份中已暂停</span>
+                                    </div>
+                                    <p x-show="entry.matchedAccountId" class="break-all text-xs text-muted" x-text="'匹配本地账户：' + (entry.matchedEmail || entry.matchedAccountId) + (entry.matchedEmail ? '（' + entry.matchedAccountId + '）' : '')"></p>
+                                    <p x-show="entry.affectedProviders?.length" class="text-xs text-muted" x-text="'受影响 Provider：' + (entry.affectedProviders || []).join('、')"></p>
+                                    <p x-show="entry.tags?.length || entry.hasNote" class="text-xs text-muted" x-text="'备份含' + (entry.tags?.length ? '标签 ' + entry.tags.join('、') : '') + (entry.tags?.length && entry.hasNote ? '，' : '') + (entry.hasNote ? '备注' : '')"></p>
+                                    <template x-for="(note, i) in chatGPTRestoreEntryNotes(entry)" :key="'n' + i">
+                                        <p class="text-xs text-cyan2" x-text="note"></p>
+                                    </template>
+                                    <p x-show="entry.invalidReason" class="text-xs text-danger" x-text="entry.invalidReason"></p>
+                                    <template x-for="(message, i) in (entry.warnings || [])" :key="'w' + i">
+                                        <p class="text-xs text-amber-100" x-text="message"></p>
+                                    </template>
+                                    <template x-for="(message, i) in (entry.errors || [])" :key="'e' + i">
+                                        <p class="text-xs font-semibold text-danger" x-text="message"></p>
+                                    </template>
+                                </div>
+                                <label class="shrink-0 sm:w-32">
+                                    <span class="sr-only" x-text="'第 ' + entry.index + ' 条的恢复动作'"></span>
+                                    <select class="field py-1.5 text-xs" :disabled="!!chatGPTBackupBusy || (entry.allowedActions || []).length < 2"
+                                            :data-testid="'chatgpt-restore-action-' + entry.index"
+                                            @change="setChatGPTRestoreAction(entry, $event.target.value)">
+                                        <template x-if="!entry.action">
+                                            <option value="" selected disabled>请选择</option>
+                                        </template>
+                                        <template x-for="action in (entry.allowedActions || [])" :key="action">
+                                            <option :value="action" :selected="entry.action === action" x-text="chatGPTRestoreActionLabel(action)"></option>
+                                        </template>
+                                    </select>
+                                </label>
+                            </li>
+                        </template>
+                    </ul>
+                    <p class="border-t border-line px-4 py-2.5 text-[11px] leading-relaxed text-muted">已有账户默认跳过；选择「更新」会整组替换凭据，保留本地 ID、Provider 绑定和用量快照。改动任何选择都会自动重新预检，预检凭证 10 分钟内有效。</p>
+                </section>
+                <section x-show="chatGPTRestoreResult" x-cloak data-testid="chatgpt-restore-result" role="status" class="rounded-lg border border-good/30 bg-good/5" aria-labelledby="chatgpt-restore-result-title">
+                    <div class="px-4 pt-3">
+                        <h4 id="chatgpt-restore-result-title" class="text-sm font-semibold text-good">恢复已保存</h4>
+                        <p class="mt-1 text-xs text-muted" x-text="chatGPTRestoreResultText(chatGPTRestoreResult)"></p>
+                    </div>
+                    <div x-show="chatGPTRestoreResultMappings().length" class="mt-3 overflow-x-auto border-t border-good/20">
+                        <table class="w-full text-left text-xs" data-testid="chatgpt-restore-mapping">
+                            <caption class="sr-only">源账户 ID 到本地账户 ID 的映射</caption>
+                            <thead class="text-muted">
+                                <tr>
+                                    <th scope="col" class="px-4 py-2 font-semibold">源 ID</th>
+                                    <th scope="col" class="px-4 py-2 font-semibold">本地 ID</th>
+                                    <th scope="col" class="px-4 py-2 font-semibold">动作</th>
+                                </tr>
+                            </thead>
+                            <tbody class="divide-y divide-line">
+                                <template x-for="item in chatGPTRestoreResultMappings()" :key="item.sourceAccountId">
+                                    <tr data-testid="chatgpt-restore-mapping-row" :data-source-account-id="item.sourceAccountId">
+                                        <td class="break-all px-4 py-2 font-mono text-muted" x-text="item.sourceAccountId"></td>
+                                        <td class="break-all px-4 py-2 font-mono text-white">
+                                            <span x-text="item.targetAccountId || '—'"></span>
+                                            <span x-show="item.remapped" class="tag ml-1 bg-warn/10 font-sans text-amber-100">重映射</span>
+                                        </td>
+                                        <td class="whitespace-nowrap px-4 py-2 text-muted" x-text="chatGPTRestoreActionLabel(item.action)"></td>
+                                    </tr>
+                                </template>
+                            </tbody>
+                        </table>
+                    </div>
+                    <div class="flex flex-col gap-3 border-t border-good/20 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+                        <p class="text-[11px] leading-relaxed text-muted">账户恢复已单独保存。若还要迁移提供商 / 路由配置，可把映射交给配置迁移导入作为预填；配置迁移需另行预览并保存，两者不是一次原子操作。</p>
+                        <button type="button" x-show="chatGPTRestoreResultMappings().some(item => item.targetAccountId)" @click="useChatGPTRestoreMappingsForConfigTransfer()" data-testid="chatgpt-restore-use-mappings" class="btn btn-secondary shrink-0 px-3 py-2 text-xs">用于配置迁移</button>
+                    </div>
+                </section>
+                <div class="flex flex-wrap justify-end gap-2 border-t border-line pt-4">
+                    <button type="button" @click="closeChatGPTTransferDialog()" :disabled="!!chatGPTBackupBusy" data-testid="chatgpt-restore-close" class="btn btn-secondary disabled:opacity-50">关闭</button>
+                    <button x-show="!chatGPTRestorePlan" type="button" @click="previewChatGPTRestore()" :disabled="!canPreviewChatGPTRestore()" data-testid="chatgpt-restore-preview" class="btn btn-primary disabled:cursor-not-allowed disabled:opacity-50">
+                        <span x-show="chatGPTBackupBusy === 'preview'" x-cloak class="material-symbols-outlined gw-spin text-[18px]">progress_activity</span>
+                        <span x-text="chatGPTBackupBusy === 'preview' ? '解密预检中…' : '解密并预检'"></span>
+                    </button>
+                    <button x-show="chatGPTRestorePlan" x-cloak type="button" @click="applyChatGPTRestore()" data-testid="chatgpt-restore-apply"
+                            :disabled="!chatGPTRestorePlan?.canApply || !chatGPTRestorePlan?.previewToken || !!chatGPTBackupBusy"
+                            :title="chatGPTRestorePlan?.canApply ? '按当前选择一次保存全部变更' : (chatGPTRestorePlan?.noChanges ? '当前选择没有需要保存的变更' : '请先处理标红的条目')"
+                            class="btn btn-primary disabled:cursor-not-allowed disabled:opacity-50">
+                        <span x-show="chatGPTBackupBusy === 'apply' || chatGPTBackupBusy === 'preview'" x-cloak class="material-symbols-outlined gw-spin text-[18px]">progress_activity</span>
+                        <span x-text="chatGPTBackupBusy === 'apply' ? '保存中…' : chatGPTBackupBusy === 'preview' ? '重新预检…' : '应用恢复（新增 ' + (chatGPTRestorePlan?.summary?.add || 0) + '，更新 ' + (chatGPTRestorePlan?.summary?.update || 0) + '）'"></span>
+                    </button>
+                </div>
+            </div>
+            </template>
         </div>
     </div>
 
@@ -3548,6 +4309,11 @@
                         <div class="border-b border-line p-3">
                             <div class="text-xs font-bold text-text">OAuth 账户映射</div>
                             <p class="mt-1 text-[11px] text-muted">只绑定目标已有账户；同 ID 可自动匹配。不会按邮箱猜测，也不会新建账户。</p>
+                            <p x-show="configTransferPrefilledAccountIds.length" x-cloak role="status"
+                               data-testid="config-transfer-mapping-prefilled"
+                               class="mt-2 rounded-md border border-cyan2/30 bg-cyan2/10 px-2.5 py-1.5 text-[11px] leading-relaxed text-cyan2">
+                                已按备份恢复结果预填账户映射，可修改。账户恢复已单独保存；本次配置迁移需重新预览后另行应用，两者不是一次原子操作。
+                            </p>
                         </div>
                         <div class="space-y-2 p-3">
                             <template x-for="sourceId in configTransferCatalogSourceAccounts()" :key="sourceId">
@@ -3559,7 +4325,8 @@
                                             class="field w-full py-1 text-xs sm:w-72">
                                         <option value="">自动匹配同 ID / 请选择目标账户</option>
                                         <template x-for="account in chatgptAccounts" :key="account.id">
-                                            <option :value="account.id" x-text="configTransferAccountLabel(account)"></option>
+                                            <!-- :selected 兜底：备份恢复预填时映射先于选项渲染写入，只靠 select 的 :value 会显示为空。 -->
+                                            <option :value="account.id" :selected="configTransferImportAccountMappings[sourceId] === account.id" x-text="configTransferAccountLabel(account)"></option>
                                         </template>
                                     </select>
                                 </label>

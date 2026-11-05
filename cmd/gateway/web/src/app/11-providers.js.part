@@ -9,7 +9,10 @@
                         if (!res.ok) throw new Error(await this.errorText(res, '读取 ChatGPT 账户失败'));
                         const data = await res.json();
                         this.chatgptAccounts = Array.isArray(data.data) ? data.data : [];
+                        this.rememberChatGPTAccountsETag(res);
+                        this.pruneChatGPTAccountSelection();
                         loaded = true;
+                        void this.afterChatGPTAccountsLoaded();
                         if (checkUsage && this.chatgptAccounts.some(account => {
                             const checkedAt = Date.parse(account.usage?.lastCheckedAt || '');
                             return !Number.isFinite(checkedAt) || Date.now() - checkedAt >= 30 * 60 * 1000;
@@ -27,13 +30,170 @@
                     return loaded;
                 },
 
+                // 打开诊断只准备本地表单，不自动刷新令牌、查询用量或测试模型。
+                openChatGPTDiagnoseDialog(account, event) {
+                    if (!account?.id || this.diagnosingChatGPTAccount) return;
+                    this._chatGPTDiagnoseOpener = event?.currentTarget || document.activeElement;
+                    this.chatGPTDiagnoseAccountId = account.id;
+                    this.chatGPTDiagnoseChecks = { refresh: false, usage: false, inference: false };
+                    this.chatGPTDiagnoseRefreshMode = 'auto';
+                    this.chatGPTDiagnoseProvider = '';
+                    this.chatGPTDiagnoseModel = '';
+                    this.chatGPTDiagnoseConfirmed = false;
+                    this.chatGPTDiagnoseReport = null;
+                    this.chatGPTDiagnoseError = '';
+                    this.chatGPTDiagnoseNotice = '';
+                    this.showChatGPTDiagnoseDialog = true;
+                    this.$nextTick(() => this.$refs.chatGPTDiagnoseStart?.focus());
+                },
+
+                chatGPTDiagnoseAccount() {
+                    return this.chatgptAccounts.find(account => account.id === this.chatGPTDiagnoseAccountId) || null;
+                },
+
+                // 诊断只能使用已落盘的绑定，不使用配置页尚未保存的改动。
+                chatGPTDiagnoseProviders() {
+                    return Object.entries(this._serverConfigData?.providers || {})
+                        .filter(([, provider]) => provider?.authType === 'chatgptOAuth' && provider.accountId === this.chatGPTDiagnoseAccountId)
+                        .sort(([a], [b]) => a.localeCompare(b))
+                        .map(([name, provider]) => ({ name, enabled: provider.enabled !== false }));
+                },
+
+                resetChatGPTDiagnoseResult() {
+                    this.chatGPTDiagnoseReport = null;
+                    this.chatGPTDiagnoseError = '';
+                    this.chatGPTDiagnoseNotice = '';
+                    this.chatGPTDiagnoseConfirmed = false;
+                },
+
+                canStartChatGPTDiagnose() {
+                    if (this.diagnosingChatGPTAccount || !this.chatGPTDiagnoseAccount()) return false;
+                    if (!this.chatGPTDiagnoseChecks.inference) return true;
+                    const model = this.chatGPTDiagnoseModel.trim();
+                    return !!model && new TextEncoder().encode(model).length <= 200 && !/\s|[\u0000-\u001f\u007f]/u.test(model)
+                        && this.chatGPTDiagnoseConfirmed && this.chatGPTDiagnoseProviders().some(item => item.name === this.chatGPTDiagnoseProvider);
+                },
+
+                async startChatGPTDiagnose() {
+                    if (!this.canStartChatGPTDiagnose()) return;
+                    const accountId = this.chatGPTDiagnoseAccountId;
+                    const sequence = ++this._chatGPTDiagnoseSequence;
+                    const controller = new AbortController();
+                    this._chatGPTDiagnoseController = controller;
+                    this.diagnosingChatGPTAccount = true;
+                    this.chatGPTDiagnoseReport = null;
+                    this.chatGPTDiagnoseError = '';
+                    this.chatGPTDiagnoseNotice = '';
+                    const input = { checks: ['local', ...['refresh', 'usage', 'inference'].filter(name => this.chatGPTDiagnoseChecks[name])] };
+                    if (this.chatGPTDiagnoseChecks.refresh) input.refreshMode = this.chatGPTDiagnoseRefreshMode;
+                    if (this.chatGPTDiagnoseChecks.inference) Object.assign(input, {
+                        provider: this.chatGPTDiagnoseProvider, model: this.chatGPTDiagnoseModel.trim(), confirm: 'consume_quota'
+                    });
+                    const timeoutId = window.setTimeout(() => controller.abort('timeout'), 50_000);
+                    try {
+                        const res = await fetch('/api/chatgpt/accounts/' + encodeURIComponent(accountId) + '/diagnose', {
+                            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input), signal: controller.signal
+                        });
+                        if (!res.ok) throw new Error(await this.errorText(res, '账户诊断失败'));
+                        const data = await res.json();
+                        if (!Array.isArray(data.data?.steps)) throw new Error('响应里没有诊断步骤，请重试');
+                        if (sequence !== this._chatGPTDiagnoseSequence || !this.showChatGPTDiagnoseDialog) return;
+                        this.chatGPTDiagnoseReport = data.data;
+                        if (data.data.account?.id === accountId) this.chatgptAccounts = this.chatgptAccounts.map(account => account.id === accountId ? data.data.account : account);
+                        this.$nextTick(() => this.$refs.chatGPTDiagnoseResults?.focus());
+                    } catch (err) {
+                        if (sequence !== this._chatGPTDiagnoseSequence || !this.showChatGPTDiagnoseDialog) return;
+                        if (controller.signal.aborted) this.chatGPTDiagnoseNotice = '等待诊断结果超时；已发送的刷新或调用无法撤回，请重新读取账户状态。';
+                        else this.chatGPTDiagnoseError = err.message || '账户诊断失败，请重试';
+                    } finally {
+                        window.clearTimeout(timeoutId);
+                        if (sequence === this._chatGPTDiagnoseSequence) {
+                            this.diagnosingChatGPTAccount = false;
+                            this._chatGPTDiagnoseController = null;
+                            this.chatGPTDiagnoseConfirmed = false;
+                        }
+                    }
+                },
+
+                cancelChatGPTDiagnose() {
+                    this._chatGPTDiagnoseSequence++;
+                    this._chatGPTDiagnoseController?.abort();
+                    this._chatGPTDiagnoseController = null;
+                    this.diagnosingChatGPTAccount = false;
+                    this.chatGPTDiagnoseConfirmed = false;
+                    this.chatGPTDiagnoseNotice = '已取消等待诊断结果。已经完成的令牌交换或模型调用不会回滚，已发送的调用可能已消耗额度。';
+                },
+
+                closeChatGPTDiagnoseDialog(returnFocus = true) {
+                    if (!this.showChatGPTDiagnoseDialog) return;
+                    if (this.diagnosingChatGPTAccount) this.cancelChatGPTDiagnose();
+                    this.showChatGPTDiagnoseDialog = false;
+                    this.chatGPTDiagnoseAccountId = '';
+                    this.chatGPTDiagnoseProvider = '';
+                    this.chatGPTDiagnoseModel = '';
+                    this.resetChatGPTDiagnoseResult();
+                    const opener = this._chatGPTDiagnoseOpener;
+                    this._chatGPTDiagnoseOpener = null;
+                    if (returnFocus) this.$nextTick(() => { if (opener?.isConnected) opener.focus(); });
+                },
+
+                escapeChatGPTDiagnoseDialog(event) {
+                    if (!this.showChatGPTDiagnoseDialog) return;
+                    event?.preventDefault();
+                    event?.stopImmediatePropagation();
+                    this.closeChatGPTDiagnoseDialog();
+                },
+
+                trapChatGPTDiagnoseFocus(event) {
+                    if (!this.showChatGPTDiagnoseDialog) return;
+                    const controls = [...this.$refs.chatGPTDiagnoseDialog.querySelectorAll('button, input, select, textarea, [tabindex]')]
+                        .filter(el => !el.disabled && el.tabIndex >= 0 && el.getClientRects().length);
+                    const first = controls[0], last = controls.at(-1);
+                    if (!first) return;
+                    if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+                    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+                },
+
+                chatGPTDiagnoseStepLabel(name) {
+                    return { local: '本地检查', refresh: '刷新链路', usage: '用量查询', inference: '实际模型调用' }[name] || '检查步骤';
+                },
+
+                chatGPTDiagnoseStatusInfo(status) {
+                    return {
+                        success: { label: '成功', icon: 'check_circle', className: 'text-good' },
+                        failure: { label: '失败', icon: 'error', className: 'text-danger' },
+                        skipped: { label: '跳过', icon: '', className: 'text-muted' },
+                        cancelled: { label: '取消', icon: 'close', className: 'text-warn' }
+                    }[status] || { label: '未知', icon: '', className: 'text-muted' };
+                },
+
+                chatGPTDiagnoseCategoryLabel(category) {
+                    return { authorization: '授权或权限', quota: '额度或限流', model: '模型或参数', query_failed: '用量查询失败',
+                        network: '网络或代理', timeout: '网络超时', gateway: '网关配置或转换', upstream: '上游服务',
+                        no_refresh_token: '缺少刷新凭据', not_found: '账户不存在', conflict: '凭据已变化',
+                        storage: '凭据保存失败', invalid_response: '响应格式异常', unknown: '原因未确认' }[category] || '';
+                },
+
+                chatGPTDiagnoseProxyLabel(source) {
+                    return { oauth_proxy: '专用 OAuth 代理', provider_proxy: 'Provider 代理', environment: '全局环境代理', direct: '直连' }[source] || '';
+                },
+
+                chatGPTDiagnoseSummary() {
+                    const report = this.chatGPTDiagnoseReport;
+                    if (!report) return '';
+                    const count = status => report.steps.filter(step => step.status === status).length;
+                    return `成功 ${count('success')} · 失败 ${count('failure')} · 跳过 ${count('skipped')} · 取消 ${count('cancelled')}`;
+                },
+
                 openChatGPTTransferDialog() {
-                    if (this.importingChatGPTAccounts || this.exportingChatGPTAccounts) return;
+                    if (this.importingChatGPTAccounts || this.exportingChatGPTAccounts || this.chatGPTBackupBusy) return;
                     this.clearChatGPTImportInput();
                     this.chatGPTImportResult = null;
                     this.chatGPTImportError = '';
+                    this.resetChatGPTBackupState();
                     this.chatGPTTransferTab = 'export';
                     this.chatGPTExportAccountIds = this.chatgptAccounts.map(account => account.id);
+                    this.chatGPTBackupAccountIds = this.chatgptAccounts.map(account => account.id);
                     this.showChatGPTTransferDialog = true;
                 },
 
@@ -41,28 +201,40 @@
                     this.chatGPTImportFile = null;
                     this.chatGPTImportText = '';
                     if (this.$refs.chatGPTImportFileInput) this.$refs.chatGPTImportFileInput.value = '';
+                    this.resetChatGPTImportPlan();
+                },
+
+                // 输入变化、关闭或应用结束都会作废预检：源和计划只属于这一次流程。
+                resetChatGPTImportPlan() {
+                    this.chatGPTImportSource = null;
+                    this.chatGPTImportPlan = null;
+                    this.chatGPTImportPlanETag = '';
+                    this.chatGPTImportPlanActions = {};
                 },
 
                 closeChatGPTTransferDialog() {
-                    if (this.importingChatGPTAccounts || this.exportingChatGPTAccounts) return;
+                    if (this.importingChatGPTAccounts || this.exportingChatGPTAccounts || this.chatGPTBackupBusy) return;
                     this.showChatGPTTransferDialog = false;
                     this.clearChatGPTImportInput();
                     this.chatGPTImportResult = null;
                     this.chatGPTImportError = '';
+                    this.resetChatGPTBackupState();
                 },
 
                 switchChatGPTTransferTab(tab) {
-                    if (this.importingChatGPTAccounts || this.exportingChatGPTAccounts) return;
+                    if (this.importingChatGPTAccounts || this.exportingChatGPTAccounts || this.chatGPTBackupBusy) return;
                     if (tab === this.chatGPTTransferTab) return;
                     this.clearChatGPTImportInput();
                     this.chatGPTImportResult = null;
                     this.chatGPTImportError = '';
+                    this.resetChatGPTBackupState();
                     this.chatGPTTransferTab = tab;
                 },
 
                 onChatGPTImportFileChange(event) {
                     this.chatGPTImportFile = event.target.files?.[0] || null;
                     if (this.chatGPTImportFile) this.chatGPTImportText = '';
+                    this.resetChatGPTImportPlan();
                     this.chatGPTImportResult = null;
                     this.chatGPTImportError = '';
                 },
@@ -73,6 +245,7 @@
                         this.chatGPTImportFile = null;
                         if (this.$refs.chatGPTImportFileInput) this.$refs.chatGPTImportFileInput.value = '';
                     }
+                    this.resetChatGPTImportPlan();
                     this.chatGPTImportResult = null;
                     this.chatGPTImportError = '';
                 },
@@ -88,6 +261,7 @@
                     }
                     const isZip = file && (/\.zip$/i.test(file.name || '') || /application\/(x-)?zip/i.test(file.type || ''));
                     this.importingChatGPTAccounts = true;
+                    this.chatGPTImportStage = 'direct';
                     this.chatGPTImportResult = null;
                     this.chatGPTImportError = '';
                     try {
@@ -108,8 +282,127 @@
                         this.showStatus(this.chatGPTImportError, 'error');
                     } finally {
                         this.importingChatGPTAccounts = false;
+                        this.chatGPTImportStage = '';
                         this.clearChatGPTImportInput();
                     }
+                },
+
+                // buildChatGPTImportSource 把文件或文本包成预检接口的严格源封装；ZIP 用 base64。
+                async buildChatGPTImportSource() {
+                    const file = this.chatGPTImportFile;
+                    const text = this.chatGPTImportText;
+                    const size = file ? file.size : new TextEncoder().encode(text).byteLength;
+                    if (size > 16 * 1024 * 1024) throw new Error('导入内容超过 16 MiB 限制，请缩减后重试');
+                    if (!file) return { mediaType: 'application/json', encoding: 'utf8', content: text };
+                    const isZip = /\.zip$/i.test(file.name || '') || /application\/(x-)?zip/i.test(file.type || '');
+                    if (!isZip) return { mediaType: 'application/json', encoding: 'utf8', content: await file.text() };
+                    const bytes = new Uint8Array(await file.arrayBuffer());
+                    let binary = '';
+                    for (let i = 0; i < bytes.length; i += 0x8000) {
+                        binary += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+                    }
+                    return { mediaType: 'application/zip', encoding: 'base64', content: btoa(binary) };
+                },
+
+                chatGPTImportPlanActionList() {
+                    return Object.entries(this.chatGPTImportPlanActions)
+                        .map(([index, item]) => item.action === 'update'
+                            ? { index: Number(index), action: 'update', targetAccountId: item.targetAccountId }
+                            : { index: Number(index), action: item.action })
+                        .sort((a, b) => a.index - b.index);
+                },
+
+                // previewChatGPTImport 只读预检：不落盘、不刷新令牌、不访问上游。每次改选都重新预检。
+                async previewChatGPTImport() {
+                    if (this.importingChatGPTAccounts || this.exportingChatGPTAccounts) return;
+                    if (!this.chatGPTImportSource && !this.chatGPTImportFile && !this.chatGPTImportText.trim()) return;
+                    this.importingChatGPTAccounts = true;
+                    this.chatGPTImportStage = 'preview';
+                    this.chatGPTImportError = '';
+                    this.chatGPTImportResult = null;
+                    try {
+                        if (!this.chatGPTImportSource) this.chatGPTImportSource = await this.buildChatGPTImportSource();
+                        const res = await fetch('/api/chatgpt/accounts/import/preview', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ source: this.chatGPTImportSource, actions: this.chatGPTImportPlanActionList() })
+                        });
+                        if (!res.ok) throw new Error(await this.errorText(res, '导入预检失败'));
+                        const data = await res.json();
+                        this.chatGPTImportPlan = data.data || null;
+                        this.chatGPTImportPlanETag = res.headers.get('ETag') || '';
+                    } catch (err) {
+                        this.chatGPTImportPlan = null;
+                        this.chatGPTImportError = '导入预检失败：' + err.message;
+                    } finally {
+                        this.importingChatGPTAccounts = false;
+                        this.chatGPTImportStage = '';
+                    }
+                },
+
+                async setChatGPTImportAction(entry, action) {
+                    if (!entry || !action || this.importingChatGPTAccounts) return;
+                    this.chatGPTImportPlanActions = {
+                        ...this.chatGPTImportPlanActions,
+                        [entry.index]: { action, targetAccountId: entry.matchedAccountId || '' }
+                    };
+                    // 旧计划立即作废，避免在重新预检返回前误用旧凭证应用。
+                    this.chatGPTImportPlan = { ...this.chatGPTImportPlan, canApply: false, previewToken: null };
+                    await this.previewChatGPTImport();
+                },
+
+                // applyChatGPTImport 携带预检凭证与账户版本应用；无论成败都清空源和计划。
+                async applyChatGPTImport() {
+                    const plan = this.chatGPTImportPlan;
+                    if (!plan?.canApply || !plan.previewToken || this.importingChatGPTAccounts) return;
+                    this.importingChatGPTAccounts = true;
+                    this.chatGPTImportStage = 'apply';
+                    this.chatGPTImportError = '';
+                    try {
+                        const res = await fetch('/api/chatgpt/accounts/import/apply', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json', 'If-Match': this.chatGPTImportPlanETag },
+                            body: JSON.stringify({ source: this.chatGPTImportSource, actions: this.chatGPTImportPlanActionList(), previewToken: plan.previewToken })
+                        });
+                        if (!res.ok) throw new Error(await this.errorText(res, '应用导入失败'));
+                        const response = await res.json();
+                        this.chatGPTImportResult = response.data || null;
+                        await this.loadChatGPTAccounts(false, true);
+                        const result = this.chatGPTImportResult || {};
+                        this.showStatus('导入完成：' + this.chatGPTImportResultText(result), 'success');
+                    } catch (err) {
+                        this.chatGPTImportError = '应用导入失败：' + err.message + '；请重新选择文件或粘贴内容后再预检';
+                        this.showStatus(this.chatGPTImportError, 'error');
+                    } finally {
+                        this.importingChatGPTAccounts = false;
+                        this.chatGPTImportStage = '';
+                        this.clearChatGPTImportInput();
+                    }
+                },
+
+                chatGPTImportActionLabel(action) {
+                    return { add: '新增', skip: '跳过', update: '更新凭据' }[action] || action;
+                },
+
+                chatGPTImportEntryStatus(entry) {
+                    if (entry?.status === 'invalid') return { label: '无效', badgeClass: 'bg-danger/10 text-danger' };
+                    if (entry?.duplicateOf) return { label: `与第 ${entry.duplicateOf} 条重复`, badgeClass: 'bg-warn/10 text-amber-100' };
+                    if (entry?.status === 'existing') return { label: '已有账户', badgeClass: 'bg-cyan2/10 text-cyan2' };
+                    return { label: '新账户', badgeClass: 'bg-good/10 text-good' };
+                },
+
+                chatGPTImportPlanSummaryText() {
+                    const s = this.chatGPTImportPlan?.summary || {};
+                    return `共 ${s.total || 0} 条 · 新增 ${s.add || 0} · 更新 ${s.update || 0} · 跳过 ${s.skip || 0}` + (s.invalid ? ` · 无效 ${s.invalid}` : '');
+                },
+
+                chatGPTImportResultText(result) {
+                    if (!result) return '';
+                    let text = '新增 ' + (result.imported || 0) + ' 个';
+                    if (result.updated) text += '，更新 ' + result.updated + ' 个';
+                    text += '，重复跳过 ' + (result.skippedDuplicates || 0) + ' 个';
+                    if (result.skippedInvalid) text += '，跳过无效 ' + result.skippedInvalid + ' 条';
+                    return text;
                 },
 
                 selectAllChatGPTExportAccounts() {
@@ -260,12 +553,37 @@
                     return { label: '', valueClass: 'text-white', badgeClass: '' };
                 },
 
+                // chatGPTAccountStatusInfo 只描述授权维度（能否拿到令牌），不代表实际调用健康；
+                // 调用结果见 chatGPTInvocationInfo。旧后端没有 authorization 字段时按旧 status 推断。
                 chatGPTAccountStatusInfo(account) {
-                    if (account?.status !== 'ready') {
+                    const auth = account?.authorization || null;
+                    const state = auth?.state || (account?.status !== 'ready' ? 'reauthorization_required' : '');
+                    if (state === 'reauthorization_required') {
                         return {
                             label: '需重新授权',
                             badgeClass: 'bg-danger/10 text-danger',
-                            title: '令牌刷新已确认需要重新授权'
+                            title: auth?.message || '令牌刷新已确认需要重新授权'
+                        };
+                    }
+                    if (auth?.credentialsUnsaved) {
+                        return {
+                            label: '新凭据未保存',
+                            badgeClass: 'bg-warn/10 text-amber-100',
+                            title: '自动刷新得到的新凭据只在内存中，写入账户文件失败；网关重启前请恢复磁盘写入，否则可能需要重新授权'
+                        };
+                    }
+                    if (auth?.lastRefreshError) {
+                        return {
+                            label: '自动刷新失败',
+                            badgeClass: 'bg-warn/10 text-amber-100',
+                            title: `${auth.lastRefreshError}（${this.formatChatGPTDate(auth.lastRefreshFailedAt)}）`
+                        };
+                    }
+                    if (state === 'refreshable') {
+                        return {
+                            label: '可自动刷新',
+                            badgeClass: 'bg-cyan2/10 text-cyan2',
+                            title: (auth?.message || '访问令牌已过期，下次使用时会尝试用刷新凭据续期') + '；能否续期以实际刷新结果为准'
                         };
                     }
                     const expiresAt = Date.parse(account?.expiresAt || '');
@@ -280,10 +598,12 @@
                     const remaining = expiresAt - now;
                     const expiry = this.chatGPTExpiryInfo(account);
                     if (remaining <= 0) {
+                        // 授权视图按服务端时间判定；本地时钟先到期时同样提示会自动续期。
                         return {
-                            label: '访问令牌已过期',
-                            badgeClass: expiry.badgeClass,
-                            title: `访问令牌于 ${this.formatChatGPTDate(account.expiresAt)} 到期；使用时仍会尝试自动续期`
+                            label: auth && !auth.canRefresh ? '需重新授权' : '可自动刷新',
+                            badgeClass: auth && !auth.canRefresh ? 'bg-danger/10 text-danger' : 'bg-cyan2/10 text-cyan2',
+                            title: `访问令牌于 ${this.formatChatGPTDate(account.expiresAt)} 到期；` +
+                                (auth && !auth.canRefresh ? '没有刷新凭据，需要重新授权' : '下次使用时会尝试自动续期')
                         };
                     }
                     const days = Math.floor(remaining / 86400000);
@@ -295,10 +615,64 @@
                             ? `${hours} 小时${minutes > 0 ? ` ${minutes} 分钟` : ''}`
                             : minutes > 0 ? `${minutes} 分钟` : '不足 1 分钟';
                     const label = `访问令牌到期：${countdown} 后`;
+                    const renewal = auth && !auth.canRefresh
+                        ? '没有刷新凭据，到期后需要重新授权'
+                        : '使用时仍会尝试自动续期';
                     return {
                         label,
                         badgeClass: expiry.badgeClass || 'bg-good/10 text-good',
-                        title: `${label}（${this.formatChatGPTDate(account.expiresAt)}）；使用时仍会尝试自动续期，此提示不代表额度状态`
+                        title: `${label}（${this.formatChatGPTDate(account.expiresAt)}）；${renewal}；此提示只说明凭据条件，不代表实际调用或额度状态`
+                    };
+                },
+
+                // chatGPTInvocationInfo 描述最近一次经网关发出的真实上游调用；只在当前进程内有效，重启后回到未实测。
+                chatGPTInvocationInfo(account) {
+                    const invocation = account?.invocation || null;
+                    const where = [invocation?.provider, invocation?.model].filter(Boolean).join(' · ');
+                    const when = invocation?.observedAt ? this.formatChatGPTDate(invocation.observedAt) : '';
+                    if (invocation?.state === 'success') {
+                        return {
+                            label: '调用成功',
+                            badgeClass: 'bg-good/10 text-good',
+                            title: ['最近一次真实调用成功', where, when].filter(Boolean).join(' · '),
+                            detail: ['成功', where, when].filter(Boolean).join(' · ')
+                        };
+                    }
+                    if (invocation?.state === 'failure') {
+                        const status = Number(invocation.httpStatus) || 0;
+                        // 判定顺序与后端 chatGPTInvocationHealth 一致：转换失败只是提示；
+                        // 流中断、鉴权拒绝、5xx 与无响应算异常；限流和其他 4xx 只是提示。
+                        const severe = invocation.reason !== 'conversion_error' && (invocation.reason === 'stream_interrupted' ||
+                            status === 401 || status === 403 || status === 0 || status >= 500);
+                        return {
+                            label: status === 429 ? '调用被限流' : '调用失败',
+                            badgeClass: severe ? 'bg-danger/10 text-danger' : 'bg-warn/10 text-amber-100',
+                            title: [invocation.message || '最近一次真实调用失败', where, when].filter(Boolean).join(' · '),
+                            detail: [invocation.message || '失败', where, when].filter(Boolean).join(' · ')
+                        };
+                    }
+                    return {
+                        label: '尚未实测',
+                        badgeClass: 'bg-white/[.06] text-muted',
+                        title: '本次网关启动后还没有经此账户发出的真实调用；凭据可用不代表模型调用一定成功',
+                        detail: '本次启动后尚无真实调用记录'
+                    };
+                },
+
+                // chatGPTUsageFreshnessInfo 提示用量快照过期或重置时间已到；两者都不等于额度已恢复。
+                chatGPTUsageFreshnessInfo(account) {
+                    const usageState = account?.usageState || null;
+                    const pending = Array.isArray(usageState?.resetPendingWindows) ? usageState.resetPendingWindows : [];
+                    const stale = usageState?.freshness === 'stale' && !account?.usage?.error;
+                    return {
+                        stale,
+                        staleTitle: '用量数据已超过 30 分钟缓存周期，可能已过时；刷新后再判断剩余额度',
+                        resetPending: pending.length > 0,
+                        resetPendingTitle: pending.length > 0
+                            ? `以下窗口的重置时间已到但还没有新数据：${pending.map((name) => this.formatUsageWindowName({ name })).join('、')}；重置时间到达不代表额度已恢复，请刷新确认`
+                            : '',
+                        pendingNames: pending,
+                        message: usageState?.message || ''
                     };
                 },
 
@@ -733,6 +1107,7 @@
                         const response = await res.json();
                         if (!response.data) throw new Error('服务器没有返回更新后的账户信息');
                         this.chatgptAccounts = this.chatgptAccounts.map(item => item.id === account.id ? response.data : item);
+                        this.rememberChatGPTAccountsETag(res);
                         this.cancelChatGPTAccountMetadataEdit(account);
                         this.showStatus('账户标签和备注已保存', 'success');
                     } catch (err) {
@@ -1202,29 +1577,6 @@
                         .filter(([name, p]) => this.providerMatchesFilter(name, p)).length;
                 },
 
-                chatGPTAccountMatchesFilter(account) {
-                    const q = (this.chatGPTAccountFilter || '').trim().toLowerCase();
-                    if (!q) return true;
-                    const values = [
-                        account?.email,
-                        account?.id,
-                        account?.plan,
-                        account?.usage?.planType,
-                        account?.note,
-                        ...(Array.isArray(account?.tags) ? account.tags : []),
-                        ...(Array.isArray(account?.providers) ? account.providers : [])
-                    ];
-                    return values.some(value => String(value || '').toLowerCase().includes(q));
-                },
-
-                filteredChatGPTAccountCount() {
-                    return this.chatgptAccounts.filter(account => this.chatGPTAccountMatchesFilter(account)).length;
-                },
-
-                filteredChatGPTAccounts() {
-                    return this.chatgptAccounts.filter(account => this.chatGPTAccountMatchesFilter(account));
-                },
-
                 providerChatGPTAccountMatchesFilter(account) {
                     const q = (this.providerChatGPTAccountFilter || '').trim().toLowerCase();
                     if (!q) return true;
@@ -1262,7 +1614,7 @@
                     const account = option?.account;
                     if (!account) return '选择已连接账户';
                     const plan = account.usage?.planType || account.plan;
-                    return (account.email || account.id) + (plan ? ' · ' + plan : '') + (account.status === 'ready' ? '' : '（需重新授权）');
+                    return (account.email || account.id) + (plan ? ' · ' + plan : '') + (account.status === 'ready' ? '' : '（需重新授权）') + (account.enabled === false ? '（已暂停）' : '');
                 },
 
                 openProviderChatGPTAccountPicker() {
@@ -1374,6 +1726,8 @@
                 toggleChatGPTAccount(account) {
                     if (!account?.id) return;
                     this.expandedChatGPTAccountId = this.expandedChatGPTAccountId === account.id ? '' : account.id;
+                    // 展开时读取调用统计；统计只在展开详情里展示，不随列表轮询。
+                    if (this.expandedChatGPTAccountId === account.id) void this.loadChatGPTAccountMetrics(account);
                 },
 
                 isChatGPTAccountExpanded(account) {

@@ -141,6 +141,9 @@ func main() {
 	}
 	keyPool.SetEventHandler(srv.onKeyPoolEvent)
 	keyPool.Reconcile(cfg)
+	chatgptAuth.SetStatsWindow(cfg.Metrics.WindowMinutes)
+	chatgptAuth.SetEventHandler(srv.onChatGPTAccountEvent)
+	srv.applyChatGPTAccountLimits(cfg)
 	healthChecker.OnStateChange = srv.onProviderHealthStateChange
 	srv.breaker.SetSettings(breakerSettingsWithCallback(cfg, srv.onBreakerStateChange))
 	initialLimits := make(map[string]queue.Limits, len(cfg.Providers))
@@ -162,12 +165,14 @@ func main() {
 
 	httpServer := newGatewayHTTPServer(addr, mux)
 	srv.startProviderHealthLoop(context.Background())
+	srv.applyChatGPTBackground(cfg)
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	shutdownDone := make(chan struct{})
 	go func() {
 		<-stop
 		srv.stopProviderHealthLoop()
+		srv.stopChatGPTBackground()
 		logSystem("收到退出信号，正在关闭...")
 		if err := shutdownThenClose(httpServer, 30*time.Second, func() error {
 			var callbackShutdownErr error
@@ -185,6 +190,7 @@ func main() {
 
 	if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		srv.stopProviderHealthLoop()
+		srv.stopChatGPTBackground()
 		signal.Stop(stop)
 		_ = imgCache.Close()
 		if oauthCallbackServer != nil {
@@ -263,11 +269,15 @@ type server struct {
 	metrics           *metrics.Collector
 	providerHealth    providerHealthRuntime
 	chatgptAuth       *chatgptauth.Manager
-	breaker           *breaker.Breaker
-	eventLog          *metrics.EventLog
-	healthLoopMu      sync.Mutex
-	healthLoopParent  context.Context
-	healthLoopCancel  context.CancelFunc
+	// chatGPTDiagnosing 记录正在诊断的账户 ID，同一账户同一时间只允许一个诊断，避免重复消耗额度。
+	chatGPTDiagnosing sync.Map
+	// chatGPTBatchRefreshing 保证同一时间只有一个批量用量刷新，避免重复消耗查询额度。
+	chatGPTBatchRefreshing atomic.Bool
+	breaker                *breaker.Breaker
+	eventLog               *metrics.EventLog
+	healthLoopMu           sync.Mutex
+	healthLoopParent       context.Context
+	healthLoopCancel       context.CancelFunc
 	// selector 持有跨请求的候选选择状态（per-route 轮转计数器 + prompt cache 粘性映射）。
 	// router 是无状态纯函数，这些状态只能由 server 持有并显式传入。
 	selector  *balancer.Selector
@@ -386,6 +396,91 @@ func (s *server) onProviderHealthStateChange(provider, fromStatus, toStatus stri
 func (s *server) onKeyPoolEvent(event keypool.Event) {
 	if s.eventLog != nil {
 		s.eventLog.Add(event.Kind, event.Provider, event.Detail)
+	}
+}
+
+// onChatGPTAccountEvent 把账户状态变化写入共享运行事件流。由账户管理器在持锁时同步调用，
+// 只做有界追加，不回调账户管理器。
+func (s *server) onChatGPTAccountEvent(event chatgptauth.Event) {
+	if s.eventLog != nil {
+		s.eventLog.AddEvent(metrics.Event{Kind: event.Kind, Provider: event.Provider, AccountIDs: event.AccountIDs, Account: event.Account, Detail: event.Detail})
+	}
+}
+
+// chatGPTBindingChange 是一次配置生效中某个 OAuth Provider 的绑定账户变化。
+type chatGPTBindingChange struct {
+	provider string
+	from, to string
+}
+
+// chatGPTBindingChanges 比较新旧配置中 OAuth Provider 绑定的本地账户，按 Provider 名排序返回。
+// 删除仍绑定账户的 Provider 视为解绑；新建的 OAuth Provider 带绑定视为绑定。调用方持有 cfgMu。
+func chatGPTBindingChanges(oldCfg, newCfg *config.Config) []chatGPTBindingChange {
+	boundAccount := func(cfg *config.Config, name string) string {
+		if cfg == nil {
+			return ""
+		}
+		provider := cfg.Providers[name]
+		if provider == nil || provider.AuthType != "chatgptOAuth" {
+			return ""
+		}
+		return provider.AccountID
+	}
+	names := make(map[string]struct{})
+	for _, cfg := range []*config.Config{oldCfg, newCfg} {
+		if cfg == nil {
+			continue
+		}
+		for name := range cfg.Providers {
+			names[name] = struct{}{}
+		}
+	}
+	sorted := make([]string, 0, len(names))
+	for name := range names {
+		sorted = append(sorted, name)
+	}
+	sort.Strings(sorted)
+	var changes []chatGPTBindingChange
+	for _, name := range sorted {
+		from, to := boundAccount(oldCfg, name), boundAccount(newCfg, name)
+		if from != to {
+			changes = append(changes, chatGPTBindingChange{provider: name, from: from, to: to})
+		}
+	}
+	return changes
+}
+
+// emitChatGPTBindingEvents 为每个绑定变化的 Provider 写一条账户事件。只在释放 cfgMu 后调用：
+// 读取账户显示名需要账户锁，不与配置锁嵌套。
+func (s *server) emitChatGPTBindingEvents(changes []chatGPTBindingChange) {
+	if s.eventLog == nil || len(changes) == 0 {
+		return
+	}
+	label := func(id string) string {
+		if s.chatgptAuth != nil {
+			if view, ok := s.chatgptAuth.Account(id); ok && view.Email != "" {
+				return view.Email
+			}
+		}
+		return id
+	}
+	for _, change := range changes {
+		event := metrics.Event{Kind: "account_binding_changed", Provider: change.provider}
+		switch {
+		case change.from == "":
+			event.AccountIDs = []string{change.to}
+			event.Account = label(change.to)
+			event.Detail = "Provider 已绑定该账户"
+		case change.to == "":
+			event.AccountIDs = []string{change.from}
+			event.Account = label(change.from)
+			event.Detail = "Provider 已解除绑定"
+		default:
+			event.AccountIDs = []string{change.from, change.to}
+			event.Account = label(change.to)
+			event.Detail = "Provider 已从 " + label(change.from) + " 改绑到该账户"
+		}
+		s.eventLog.AddEvent(event)
 	}
 }
 
@@ -802,6 +897,15 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		// disabledSkips 因 provider 被禁用而跳过的次数；与熔断跳过一样不消耗额度。
 		// 人工声明优先于自动熔断，所以这个判断放在 breaker.Allow 之前。
 		disabledSkips int
+		// pausedSkips 因绑定的 ChatGPT OAuth 账户被暂停而跳过的次数，与停用同档：
+		// 不消耗额度、不借熔断探针（D01）。
+		pausedSkips int
+		// cooldownSkips 因绑定账户处于共享额度冷却而跳过的次数；soonestCooldown 是其中最早的到期时间。
+		// cooldownTriggered 表示本请求的某次真实尝试触发了冷却，lastCooldown 表示最后一个候选的放弃由它导致。
+		cooldownSkips     int
+		soonestCooldown   time.Time
+		cooldownTriggered bool
+		lastCooldown      bool
 		// freeSkips 因上游自报限流而放弃、且未消耗额度的次数
 		freeSkips int
 		// contextSkips 因输入装不进候选窗口而跳过的次数；与熔断跳过一样不消耗额度。
@@ -838,6 +942,56 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 				Reason:         "provider_disabled",
 			})
 			logf(reqID, "  候选 %s 已禁用，跳过", name)
+			continue
+		}
+
+		// 账户暂停过滤：与 Provider 停用同为人工状态，放在熔断之前，不调用 breaker.Allow。
+		if s.candidateAccountPaused(candidate.Provider) {
+			pausedSkips++
+			trail = append(trail, name+":account_paused")
+			s.recordChatGPTAdmissionSkip(r.Context(), candidate.Provider, false, chatgptauth.SkipAccountPaused)
+			skipStarted := time.Now()
+			nextDetailSequence++
+			reqLog.AttemptDetails = append(reqLog.AttemptDetails, metrics.AttemptDetail{
+				Sequence:       nextDetailSequence,
+				Kind:           "account_paused",
+				Provider:       name,
+				AccountID:      candidate.Provider.AccountID,
+				TargetModel:    candidate.TargetModel,
+				ProviderFormat: candidate.Provider.Format,
+				StartedAt:      skipStarted.In(beijingLoc).Format(time.RFC3339Nano),
+				DurationMs:     time.Since(skipStarted).Milliseconds(),
+				Outcome:        "skipped",
+				Reason:         "account_paused",
+			})
+			logf(reqID, "  候选 %s 的 ChatGPT OAuth 账户已暂停，跳过", name)
+			continue
+		}
+
+		// 账户共享冷却：上游明确报告额度耗尽，同账户全部 Provider 暂停准入。放在熔断之前，
+		// 不消耗额度、不调用 breaker（DESIGN 6.4）。
+		if until := s.candidateAccountCooldown(candidate.Provider); !until.IsZero() {
+			cooldownSkips++
+			if soonestCooldown.IsZero() || until.Before(soonestCooldown) {
+				soonestCooldown = until
+			}
+			trail = append(trail, name+":account_cooldown")
+			s.recordChatGPTAdmissionSkip(r.Context(), candidate.Provider, false, chatgptauth.SkipCooldown)
+			skipStarted := time.Now()
+			nextDetailSequence++
+			reqLog.AttemptDetails = append(reqLog.AttemptDetails, metrics.AttemptDetail{
+				Sequence:       nextDetailSequence,
+				Kind:           "account_cooldown",
+				Provider:       name,
+				AccountID:      candidate.Provider.AccountID,
+				TargetModel:    candidate.TargetModel,
+				ProviderFormat: candidate.Provider.Format,
+				StartedAt:      skipStarted.In(beijingLoc).Format(time.RFC3339Nano),
+				Outcome:        "skipped",
+				Reason:         "account_cooldown",
+				RetryAfterMs:   time.Until(until).Milliseconds(),
+			})
+			logf(reqID, "  候选 %s 的 ChatGPT OAuth 账户额度冷却中，跳过", name)
 			continue
 		}
 
@@ -943,7 +1097,9 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		hasCompatibleNext := false
 		for nextPos := pos + 1; nextPos < len(order); nextPos++ {
 			next := matched.Candidates[order[nextPos]]
-			if conversionErrors[next.Provider.Format] == nil {
+			// 账户已暂停的候选一定会被跳过，不能算作「还有后续可试」，
+			// 否则最后一个真实候选的失败会被放弃，客户端只拿到合成的 502。
+			if conversionErrors[next.Provider.Format] == nil && !s.candidateAccountBlocked(next.Provider) {
 				hasCompatibleNext = true
 				break
 			}
@@ -956,6 +1112,10 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		candidateAllFreeAttempts := true
 		candidateNoKey := false
 		candidateKeySelectionExhausted := false
+		// candidatePaused 表示本候选在准入阶段因账户暂停放弃；有过真实尝试时保留最后一次真实结论。
+		candidatePaused := false
+		// candidateCooledDown 表示准入阶段的放弃来自账户共享冷却而不是暂停。
+		candidateCooledDown := false
 		outcomeTrailRecorded := false
 		var outcome forwardAttemptOutcome
 		for {
@@ -1019,6 +1179,7 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 					detail.KeyFingerprint = ticket.Fingerprint
 				}
 
+				previousOutcome := outcome
 				outcome = s.forwardAttempt(w, r, forwardAttemptInput{
 					cfg:                             cfg,
 					reqID:                           reqID,
@@ -1044,6 +1205,23 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 				outcomeTrailRecorded = false
 				detail.DurationMs = time.Since(attemptStarted).Milliseconds()
 				reqLog.AttemptDetails = append(reqLog.AttemptDetails, detail)
+				if !outcome.cooldownUntil.IsZero() {
+					cooldownTriggered = true
+					if soonestCooldown.IsZero() || outcome.cooldownUntil.Before(soonestCooldown) {
+						soonestCooldown = outcome.cooldownUntil
+					}
+				}
+				if outcome.accountPaused || outcome.accountCooldown {
+					candidatePaused = true
+					candidateCooledDown = outcome.accountCooldown
+					if candidateActualAttempts > 0 {
+						// 本地重试准入前被暂停：沿用上一次真实尝试的结论上报熔断和终态。
+						outcome = previousOutcome
+						trail = append(trail, name+":account_paused")
+						outcomeTrailRecorded = true
+					}
+					break
+				}
 				if outcome.requestStarted {
 					nextHTTPAttemptNo++
 					candidateActualAttempts++
@@ -1073,10 +1251,11 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 				break
 			}
 
-			if candidateNoKey || candidateKeySelectionExhausted {
+			if candidateNoKey || candidateKeySelectionExhausted || candidatePaused {
 				break
 			}
-			if outcome.buildErr != "" || !outcome.abandoned || outcome.freeAttempt || localRetriesRemaining <= 0 ||
+			// 触发共享冷却的那次失败不在同一账户上本地重试：重试一定会被冷却拦下。
+			if outcome.buildErr != "" || !outcome.abandoned || outcome.freeAttempt || localRetriesRemaining <= 0 || !outcome.cooldownUntil.IsZero() ||
 				(candidate.Provider.UsesKeyList() && (outcome.upstreamStatus == http.StatusUnauthorized || outcome.upstreamStatus == http.StatusPaymentRequired || outcome.upstreamStatus == http.StatusForbidden)) {
 				break
 			}
@@ -1090,6 +1269,24 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 			localRetryAttempt = true
 		}
 		if candidateNoKey {
+			continue
+		}
+		if candidatePaused && candidateActualAttempts == 0 {
+			// 取令牌后或排队中被暂停或进入冷却：没有发出请求。熔断 Allow 已借出的半开探针要归还。
+			if s.breaker != nil {
+				s.breaker.Report(name, breaker.OutcomeIgnored)
+			}
+			trail = append(trail, outcome.trail)
+			if candidateCooledDown {
+				cooldownSkips++
+				if until := s.candidateAccountCooldown(candidate.Provider); !until.IsZero() && (soonestCooldown.IsZero() || until.Before(soonestCooldown)) {
+					soonestCooldown = until
+				}
+				logf(reqID, "  候选 %s 的 ChatGPT OAuth 账户在准入前进入额度冷却，跳过", name)
+				continue
+			}
+			pausedSkips++
+			logf(reqID, "  候选 %s 的 ChatGPT OAuth 账户在准入前被暂停，跳过", name)
 			continue
 		}
 		if candidateActualAttempts > 0 {
@@ -1119,6 +1316,7 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 				trail = append(trail, outcome.trail)
 			}
 			lastAbandoned = true
+			lastCooldown = !outcome.cooldownUntil.IsZero()
 			logf(reqID, "  候选 %s 放弃（%s），不计入尝试额度", name, outcome.trail)
 			continue
 		}
@@ -1127,6 +1325,7 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 			trail = append(trail, outcome.trail)
 		}
 		lastAbandoned = outcome.abandoned
+		lastCooldown = outcome.abandoned && !outcome.cooldownUntil.IsZero()
 		if !outcome.abandoned {
 			// 只在确实成功后绑定粘性：绑定失败过的目标会把整条会话钉在坏上游上。
 			// 复用 breakerOutcome 判定成功，避免再写一份状态码分类。
@@ -1152,13 +1351,22 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 	}
 
 	switch {
-	case attempts == 0 && disabledSkips > 0:
-		// 全部候选的 provider 都被禁用：人工停用优先于自动熔断，单独一档。
+	case attempts == 0 && (disabledSkips > 0 || pausedSkips > 0):
+		// 全部候选的 provider 都被禁用或账户被暂停：人工状态优先于自动熔断，单独一档。
 		// 503 表达「服务端暂时不可用」，成因在配置侧、不是客户端请求问题。
 		// 不带 retry-after：人工禁用没有恢复时间，给假数字会误导客户端重试。
 		reqLog.AttemptTrail = strings.Join(trail, " → ")
-		reqLog.Error = "全部候选上游均已禁用"
-		writeJSONError(w, http.StatusServiceUnavailable, "all_candidates_disabled", reqLog.Error)
+		errorType := "all_candidates_disabled"
+		switch {
+		case disabledSkips > 0 && pausedSkips > 0:
+			reqLog.Error = "全部候选上游均不可用：部分 Provider 已停用，部分 ChatGPT OAuth 账户已暂停"
+		case pausedSkips > 0:
+			errorType = "all_candidates_paused"
+			reqLog.Error = "全部候选上游绑定的 ChatGPT OAuth 账户均已暂停"
+		default:
+			reqLog.Error = "全部候选上游均已禁用"
+		}
+		writeJSONError(w, http.StatusServiceUnavailable, errorType, reqLog.Error)
 	case attempts == 0 && keySkips > 0:
 		reqLog.AttemptTrail = strings.Join(trail, " → ")
 		reqLog.Error = "没有可选择的 Provider 密钥"
@@ -1173,6 +1381,10 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		writeJSONError(w, http.StatusServiceUnavailable, "no_selectable_provider_key", reqLog.Error)
+	case attempts == 0 && (cooldownSkips > 0 || cooldownTriggered):
+		// 账户共享冷却：上游明确报告额度耗尽，retry-after 取最早到期时间。排在无密钥之后、熔断之前。
+		reqLog.AttemptTrail = strings.Join(trail, " → ")
+		reqLog.Error = writeAccountUsageLimited(w, soonestCooldown)
 	case attempts == 0 && breakerSkips > 0:
 		// 全部候选被熔断：给出最早恢复者的剩余冷却，让客户端知道何时重试
 		reqLog.AttemptTrail = strings.Join(trail, " → ")
@@ -1205,6 +1417,9 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		reqLog.AttemptTrail = strings.Join(trail, " → ")
 		reqLog.Error = "没有可用的候选上游"
 		writeJSONError(w, http.StatusBadGateway, "all_candidates_failed", reqLog.Error)
+	case lastAbandoned && lastCooldown:
+		// 最后一次真实尝试触发了账户冷却并被放弃（不在同账户上本地重试），后面没有可用候选。
+		reqLog.Error = writeAccountUsageLimited(w, soonestCooldown)
 	case lastAbandoned:
 		// 兜底：最后一次尝试被放弃却没有后续候选可试（例如剩余候选全被熔断）。
 		// 放弃时未向客户端写入任何字节，必须在这里补一个终态响应。
@@ -1289,7 +1504,7 @@ func (s *server) candidateOrder(matched *router.Match, stickyKey string) []int {
 		for i := range order {
 			order[i] = i
 		}
-		return order
+		return s.applyQuotaOrder(matched, order, -1)
 	}
 	keys := make([]string, n)
 	for i, c := range matched.Candidates {
@@ -1303,13 +1518,20 @@ func (s *server) candidateOrder(matched *router.Match, stickyKey string) []int {
 		st := s.qm.StatusOf(p.Name, p.MaxConcurrent, p.MaxPerSecond)
 		return st.Running + st.Queued
 	}
-	return s.selector.Select(matched.RouteMatch, matched.Strategy, keys, stickyKey, load)
+	order, sticky := s.selector.SelectWithSticky(matched.RouteMatch, matched.Strategy, keys, stickyKey, load)
+	return s.applyQuotaOrder(matched, order, sticky)
 }
 
 // candidateKey 候选的稳定身份，用作粘性映射的值。
 // 用 provider/model 而不是下标：热重载改了 targets 顺序后，下标会指向另一个上游。
+// ChatGPT OAuth 候选再带上绑定账户：同名 Provider 换绑到其他账户后，旧映射不再命中，
+// 上游侧的 prompt cache 属于原账户。
 func candidateKey(c router.Candidate) string {
-	return c.Provider.Name + "/" + c.TargetModel
+	key := c.Provider.Name + "/" + c.TargetModel
+	if c.Provider.AuthType == "chatgptOAuth" {
+		key += "@" + c.Provider.AccountID
+	}
+	return key
 }
 
 // rememberSticky 记下「该前缀下次仍走这个候选」，保住上游侧的 prompt cache 前缀。
@@ -1324,6 +1546,11 @@ func (s *server) rememberSticky(matched *router.Match, stickyKey string, c route
 		return
 	}
 	s.selector.Remember(matched.RouteMatch, stickyKey, candidateKey(c))
+}
+
+// candidateAccountPaused 判断候选是否是绑定了已暂停账户的 ChatGPT OAuth Provider。
+func (s *server) candidateAccountPaused(p *config.Provider) bool {
+	return p != nil && p.AuthType == "chatgptOAuth" && s.chatgptAuth != nil && s.chatgptAuth.IsPaused(p.AccountID)
 }
 
 // forwardAttemptInput 单次候选尝试的输入，字段在循环内不被修改。
@@ -1352,6 +1579,8 @@ type forwardAttemptInput struct {
 	allowLocalRetry       bool
 	reqLog                *metrics.RequestLog
 	detail                *metrics.AttemptDetail
+	// diagnostic 禁止诊断调用打印原文或参与上游抓包，只由独立诊断入口设为 true。
+	diagnostic bool
 }
 
 // forwardAttemptOutcome 单次尝试结果。
@@ -1371,6 +1600,46 @@ type forwardAttemptOutcome struct {
 	upstreamStatus   int
 	retryAfter       time.Duration
 	upstreamDuration time.Duration
+	// oauthErr 是获取 ChatGPT OAuth 凭据失败的原始错误，仅供诊断归类，不写给客户端。
+	oauthErr error
+	// invocation 是本次尝试写回账户的调用结论；nil 表示未写回（未发出请求或客户端取消）。
+	invocation *chatgptauth.InvocationResult
+	// accountPaused 表示绑定的 ChatGPT OAuth 账户在准入前（取令牌后或排队中）被暂停，
+	// 本次没有发出上游请求，按候选循环的暂停跳过处理。
+	accountPaused bool
+	// accountCooldown 表示绑定账户在准入前进入共享额度冷却，同样没有发出上游请求。
+	accountCooldown bool
+	// cooldownUntil 非零表示本次真实尝试返回额度耗尽并让账户进入（或延长）冷却。
+	cooldownUntil time.Time
+}
+
+// accountCooldownOutcome 生成准入阶段因账户共享冷却而放弃的结果：未发出请求、不计尝试、不影响熔断。
+func accountCooldownOutcome(detail *metrics.AttemptDetail, providerName string) forwardAttemptOutcome {
+	if detail != nil {
+		detail.Kind = "account_cooldown"
+		detail.Outcome = "skipped"
+		detail.Reason = "account_cooldown"
+	}
+	return forwardAttemptOutcome{accountCooldown: true, trail: providerName + ":account_cooldown", breakerOutcome: breaker.OutcomeIgnored}
+}
+
+// accountPausedOutcome 生成准入阶段因账户暂停而放弃的结果：未发出请求、不计尝试、不影响熔断。
+// recordChatGPTAdmissionSkip 记录 OAuth 账户的一次准入跳过（未发出上游请求）。
+// 诊断调用单列、客户端已断开的放弃没有结论，两者都不计入。
+func (s *server) recordChatGPTAdmissionSkip(ctx context.Context, p *config.Provider, diagnostic bool, reason string) {
+	if diagnostic || s.chatgptAuth == nil || p == nil || p.AuthType != "chatgptOAuth" || ctx.Err() != nil {
+		return
+	}
+	s.chatgptAuth.RecordAdmissionSkip(p.AccountID, reason)
+}
+
+func accountPausedOutcome(detail *metrics.AttemptDetail, providerName string) forwardAttemptOutcome {
+	if detail != nil {
+		detail.Kind = "account_paused"
+		detail.Outcome = "skipped"
+		detail.Reason = "account_paused"
+	}
+	return forwardAttemptOutcome{accountPaused: true, trail: providerName + ":account_paused", breakerOutcome: breaker.OutcomeIgnored}
 }
 
 // forwardAttempt 执行单个候选的一次转发尝试。
@@ -1378,6 +1647,11 @@ type forwardAttemptOutcome struct {
 func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwardAttemptInput) forwardAttemptOutcome {
 	cfg := in.cfg
 	reqID := in.reqID
+	attemptLog := func(format string, args ...any) {
+		if !in.diagnostic {
+			logf(reqID, format, args...)
+		}
+	}
 	p := in.candidate.Provider
 	if p != nil {
 		providerCopy := *p
@@ -1506,7 +1780,7 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 			return forwardAttemptOutcome{buildErr: stripErr.Error()}
 		}
 		if len(dropped) > 0 {
-			logf(reqID, "  ChatGPT Codex 端点不接受 %s，已从上游请求体剔除", strings.Join(dropped, "、"))
+			attemptLog("  ChatGPT Codex 端点不接受 %s，已从上游请求体剔除", strings.Join(dropped, "、"))
 		}
 	}
 	upstreamBody, err := json.Marshal(upstreamMap)
@@ -1534,6 +1808,10 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 		return forwardAttemptOutcome{buildErr: buildErr}
 	}
 	oauthAccessToken, chatgptAccountID := "", ""
+	// invocation 在取令牌之前捕获账户身份和顺序号；只有真正发出上游请求后才写回结果。
+	var invocation *chatgptauth.InvocationTicket
+	// admission 只在 OAuth Provider 上非 nil；nil 的 Context/Paused/Release 都安全。
+	var admission *chatgptauth.AdmissionWatch
 	if p.AuthType == "chatgptOAuth" {
 		if s.chatgptAuth == nil {
 			buildErr := "ChatGPT OAuth 账户管理器未初始化"
@@ -1545,8 +1823,38 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 			}
 			return forwardAttemptOutcome{buildErr: buildErr}
 		}
+		// 准入监听覆盖取令牌到获得执行槽的整段等待：期间账户被暂停时，排队的等待者被立即唤醒。
+		// 令牌交换本身仍用请求 context，避免中途取消导致已轮换的刷新凭据来不及落盘。
+		// 尝试归属取请求开始时的 Provider 快照：请求途中换绑只影响之后的请求。
+		if in.detail != nil {
+			in.detail.AccountID = p.AccountID
+		}
+		var watchErr error
+		admission, watchErr = s.chatgptAuth.WatchAdmission(r.Context(), p.AccountID)
+		if errors.Is(watchErr, chatgptauth.ErrAccountPaused) {
+			s.recordChatGPTAdmissionSkip(r.Context(), p, in.diagnostic, chatgptauth.SkipAccountPaused)
+			return accountPausedOutcome(in.detail, p.Name)
+		}
+		if errors.Is(watchErr, chatgptauth.ErrAccountCooldown) {
+			s.recordChatGPTAdmissionSkip(r.Context(), p, in.diagnostic, chatgptauth.SkipCooldown)
+			return accountCooldownOutcome(in.detail, p.Name)
+		}
+		defer admission.Release()
+		invocation = s.chatgptAuth.BeginInvocationWith(p.AccountID, p.Name, targetModel, chatgptauth.InvocationSource{
+			Diagnostic: in.diagnostic,
+			LocalRetry: in.detail != nil && in.detail.LocalRetry,
+		})
 		oauthAccessToken, chatgptAccountID, err = s.chatgptAuth.AccessToken(r.Context(), p.AccountID, client)
+		if err == nil && (admission.Paused() || s.chatgptAuth.IsPaused(p.AccountID)) {
+			s.recordChatGPTAdmissionSkip(r.Context(), p, in.diagnostic, chatgptauth.SkipAccountPaused)
+			return accountPausedOutcome(in.detail, p.Name)
+		}
+		if err == nil && (admission.CooledDown() || !s.chatgptAuth.CooldownUntil(p.AccountID).IsZero()) {
+			s.recordChatGPTAdmissionSkip(r.Context(), p, in.diagnostic, chatgptauth.SkipCooldown)
+			return accountCooldownOutcome(in.detail, p.Name)
+		}
 		if err != nil {
+			s.recordChatGPTAdmissionSkip(r.Context(), p, in.diagnostic, chatgptauth.SkipAuthorization)
 			buildErr := "获取 ChatGPT OAuth 凭据失败: " + err.Error()
 			if in.detail != nil {
 				in.detail.Kind = "build_skip"
@@ -1554,7 +1862,7 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 				in.detail.Reason = "oauth_auth_error"
 				in.detail.Error = buildErr
 			}
-			return forwardAttemptOutcome{buildErr: buildErr}
+			return forwardAttemptOutcome{buildErr: buildErr, oauthErr: err}
 		}
 	}
 
@@ -1568,14 +1876,40 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 	// 直通模式：跳过队列（并发/限速/排队），请求直接转发；超时用 direct* 配置。
 	// 非直通模式：先经队列获取执行槽位（并发 + 限速 + 等待超时）。
 	if !cfg.DirectMode {
-		release, waitMs, err := s.qm.Acquire(r.Context(), p.Name, p.MaxConcurrent, p.MaxPerSecond, p.MaxQueueWait)
+		waitCtx := r.Context()
+		if admission != nil {
+			waitCtx = admission.Context()
+		}
+		var (
+			release func()
+			waitMs  int64
+			err     error
+		)
+		if admission != nil && cfg.ChatGPTAccountLimits.Enabled() {
+			// 账户共享约束：账户与 Provider 同时有空位才准入，等待期间不占用任何一方（DESIGN 6.4）。
+			release, waitMs, err = s.qm.AcquireGroup(waitCtx, p.Name, p.MaxConcurrent, p.MaxPerSecond, p.MaxQueueWait, p.AccountID)
+		} else {
+			release, waitMs, err = s.qm.Acquire(waitCtx, p.Name, p.MaxConcurrent, p.MaxPerSecond, p.MaxQueueWait)
+		}
 		in.reqLog.QueueWaitMs += waitMs
+		if err != nil && admission.Paused() && r.Context().Err() == nil {
+			attemptLog("  候选 %s 的 ChatGPT OAuth 账户在排队期间被暂停，放弃本次尝试", p.Name)
+			s.recordChatGPTAdmissionSkip(r.Context(), p, in.diagnostic, chatgptauth.SkipAccountPaused)
+			return accountPausedOutcome(in.detail, p.Name)
+		}
+		if err != nil && admission.CooledDown() && r.Context().Err() == nil {
+			attemptLog("  候选 %s 的 ChatGPT OAuth 账户在排队期间进入额度冷却，放弃本次尝试", p.Name)
+			s.recordChatGPTAdmissionSkip(r.Context(), p, in.diagnostic, chatgptauth.SkipCooldown)
+			return accountCooldownOutcome(in.detail, p.Name)
+		}
 		if err != nil {
+			// 客户端断开时由 recordChatGPTAdmissionSkip 自行排除；这里只剩队列超时与队列错误。
+			s.recordChatGPTAdmissionSkip(r.Context(), p, in.diagnostic, chatgptauth.SkipQueue)
 			if in.detail != nil {
 				in.detail.Kind = "queue_skip"
 				in.detail.Error = err.Error()
 			}
-			logf(reqID, "  队列处理异常: %s", err.Error())
+			attemptLog("  队列处理异常: %s", err.Error())
 			if errors.Is(err, queue.ErrQueueTimeout) {
 				if in.detail != nil {
 					in.detail.Reason = "queue_timeout"
@@ -1601,7 +1935,7 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 				}
 				// 客户端已断开，net/http 会忽略写入，无需也不应写响应
 				in.reqLog.Error = err.Error()
-				logf(reqID, "  客户端已断开，跳过响应")
+				attemptLog("  客户端已断开，跳过响应")
 			} else {
 				if in.detail != nil {
 					in.detail.Reason = "queue_error"
@@ -1613,7 +1947,18 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 			return forwardAttemptOutcome{trail: p.Name + ":queue_error", breakerOutcome: breaker.OutcomeIgnored}
 		}
 		defer release()
+		if admission.Paused() || (admission != nil && s.chatgptAuth.IsPaused(p.AccountID)) {
+			// 拿到执行槽的同时账户被暂停：归还槽（defer release），不发请求。
+			s.recordChatGPTAdmissionSkip(r.Context(), p, in.diagnostic, chatgptauth.SkipAccountPaused)
+			return accountPausedOutcome(in.detail, p.Name)
+		}
+		if admission.CooledDown() || (admission != nil && !s.chatgptAuth.CooldownUntil(p.AccountID).IsZero()) {
+			s.recordChatGPTAdmissionSkip(r.Context(), p, in.diagnostic, chatgptauth.SkipCooldown)
+			return accountCooldownOutcome(in.detail, p.Name)
+		}
 	}
+	// 从这里开始即视为已准入：之后的暂停与冷却不再截断本次请求。
+	admission.Release()
 
 	timeoutMs, headerTimeoutMs, activityTimeoutMs := forwardAttemptTimeouts(cfg, in.internal.Stream, in.keyTicket != nil, in.chainBudgetMs)
 
@@ -1648,6 +1993,13 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 		// 流式一旦开始写客户端就不再询问 ShouldRetry，至多一个候选能写出内容事件，
 		// 不存在两个候选各记一次、后者覆盖前者的情况。
 		firstByteDone bool
+		// upstreamStarted 是发出上游请求的时刻；headerLatency 计到收到响应头为止，
+		// 不含排队和正文生成，只进入账户统计的延迟样本。
+		upstreamStarted time.Time
+		headerLatency   time.Duration
+		headersReceived bool
+		// errorBody 是脱敏后的上游错误正文，用于识别账户级额度耗尽。
+		errorBody string
 	)
 	opts := &proxy.Options{
 		ClientReq:             r,
@@ -1659,7 +2011,7 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 		ClientFormat:          in.clientFormat,
 		OriginalModel:         in.originalModel,
 		IsStreaming:           in.internal.Stream,
-		Log:                   func(f string, a ...any) { logf(reqID, f, a...) },
+		Log:                   attemptLog,
 		StartTime:             in.start,
 		TimeoutMs:             timeoutMs,
 		HeaderTimeoutMs:       headerTimeoutMs,
@@ -1674,6 +2026,10 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 		OnUpstreamStatus: func(code int) {
 			attemptStatus = code
 			in.reqLog.UpstreamStatus = code
+			if !headersReceived {
+				headersReceived = true
+				headerLatency = time.Since(upstreamStarted)
+			}
 		},
 		OnUpstreamHeaders: func(code int, requestID string, retryAfter time.Duration) {
 			attemptRetryAfter = retryAfter
@@ -1685,6 +2041,7 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 			in.detail.RetryAfterMs = retryAfter.Milliseconds()
 		},
 		OnErrorBody: func(body string, truncated bool) {
+			errorBody = body
 			if in.detail != nil {
 				in.detail.ErrorBody = body
 				in.detail.ErrorBodyTruncated = truncated
@@ -1707,12 +2064,11 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 		},
 	}
 	// 只在排查开关开启时挂回调：为 nil 时 proxy 完全不缓冲原始流。
-	if os.Getenv("AI_GATEWAY_DEBUG_UPSTREAM_STREAM") != "" {
+	if !in.diagnostic && os.Getenv("AI_GATEWAY_DEBUG_UPSTREAM_STREAM") != "" {
 		opts.OnStreamConversionError = func(raw []byte, truncated bool, convErr error) {
 			captureUpstreamStream(reqID, p.Name, targetModel, in.clientFormat, p.Format, raw, truncated, convErr)
 		}
 	}
-	var upstreamStarted time.Time
 	if in.keyTicket != nil || in.allowFailoverTransfer || in.allowLocalRetry {
 		opts.ShouldRetry = func(upstreamCode int, retryAfter time.Duration, err error) bool {
 			if in.keyTicket != nil && in.allowKeySwitch && isKeyRelatedFailure(upstreamCode) {
@@ -1769,10 +2125,30 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 		// 在 abandonAttempt 判定之前就已赋值（proxy.go 里 recordUpstreamHeaders
 		// 先于 ShouldRetry），所以这里拿得到真实上游状态码。传输错误/超时转移时
 		// attemptStatus == 0，不进这个分支。
-		if shouldCaptureUpstreamBody(attemptStatus) {
+		if !in.diagnostic && shouldCaptureUpstreamBody(attemptStatus) {
 			captureUpstreamBody(reqID, p.Name, targetModel, attemptStatus, upstreamBody)
 		}
+		var abandonedInvocation *chatgptauth.InvocationResult
+		var cooldownUntil time.Time
+		if invocation != nil {
+			invocationStatus := abandonStatus
+			if invocationStatus == 0 {
+				invocationStatus = attemptStatus
+			}
+			result := chatgptauth.InvocationResult{HTTPStatus: invocationStatus, Reason: reason, HeaderLatency: headerLatency, HeadersReceived: headersReceived}
+			s.chatgptAuth.FinishInvocation(invocation, result)
+			abandonedInvocation = &result
+			cooldownUntil = s.reportChatGPTUsageLimit(invocation, in.diagnostic, attemptStatus, errorBody, attemptRetryAfter)
+			if !cooldownUntil.IsZero() && isLongRetryAfter(&cfg.Failover, time.Until(cooldownUntil)) {
+				// 冷却超过 maxRetryAfterMs：与长 Retry-After 的 429 同等待遇，不消耗尝试额度。
+				abandonFree = true
+				if in.detail != nil {
+					in.detail.FreeAttempt = true
+				}
+			}
+		}
 		return forwardAttemptOutcome{
+			invocation:       abandonedInvocation,
 			abandoned:        true,
 			requestStarted:   true,
 			trail:            attemptTrail(p.Name, in.keyTicket, attemptStatus, reason),
@@ -1782,6 +2158,7 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 			upstreamStatus:   abandonStatus,
 			retryAfter:       abandonRetryAfter,
 			upstreamDuration: upstreamDuration,
+			cooldownUntil:    cooldownUntil,
 		}
 	}
 
@@ -1815,11 +2192,11 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 		}
 		// 区分客户端断开、超时、其他错误，避免把正常断开误报为异常
 		if errors.Is(forwardErr, context.Canceled) {
-			logf(reqID, "  客户端断开连接")
+			attemptLog("  客户端断开连接")
 		} else if errors.Is(forwardErr, context.DeadlineExceeded) {
-			logf(reqID, "  转发超时（%d秒）: %s", timeoutMs/1000, forwardErr.Error())
+			attemptLog("  转发超时（%d秒）: %s", timeoutMs/1000, forwardErr.Error())
 		} else {
-			logf(reqID, "  转发结束（异常）: %s", forwardErr.Error())
+			attemptLog("  转发结束（异常）: %s", forwardErr.Error())
 		}
 	}
 	status := upstreamStatus
@@ -1847,16 +2224,29 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 			in.detail.Reason = attemptFailureReason(upstreamStatus, forwardErr)
 		}
 	}
-	if shouldCaptureUpstreamBody(upstreamStatus) {
+	if !in.diagnostic && shouldCaptureUpstreamBody(upstreamStatus) {
 		captureUpstreamBody(reqID, p.Name, targetModel, upstreamStatus, upstreamBody)
 	}
+	var finalInvocation *chatgptauth.InvocationResult
+	var cooldownUntil time.Time
+	if invocation != nil {
+		if result, ok := chatGPTInvocationResult(upstreamStatus, forwardErr); ok {
+			result.HeaderLatency, result.HeadersReceived = headerLatency, headersReceived
+			s.chatgptAuth.FinishInvocation(invocation, result)
+			finalInvocation = &result
+		}
+		// 最后一个候选的额度耗尽原样透传给客户端，但仍让账户进入冷却，后续请求不再发往该账户。
+		cooldownUntil = s.reportChatGPTUsageLimit(invocation, in.diagnostic, upstreamStatus, errorBody, attemptRetryAfter)
+	}
 	return forwardAttemptOutcome{
+		invocation:       finalInvocation,
 		trail:            attemptTrail(p.Name, in.keyTicket, status, keyFailureReasonIfNeeded(in.keyTicket, status)),
 		requestStarted:   true,
 		breakerOutcome:   breakerOutcome,
 		upstreamStatus:   status,
 		retryAfter:       attemptRetryAfter,
 		upstreamDuration: upstreamDuration,
+		cooldownUntil:    cooldownUntil,
 	}
 }
 
@@ -2494,6 +2884,12 @@ func (s *server) chatGPTProviderStatus(name string, provider *config.Provider) p
 		status.Message = "ChatGPT OAuth 账户管理器不可用"
 		return status
 	}
+	if strings.TrimSpace(provider.AccountID) == "" {
+		// 解绑后的合法状态：Provider 已停用且没有账户引用，不是异常。
+		status.Status = "unchecked"
+		status.Message = "未绑定 ChatGPT OAuth 账户"
+		return status
+	}
 	account, ok := s.chatgptAuth.Account(provider.AccountID)
 	if !ok {
 		status.Status = "error"
@@ -2505,9 +2901,82 @@ func (s *server) chatGPTProviderStatus(name string, provider *config.Provider) p
 		status.Message = "ChatGPT OAuth 账户需要重新授权"
 		return status
 	}
-	status.Status = "ok"
-	status.Message = "ChatGPT OAuth 账户已连接；实际可用性将在转发请求时验证"
+	if !account.Enabled {
+		// 暂停是人工状态，不是故障；网关不会经该账户发起调用，所以没有可报告的健康结论。
+		status.Status = "unchecked"
+		status.Message = "ChatGPT OAuth 账户已暂停，不接收新请求"
+		return status
+	}
+	// 本地凭据条件只说明能尝试取令牌；健康结论只来自经该 Provider 的真实调用。
+	invocation, _ := s.chatgptAuth.ProviderInvocation(provider.AccountID, name)
+	if failedAt := account.Authorization.LastRefreshFailedAt; failedAt != "" && (invocation.State == "unknown" || failedAt > invocation.ObservedAt) {
+		status.Status = "warn"
+		status.Message = account.Authorization.LastRefreshError
+		status.CheckedAt = failedAt
+		return status
+	}
+	switch invocation.State {
+	case "success":
+		status.Status = "ok"
+		status.Message = "最近一次真实调用成功"
+		if invocation.Model != "" {
+			status.Message += "（模型 " + invocation.Model + "）"
+		}
+		status.CheckedAt = invocation.ObservedAt
+	case "failure":
+		status.Status = chatGPTInvocationHealth(invocation)
+		status.HTTPCode = invocation.HTTPStatus
+		status.Message = invocation.Message
+		if invocation.Model != "" {
+			status.Message += "（模型 " + invocation.Model + "）"
+		}
+		status.CheckedAt = invocation.ObservedAt
+	default:
+		status.Status = "unverified"
+		status.Message = account.Authorization.Message + "；尚未经网关实际调用验证"
+	}
 	return status
+}
+
+// chatGPTInvocationHealth 把真实调用失败映射到 Provider 健康档位，口径与 providerhealth.checkOne 一致：
+// 鉴权拒绝、上游 5xx 和没有响应计异常，限流、其他 4xx 和网关转换失败计「可达」。
+func chatGPTInvocationHealth(invocation chatgptauth.InvocationView) string {
+	switch {
+	case invocation.Reason == "conversion_error":
+		return "warn"
+	case invocation.Reason == "stream_interrupted":
+		return "error"
+	case invocation.HTTPStatus == http.StatusUnauthorized || invocation.HTTPStatus == http.StatusForbidden:
+		return "error"
+	case invocation.HTTPStatus == 0 || invocation.HTTPStatus >= 500:
+		return "error"
+	default:
+		return "warn"
+	}
+}
+
+// chatGPTInvocationResult 把一次已发出的上游尝试归纳成账户调用结果。
+// 客户端主动取消不说明上游好坏，返回 false 表示不记录。
+func chatGPTInvocationResult(upstreamStatus int, forwardErr error) (chatgptauth.InvocationResult, bool) {
+	if errors.Is(forwardErr, context.Canceled) {
+		return chatgptauth.InvocationResult{}, false
+	}
+	status := upstreamStatus
+	var streamErr *proxy.UpstreamStreamError
+	if errors.As(forwardErr, &streamErr) {
+		status = streamErr.Status
+	}
+	if status == 0 && forwardErr == nil {
+		return chatgptauth.InvocationResult{}, false
+	}
+	if forwardErr == nil && status >= 200 && status < 300 {
+		return chatgptauth.InvocationResult{Success: true, HTTPStatus: status}, true
+	}
+	if streamErr == nil && status >= 200 && status < 300 && !errors.Is(forwardErr, proxy.ErrConversion) {
+		// 上游已返回成功响应头，之后流中断、活跃超时或读取失败：不是参数问题。
+		return chatgptauth.InvocationResult{HTTPStatus: status, Reason: "stream_interrupted"}, true
+	}
+	return chatgptauth.InvocationResult{HTTPStatus: status, Reason: attemptFailureReason(upstreamStatus, forwardErr)}, true
 }
 
 func writeProviderHealthResponse(w http.ResponseWriter, statuses map[string]providerhealth.Status) {
@@ -2589,6 +3058,10 @@ func (s *server) handleProviderModels(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleChatGPTAuthAPI(w http.ResponseWriter, r *http.Request, path string) {
+	if path == "/api/chatgpt/accounts/backup/export" || path == "/api/chatgpt/accounts/backup/preview" || path == "/api/chatgpt/accounts/backup/apply" {
+		// 备份端点的所有响应（含下面的跨站 403 与管理器不可用 503）都不缓存。
+		setChatGPTBackupHeaders(w)
+	}
 	if isCrossSiteRequest(r) {
 		writeForbiddenOrigin(w)
 		return
@@ -2598,6 +3071,16 @@ func (s *server) handleChatGPTAuthAPI(w http.ResponseWriter, r *http.Request, pa
 		return
 	}
 	switch path {
+	case "/api/chatgpt/accounts/import/preview":
+		s.handleChatGPTImportPlan(w, r, false)
+	case "/api/chatgpt/accounts/import/apply":
+		s.handleChatGPTImportPlan(w, r, true)
+	case "/api/chatgpt/accounts/backup/export":
+		s.handleChatGPTBackupExport(w, r)
+	case "/api/chatgpt/accounts/backup/preview":
+		s.handleChatGPTBackupRestore(w, r, false)
+	case "/api/chatgpt/accounts/backup/apply":
+		s.handleChatGPTBackupRestore(w, r, true)
 	case "/api/chatgpt/accounts/import":
 		if r.Method != http.MethodPost {
 			writeMethodNotAllowed(w, http.MethodPost)
@@ -2694,7 +3177,20 @@ func (s *server) handleChatGPTAuthAPI(w http.ResponseWriter, r *http.Request, pa
 		cfg := s.cfg
 		refs := chatGPTAccountReferences(cfg)
 		s.cfgMu.RUnlock()
-		writeJSON(w, http.StatusOK, map[string]any{"data": s.chatgptAuth.List(refs)})
+		accounts, version := s.chatgptAuth.ListWithVersion(refs)
+		// 账户控制版本作为 ETag，供导入应用等写入接口做精确 If-Match。
+		w.Header().Set("ETag", strconv.Quote(version))
+		writeJSON(w, http.StatusOK, map[string]any{"data": accounts})
+	case "/api/chatgpt/accounts/events":
+		s.handleChatGPTAccountEvents(w, r)
+	case "/api/chatgpt/background":
+		s.handleChatGPTBackground(w, r)
+	case "/api/chatgpt/accounts/batch/preview":
+		s.handleChatGPTAccountBatch(w, r, false)
+	case "/api/chatgpt/accounts/batch/apply":
+		s.handleChatGPTAccountBatch(w, r, true)
+	case "/api/chatgpt/accounts/usage/batch-refresh":
+		s.handleChatGPTUsageBatchRefresh(w, r)
 	case "/api/chatgpt/accounts/usage/refresh":
 		if r.Method != http.MethodPost {
 			writeMethodNotAllowed(w, http.MethodPost)
@@ -2777,6 +3273,22 @@ func (s *server) handleChatGPTAuthAPI(w http.ResponseWriter, r *http.Request, pa
 			if strings.HasSuffix(relativePath, "/usage/refresh") {
 				accountID := strings.TrimSuffix(relativePath, "/usage/refresh")
 				s.handleRefreshChatGPTAccountUsage(w, r, accountID)
+				return
+			}
+			if strings.HasSuffix(relativePath, "/diagnose") {
+				s.handleChatGPTAccountDiagnose(w, r, strings.TrimSuffix(relativePath, "/diagnose"))
+				return
+			}
+			if strings.HasSuffix(relativePath, "/state") {
+				s.handleChatGPTAccountState(w, r, strings.TrimSuffix(relativePath, "/state"))
+				return
+			}
+			if strings.HasSuffix(relativePath, "/metrics") {
+				s.handleChatGPTAccountMetrics(w, r, strings.TrimSuffix(relativePath, "/metrics"))
+				return
+			}
+			if strings.HasSuffix(relativePath, "/cooldown") {
+				s.handleChatGPTAccountCooldown(w, r, strings.TrimSuffix(relativePath, "/cooldown"))
 				return
 			}
 			if parts := strings.Split(relativePath, "/bindings/"); len(parts) == 2 {
@@ -2989,7 +3501,7 @@ func (s *server) handleUpdateChatGPTAccountMetadata(w http.ResponseWriter, r *ht
 		writeJSONError(w, http.StatusBadRequest, "invalid_account_metadata", "账户 ID 无效")
 		return
 	}
-	view, err := s.chatgptAuth.UpdateMetadata(id, patch)
+	view, version, err := s.chatgptAuth.UpdateMetadataVersioned(id, patch)
 	if errors.Is(err, chatgptauth.ErrInvalidAccountMetadata) {
 		writeJSONError(w, http.StatusBadRequest, "invalid_account_metadata", err.Error())
 		return
@@ -3010,6 +3522,8 @@ func (s *server) handleUpdateChatGPTAccountMetadata(w http.ResponseWriter, r *ht
 	s.cfgMu.RLock()
 	view.Providers = append([]string(nil), chatGPTAccountReferences(s.cfg)[id]...)
 	s.cfgMu.RUnlock()
+	// 返回写入后的账户控制版本，前端据此更新后续暂停、批量操作的 If-Match。
+	w.Header().Set("ETag", strconv.Quote(version))
 	writeJSON(w, http.StatusOK, map[string]any{"data": view})
 }
 
@@ -3070,6 +3584,36 @@ func (s *server) handleDeleteChatGPTAccount(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+// chatGPTReferenceError 是普通配置保存时 OAuth 账户引用校验失败的 HTTP 结果。
+type chatGPTReferenceError struct {
+	status  int
+	errType string
+	message string
+}
+
+// validateChatGPTAccountReference 让普通配置保存与 config.validateProvider 采用同一空引用语义：
+// 停用且 accountId 为空的 OAuth Provider 合法（解绑后的状态），启用的 Provider 必须绑定现有账户；
+// 非空 accountId 即使 Provider 已停用也必须指向现有账户，避免错拼的 ID 被静默保存。
+func (s *server) validateChatGPTAccountReference(name string, p *config.Provider) *chatGPTReferenceError {
+	if p == nil || p.AuthType != "chatgptOAuth" {
+		return nil
+	}
+	if strings.TrimSpace(p.AccountID) == "" && !p.IsEnabled() {
+		return nil
+	}
+	if s.chatgptAuth == nil {
+		return &chatGPTReferenceError{status: http.StatusServiceUnavailable, errType: "oauth_unavailable", message: "ChatGPT OAuth 账户管理器不可用"}
+	}
+	if _, ok := s.chatgptAuth.Account(p.AccountID); !ok {
+		return &chatGPTReferenceError{
+			status:  http.StatusBadRequest,
+			errType: "config_validation_error",
+			message: fmt.Sprintf("providers.%s.accountId 引用了不存在的 ChatGPT OAuth 账户", name),
+		}
+	}
+	return nil
 }
 
 func chatGPTAccountReferences(cfg *config.Config) map[string][]string {
@@ -3962,15 +4506,9 @@ func (s *server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 			}
 			p.Proxy = replaceProxyPassword(p.Proxy, password)
 		}
-		if p.AuthType == "chatgptOAuth" {
-			if s.chatgptAuth == nil {
-				writeJSONError(w, http.StatusServiceUnavailable, "oauth_unavailable", "ChatGPT OAuth 账户管理器不可用")
-				return
-			}
-			if _, ok := s.chatgptAuth.Account(p.AccountID); !ok {
-				writeJSONError(w, http.StatusBadRequest, "config_validation_error", fmt.Sprintf("providers.%s.accountId 引用了不存在的 ChatGPT OAuth 账户", name))
-				return
-			}
+		if err := s.validateChatGPTAccountReference(name, p); err != nil {
+			writeJSONError(w, err.status, err.errType, err.message)
+			return
 		}
 	}
 
@@ -4105,9 +4643,19 @@ func (s *server) applyRuntimeConfig(newCfg *config.Config, revision string) []st
 		// 窗口变了才重建桶；SetWindow 内部会保留仍落在新窗口内的历史桶
 		s.metrics.SetWindow(newCfg.Metrics.WindowMinutes)
 	}
+	bindingChanges := chatGPTBindingChanges(oldCfg, newCfg)
 	s.cfg = newCfg
 	s.revision = revision
 	s.cfgMu.Unlock()
+	if s.chatgptAuth != nil {
+		// 账户统计窗口与全局指标窗口一致；账户锁不与配置锁嵌套，放在释放 cfgMu 之后。
+		s.chatgptAuth.SetStatsWindow(newCfg.Metrics.WindowMinutes)
+	}
+	// 账户共享约束只影响之后的准入；关闭 sharedCooldown 时清除全部冷却。
+	s.applyChatGPTAccountLimits(newCfg)
+	// 后台刷新热重载只更新设置并立即重算；全部关闭时等循环退出。
+	s.applyChatGPTBackground(newCfg)
+	s.emitChatGPTBindingEvents(bindingChanges)
 	if oldHealthInterval != newCfg.ProviderHealth.CheckIntervalSeconds {
 		s.restartProviderHealthLoop(newCfg.ProviderHealth.CheckIntervalSeconds)
 	}

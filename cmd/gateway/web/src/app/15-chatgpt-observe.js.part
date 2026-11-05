@@ -1,0 +1,280 @@
+                // 本片段排在 14-chatgpt-manage.js.part 之后；上一片段末尾已带尾逗号，这里直接续写成员，
+                // 本片段最后一项同样保留尾逗号。
+
+                // ── ChatGPT 账户调用统计、账户事件与「需要关注」提醒 ─────────────────
+                // 统计只描述当前网关进程，展开账户详情时读取；提醒只在页面内显示，
+                // 不使用浏览器系统通知，也不发送外部通知。
+
+                async loadChatGPTAccountMetrics(account) {
+                    const id = account?.id;
+                    if (!id) return;
+                    const sequence = (this._chatGPTMetricsSequence[id] || 0) + 1;
+                    this._chatGPTMetricsSequence[id] = sequence;
+                    const previous = this.chatGPTAccountMetrics[id] || {};
+                    this.chatGPTAccountMetrics = { ...this.chatGPTAccountMetrics, [id]: { ...previous, loading: true, error: '' } };
+                    const controller = new AbortController();
+                    const timeoutId = window.setTimeout(() => controller.abort(), 15_000);
+                    let next;
+                    try {
+                        const res = await fetch('/api/chatgpt/accounts/' + encodeURIComponent(id) + '/metrics', { signal: controller.signal });
+                        if (!res.ok) throw new Error(await this.errorText(res, '读取调用统计失败'));
+                        const body = await res.json();
+                        const data = body?.data;
+                        if (!data || typeof data.window !== 'object' || typeof data.total !== 'object') throw new Error('调用统计响应格式无效');
+                        next = { data, loading: false, error: '', loadedAt: Date.now() };
+                    } catch (err) {
+                        // 失败保留上次读取的内容，只追加错误说明。
+                        next = { ...previous, loading: false, error: controller.signal.aborted ? '读取调用统计超时，请重试' : '读取调用统计失败：' + err.message };
+                    } finally {
+                        window.clearTimeout(timeoutId);
+                    }
+                    if (this._chatGPTMetricsSequence[id] !== sequence) return;
+                    this.chatGPTAccountMetrics = { ...this.chatGPTAccountMetrics, [id]: next };
+                },
+
+                // 账户列表重新加载后丢掉已删除账户的统计缓存，并顺带读取账户事件供提醒使用。
+                async afterChatGPTAccountsLoaded() {
+                    const ids = new Set(this.chatgptAccounts.map(item => item.id));
+                    const kept = {};
+                    for (const [id, value] of Object.entries(this.chatGPTAccountMetrics)) if (ids.has(id)) kept[id] = value;
+                    this.chatGPTAccountMetrics = kept;
+                    await this.loadChatGPTAccountEvents();
+                },
+
+                async loadChatGPTAccountEvents() {
+                    const data = await this.loadOptionalJSON('/api/chatgpt/accounts/events');
+                    // 读取失败时保留旧事件；提醒依据的是已经看到过的安全事件。
+                    if (Array.isArray(data?.data)) this.chatGPTAccountEvents = data.data;
+                },
+
+                chatGPTStatsOf(account) {
+                    return this.chatGPTAccountMetrics[account?.id] || {};
+                },
+
+                chatGPTStatsWindowText(stats) {
+                    const minutes = Number(stats?.data?.windowMinutes) || 0;
+                    if (!minutes) return '最近窗口';
+                    return minutes >= 60 && minutes % 60 === 0 ? `最近 ${minutes / 60} 小时` : `最近 ${minutes} 分钟`;
+                },
+
+                // 统计表的行：窗口与本次启动以来两列同口径。没有样本时显示「暂无样本」，不以 0 冒充。
+                chatGPTStatRows(account) {
+                    const data = this.chatGPTStatsOf(account).data;
+                    if (!data) return [];
+                    const rate = scope => scope?.successRate === null || scope?.successRate === undefined
+                        ? '暂无样本'
+                        : `${(Number(scope.successRate) * 100).toFixed(1).replace(/\.0$/, '')}%（${scope.successes || 0}/${scope.requests || 0}）`;
+                    const latency = scope => {
+                        const samples = Number(scope?.latencySamples) || 0;
+                        if (!samples || scope?.p50LatencyMs === null || scope?.p50LatencyMs === undefined) return '暂无样本';
+                        // P95 在样本少时退化为最大值，与仪表盘同一阈值，只给 P50 并注明样本量。
+                        const p95 = samples >= 20 ? ` · P95 ${this.durationText(scope.p95LatencyMs)}` : '';
+                        return `P50 ${this.durationText(scope.p50LatencyMs)}${p95}（${samples} 个样本）`;
+                    };
+                    const count = (scope, key) => String(Number(scope?.[key]) || 0);
+                    const skips = scope => {
+                        const s = scope?.skips || {};
+                        const total = (Number(s.accountPaused) || 0) + (Number(s.authorization) || 0) + (Number(s.queue) || 0) + (Number(s.cooldown) || 0);
+                        // 旧后端没有 cooldown 字段时不显示这一项。
+                        const cooldown = s.cooldown === undefined ? '' : ` · 冷却 ${s.cooldown || 0}`;
+                        return total ? `${total}（暂停 ${s.accountPaused || 0} · 取令牌 ${s.authorization || 0} · 排队 ${s.queue || 0}${cooldown}）` : '0';
+                    };
+                    const pair = (scope, key) => {
+                        const p = scope?.[key] || {};
+                        return `成功 ${p.successes || 0} · 失败 ${p.failures || 0}`;
+                    };
+                    const rows = [
+                        { key: 'requests', label: '真实调用', tip: '已向上游发出并得到结论的尝试，含本地重试和故障转移；客户端在上游响应前断开不计入', value: scope => count(scope, 'requests') },
+                        { key: 'successRate', label: '成功率', tip: '成功 / 真实调用；流中断和响应转换失败计为失败', value: rate },
+                        { key: 'rateLimited', label: '限流（429）', tip: '结论为 HTTP 429 的真实调用', value: scope => count(scope, 'rateLimited') },
+                        { key: 'localRetries', label: '其中本地重试', tip: '同一候选的额外转发，已包含在真实调用中', value: scope => count(scope, 'localRetries') },
+                        { key: 'latency', label: '响应头延迟', tip: '从发出请求到收到上游响应头，不含排队和正文生成；分位数取固定桶上界近似', value: latency },
+                        { key: 'skips', label: '准入跳过', tip: '账户暂停、额度冷却、取令牌失败或排队失败，均未发出上游请求，不计入真实调用', value: skips },
+                        { key: 'diagnostics', label: '诊断调用', tip: '账户诊断发出的实际调用，单独计数，不进入成功率和延迟', value: scope => pair(scope, 'diagnostics') },
+                        { key: 'refresh', label: '令牌刷新', tip: 'OAuth 刷新交换，属于管理请求，不计入模型调用', value: scope => pair(scope, 'refresh') },
+                        { key: 'usage', label: '用量查询', tip: '额度查询，属于管理请求，不计入模型调用', value: scope => pair(scope, 'usage') }
+                    ];
+                    return rows.map(row => ({ key: row.key, label: row.label, tip: row.tip, window: row.value(data.window), total: row.value(data.total) }));
+                },
+
+                chatGPTStatsLoadedText(stats) {
+                    return stats?.loadedAt ? '读取于 ' + new Date(stats.loadedAt).toLocaleTimeString() : '';
+                },
+
+                // ── 账户共享约束与额度冷却 ──
+                // 冷却截止只在后端判定未到期时下发；页面再按本地时间兜底，到期后不再显示。
+                chatGPTCooldownActive(account) {
+                    const until = Date.parse(account?.cooldownUntil || '');
+                    return Number.isFinite(until) && until > Date.now();
+                },
+
+                // 准入说明行：没有 admission 字段（旧后端）时不显示。
+                chatGPTAdmissionRows(account) {
+                    const admission = this.chatGPTStatsOf(account).data?.admission;
+                    if (!admission || typeof admission !== 'object') return [];
+                    const rows = [];
+                    if (admission.limited) {
+                        const limits = [];
+                        if (Number(admission.maxConcurrent) > 0) limits.push(`并发上限 ${admission.maxConcurrent}`);
+                        if (Number(admission.maxPerSecond) > 0) limits.push(`每秒 ${admission.maxPerSecond} 次`);
+                        rows.push({ key: 'limits', label: '共享约束', value: `${limits.join(' · ') || '已启用'}；在途 ${admission.running || 0} · 排队 ${admission.queued || 0}` });
+                    } else {
+                        rows.push({ key: 'limits', label: '共享约束', value: this.config.directMode ? '直通模式下不生效' : '未启用，按各 Provider 自身上限' });
+                    }
+                    rows.push({ key: 'cooldown', label: '额度冷却', value: !admission.sharedCooldown
+                        ? '未开启'
+                        : (admission.cooldownUntil ? '冷却至 ' + this.formatChatGPTDate(admission.cooldownUntil) : '已开启，当前未冷却') });
+                    return rows;
+                },
+
+                async clearChatGPTCooldown(account) {
+                    if (!account?.id || this.clearingChatGPTCooldown) return;
+                    this.clearingChatGPTCooldown = account.id;
+                    try {
+                        if (!(await this.askConfirm('手动解除后，该账户绑定的全部 Provider 立即恢复准入。上游额度若仍未恢复，下一次请求会再次触发冷却。', {
+                            title: '解除额度冷却', confirmText: '解除冷却'
+                        }))) return;
+                        const res = await fetch('/api/chatgpt/accounts/' + encodeURIComponent(account.id) + '/cooldown', { method: 'DELETE' });
+                        if (!res.ok) throw new Error(await this.errorText(res, '解除冷却失败'));
+                        const data = await res.json();
+                        if (data?.data?.account?.id === account.id) {
+                            this.chatgptAccounts = this.chatgptAccounts.map(item => item.id === account.id ? data.data.account : item);
+                        }
+                        this.showStatus(data?.data?.changed ? '已解除额度冷却' : '账户当前没有冷却', 'success');
+                        if (this.chatGPTStatsOf(account).data) void this.loadChatGPTAccountMetrics(account);
+                    } catch (err) {
+                        this.showStatus(err.message, 'error');
+                    } finally {
+                        this.clearingChatGPTCooldown = '';
+                    }
+                },
+
+                // ── 「需要关注」提醒 ──
+                // 已读状态按「条件 + 证据时间」记在浏览器本地；证据变化（新的失败时间、新的重置时间、
+                // 新的恢复事件）会生成新的键，重新提醒。条件消失后提醒自然消失。
+
+                loadChatGPTReminderReads() {
+                    try {
+                        const parsed = JSON.parse(window.localStorage.getItem('gw.chatgptReminderRead') || '[]');
+                        this.chatGPTReminderReadKeys = Array.isArray(parsed) ? parsed.filter(key => typeof key === 'string').slice(-200) : [];
+                    } catch (_) {
+                        // localStorage 被禁用或内容损坏：全部视为未读，不影响页面其他功能。
+                        this.chatGPTReminderReadKeys = [];
+                    }
+                },
+
+                saveChatGPTReminderReads() {
+                    try {
+                        window.localStorage.setItem('gw.chatgptReminderRead', JSON.stringify(this.chatGPTReminderReadKeys));
+                    } catch (_) {
+                        // 写入失败只影响跨刷新的已读记忆，本次页面内仍有效。
+                    }
+                },
+
+                chatGPTReminderItems() {
+                    const items = [];
+                    const label = account => account.email || account.id;
+                    for (const account of this.chatgptAccounts) {
+                        const auth = account?.authorization || {};
+                        if (this.chatGPTAuthorizationCategory(account) === 'reauthorization_required') {
+                            // 刷新失败时间只在进程内存在，重启后会变；用凭据的最近更新与到期时间作证据，
+                            // 只有重新授权或凭据被替换后才会变化。
+                            items.push({
+                                key: `reauth|${account.id}|${account.lastRefresh || ''}|${account.expiresAt || ''}`,
+                                accountId: account.id, account: label(account), severity: 'danger', title: '需要重新授权',
+                                detail: auth.message || '刷新凭据已失效，需要重新连接此账户', at: auth.lastRefreshFailedAt || ''
+                            });
+                        } else {
+                            if (auth.credentialsUnsaved) {
+                                items.push({
+                                    key: `unsaved|${account.id}|${account.lastRefresh || ''}`,
+                                    accountId: account.id, account: label(account), severity: 'warn', title: '新凭据未保存',
+                                    detail: '自动刷新得到的新凭据写入账户文件失败；网关重启前请恢复磁盘写入', at: account.lastRefresh || ''
+                                });
+                            }
+                            if (auth.lastRefreshError) {
+                                items.push({
+                                    key: `refresh|${account.id}|${auth.lastRefreshFailedAt || ''}`,
+                                    accountId: account.id, account: label(account), severity: 'warn', title: '自动刷新失败',
+                                    detail: auth.lastRefreshError, at: auth.lastRefreshFailedAt || ''
+                                });
+                            }
+                        }
+                        // 额度偏低只认新鲜快照：快照过期或窗口已到重置待复查时不提醒，也不据此判断恢复。
+                        if (account?.usageState?.freshness === 'fresh' && !account?.usage?.error) {
+                            const pending = account.usageState.resetPendingWindows || [];
+                            for (const window of (account.usage?.windows || [])) {
+                                const remaining = Number(window?.remainingPercent);
+                                if (window?.remainingPercent === null || window?.remainingPercent === undefined || !Number.isFinite(remaining)) continue;
+                                if (pending.includes(window.name) || remaining > 10) continue;
+                                items.push({
+                                    key: `quota|${account.id}|${window.name}|${window.resetAt || ''}`,
+                                    accountId: account.id, account: label(account), severity: 'warn', title: '额度偏低',
+                                    detail: `${this.formatUsageWindowName(window)} 剩余 ${Math.round(remaining)}%，${this.formatUsageReset(window.resetAt)}`,
+                                    at: account.usage?.lastSuccessAt || ''
+                                });
+                            }
+                        }
+                    }
+                    const known = new Set(this.chatgptAccounts.map(item => item.id));
+                    for (const event of (Array.isArray(this.chatGPTAccountEvents) ? this.chatGPTAccountEvents : [])) {
+                        if (!event?.recovered || !Array.isArray(event.accountIds)) continue;
+                        const accountId = event.accountIds.find(id => known.has(id));
+                        if (!accountId) continue;
+                        const account = this.chatgptAccounts.find(item => item.id === accountId);
+                        items.push({
+                            // 事件 ID 在网关重启后会重新编号，加上时间与种类避免把新事件当成已读。
+                            key: `event|${accountId}|${event.kind}|${event.time || ''}|${event.id || ''}`,
+                            accountId, account: event.account || label(account), severity: 'good', title: this.runEventLabel(event),
+                            detail: [event.provider, event.detail].filter(Boolean).join(' · '), eventTime: event.time || ''
+                        });
+                    }
+                    const order = { danger: 0, warn: 1, good: 2 };
+                    return items.sort((a, b) => order[a.severity] - order[b.severity] || a.account.localeCompare(b.account) || a.key.localeCompare(b.key));
+                },
+
+                unreadChatGPTReminders() {
+                    const read = new Set(this.chatGPTReminderReadKeys);
+                    return this.chatGPTReminderItems().filter(item => !read.has(item.key));
+                },
+
+                markChatGPTRemindersRead(items) {
+                    const keys = (Array.isArray(items) ? items : [items]).map(item => item?.key).filter(Boolean);
+                    if (!keys.length) return;
+                    // 上限 200：优先保留仍然有效的已读项，旧条件的已读记录先被淘汰。
+                    const active = new Set(this.chatGPTReminderItems().map(item => item.key));
+                    const merged = [...this.chatGPTReminderReadKeys.filter(key => !keys.includes(key)), ...keys];
+                    const stale = merged.filter(key => !active.has(key));
+                    const live = merged.filter(key => active.has(key));
+                    this.chatGPTReminderReadKeys = [...stale, ...live].slice(-200);
+                    this.saveChatGPTReminderReads();
+                },
+
+                chatGPTReminderClass(item) {
+                    return {
+                        danger: 'bg-danger/10 text-danger',
+                        warn: 'bg-warn/10 text-amber-100',
+                        good: 'bg-good/10 text-good'
+                    }[item?.severity] || 'bg-white/[.06] text-muted';
+                },
+
+                chatGPTReminderTime(item) {
+                    if (item?.eventTime) return item.eventTime;
+                    return item?.at ? this.formatChatGPTDate(item.at) : '';
+                },
+
+                // 定位到账户行并展开详情；被当前筛选隐藏时只提示，不擅自清除用户的筛选条件。
+                async locateChatGPTReminder(item) {
+                    const account = this.chatgptAccounts.find(entry => entry.id === item?.accountId);
+                    if (!account) return;
+                    if (!this.chatGPTAccountMatchesFilter(account)) {
+                        this.showStatus(`账户 ${account.email || account.id} 被当前筛选隐藏，清除筛选后再定位`, 'error');
+                        return;
+                    }
+                    if (!this.isChatGPTAccountExpanded(account)) this.toggleChatGPTAccount(account);
+                    await this.$nextTick();
+                    const row = [...document.querySelectorAll('[data-chatgpt-account-row]')].find(el => el.dataset.chatgptAccountRow === account.id);
+                    const reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+                    row?.scrollIntoView({ behavior: reducedMotion ? 'auto' : 'smooth', block: 'center' });
+                    row?.focus({ preventScroll: true });
+                },

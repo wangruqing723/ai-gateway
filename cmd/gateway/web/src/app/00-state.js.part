@@ -28,6 +28,29 @@
                 providerProbeKeyId: '',
                 resettingProviderKey: '',
                 chatgptAccounts: [],
+                chatGPTAccountsETag: '',
+                chatGPTAccountFiltersOpen: false,
+                chatGPTAccountFilters: { authorization: '', enabled: '', invocation: '', binding: '', plan: '', tags: [] },
+                chatGPTAccountSort: 'identity',
+                chatGPTAccountSortDirection: 'asc',
+                chatGPTSelectedAccountIds: [],
+                changingChatGPTAccountState: '',
+                showChatGPTBatchDialog: false,
+                chatGPTBatchOperation: '',
+                chatGPTBatchAccountIds: [],
+                chatGPTBatchHiddenCount: 0,
+                chatGPTBatchAddTags: '',
+                chatGPTBatchRemoveTags: '',
+                chatGPTBatchRefreshMode: 'auto',
+                chatGPTBatchPlan: null,
+                chatGPTBatchPlanETag: '',
+                chatGPTBatchPlanInput: null,
+                chatGPTBatchResult: null,
+                chatGPTBatchError: '',
+                chatGPTBatchBusy: '',
+                _chatGPTBatchController: null,
+                _chatGPTBatchSequence: 0,
+                _chatGPTBatchOpener: null,
                 chatGPTNow: Date.now(),
                 _chatGPTExpiryTimer: null,
                 _providerKeyCountdownTimer: null,
@@ -36,6 +59,21 @@
                 refreshingChatGPTAccountId: '',
                 unbindingChatGPTProvider: '',
                 bindingChatGPTAccountId: '',
+                // 诊断只在用户启动时出网；请求、结果和消费确认均只属于这次浮层。
+                showChatGPTDiagnoseDialog: false,
+                chatGPTDiagnoseAccountId: '',
+                chatGPTDiagnoseChecks: { refresh: false, usage: false, inference: false },
+                chatGPTDiagnoseRefreshMode: 'auto',
+                chatGPTDiagnoseProvider: '',
+                chatGPTDiagnoseModel: '',
+                chatGPTDiagnoseConfirmed: false,
+                chatGPTDiagnoseReport: null,
+                chatGPTDiagnoseError: '',
+                chatGPTDiagnoseNotice: '',
+                diagnosingChatGPTAccount: false,
+                _chatGPTDiagnoseController: null,
+                _chatGPTDiagnoseSequence: 0,
+                _chatGPTDiagnoseOpener: null,
                 showChatGPTAccountBindDialog: false,
                 chatGPTAccountBindTargetId: '',
                 chatGPTAccountBindProvider: '',
@@ -45,10 +83,39 @@
                 chatGPTImportError: '',
                 chatGPTImportFile: null,
                 importingChatGPTAccounts: false,
+                // 导入预检流程：源只在本次弹窗内存中保留到应用结束；改动输入或关闭即清空。
+                chatGPTImportStage: '',
+                chatGPTImportSource: null,
+                chatGPTImportPlan: null,
+                chatGPTImportPlanETag: '',
+                chatGPTImportPlanActions: {},
                 chatGPTImportResult: null,
                 exportingChatGPTAccounts: false,
                 chatGPTExportFormat: 'cliproxyapi',
                 chatGPTExportAccountIds: [],
+                // 加密备份与恢复：密码、备份原文和预检凭证只在本次弹窗内存中保留；
+                // 关闭、切换页签、导出成功、恢复应用成功都会清空，绝不写入浏览器存储或 URL。
+                chatGPTBackupAccountIds: [],
+                chatGPTBackupPassword: '',
+                chatGPTBackupPasswordConfirm: '',
+                chatGPTBackupError: '',
+                chatGPTBackupNotice: '',
+                chatGPTBackupBusy: '',
+                chatGPTRestoreFileName: '',
+                chatGPTRestoreFileSize: 0,
+                chatGPTRestoreBackupText: '',
+                _chatGPTRestoreFileReadVersion: 0,
+                chatGPTRestorePassword: '',
+                chatGPTRestoreMetadata: 'keep',
+                chatGPTRestorePaused: false,
+                chatGPTRestorePlan: null,
+                chatGPTRestorePlanETag: '',
+                chatGPTRestorePlanActions: {},
+                chatGPTRestoreError: '',
+                chatGPTRestoreNotice: '',
+                chatGPTRestoreResult: null,
+                // 恢复结果交给配置迁移的账户映射预填值：只存 {源 ID: 目标 ID}，不含任何凭据。
+                chatGPTRestoreAccountMappings: {},
                 showChatGPTOAuthDialog: false,
                 chatGPTOAuthAuthURL: '',
                 chatGPTOAuthReturnURL: '',
@@ -160,6 +227,18 @@
                     },
                     providerHealth: {
                         checkIntervalSeconds: 0
+                    },
+                    chatgptAccountLimits: {
+                        maxConcurrent: null,
+                        maxPerSecond: 0,
+                        sharedCooldown: false
+                    },
+                    // 后台刷新默认全部关闭；周期留空（null）表示使用后端默认值。
+                    chatgptBackground: {
+                        tokenRefresh: false,
+                        usageRefresh: false,
+                        usageIntervalMinutes: null,
+                        activeWindowMinutes: null
                     }
                 },
                 health: null,
@@ -181,6 +260,18 @@
                 expandedLogId: null,
                 // ChatGPT 账户列表一次只展开一行详情（同请求日志），存账户 id，'' 表示都收起。
                 expandedChatGPTAccountId: '',
+                // 账户调用统计按账户 ID 缓存 { data, loading, error, loadedAt }，展开详情时读取。
+                chatGPTAccountMetrics: {},
+                _chatGPTMetricsSequence: {},
+                // 含账户维度的运行事件，供「需要关注」中的恢复提醒使用。
+                chatGPTAccountEvents: [],
+                // 正在解除冷却的账户 ID，防止重复提交。
+                clearingChatGPTCooldown: '',
+                // GET /api/chatgpt/background 的最近一次有效结果；读取失败或旧后端 404 时为 null，不显示状态行。
+                chatGPTBackgroundStatus: null,
+                _chatGPTBackgroundStatusSequence: 0,
+                // 已读提醒的「条件 + 证据时间」键，持久化在 localStorage，最多 200 项。
+                chatGPTReminderReadKeys: [],
                 chatGPTAccountMetadataDrafts: {},
                 savingChatGPTAccountMetadataId: '',
                 // 高级诊断筛选默认折叠：正常排查优先看请求最终结果；仅在定位
@@ -232,6 +323,9 @@
                 _configTransferSelectionInitialized: false,
                 configTransferImportConflicts: { providers: {}, routes: {} },
                 configTransferImportAccountMappings: {},
+                // 本次导入草稿中已按备份恢复结果预填过的源账户 ID；每个源 ID 只预填一次，
+                // 用户随后改成其他账户或清空都不会被再次覆盖。
+                configTransferPrefilledAccountIds: [],
                 configTransferNow: Date.now(),
                 _configTransferExpiryTimer: null,
                 _configTransferPreviewController: null,

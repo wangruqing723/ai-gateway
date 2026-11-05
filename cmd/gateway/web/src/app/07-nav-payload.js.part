@@ -3,6 +3,8 @@
                 // 此时不能再 pushState，否则后退会原地打转。
                 selectNav(tab, closeMobile = false, fromHistory = false) {
                     const changed = tab !== this.activeTab;
+                    if (changed && this.showChatGPTDiagnoseDialog) this.closeChatGPTDiagnoseDialog(false);
+                    if (changed && this.showChatGPTBatchDialog) this.closeChatGPTBatchDialog(false);
                     if (changed) {
                         // 快速切换时上一页可能还没恢复，不能把旧页的偏移覆盖它的快照。
                         if (!this._navScrollRestoreTab) {
@@ -145,7 +147,35 @@
                         // failover / breaker / providerHealth 必须带上：PUT 是全量替换，漏掉就会静默丢配置
                         failover: this.failoverPayload(),
                         breaker: this.breakerPayload(),
-                        providerHealth: this.providerHealthPayload()
+                        providerHealth: this.providerHealthPayload(),
+                        chatgptAccountLimits: this.chatGPTAccountLimitsPayload(),
+                        chatgptBackground: this.chatGPTBackgroundPayload()
+                    };
+                },
+
+                // 后台刷新：false 与留空的周期不下发，0 也不下发（后端按默认值处理）。
+                // 全部为默认时整块省略，等同未配置，旧后端也不会收到未知字段。
+                chatGPTBackgroundPayload() {
+                    const value = this.config.chatgptBackground || {};
+                    const payload = {};
+                    if (value.tokenRefresh === true) payload.tokenRefresh = true;
+                    if (value.usageRefresh === true) payload.usageRefresh = true;
+                    const usageIntervalMinutes = this.numOrNull(value.usageIntervalMinutes);
+                    if (usageIntervalMinutes) payload.usageIntervalMinutes = usageIntervalMinutes;
+                    const activeWindowMinutes = this.numOrNull(value.activeWindowMinutes);
+                    if (activeWindowMinutes) payload.activeWindowMinutes = activeWindowMinutes;
+                    return Object.keys(payload).length ? payload : undefined;
+                },
+
+                // 未配置的上限不下发：maxConcurrent 省略表示不限制，显式 0 会被后端拒绝。
+                chatGPTAccountLimitsPayload() {
+                    const limits = this.config.chatgptAccountLimits || {};
+                    const maxConcurrent = this.numOrNull(limits.maxConcurrent);
+                    const maxPerSecond = this.numOrNull(limits.maxPerSecond);
+                    return {
+                        maxConcurrent: maxConcurrent === null ? undefined : maxConcurrent,
+                        maxPerSecond: maxPerSecond || undefined,
+                        sharedCooldown: limits.sharedCooldown === true ? true : undefined
                     };
                 },
 

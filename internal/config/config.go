@@ -311,6 +311,10 @@ type Route struct {
 	// ExtraBody 覆盖该路由转发时合并进请求体的自定义字段，nil 表示不覆盖。
 	// 按键叠加，优先级 target > route > provider，语义见 Target.ExtraBody。
 	ExtraBody map[string]any `yaml:"extraBody,omitempty" json:"extraBody,omitempty"`
+	// QuotaAware 在既有策略之后按 ChatGPT OAuth 账户的内存用量快照稳定分层：
+	// 正常与未知在前，偏低其次，已耗尽最后；层内保持原策略顺序，不丢候选、不发网络请求。
+	// 只对多候选路由有效，默认 false。
+	QuotaAware bool `yaml:"quotaAware,omitempty" json:"quotaAware,omitempty"`
 }
 
 // IsEnabled 返回路由是否参与匹配。未配置时默认启用，false 时跳过该规则继续向下匹配。
@@ -513,6 +517,62 @@ type Metrics struct {
 	WindowMinutes int `yaml:"windowMinutes" json:"windowMinutes"`
 }
 
+// ChatGPTAccountLimits 是 ChatGPT OAuth 账户级共享约束。每个账户各建一个共享桶，
+// 同一账户绑定的全部 Provider 共用；未配置时完全不启用，请求路径与旧版本一致。
+// 直通模式跳过本地排队，因此并发与速率不生效；共享冷却仍然生效。
+type ChatGPTAccountLimits struct {
+	// MaxConcurrent 账户级最大并发。nil 表示不限制；显式值 1-100，写 0 报错。
+	MaxConcurrent *int `yaml:"maxConcurrent,omitempty" json:"maxConcurrent,omitempty"`
+	// MaxPerSecond 账户级每秒最多准入请求数，0 表示不限制，与 Provider 同名字段口径一致。
+	MaxPerSecond int `yaml:"maxPerSecond,omitempty" json:"maxPerSecond,omitempty"`
+	// SharedCooldown 显式开启账户级额度冷却：上游明确报告账户用量上限时，
+	// 冷却该账户绑定的全部 Provider，直到上游给出的重置时间。默认 false。
+	SharedCooldown bool `yaml:"sharedCooldown,omitempty" json:"sharedCooldown,omitempty"`
+}
+
+// ConcurrencyLimit 返回账户级并发上限，0 表示不限制。
+func (l ChatGPTAccountLimits) ConcurrencyLimit() int { return IntOr(l.MaxConcurrent, 0) }
+
+// Enabled 判断是否需要账户级联合准入。
+func (l ChatGPTAccountLimits) Enabled() bool { return l.ConcurrencyLimit() > 0 || l.MaxPerSecond > 0 }
+
+// ChatGPTBackground 后台令牌预刷新与用量刷新，默认全部关闭。
+// 只对活跃账户生效：本进程在 ActiveWindow 分钟内为它发起过真实上游调用（不含诊断），
+// 且未暂停、不需重新授权、有 refresh token。
+type ChatGPTBackground struct {
+	// TokenRefresh 对活跃账户在访问令牌到期前预刷新。
+	TokenRefresh bool `yaml:"tokenRefresh,omitempty" json:"tokenRefresh,omitempty"`
+	// UsageRefresh 对活跃账户按 UsageInterval 周期刷新用量。
+	UsageRefresh bool `yaml:"usageRefresh,omitempty" json:"usageRefresh,omitempty"`
+	// UsageIntervalMinutes 用量刷新周期（分钟）。nil 表示默认 30；显式值 30-1440，写 0 报错。
+	UsageIntervalMinutes *int `yaml:"usageIntervalMinutes,omitempty" json:"usageIntervalMinutes,omitempty"`
+	// ActiveWindowMinutes 活跃账户判定窗口（分钟）。nil 表示默认 60；显式值 5-1440，写 0 报错。
+	ActiveWindowMinutes *int `yaml:"activeWindowMinutes,omitempty" json:"activeWindowMinutes,omitempty"`
+}
+
+// 后台刷新周期的默认值与上下界（分钟），默认值只在这里定义。
+const (
+	defaultChatGPTUsageIntervalMinutes = 30
+	minChatGPTUsageIntervalMinutes     = 30
+	maxChatGPTUsageIntervalMinutes     = 1440
+	defaultChatGPTActiveWindowMinutes  = 60
+	minChatGPTActiveWindowMinutes      = 5
+	maxChatGPTActiveWindowMinutes      = 1440
+)
+
+// Enabled 判断是否开启了任一后台功能。
+func (b ChatGPTBackground) Enabled() bool { return b.TokenRefresh || b.UsageRefresh }
+
+// UsageInterval 返回用量刷新周期（分钟），未配置时为 30。
+func (b ChatGPTBackground) UsageInterval() int {
+	return IntOr(b.UsageIntervalMinutes, defaultChatGPTUsageIntervalMinutes)
+}
+
+// ActiveWindow 返回活跃账户判定窗口（分钟），未配置时为 60。
+func (b ChatGPTBackground) ActiveWindow() int {
+	return IntOr(b.ActiveWindowMinutes, defaultChatGPTActiveWindowMinutes)
+}
+
 // ProviderHealthConfig 配置 Provider 健康检测的后台周期。
 // 0 表示关闭周期检测，手动检测接口仍然可用。
 type ProviderHealthConfig struct {
@@ -532,6 +592,10 @@ type Config struct {
 	Failover              Failover             `yaml:"failover" json:"failover"`
 	Breaker               Breaker              `yaml:"breaker" json:"breaker"`
 	ProviderHealth        ProviderHealthConfig `yaml:"providerHealth" json:"providerHealth"`
+	// ChatGPTAccountLimits 账户级共享约束，见 ChatGPTAccountLimits。
+	ChatGPTAccountLimits ChatGPTAccountLimits `yaml:"chatgptAccountLimits,omitempty" json:"chatgptAccountLimits"`
+	// ChatGPTBackground 后台令牌预刷新与用量刷新，见 ChatGPTBackground。
+	ChatGPTBackground ChatGPTBackground `yaml:"chatgptBackground,omitempty" json:"chatgptBackground"`
 	// ContextSafetyMargin 是估算输入 token 时预留的安全余量，nil 时使用默认值。
 	ContextSafetyMargin *int   `yaml:"contextSafetyMargin,omitempty" json:"contextSafetyMargin,omitempty"`
 	Path                string `yaml:"-" json:"path,omitempty"`
@@ -1155,6 +1219,18 @@ func validate(c *Config) error {
 	if c.ContextSafetyMargin != nil && *c.ContextSafetyMargin < 0 {
 		return fmt.Errorf("contextSafetyMargin 应大于等于 0")
 	}
+	if limit := c.ChatGPTAccountLimits.MaxConcurrent; limit != nil && (*limit < 1 || *limit > 100) {
+		return fmt.Errorf("chatgptAccountLimits.maxConcurrent 应在 1-100 之间；不限制请删除该项")
+	}
+	if rate := c.ChatGPTAccountLimits.MaxPerSecond; rate < 0 || rate > 100 {
+		return fmt.Errorf("chatgptAccountLimits.maxPerSecond 应在 0-100 之间（0 表示不限制）")
+	}
+	if v := c.ChatGPTBackground.UsageIntervalMinutes; v != nil && (*v < minChatGPTUsageIntervalMinutes || *v > maxChatGPTUsageIntervalMinutes) {
+		return fmt.Errorf("chatgptBackground.usageIntervalMinutes 应在 %d-%d 之间；使用默认值请删除该项", minChatGPTUsageIntervalMinutes, maxChatGPTUsageIntervalMinutes)
+	}
+	if v := c.ChatGPTBackground.ActiveWindowMinutes; v != nil && (*v < minChatGPTActiveWindowMinutes || *v > maxChatGPTActiveWindowMinutes) {
+		return fmt.Errorf("chatgptBackground.activeWindowMinutes 应在 %d-%d 之间；使用默认值请删除该项", minChatGPTActiveWindowMinutes, maxChatGPTActiveWindowMinutes)
+	}
 	for name, p := range c.Providers {
 		if err := validateProvider(name, p, true); err != nil {
 			return err
@@ -1490,6 +1566,9 @@ func validateRoute(c *Config, r *Route) error {
 	if err := validateRouteStrategy(r); err != nil {
 		return err
 	}
+	if err := validateRouteQuotaAware(r); err != nil {
+		return err
+	}
 	if r.MaxTokens != nil && (*r.MaxTokens < 1 || *r.MaxTokens > MaxOutputTokensCeiling) {
 		return fmt.Errorf("route %q.maxTokens 应在 1-%d 之间", r.Match, MaxOutputTokensCeiling)
 	}
@@ -1628,6 +1707,14 @@ func validateRouteStrategy(r *Route) error {
 	if len(r.TargetList()) < 2 && r.Strategy != balancer.StrategyFailover {
 		return fmt.Errorf("route %q 只有一个候选，strategy: %s 不会生效；请配置 targets 或删掉 strategy",
 			r.Match, r.Strategy)
+	}
+	return nil
+}
+
+// validateRouteQuotaAware 与 strategy 同理：单候选上的 quotaAware 不会生效，直接报错不静默忽略。
+func validateRouteQuotaAware(r *Route) error {
+	if r.QuotaAware && len(r.TargetList()) < 2 {
+		return fmt.Errorf("route %q 只有一个候选，quotaAware 不会生效；请配置 targets 或删掉 quotaAware", r.Match)
 	}
 	return nil
 }

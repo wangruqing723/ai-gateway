@@ -474,3 +474,26 @@ func TestCollectorFutureTimestampDoesNotPoisonCurrentBucket(t *testing.T) {
 		t.Fatalf("future timestamp must not poison the current metric bucket: %#v", m)
 	}
 }
+
+func TestLatencyHistogramMatchesInternalBuckets(t *testing.T) {
+	var empty LatencyHistogram
+	if empty.Count() != 0 || empty.Percentile(95) != 0 {
+		t.Fatalf("空直方图 = count %d p95 %d", empty.Count(), empty.Percentile(95))
+	}
+	var first, second LatencyHistogram
+	for _, ms := range []int64{-5, 40, 90} {
+		first.Add(ms)
+	}
+	second.Add(1500)
+	first.Merge(second)
+	if first.Count() != 4 {
+		t.Fatalf("合并后样本数 = %d", first.Count())
+	}
+	// 分位数返回所在桶的上界：40→50、90→100、1500→2000，负值按 0 计。
+	if p50, p95 := first.Percentile(50), first.Percentile(95); p50 != 50 || p95 != 2000 {
+		t.Fatalf("p50=%d p95=%d", p50, p95)
+	}
+	if second.Count() != 1 {
+		t.Fatal("合并不应修改来源直方图")
+	}
+}

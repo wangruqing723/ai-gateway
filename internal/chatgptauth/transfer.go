@@ -3,6 +3,7 @@ package chatgptauth
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,11 +29,14 @@ var (
 
 // ImportResult 只包含公开账户视图和批次统计，不包含任何凭据。
 type ImportResult struct {
-	DetectedFormat    string        `json:"detectedFormat"`
-	Imported          int           `json:"imported"`
-	SkippedDuplicates int           `json:"skippedDuplicates"`
-	Accounts          []AccountView `json:"accounts"`
-	Warnings          []string      `json:"warnings,omitempty"`
+	DetectedFormat    string `json:"detectedFormat"`
+	Imported          int    `json:"imported"`
+	SkippedDuplicates int    `json:"skippedDuplicates"`
+	// Updated / SkippedInvalid 只由导入应用产生；旧原始导入恒为 0，省略后返回形状不变。
+	Updated        int           `json:"updated,omitempty"`
+	SkippedInvalid int           `json:"skippedInvalid,omitempty"`
+	Accounts       []AccountView `json:"accounts"`
+	Warnings       []string      `json:"warnings,omitempty"`
 }
 
 // ExportFile 是显式导出请求返回给管理界面的文件内容。
@@ -47,12 +51,14 @@ type importRecord struct {
 	AccessToken  string
 	RefreshToken string
 	AccountID    string
-	Email        string
-	Plan         string
-	ExpiresAt    time.Time
-	LastRefresh  time.Time
-	Source       string
-	Index        int
+	// ClaimAccountID 是令牌声明中的账户 ID；显式字段存在时 AccountID 取显式值。
+	ClaimAccountID string
+	Email          string
+	Plan           string
+	ExpiresAt      time.Time
+	LastRefresh    time.Time
+	Source         string
+	Index          int
 }
 
 // transferAccountSnapshot 只复制导入导出所需字段，避免复制含互斥锁的 account。
@@ -77,9 +83,9 @@ func (m *Manager) Import(data []byte, archive bool) (ImportResult, error) {
 	var records []importRecord
 	var err error
 	if archive {
-		records, err = parseImportArchive(data)
+		records, err = parseImportArchive(data, m.now())
 	} else {
-		records, err = parseImportDocument(data)
+		records, err = parseImportDocument(data, m.now())
 	}
 	if err != nil {
 		return ImportResult{}, err
@@ -92,8 +98,11 @@ func (m *Manager) Import(data []byte, archive bool) (ImportResult, error) {
 	}
 	format := detectedImportFormat(records)
 
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	unlock, err := m.lockForWrite(context.Background())
+	if err != nil {
+		return ImportResult{}, fmt.Errorf("%w: %v", ErrAccountImportPersist, err)
+	}
+	defer unlock()
 
 	result := ImportResult{
 		DetectedFormat: format,
@@ -109,28 +118,9 @@ func (m *Manager) Import(data []byte, archive bool) (ImportResult, error) {
 			continue
 		}
 		seen[record.AccountID] = struct{}{}
-		id, err := randomHex(16)
+		item, err := newImportedAccount(record, m.now().UTC())
 		if err != nil {
-			return ImportResult{}, fmt.Errorf("%w: 无法生成本地账户 ID", ErrAccountImportPersist)
-		}
-		now := time.Now().UTC()
-		lastRefresh := record.LastRefresh
-		if lastRefresh.IsZero() {
-			lastRefresh = now
-		}
-		authorizedAt := now
-		item := &account{
-			ID:           "acc_" + id,
-			Email:        record.Email,
-			Plan:         record.Plan,
-			AccountID:    record.AccountID,
-			IDToken:      record.IDToken,
-			AccessToken:  record.AccessToken,
-			RefreshToken: record.RefreshToken,
-			ExpiresAt:    record.ExpiresAt,
-			LastRefresh:  lastRefresh,
-			AuthorizedAt: &authorizedAt,
-			NeedsReauth:  false,
+			return ImportResult{}, err
 		}
 		if record.RefreshToken == "" {
 			result.Warnings = append(result.Warnings, fmt.Sprintf("第 %d 条账户没有 refresh_token，到期后需要重新授权", record.Index))
@@ -150,8 +140,9 @@ func (m *Manager) Import(data []byte, archive bool) (ImportResult, error) {
 		}
 		return ImportResult{}, fmt.Errorf("%w: %v", ErrAccountImportPersist, err)
 	}
+	m.bumpVersionLocked()
 	for _, item := range newAccounts {
-		result.Accounts = append(result.Accounts, viewOf(item))
+		result.Accounts = append(result.Accounts, m.viewOf(item))
 	}
 	result.Imported = len(newAccounts)
 	return result, nil
@@ -166,63 +157,78 @@ func (m *Manager) hasAccountIDLocked(accountID string) bool {
 	return false
 }
 
-func parseImportArchive(data []byte) ([]importRecord, error) {
-	reader, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
-	if err != nil {
-		return nil, fmt.Errorf("%w: ZIP 文件无法读取", ErrInvalidImport)
-	}
-	if len(reader.File) > maxArchiveEntries {
-		return nil, ErrImportTooLarge
-	}
+func parseImportArchive(data []byte, now time.Time) ([]importRecord, error) {
 	var all []importRecord
-	var total int64
-	jsonFiles := 0
-	for _, file := range reader.File {
-		if !safeArchiveName(file.Name) {
-			return nil, fmt.Errorf("%w: ZIP 包含不安全路径", ErrInvalidImport)
-		}
-		if file.FileInfo().IsDir() {
-			continue
-		}
-		if !file.Mode().IsRegular() || !strings.EqualFold(path.Ext(file.Name), ".json") {
-			return nil, fmt.Errorf("%w: ZIP 只能包含 JSON 文件", ErrInvalidImport)
-		}
-		jsonFiles++
-		if jsonFiles > maxAccountTransferCount || file.UncompressedSize64 > maxAccountTransferItem {
-			return nil, ErrImportTooLarge
-		}
-		total += int64(file.UncompressedSize64)
-		if total > maxAccountTransferBytes {
-			return nil, ErrImportTooLarge
-		}
-		entry, err := file.Open()
+	err := walkImportArchive(data, func(content []byte) error {
+		records, err := parseImportDocument(content, now)
 		if err != nil {
-			return nil, fmt.Errorf("%w: ZIP 中 JSON 文件无法读取", ErrInvalidImport)
-		}
-		content, readErr := io.ReadAll(io.LimitReader(entry, maxAccountTransferItem+1))
-		closeErr := entry.Close()
-		if readErr != nil || closeErr != nil {
-			return nil, fmt.Errorf("%w: ZIP 中 JSON 文件无法读取", ErrInvalidImport)
-		}
-		if len(content) > maxAccountTransferItem {
-			return nil, ErrImportTooLarge
-		}
-		records, err := parseImportDocument(content)
-		if err != nil {
-			return nil, err
+			return err
 		}
 		for i := range records {
 			records[i].Index = len(all) + i + 1
 		}
 		all = append(all, records...)
 		if len(all) > maxAccountTransferCount {
-			return nil, ErrImportTooLarge
+			return ErrImportTooLarge
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return all, nil
+}
+
+// walkImportArchive 按 ZIP 条目顺序校验路径、类型和大小，并把每个 JSON 文件内容交给 visit。
+// 旧导入与导入计划共用这套结构限制；visit 返回错误时立即停止。
+func walkImportArchive(data []byte, visit func(content []byte) error) error {
+	reader, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		return fmt.Errorf("%w: ZIP 文件无法读取", ErrInvalidImport)
+	}
+	if len(reader.File) > maxArchiveEntries {
+		return ErrImportTooLarge
+	}
+	var total int64
+	jsonFiles := 0
+	for _, file := range reader.File {
+		if !safeArchiveName(file.Name) {
+			return fmt.Errorf("%w: ZIP 包含不安全路径", ErrInvalidImport)
+		}
+		if file.FileInfo().IsDir() {
+			continue
+		}
+		if !file.Mode().IsRegular() || !strings.EqualFold(path.Ext(file.Name), ".json") {
+			return fmt.Errorf("%w: ZIP 只能包含 JSON 文件", ErrInvalidImport)
+		}
+		jsonFiles++
+		if jsonFiles > maxAccountTransferCount || file.UncompressedSize64 > maxAccountTransferItem {
+			return ErrImportTooLarge
+		}
+		total += int64(file.UncompressedSize64)
+		if total > maxAccountTransferBytes {
+			return ErrImportTooLarge
+		}
+		entry, err := file.Open()
+		if err != nil {
+			return fmt.Errorf("%w: ZIP 中 JSON 文件无法读取", ErrInvalidImport)
+		}
+		content, readErr := io.ReadAll(io.LimitReader(entry, maxAccountTransferItem+1))
+		closeErr := entry.Close()
+		if readErr != nil || closeErr != nil {
+			return fmt.Errorf("%w: ZIP 中 JSON 文件无法读取", ErrInvalidImport)
+		}
+		if len(content) > maxAccountTransferItem {
+			return ErrImportTooLarge
+		}
+		if err := visit(content); err != nil {
+			return err
 		}
 	}
 	if jsonFiles == 0 {
-		return nil, fmt.Errorf("%w: ZIP 中没有 JSON 文件", ErrInvalidImport)
+		return fmt.Errorf("%w: ZIP 中没有 JSON 文件", ErrInvalidImport)
 	}
-	return all, nil
+	return nil
 }
 
 func safeArchiveName(name string) bool {
@@ -241,11 +247,20 @@ func safeArchiveName(name string) bool {
 	return true
 }
 
-func parseImportDocument(data []byte) ([]importRecord, error) {
-	if len(data) == 0 || len(data) > maxAccountTransferBytes {
-		if len(data) > maxAccountTransferBytes {
-			return nil, ErrImportTooLarge
-		}
+func parseImportDocument(data []byte, now time.Time) ([]importRecord, error) {
+	value, err := decodeImportDocument(data)
+	if err != nil {
+		return nil, err
+	}
+	return parseImportValue(value, "", 0, now)
+}
+
+// decodeImportDocument 把单个 JSON 文档解码成通用值，数字保留为 json.Number。
+func decodeImportDocument(data []byte) (any, error) {
+	if len(data) > maxAccountTransferBytes {
+		return nil, ErrImportTooLarge
+	}
+	if len(data) == 0 {
 		return nil, fmt.Errorf("%w: 文件为空", ErrInvalidImport)
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
@@ -258,10 +273,10 @@ func parseImportDocument(data []byte) ([]importRecord, error) {
 	if err := decoder.Decode(&extra); err != io.EOF {
 		return nil, fmt.Errorf("%w: JSON 文件只能包含一个值", ErrInvalidImport)
 	}
-	return parseImportValue(value, "", 0)
+	return value, nil
 }
 
-func parseImportValue(value any, sourceHint string, indexOffset int) ([]importRecord, error) {
+func parseImportValue(value any, sourceHint string, indexOffset int, now time.Time) ([]importRecord, error) {
 	switch typed := value.(type) {
 	case []any:
 		if len(typed) == 0 {
@@ -272,7 +287,7 @@ func parseImportValue(value any, sourceHint string, indexOffset int) ([]importRe
 		}
 		out := make([]importRecord, 0, len(typed))
 		for i, item := range typed {
-			records, err := parseImportValue(item, sourceHint, indexOffset+i)
+			records, err := parseImportValue(item, sourceHint, indexOffset+i, now)
 			if err != nil {
 				return nil, err
 			}
@@ -288,12 +303,12 @@ func parseImportValue(value any, sourceHint string, indexOffset int) ([]importRe
 			if !ok || len(accounts) == 0 {
 				return nil, fmt.Errorf("%w: sub2api accounts 必须是非空数组", ErrInvalidImport)
 			}
-			return parseImportValue(accounts, "sub2api", indexOffset)
+			return parseImportValue(accounts, "sub2api", indexOffset, now)
 		}
 		if accounts, ok := typed["accounts"].([]any); ok {
-			return parseImportValue(accounts, "sub2api", indexOffset)
+			return parseImportValue(accounts, "sub2api", indexOffset, now)
 		}
-		record, err := parseImportObject(typed, sourceHint, indexOffset+1)
+		record, err := parseImportObject(typed, sourceHint, indexOffset+1, now)
 		if err != nil {
 			return nil, err
 		}
@@ -303,7 +318,7 @@ func parseImportValue(value any, sourceHint string, indexOffset int) ([]importRe
 	}
 }
 
-func parseImportObject(object map[string]any, sourceHint string, index int) (importRecord, error) {
+func parseImportObject(object map[string]any, sourceHint string, index int, now time.Time) (importRecord, error) {
 	if credentials, ok := object["credentials"].(map[string]any); ok {
 		object = mergeMaps(object, credentials)
 		delete(object, "credentials")
@@ -342,10 +357,13 @@ func parseImportObject(object map[string]any, sourceHint string, index int) (imp
 	refreshToken := strings.TrimSpace(firstString(object["refresh_token"], object["refreshToken"]))
 	idToken := strings.TrimSpace(firstString(object["id_token"], object["idToken"]))
 	claims := tokenClaims(idToken, accessToken)
-	accountID := strings.TrimSpace(firstString(
-		object["account_id"], object["chatgpt_account_id"], object["chatgptAccountId"], object["accountId"],
-		claims.Auth["chatgpt_account_id"], claims.Auth["account_id"], claims.Root["chatgpt_account_id"], claims.Root["account_id"],
-	))
+	// 显式字段与令牌声明分开取：两者都存在但不一致时，导入计划据此阻止凭据更新。
+	explicitAccountID := strings.TrimSpace(firstString(object["account_id"], object["chatgpt_account_id"], object["chatgptAccountId"], object["accountId"]))
+	claimAccountID := strings.TrimSpace(firstString(claims.Auth["chatgpt_account_id"], claims.Auth["account_id"], claims.Root["chatgpt_account_id"], claims.Root["account_id"]))
+	accountID := explicitAccountID
+	if accountID == "" {
+		accountID = claimAccountID
+	}
 	email := strings.TrimSpace(firstString(object["email"], object["account_email"], object["accountEmail"], object["name"], claims.Root["email"], claims.Auth["email"]))
 	plan := strings.TrimSpace(firstString(object["plan_type"], object["planType"], object["plan"], claims.Auth["chatgpt_plan_type"], claims.Auth["plan_type"]))
 	expiresAt := claimTime(firstValue(object, "expires_at", "expiresAt", "expired", "expires"))
@@ -360,12 +378,12 @@ func parseImportObject(object map[string]any, sourceHint string, index int) (imp
 	if accountID == "" {
 		return importRecord{}, importFieldError(index, "无法解析 ChatGPT account_id")
 	}
-	if refreshToken == "" && (expiresAt.IsZero() || !expiresAt.After(time.Now())) {
+	if refreshToken == "" && (expiresAt.IsZero() || !expiresAt.After(now)) {
 		return importRecord{}, importFieldError(index, "缺少 refresh_token，且 access token 没有未来的到期时间")
 	}
 	return importRecord{
 		IDToken: idToken, AccessToken: accessToken, RefreshToken: refreshToken,
-		AccountID: accountID, Email: email, Plan: plan, ExpiresAt: expiresAt,
+		AccountID: accountID, ClaimAccountID: claimAccountID, Email: email, Plan: plan, ExpiresAt: expiresAt,
 		LastRefresh: lastRefresh, Source: format, Index: index,
 	}, nil
 }
