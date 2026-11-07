@@ -261,36 +261,33 @@
                     this.routeForm.targets[ti].extraBody.splice(index, 1);
                 },
 
-                // 用已落盘 provider 配置里的 apiKey 拉上游 /v1/models。
-                // 结果按 provider 的 baseUrl+format 做指纹缓存到 localStorage，TTL 1 天：
-                // 同一上游反复查不重复打上游；改了 baseUrl/format 自动换 key 失效。
-                //
-                // 只负责「按 provider 名拿模型列表」，loading 态与结果落点交给调用方——
-                // 路由列表就地编辑与编辑抽屉两处共用它，缓存与错误口径因此只有一份。
-                // 返回 { models, message }：models 为 null 表示失败；message 是给下拉里显示的说明
-                // （失败原因、空列表、OAuth 没有模型目录）。不弹 toast：下拉一聚焦就会自动查询，
-                // 每失败一次弹一条 20 秒的报错只会刷屏，原因写在下拉里更贴近操作位置。
-                async fetchModelsFor(providerName) {
+                // 已保存 Provider 的统一目录入口；普通目录保留一天浏览器缓存，OAuth 只用服务端身份缓存。
+                // 失败只给固定安全提示，保持手填值；显式刷新携带 revision，不查询草稿。
+                async fetchModelsFor(providerName, refresh = false, signal) {
                     const provider = this.config.providers?.[providerName];
                     if (!provider) return { models: null, message: '找不到这个 Provider，请先保存配置' };
-                    if (provider.authType === 'chatgptOAuth') {
-                        return { models: [], message: 'ChatGPT OAuth 不提供模型目录，请直接输入模型名' };
-                    }
-                    const empty = '上游返回了空的模型列表，可直接输入模型名';
-
+                    const identity = JSON.stringify([this.revision, provider]);
+                    const oauth = provider.authType === 'chatgptOAuth';
                     const cacheKey = 'gw.models|' + [providerName, provider.baseUrl, provider.format].join('|');
-                    const cached = this.readModelCache(cacheKey);
-                    if (cached) return { models: cached, message: cached.length ? '' : empty };
-
+                    const empty = '上游返回了空的模型列表，可直接输入模型名';
+                    if (!oauth && !refresh) {
+                        const cached = this.readModelCache(cacheKey);
+                        if (cached) return { models: cached, message: '浏览器缓存（有效期 1 天） · ' + (cached.length ? '可明确刷新远端模型' : empty) };
+                    }
                     try {
-                        const res = await fetch(`/api/providers/models?provider=${encodeURIComponent(providerName)}`);
-                        if (!res.ok) throw new Error(await this.errorText(res, '上游查询失败'));
+                        if (refresh && this.isDirty()) return { models: null, message: '请先保存配置，再刷新已保存提供商的目录；手填值保留' };
+                        const res = await fetch(refresh ? '/api/providers/models/refresh' : `/api/providers/models?provider=${encodeURIComponent(providerName)}`,
+                            refresh ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ provider: providerName, revision: this.revision }), signal } : { signal, cache: 'no-store' });
+                        if (!res.ok) return { models: null, message: `模型目录查询失败（HTTP ${res.status}），可继续手动填写` };
                         const data = await res.json();
+                        if (signal?.aborted || identity !== JSON.stringify([this.revision, this.config.providers?.[providerName]])) return { models: null, message: '提供商身份已变化，请重新查询；手填值保留' };
                         const models = Array.isArray(data.models) ? data.models : [];
-                        this.writeModelCache(cacheKey, models);
-                        return { models, message: models.length ? '' : empty };
-                    } catch (err) {
-                        return { models: null, message: '查询模型列表失败：' + err.message + '。可直接输入模型名' };
+                        if (!oauth) this.writeModelCache(cacheKey, models);
+                        const when = data.queriedAt ? this.providerBalanceTime(data.queriedAt) : '查询时间未知';
+                        const source = data.source === 'chatgpt-codex' ? '绑定账户远端目录' : '上游模型目录';
+                        return { models, message: [source, when, data.stale ? '旧目录，刷新未成功' : data.cached ? '服务端缓存' : '已查询', data.message || '', models.length ? '' : empty].filter(Boolean).join(' · ') };
+                    } catch {
+                        return { models: null, message: signal?.aborted ? '已取消目录等待；已发生的令牌轮换仍会安全保存，可手动填写' : '模型目录暂不可用，可继续手动填写' };
                     }
                 },
 
@@ -327,9 +324,10 @@
                     return this.modelOptions(this.modelPicker.models, value, this.modelPicker.typed);
                 },
 
-                async openModelPicker(key, provider, value) {
+                async openModelPicker(key, provider, value, refresh = false) {
                     const current = this.modelPicker;
                     if (current.key !== key || current.provider !== provider) {
+                        this._modelPickerController?.abort();
                         this.modelPicker = { key, provider, models: [], loading: false, message: '', open: true, active: -1, typed: false, token: current.token + 1 };
                     } else {
                         current.open = true;
@@ -339,14 +337,17 @@
                         picker.message = '请先选择 Provider';
                         return;
                     }
-                    if (!picker.models.length && !picker.loading) {
+                    if ((!picker.models.length || refresh) && !picker.loading) {
+                        this._modelPickerController?.abort();
+                        const controller = new AbortController();
+                        this._modelPickerController = controller;
                         const token = picker.token;
                         picker.loading = true;
                         picker.message = '';
                         try {
-                            const { models, message } = await this.fetchModelsFor(provider);
-                            if (this.modelPicker.token !== token) return;
-                            this.modelPicker.models = models || [];
+                            const { models, message } = await this.fetchModelsFor(provider, refresh, controller.signal);
+                            if (controller.signal.aborted || this.modelPicker.token !== token) return;
+                            if (models !== null) this.modelPicker.models = models;
                             this.modelPicker.message = message;
                         } finally {
                             if (this.modelPicker.token === token) this.modelPicker.loading = false;
@@ -369,12 +370,16 @@
                 },
 
                 closeModelPicker() {
+                    this._modelPickerController?.abort();
+                    this.modelPicker.token++;
+                    this.modelPicker.loading = false;
                     this.modelPicker.open = false;
                     this.modelPicker.active = -1;
                 },
 
                 // Provider 换了，已拉的列表就作废：列表是上一个上游的，留着只会让人选错模型。
                 resetModelPicker() {
+                    this._modelPickerController?.abort();
                     this.modelPicker = { key: '', provider: '', models: [], loading: false, message: '', open: false, active: -1, typed: false, token: this.modelPicker.token + 1 };
                 },
 
@@ -646,6 +651,7 @@
                 },
 
                 beginInlineEdit(routeIndex, targetIndex, value, provider = '') {
+                    this._inlineModelController?.abort();
                     this.inlineModel = {
                         routeIndex,
                         targetIndex,
@@ -686,6 +692,7 @@
                 },
 
                 cancelInlineModel() {
+                    this._inlineModelController?.abort();
                     this.inlineModel = {
                         routeIndex: -1, targetIndex: -1, value: '', provider: '',
                         models: [], modelsLoading: false, message: '',
@@ -783,17 +790,20 @@
                 },
 
                 // 复用 fetchModelsFor：缓存与错误口径只有一份，这里只管 loading 态与结果落点。
-                async loadInlineModels() {
+                async loadInlineModels(refresh = false) {
+                    this._inlineModelController?.abort();
+                    const controller = new AbortController();
+                    this._inlineModelController = controller;
                     const provider = this.inlineModelProvider();
                     if (!provider) return;
                     const token = this.inlineModel.token;
                     this.inlineModel.modelsLoading = true;
                     this.inlineModel.message = '';
                     try {
-                        const { models, message } = await this.fetchModelsFor(provider);
-                        // 查询期间可能已经关掉或换去编辑别的格子，回来的结果就不该再落进去
-                        if (this.inlineModel.token !== token) return;
-                        this.inlineModel.models = models || [];
+                        const { models, message } = await this.fetchModelsFor(provider, refresh, controller.signal);
+                        // 取消、换格或换身份后丢弃迟到结果，不能覆盖新输入。
+                        if (controller.signal.aborted || this.inlineModel.token !== token) return;
+                        if (models !== null) this.inlineModel.models = models;
                         this.inlineModel.message = message;
                         this.positionInlineList();
                     } finally {

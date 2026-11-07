@@ -1,3 +1,13 @@
+                providerBalances: {},
+                providerBalanceResults: {},
+                providerBalancesSupported: true,
+                refreshingProviderBalances: [],
+                _providerBalancesSequence: 0,
+                _providerBalancesController: null,
+                _providerBalancesReadController: null,
+                providerBalanceOpen: false,
+                _modelPickerController: null,
+                _inlineModelController: null,
                 activeTab: 'monitor',
                 // 页签滚动快照只留在内存；恢复期间不把共享容器的过渡位置记给下一页。
                 _navScrollPositions: {},
@@ -384,7 +394,9 @@
                     // enabled 默认 true：新增 provider 默认启用；editProvider 回填既有值。
                     enabled: true,
                     apiKeyConfigured: false,
-                    clearApiKey: false
+                    clearApiKey: false,
+                    balance: { type: '', source: 'auto', baseUrl: '', accessToken: '', accessTokenConfigured: false, clearAccessToken: false, userId: '', apiKeyId: '', quotaPerUnit: '', refreshIntervalMinutes: 0 },
+                    modelCatalog: { clientVersion: '' }
                 },
                 showRouteModal: false,
                 editingRouteIndex: -1,

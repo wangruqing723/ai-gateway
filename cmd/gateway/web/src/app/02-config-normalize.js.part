@@ -26,6 +26,8 @@
                             format: pick(p, 'format', 'Format') || 'anthropic',
                             authType: pick(p, 'authType', 'AuthType') || '',
                             accountId: pick(p, 'accountId', 'AccountID') || '',
+                            balance: this.normalizeProviderBalance(pick(p, 'balance', 'Balance')),
+                            modelCatalog: pick(p, 'modelCatalog', 'ModelCatalog') ? { clientVersion: pick(p, 'modelCatalog', 'ModelCatalog').clientVersion || '0.167.0' } : undefined,
                             maxConcurrent: pick(p, 'maxConcurrent', 'MaxConcurrent') || 5,
                             maxPerSecond: pick(p, 'maxPerSecond', 'MaxPerSecond') || 0,
                             maxQueueWait: pick(p, 'maxQueueWait', 'MaxQueueWait') || 30000,

@@ -1462,6 +1462,7 @@ func TestFrontendSentinelLiteralsMatchBackend(t *testing.T) {
 
 	sentinels := map[string]string{
 		"config.APIKeyKeepSentinel":        config.APIKeyKeepSentinel,
+		"config.BalanceTokenKeepSentinel":  config.BalanceTokenKeepSentinel,
 		"config.ProxyPasswordKeepSentinel": config.ProxyPasswordKeepSentinel,
 	}
 

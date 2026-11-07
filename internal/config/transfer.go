@@ -86,13 +86,14 @@ type TransferRouteIdentity struct {
 }
 
 type TransferProviderEntry struct {
-	Name             string `json:"name"`
-	KeyCount         int    `json:"keyCount"`
-	APIKeyConfigured bool   `json:"apiKeyConfigured"`
-	SourceAccountID  string `json:"sourceAccountId,omitempty"`
-	RouteIndexes     []int  `json:"routeIndexes"`
-	Selected         bool   `json:"selected"`
-	Conflict         bool   `json:"conflict"`
+	BalanceTokenConfigured bool   `json:"balanceTokenConfigured"`
+	Name                   string `json:"name"`
+	KeyCount               int    `json:"keyCount"`
+	APIKeyConfigured       bool   `json:"apiKeyConfigured"`
+	SourceAccountID        string `json:"sourceAccountId,omitempty"`
+	RouteIndexes           []int  `json:"routeIndexes"`
+	Selected               bool   `json:"selected"`
+	Conflict               bool   `json:"conflict"`
 }
 
 type TransferRouteEntry struct {
@@ -280,7 +281,7 @@ func PlanTransfer(current *Config, content []byte, options TransferOptions, acco
 	accountSet := make(map[string]bool)
 	for _, name := range transferProviderNames(source.Providers) {
 		provider := source.Providers[name]
-		entry := TransferProviderEntry{Name: name, KeyCount: transferKeyCount(provider), APIKeyConfigured: provider.APIKey != "", SourceAccountID: provider.AccountID, RouteIndexes: []int{}, Selected: selectedProviders[name], Conflict: current.Providers[name] != nil}
+		entry := TransferProviderEntry{Name: name, KeyCount: transferKeyCount(provider), APIKeyConfigured: provider.APIKey != "", BalanceTokenConfigured: provider.Balance != nil && provider.Balance.AccessToken != "", SourceAccountID: provider.AccountID, RouteIndexes: []int{}, Selected: selectedProviders[name], Conflict: current.Providers[name] != nil}
 		for index, route := range source.Routes {
 			if transferReferences(route, name) {
 				entry.RouteIndexes = append(entry.RouteIndexes, index)
@@ -582,6 +583,9 @@ func strictTransferDecode(content []byte, target any) error {
 }
 
 func transferContainsSentinel(provider *Provider) bool {
+	if provider.Balance != nil && provider.Balance.AccessToken == BalanceTokenKeepSentinel {
+		return true
+	}
 	if provider.APIKey == APIKeyKeepSentinel {
 		return true
 	}

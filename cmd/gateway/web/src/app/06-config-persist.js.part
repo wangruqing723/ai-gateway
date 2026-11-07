@@ -116,6 +116,7 @@
                 openProviderDrawer() {
                     this._drawerOpener = document.activeElement;
                     this.providerAdvancedOpen = this.providerAdvancedCount() > 0;
+                    this.providerBalanceOpen = !!this.providerForm.balance?.type;
                     this._providerFormBaseline = this.providerFormFingerprint();
                     this.showProviderModal = true;
                     this.focusDrawerField('providerDrawer');

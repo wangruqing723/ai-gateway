@@ -1,9 +1,20 @@
                 applyServerConfig() {
                     if (!this._serverConfigData) return;
+                    this._providerBalancesSequence++;
+                    this._providerBalancesReadController?.abort();
+                    this._providerBalancesReadController = null;
+                    this._providerBalancesController?.abort();
+                    this._modelPickerController?.abort();
+                    this._inlineModelController?.abort();
+                    this.resetModelPicker();
+                    this.cancelInlineModel();
+                    this.providerBalances = {};
+                    this.providerBalanceResults = {};
                     this.config = this.normalizeConfig(this._serverConfigData);
                     this.configPath = this.config.path || '未知';
                     this.ensureConfigShape();
                     this.originalConfig = JSON.stringify(this.configPayload());
+                    if (this.activeTab === 'providers') void this.loadProviderBalances();
                 },
 
                 async loadConfig() {

@@ -226,8 +226,9 @@
                     if (!provider) return '不存在';
                     if (provider.authType === 'chatgptOAuth' || provider.accountId) return 'OAuth 账户凭据';
                     const count = this.configTransferProviderKeyCount(provider);
-                    if (Array.isArray(provider.apiKeys) && provider.apiKeys.length) return `列表密钥 ${count} 个`;
-                    return count === 0 ? '无密钥' : '单值密钥已配置';
+                    const balance = provider.balance?.accessTokenConfigured || provider.balance?.accessToken ? ' · 独立余额查询令牌 1 个已配置' : '';
+                    if (Array.isArray(provider.apiKeys) && provider.apiKeys.length) return `列表密钥 ${count} 个${balance}`;
+                    return (count === 0 ? '无密钥' : '单值密钥已配置') + balance;
                 },
 
                 configTransferRouteDependencies(route) {
@@ -327,7 +328,7 @@
                     }
                     // 每次导出都单独确认：明文文件一旦落盘就脱离页面控制。
                     const ok = await this.askConfirm(
-                        '导出文件包含真实 API Key、列表密钥、代理密码和自定义请求头／请求体等敏感配置。请只在可信本机使用，并妥善保管下载文件。',
+                        '导出文件包含真实 API Key、列表密钥、独立余额查询令牌、代理密码和自定义请求头／请求体等敏感配置。请只在可信本机使用，并妥善保管下载文件。',
                         { title: '导出含凭据的配置', confirmText: '确认导出' }
                     );
                     if (!ok || !(await this.guardConfigTransferDraft())) return;
@@ -484,6 +485,7 @@
                     if (count > 0) parts.push(`密钥 ${count} 个`);
                     else if (provider?.apiKeyConfigured) parts.push('单值密钥已配置');
                     else parts.push('无密钥');
+                    if (provider?.balanceTokenConfigured) parts.push('独立余额查询令牌 1 个已配置');
                     if (provider?.sourceAccountId) parts.push(`OAuth 账户 ${provider.sourceAccountId}`);
                     return parts.join(' · ');
                 },

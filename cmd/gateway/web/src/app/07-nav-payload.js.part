@@ -95,6 +95,8 @@
                             format: provider.format || 'anthropic',
                             authType: provider.authType || undefined,
                             accountId: provider.accountId || undefined,
+                            balance: this.providerBalancePayload(provider.balance),
+                            modelCatalog: provider.authType === 'chatgptOAuth' && provider.modelCatalog ? { clientVersion: provider.modelCatalog.clientVersion || '0.167.0' } : undefined,
                             maxConcurrent: provider.maxConcurrent || 5,
                             maxPerSecond: provider.maxPerSecond || 0,
                             maxQueueWait: provider.maxQueueWait || 30000,

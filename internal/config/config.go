@@ -25,6 +25,8 @@ import (
 const (
 	// APIKeyKeepSentinel 是管理 API 用于表示“保留已有密钥”的精确占位符。
 	APIKeyKeepSentinel = "__AI_GATEWAY_KEEP_API_KEY__"
+	// BalanceTokenKeepSentinel 表示普通保存时保留已有的独立余额查询令牌。
+	BalanceTokenKeepSentinel = "__AI_GATEWAY_KEEP_BALANCE_TOKEN__"
 	// ProxyPasswordKeepSentinel 是管理 API 用于表示“保留已有代理密码”的精确占位符。
 	ProxyPasswordKeepSentinel = "__AI_GATEWAY_KEEP_PROXY_PASSWORD__"
 
@@ -191,19 +193,21 @@ type KeyCooldown struct {
 
 // Provider 上游 provider 定义
 type Provider struct {
-	Name          string        `yaml:"-" json:"name,omitempty"` // 运行时填充（map 的 key）
-	BaseURL       string        `yaml:"baseUrl" json:"baseUrl"`  // 上游地址
-	APIKey        string        `yaml:"apiKey" json:"apiKey"`    // 密钥，留空则从客户端请求头提取
-	APIKeys       []ProviderKey `yaml:"apiKeys,omitempty" json:"apiKeys,omitempty"`
-	KeyCooldown   *KeyCooldown  `yaml:"keyCooldown,omitempty" json:"keyCooldown,omitempty"`
-	Format        string        `yaml:"format" json:"format"`                           // anthropic | openai | openai-responses
-	AuthType      string        `yaml:"authType,omitempty" json:"authType,omitempty"`   // 空值使用 API Key；chatgptOAuth 使用 ChatGPT OAuth 账户
-	AccountID     string        `yaml:"accountId,omitempty" json:"accountId,omitempty"` // chatgptOAuth 账户管理器中的 ID
-	UserAgent     string        `yaml:"userAgent,omitempty" json:"userAgent,omitempty"` // 上游请求 UA，留空则转发客户端值；两处 omitempty 见 validate 注释
-	Proxy         string        `yaml:"proxy,omitempty" json:"proxy,omitempty"`         // 上游代理，留空继承全局代理；两处 omitempty 理由同 userAgent
-	MaxConcurrent int           `yaml:"maxConcurrent" json:"maxConcurrent"`             // 最大并发
-	MaxPerSecond  int           `yaml:"maxPerSecond" json:"maxPerSecond"`               // 每秒最多请求数，0 表示不限
-	MaxQueueWait  int           `yaml:"maxQueueWait" json:"maxQueueWait,omitempty"`     // 队列最大等待（毫秒）
+	Balance       *ProviderBalance `yaml:"balance,omitempty" json:"balance,omitempty"`
+	ModelCatalog  *ModelCatalog    `yaml:"modelCatalog,omitempty" json:"modelCatalog,omitempty"`
+	Name          string           `yaml:"-" json:"name,omitempty"` // 运行时填充（map 的 key）
+	BaseURL       string           `yaml:"baseUrl" json:"baseUrl"`  // 上游地址
+	APIKey        string           `yaml:"apiKey" json:"apiKey"`    // 密钥，留空则从客户端请求头提取
+	APIKeys       []ProviderKey    `yaml:"apiKeys,omitempty" json:"apiKeys,omitempty"`
+	KeyCooldown   *KeyCooldown     `yaml:"keyCooldown,omitempty" json:"keyCooldown,omitempty"`
+	Format        string           `yaml:"format" json:"format"`                           // anthropic | openai | openai-responses
+	AuthType      string           `yaml:"authType,omitempty" json:"authType,omitempty"`   // 空值使用 API Key；chatgptOAuth 使用 ChatGPT OAuth 账户
+	AccountID     string           `yaml:"accountId,omitempty" json:"accountId,omitempty"` // chatgptOAuth 账户管理器中的 ID
+	UserAgent     string           `yaml:"userAgent,omitempty" json:"userAgent,omitempty"` // 上游请求 UA，留空则转发客户端值；两处 omitempty 见 validate 注释
+	Proxy         string           `yaml:"proxy,omitempty" json:"proxy,omitempty"`         // 上游代理，留空继承全局代理；两处 omitempty 理由同 userAgent
+	MaxConcurrent int              `yaml:"maxConcurrent" json:"maxConcurrent"`             // 最大并发
+	MaxPerSecond  int              `yaml:"maxPerSecond" json:"maxPerSecond"`               // 每秒最多请求数，0 表示不限
+	MaxQueueWait  int              `yaml:"maxQueueWait" json:"maxQueueWait,omitempty"`     // 队列最大等待（毫秒）
 	// MaxTokens 覆盖转发给该 provider 的输出上限（Anthropic / Chat 的 max_tokens、
 	// Responses 的 max_output_tokens），nil 表示不覆盖。
 	//
@@ -962,7 +966,7 @@ func LoadAndValidate(data []byte) (*Config, error) {
 	return DecodeAndValidate(data)
 }
 
-// RedactYAML 使用 YAML AST 脱敏 providers 下的 apiKey 与代理密码。
+// RedactYAML 使用 YAML AST 脱敏 providers 下的 API Key、余额查询令牌与代理密码。
 func RedactYAML(data []byte, sentinel string) ([]byte, error) {
 	if sentinel == "" {
 		return nil, fmt.Errorf("脱敏占位符不能为空")
@@ -1013,6 +1017,10 @@ func redactProviderSecrets(node *yaml.Node, sentinel string, visited map[*yaml.N
 	if node.Kind == yaml.MappingNode {
 		for i := 0; i+1 < len(node.Content); i += 2 {
 			key, value := node.Content[i], node.Content[i+1]
+			if key.Kind == yaml.ScalarNode && key.Value == "accessToken" {
+				redactAPIKeyValue(value, BalanceTokenKeepSentinel)
+				continue
+			}
 			if key.Kind == yaml.ScalarNode && key.Value == "apiKey" {
 				redactAPIKeyValue(value, sentinel)
 				continue
@@ -1305,6 +1313,9 @@ func validateProvider(name string, p *Provider, validateLimits bool) error {
 		}
 	default:
 		return fmt.Errorf("providers.%s.authType 须为空或 chatgptOAuth", name)
+	}
+	if err := validateProviderQueries(name, p); err != nil {
+		return err
 	}
 	if validateLimits {
 		if p.MaxConcurrent < 1 || p.MaxConcurrent > 100 {

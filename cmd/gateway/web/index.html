@@ -950,6 +950,8 @@
                                             </svg>
                                             <span x-text="providerListExpanded ? '收起列表' : '展开列表'"></span>
                                         </button>
+                                        <button type="button" @click="refreshProviderBalances()" :disabled="refreshingProviderBalances.length > 0 || !providerBalancesSupported" class="btn btn-secondary" data-testid="balance-refresh-visible">刷新当前列表余额</button>
+                                        <button type="button" x-show="refreshingProviderBalances.length" @click="_providerBalancesController?.abort()" class="btn btn-secondary">停止等待</button>
                                         <button @click="addProvider()" class="btn btn-secondary">
                                             <span class="material-symbols-outlined">add</span>
                                             添加 Provider
@@ -981,6 +983,7 @@
                                                 <th scope="col" class="whitespace-nowrap px-3 py-3 font-bold">格式</th>
                                                 <th scope="col" class="whitespace-nowrap px-3 py-3 font-bold">Base URL</th>
                                                 <th scope="col" class="whitespace-nowrap px-3 py-3 font-bold">Key</th>
+                                                <th scope="col" class="whitespace-nowrap px-3 py-3 font-bold">余额 / 配额</th>
                                                 <th scope="col" class="whitespace-nowrap px-3 py-3 font-bold">代理</th>
                                                 <th scope="col" class="whitespace-nowrap px-3 py-3 text-right font-bold">并发</th>
                                                 <th scope="col" class="whitespace-nowrap px-3 py-3 text-right font-bold">速率</th>
@@ -1094,6 +1097,41 @@
                                                               @blur="hideTip()"
                                                               tabindex="0">key_off</span>
                                                     </td>
+                                                    <td class="px-3 py-2.5 text-xs" style="min-width: 15rem; max-width: 22rem" data-testid="provider-balance" :data-provider="name">
+                                                        <p class="text-muted" x-text="providerBalanceState(name)"></p>
+                                                        <template x-for="(item, bi) in (providerBalanceView(name).snapshot?.items || [])" :key="bi">
+                                                            <div class="mt-1">
+                                                                <p class="font-mono text-sm text-white" x-text="providerBalanceValue(item)"></p>
+                                                                <p class="text-muted" x-text="providerBalanceKind(item.kind)"></p>
+                                                            </div>
+                                                        </template>
+                                                        <div class="mt-1 flex flex-wrap gap-3">
+                                                            <button type="button" x-show="provider.balance?.type && providerBalancesSupported" @click="refreshProviderBalances([name])" :disabled="refreshingProviderBalances.length > 0" class="text-cyan disabled:opacity-50" :aria-label="'刷新「' + name + '」余额'">刷新</button>
+                                                            <details x-show="provider.balance?.type" class="min-w-0">
+                                                                <summary class="cursor-pointer text-cyan">查询详情</summary>
+                                                                <div class="mt-2 space-y-1 break-words text-xs leading-relaxed text-muted">
+                                                                    <p x-text="'适配器：' + (providerBalanceView(name).type || provider.balance?.type || '—') + ' · 来源：' + (providerBalanceView(name).source || provider.balance?.source || 'auto')"></p>
+                                                                    <p x-text="'成功时间：' + providerBalanceTime(providerBalanceView(name).lastSuccessAt)"></p>
+                                                                    <p x-show="providerBalanceView(name).lastAttemptAt" x-text="'最近尝试：' + providerBalanceTime(providerBalanceView(name).lastAttemptAt)"></p>
+                                                                    <p x-show="providerBalanceView(name).nextRefreshAt" x-text="'下次计划：' + providerBalanceTime(providerBalanceView(name).nextRefreshAt)"></p>
+                                                                    <p x-show="providerBalanceView(name).retryAfterSeconds != null" x-text="'建议等待：' + providerBalanceView(name).retryAfterSeconds + ' 秒；不代表额度恢复'"></p>
+                                                                    <p x-show="providerBalanceView(name).error" class="text-warn" x-text="providerBalanceView(name).error?.message || '查询失败，旧值保留'"></p>
+                                                                    <template x-for="(item, di) in (providerBalanceView(name).snapshot?.items || [])" :key="di">
+                                                                        <div class="border-t border-line pt-1">
+                                                                            <p x-text="providerBalanceKind(item.kind) + ' · ' + (item.source || '来源未知') + (item.keyId ? ' · 密钥 ' + item.keyId : '')"></p>
+                                                                            <p x-text="'已用：' + (item.used ?? '未知') + ' · 上限：' + (item.limit ?? '未知') + ' ' + (item.unit || '')"></p>
+                                                                            <p x-show="item.rawUnit" x-text="'原始剩余：' + (item.rawRemaining ?? '未知') + ' · 已用：' + (item.rawUsed ?? '未知') + ' ' + (item.rawUnit || '')"></p>
+                                                                            <p x-show="item.quotaPerUnit" x-text="'每 USD 配额：' + item.quotaPerUnit + ' · 换算来源：' + (item.conversionSource === 'configuration' ? '显式配置' : '上游公开设置')"></p>
+                                                                            <template x-for="(win, wi) in (item.windows || [])" :key="wi"><p x-text="(win.name || '周期') + '：剩余 ' + (win.remaining ?? '未知') + ' / 上限 ' + (win.limit ?? '未知') + '，已用 ' + (win.used ?? '未知') + ' ' + (win.unit || item.unit || '') + (win.resetAt ? ' · 重置 ' + providerBalanceTime(win.resetAt) : '') + (win.expiresAt ? ' · 到期 ' + providerBalanceTime(win.expiresAt) : '')"></p></template>
+                                                                        </div>
+                                                                    </template>
+                                                                    <template x-for="(warning, wi) in (providerBalanceView(name).snapshot?.warnings || [])" :key="wi"><p class="text-warn" x-text="warning"></p></template>
+                                                                    <p x-show="providerBalanceView(name).sharedProviders?.length" x-text="'与 ' + (providerBalanceView(name).sharedProviders || []).join('、') + ' 共享查询来源，不可相加'"></p>
+                                                                    <p>各口径不相加；共享来源的多行不代表独立余额。查询不改变启停和路由。</p>
+                                                                </div>
+                                                            </details>
+                                                        </div>
+                                                    </td>
                                                     <td class="max-w-0 px-3 py-2.5">
                                                         <span class="block truncate font-mono text-xs text-muted"
                                                               @mouseenter="showTip(proxyHost(provider.proxy), $event)"
@@ -1123,10 +1161,10 @@
                                                 </tr>
                                             </template>
                                             <tr x-show="!config.providers || Object.keys(config.providers).length === 0">
-                                                <td colspan="10" class="px-3 py-10 text-center text-sm text-muted">还没有 Provider</td>
+                                                <td colspan="11" class="px-3 py-10 text-center text-sm text-muted">还没有 Provider</td>
                                             </tr>
                                             <tr x-show="providerCount() > 0 && filteredProviderCount() === 0">
-                                                <td colspan="10" class="px-3 py-10 text-center text-sm text-muted">没有符合当前筛选条件的 Provider</td>
+                                                <td colspan="11" class="px-3 py-10 text-center text-sm text-muted">没有符合当前筛选条件的 Provider</td>
                                             </tr>
                                         </tbody>
                                     </table>
@@ -2848,6 +2886,42 @@
                     </div>
                 </section>
 
+                <section class="mt-6 border-t border-line pt-5" x-show="providerForm.authType !== 'chatgptOAuth'" data-testid="provider-balance-settings">
+                    <button type="button" @click="providerBalanceOpen = !providerBalanceOpen" :aria-expanded="String(providerBalanceOpen)" aria-controls="provider-balance-fields" class="btn btn-secondary w-full">
+                        <span class="flex-1 text-left">余额查询</span><span class="text-xs text-muted" x-text="providerForm.balance.type ? '已配置 · 独立于模型调用' : '未配置 · 默认不查询'"></span>
+                        <span class="material-symbols-outlined" x-text="providerBalanceOpen ? 'keyboard_arrow_up' : 'keyboard_arrow_down'"></span>
+                    </button>
+                    <div id="provider-balance-fields" x-show="providerBalanceOpen" class="mt-4 space-y-4">
+                        <p class="text-xs leading-relaxed text-muted">只查询本人账户或选定密钥，不自动轮换、不求和，不影响路由与启停。设置需保存后才能查询。</p>
+                        <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                            <label><span class="mb-1.5 block text-xs font-bold text-muted">适配类型</span><select x-model="providerForm.balance.type" class="field" aria-label="余额适配类型"><option value="">不启用</option><option value="newapi">New API</option><option value="sub2api">Sub2API</option></select></label>
+                            <label x-show="providerForm.balance.type"><span class="mb-1.5 block text-xs font-bold text-muted">查询来源</span><select x-model="providerForm.balance.source" class="field" aria-label="余额查询来源"><option value="auto">自动（独立令牌优先）</option><option value="account">账户（独立令牌）</option><option value="apiKey">选定调用密钥</option></select></label>
+                        </div>
+                        <div x-show="providerForm.balance.type" class="space-y-4">
+                            <label class="block"><span class="mb-1.5 block text-xs font-bold text-muted">管理站点基址（可选）</span><input autocomplete="off" x-model="providerForm.balance.baseUrl" class="field" placeholder="默认使用 Provider URL 去掉末尾 /v1" aria-label="余额管理站点基址"></label>
+                            <p class="break-words text-xs text-muted" x-text="'查询目标：' + providerBalanceTarget(providerForm)"></p>
+                            <p class="text-xs text-warn">修改适配类型、目标站点或名称后必须重新填写独立令牌；调用密钥只能发送到同源站点。</p>
+                            <div x-show="providerForm.balance.source !== 'apiKey'" class="space-y-2">
+                                <label class="block"><span class="mb-1.5 block text-xs font-bold text-muted">独立余额查询令牌（不是模型调用密钥）</span><input type="password" autocomplete="new-password" x-model="providerForm.balance.accessToken" :disabled="providerForm.balance.clearAccessToken" class="field" :placeholder="providerForm.balance.accessTokenConfigured ? '已配置，留空保留；改目标须重新填' : '账户来源必填；auto 留空则使用调用密钥'" aria-label="独立余额查询令牌"></label>
+                                <label class="flex items-center gap-2 text-xs text-muted"><input type="checkbox" x-model="providerForm.balance.clearAccessToken">明确清除已保存查询令牌</label>
+                                <p class="text-xs text-muted">New API 需本人读取权限；Sub2API 面板 JWT 可能到期或绑定 IP / UA，本功能不自动续期。</p>
+                            </div>
+                            <label x-show="providerForm.keyListMode && providerForm.balance.source !== 'account' && !providerForm.balance.accessToken && (!providerForm.balance.accessTokenConfigured || providerForm.balance.clearAccessToken || providerForm.balance.source === 'apiKey')" class="block"><span class="mb-1.5 block text-xs font-bold text-muted">用于查询的一把调用密钥</span><select x-model="providerForm.balance.apiKeyId" class="field" aria-label="余额查询密钥"><option value="">请选择，不自动轮换</option><template x-for="key in providerForm.apiKeys" :key="key.id"><option :value="key.id" x-text="key.name || key.id"></option></template></select></label>
+                            <div x-show="providerForm.balance.type === 'newapi'" class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                                <label><span class="mb-1.5 block text-xs font-bold text-muted">旧版 New API 用户 ID（可选）</span><input autocomplete="off" x-model="providerForm.balance.userId" class="field" inputmode="numeric" aria-label="New API 用户 ID"></label>
+                                <label><span class="mb-1.5 block text-xs font-bold text-muted">每 1 USD 的原始配额（可选）</span><input autocomplete="off" x-model="providerForm.balance.quotaPerUnit" class="field" inputmode="decimal" placeholder="留空由站点公开设置发现" aria-label="每 USD 配额"></label>
+                            </div>
+                            <p x-show="providerForm.balance.type === 'newapi'" class="text-xs text-muted">纯十进制，整数部分必填，最多 18 位小数；不接受正号、指数、.5 或 1.。无法确认换算时只显示原始配额，不默认除以 500000。</p>
+                            <label class="block"><span class="mb-1.5 block text-xs font-bold text-muted">自动刷新周期（分钟）</span><input type="number" autocomplete="off" x-model.number="providerForm.balance.refreshIntervalMinutes" min="0" max="1440" step="1" class="field" aria-label="余额自动刷新分钟"><span class="mt-1 block text-xs text-muted">0 = 手动（默认）；开启为 5–1440 分钟。自动刷新跳过停用项，手动仍可查询。</span></label>
+                        </div>
+                    </div>
+                </section>
+                <label x-show="providerForm.authType === 'chatgptOAuth'" class="mt-6 block border-t border-line pt-5">
+                    <span class="mb-1.5 block text-xs font-bold text-muted">模型目录兼容版本（可选）</span>
+                    <input autocomplete="off" x-model="providerForm.modelCatalog.clientVersion" class="field" placeholder="默认 0.167.0" aria-label="模型目录兼容版本">
+                    <span class="mt-1 block text-xs text-muted">仅作用于绑定账户的远端目录，不改变转发 UA；格式 major.minor.patch。</span>
+                </label>
+
                 <!-- 高级设置：默认折叠；编辑一个已带高级配置的 Provider 时自动展开——值已经在了，藏起来反而危险。
                      折叠条与路由抽屉的「高级设置」同一套交互：tune 图标 + 已配置个数 + 展开箭头。 -->
                 <div class="mt-6 border-t border-line pt-5">
@@ -3128,6 +3202,10 @@
                                                     <div x-show="modelPicker.loading" class="flex items-center gap-2 px-3 py-1.5 text-muted">
                                                         <span class="material-symbols-outlined gw-spin text-[14px]">progress_activity</span>正在查询上游模型列表…
                                                     </div>
+                                                    <div class="flex flex-wrap gap-3 border-b border-line px-3 py-2">
+                                                        <button type="button" @mousedown.prevent @click="openModelPicker(modelPicker.key, modelPicker.provider, '', true)" :disabled="modelPicker.loading" class="text-cyan disabled:opacity-50">刷新远端模型</button>
+                                                        <button type="button" x-show="modelPicker.loading" @mousedown.prevent @click="_modelPickerController?.abort(); modelPicker.loading = false; modelPicker.token++; modelPicker.message = '已取消等待；已轮换凭据仍会安全保存'" class="text-muted">取消等待</button>
+                                                    </div>
                                                     <div x-show="!modelPicker.loading && modelPicker.message" class="px-3 py-1.5 leading-relaxed text-muted" x-text="modelPicker.message"></div>
                                                     <div x-show="!modelPicker.loading && modelPicker.models.length && !modelPickerOptions(target.model).length"
                                                          class="px-3 py-1.5 leading-relaxed text-muted"
@@ -3264,6 +3342,10 @@
                                             class="absolute left-0 right-0 top-[calc(100%+4px)] z-30 max-h-44 overflow-y-auto rounded-lg border border-line bg-panel3 py-1 text-xs shadow-glow">
                                             <div x-show="modelPicker.loading" class="flex items-center gap-2 px-3 py-1.5 text-muted">
                                                 <span class="material-symbols-outlined gw-spin text-[14px]">progress_activity</span>正在查询上游模型列表…
+                                            </div>
+                                            <div class="flex flex-wrap gap-3 border-b border-line px-3 py-2">
+                                                <button type="button" @mousedown.prevent @click="openModelPicker(modelPicker.key, modelPicker.provider, '', true)" :disabled="modelPicker.loading" class="text-cyan disabled:opacity-50">刷新远端模型</button>
+                                                <button type="button" x-show="modelPicker.loading" @mousedown.prevent @click="_modelPickerController?.abort(); modelPicker.loading = false; modelPicker.token++; modelPicker.message = '已取消等待；已轮换凭据仍会安全保存'" class="text-muted">取消等待</button>
                                             </div>
                                             <div x-show="!modelPicker.loading && modelPicker.message" class="px-3 py-1.5 leading-relaxed text-muted" x-text="modelPicker.message"></div>
                                             <template x-for="(m, mi) in modelPickerOptions(routeForm.visionModel)" :key="m">
@@ -4025,6 +4107,10 @@
         <div x-show="inlineModel.modelsLoading" class="flex items-center gap-2 px-3 py-1.5 text-muted">
             <span class="material-symbols-outlined gw-spin text-[14px]">progress_activity</span>正在查询上游模型列表…
         </div>
+        <div class="flex flex-wrap gap-3 border-b border-line px-3 py-2">
+            <button type="button" @mousedown.prevent @click="loadInlineModels(true)" :disabled="inlineModel.modelsLoading" class="text-cyan disabled:opacity-50">刷新远端模型</button>
+            <button type="button" x-show="inlineModel.modelsLoading" @mousedown.prevent @click="_inlineModelController?.abort(); inlineModel.modelsLoading = false; inlineModel.token++; inlineModel.message = '已取消等待；已轮换凭据仍会安全保存'" class="text-muted">取消等待</button>
+        </div>
         <div x-show="!inlineModel.modelsLoading && inlineModel.message" class="px-3 py-1.5 leading-relaxed text-muted" x-text="inlineModel.message"></div>
         <div x-show="!inlineModel.modelsLoading && inlineModel.models.length && !inlineModelOptions().length"
              class="px-3 py-1.5 leading-relaxed text-muted"
@@ -4459,6 +4545,16 @@
     <script>
         function gatewayApp() {
             return {
+                providerBalances: {},
+                providerBalanceResults: {},
+                providerBalancesSupported: true,
+                refreshingProviderBalances: [],
+                _providerBalancesSequence: 0,
+                _providerBalancesController: null,
+                _providerBalancesReadController: null,
+                providerBalanceOpen: false,
+                _modelPickerController: null,
+                _inlineModelController: null,
                 activeTab: 'monitor',
                 // 页签滚动快照只留在内存；恢复期间不把共享容器的过渡位置记给下一页。
                 _navScrollPositions: {},
@@ -4845,7 +4941,9 @@
                     // enabled 默认 true：新增 provider 默认启用；editProvider 回填既有值。
                     enabled: true,
                     apiKeyConfigured: false,
-                    clearApiKey: false
+                    clearApiKey: false,
+                    balance: { type: '', source: 'auto', baseUrl: '', accessToken: '', accessTokenConfigured: false, clearAccessToken: false, userId: '', apiKeyId: '', quotaPerUnit: '', refreshIntervalMinutes: 0 },
+                    modelCatalog: { clientVersion: '' }
                 },
                 showRouteModal: false,
                 editingRouteIndex: -1,
@@ -4903,7 +5001,7 @@
                     else await this.loadHealth(false);
                     this._monitorPollTimer = window.setInterval(() => {
                         if (this.monitorPollingAllowed()) this.refreshMonitor(false);
-                        else if (document.visibilityState === 'visible' && this.activeTab === 'providers') this.loadHealth(false);
+                        else if (document.visibilityState === 'visible' && this.activeTab === 'providers') { this.loadHealth(false); void this.loadProviderBalances(); }
                     }, 5000);
                     this._monitorVisibilityHandler = () => {
                         if (this.monitorPollingAllowed()) this.refreshMonitor(false);
@@ -4912,7 +5010,17 @@
                     document.addEventListener('visibilitychange', this._monitorVisibilityHandler);
                     this.$watch('activeTab', (tab, oldTab) => {
                         if (tab === oldTab) return;
-                        if (tab === 'providers') this.loadHealth(false);
+                        if (oldTab === 'providers') {
+                            this._providerBalancesSequence++;
+                            this._providerBalancesReadController?.abort();
+                            this._providerBalancesReadController = null;
+                            this._providerBalancesController?.abort();
+                        }
+                        if (oldTab === 'routes') {
+                            this.resetModelPicker();
+                            this.cancelInlineModel();
+                        }
+                        if (tab === 'providers') { this.loadHealth(false); this.loadProviderBalances(); }
                         else if (this.monitorPollingAllowed()) this.refreshMonitor(false);
                     });
                     // 直接编辑的字段仍需手动保存，关页面前拦一下，免得改了半天丢掉
@@ -4923,8 +5031,8 @@
                     });
                     window.addEventListener('keydown', (e) => this.onSaveShortcut(e));
                     // 抽屉无论从哪条路径关闭（保存成功、取消、Esc、放弃修改），焦点都还给打开它的按钮
-                    this.$watch('showProviderModal', (open) => { if (!open) this.restoreDrawerOpener(); });
-                    this.$watch('showRouteModal', (open) => { if (!open) this.restoreDrawerOpener(); });
+                    this.$watch('showProviderModal', (open) => { if (!open) { if (this.providerForm.balance) this.providerForm.balance.accessToken = ''; this._providerFormBaseline = ''; this.restoreDrawerOpener(); } });
+                    this.$watch('showRouteModal', (open) => { if (!open) { this.resetModelPicker(); this.restoreDrawerOpener(); } });
                     // 软刷新（F5）时浏览器会把刷新前的表单值恢复进 DOM，x-model 的
                     // input/change 监听再把它们写回 config。若这一步落在 loadConfig()
                     // 之后，config 就和 originalConfig 对不上，未保存浮层会在刚打开页面时
@@ -4956,6 +5064,11 @@
                 },
 
                 destroy() {
+                    this._providerBalancesSequence++;
+                    this._providerBalancesReadController?.abort();
+                    this._providerBalancesController?.abort();
+                    this._modelPickerController?.abort();
+                    this._inlineModelController?.abort();
                     this._chatGPTDiagnoseSequence++;
                     this._chatGPTDiagnoseController?.abort();
                     this._chatGPTDiagnoseController = null;
@@ -4999,6 +5112,8 @@
                             format: pick(p, 'format', 'Format') || 'anthropic',
                             authType: pick(p, 'authType', 'AuthType') || '',
                             accountId: pick(p, 'accountId', 'AccountID') || '',
+                            balance: this.normalizeProviderBalance(pick(p, 'balance', 'Balance')),
+                            modelCatalog: pick(p, 'modelCatalog', 'ModelCatalog') ? { clientVersion: pick(p, 'modelCatalog', 'ModelCatalog').clientVersion || '0.167.0' } : undefined,
                             maxConcurrent: pick(p, 'maxConcurrent', 'MaxConcurrent') || 5,
                             maxPerSecond: pick(p, 'maxPerSecond', 'MaxPerSecond') || 0,
                             maxQueueWait: pick(p, 'maxQueueWait', 'MaxQueueWait') || 30000,
@@ -5249,10 +5364,21 @@
                 // 抽出来是为了页面落定后能重放一次，抹掉浏览器的表单恢复，不必再发请求。
                 applyServerConfig() {
                     if (!this._serverConfigData) return;
+                    this._providerBalancesSequence++;
+                    this._providerBalancesReadController?.abort();
+                    this._providerBalancesReadController = null;
+                    this._providerBalancesController?.abort();
+                    this._modelPickerController?.abort();
+                    this._inlineModelController?.abort();
+                    this.resetModelPicker();
+                    this.cancelInlineModel();
+                    this.providerBalances = {};
+                    this.providerBalanceResults = {};
                     this.config = this.normalizeConfig(this._serverConfigData);
                     this.configPath = this.config.path || '未知';
                     this.ensureConfigShape();
                     this.originalConfig = JSON.stringify(this.configPayload());
+                    if (this.activeTab === 'providers') void this.loadProviderBalances();
                 },
 
                 async loadConfig() {
@@ -5617,6 +5743,7 @@
                 openProviderDrawer() {
                     this._drawerOpener = document.activeElement;
                     this.providerAdvancedOpen = this.providerAdvancedCount() > 0;
+                    this.providerBalanceOpen = !!this.providerForm.balance?.type;
                     this._providerFormBaseline = this.providerFormFingerprint();
                     this.showProviderModal = true;
                     this.focusDrawerField('providerDrawer');
@@ -5878,6 +6005,8 @@
                             format: provider.format || 'anthropic',
                             authType: provider.authType || undefined,
                             accountId: provider.accountId || undefined,
+                            balance: this.providerBalancePayload(provider.balance),
+                            modelCatalog: provider.authType === 'chatgptOAuth' && provider.modelCatalog ? { clientVersion: provider.modelCatalog.clientVersion || '0.167.0' } : undefined,
                             maxConcurrent: provider.maxConcurrent || 5,
                             maxPerSecond: provider.maxPerSecond || 0,
                             maxQueueWait: provider.maxQueueWait || 30000,
@@ -7282,6 +7411,16 @@
                         }
                         if (p.authType) lines.push(`    authType: ${p.authType}`);
                         if (p.accountId) lines.push(`    accountId: ${p.accountId}`);
+                        const balance = this.providerBalancePayload(p.balance);
+                        if (balance) {
+                            lines.push('    balance:');
+                            for (const [key, value] of Object.entries(balance)) {
+                                if (value === undefined) continue;
+                                const safe = key === 'accessToken' && value ? '__AI_GATEWAY_KEEP_BALANCE_TOKEN__' : value;
+                                lines.push(`      ${key}: ${JSON.stringify(safe)}`);
+                            }
+                        }
+                        if (p.modelCatalog && p.authType === 'chatgptOAuth') lines.push('    modelCatalog:', `      clientVersion: ${JSON.stringify(p.modelCatalog.clientVersion || '0.167.0')}`);
                         // 只在配了时才输出，与后端 yaml omitempty 一致，避免预览里
                         // 给每个 provider 都摆一行空 userAgent；配了却不显示则是假预览。
                         if (p.userAgent) lines.push(`    userAgent: "${p.userAgent}"`);
@@ -7354,6 +7493,144 @@
                     } catch (err) {
                         this.showStatus('复制失败: ' + err.message, 'error');
                     }
+                },
+
+                normalizeProviderBalance(raw) {
+                    if (!raw?.type) return undefined;
+                    const out = { ...raw };
+                    out.accessTokenConfigured = !!raw.accessTokenConfigured || !!raw.accessToken;
+                    if (out.accessTokenConfigured) out.accessToken = '__AI_GATEWAY_KEEP_BALANCE_TOKEN__';
+                    return out;
+                },
+
+                providerBalanceForm(raw, duplicate = false) {
+                    return { type: raw?.type || '', source: raw?.source || 'auto', baseUrl: raw?.baseUrl || '',
+                        accessToken: '', accessTokenConfigured: !duplicate && !!(raw?.accessTokenConfigured || raw?.accessToken), clearAccessToken: false,
+                        userId: raw?.userId || '', apiKeyId: duplicate ? '' : (raw?.apiKeyId || ''), quotaPerUnit: raw?.quotaPerUnit || '',
+                        refreshIntervalMinutes: raw?.refreshIntervalMinutes ?? 0 };
+                },
+
+                providerBalanceTarget(provider, balance = provider?.balance) {
+                    const raw = balance?.baseUrl || String(provider?.baseUrl || '').replace(/\/v1\/?$/, '');
+                    try { const url = new URL(raw); return url.origin + url.pathname.replace(/\/+$/, ''); } catch { return raw; }
+                },
+
+                providerBalancePayload(raw) {
+                    if (!raw?.type) return undefined;
+                    const { accessTokenConfigured, clearAccessToken, ...payload } = raw;
+                    if (payload.source === 'apiKey') payload.accessToken = '';
+                    else payload.accessToken = clearAccessToken ? '' : (payload.accessToken || (accessTokenConfigured ? '__AI_GATEWAY_KEEP_BALANCE_TOKEN__' : ''));
+                    if (payload.source === 'account' || (payload.source !== 'apiKey' && payload.accessToken)) delete payload.apiKeyId;
+                    for (const key of ['baseUrl', 'userId', 'apiKeyId', 'quotaPerUnit']) if (!payload[key]) delete payload[key];
+                    if (payload.type !== 'newapi') { delete payload.userId; delete payload.quotaPerUnit; }
+                    return payload;
+                },
+
+                validateProviderBalance() {
+                    const f = this.providerForm, b = f.balance;
+                    if (!b?.type || f.authType === 'chatgptOAuth') return true;
+                    const payload = this.providerBalancePayload(b);
+                    const old = this.config.providers?.[this.editingProvider];
+                    if (payload.accessToken === '__AI_GATEWAY_KEEP_BALANCE_TOKEN__' &&
+                        (!old || old.balance?.type !== b.type || this.providerBalanceTarget(old) !== this.providerBalanceTarget(f) || f.name !== this.editingProvider)) {
+                        this.showStatus('查询类型、目标站点或名称改变后，请重新填写独立余额查询令牌，或明确清除', 'error'); return false;
+                    }
+                    if (payload.source === 'account' && !payload.accessToken) { this.showStatus('账户余额查询需要独立令牌', 'error'); return false; }
+                    const quota = String(payload.quotaPerUnit || '');
+                    const [whole, fraction = ''] = quota.split('.');
+                    const integer = whole.replace(/^0+/, '') || '0';
+                    const quotaTooLarge = integer.length > 19 || (integer.length === 19 && (integer > '1000000000000000000' || (integer === '1000000000000000000' && /[1-9]/.test(fraction))));
+                    if (quota && (!/^\d+(?:\.\d{1,18})?$/.test(quota) || quota.length > 64 || !/[1-9]/.test(quota) || quotaTooLarge)) {
+                        this.showStatus('每 USD 配额须为正十进制数，整数部分必填，最多 18 位小数，不接受正号或指数', 'error'); return false;
+                    }
+                    if (payload.refreshIntervalMinutes !== 0 && (!Number.isInteger(payload.refreshIntervalMinutes) || payload.refreshIntervalMinutes < 5 || payload.refreshIntervalMinutes > 1440)) {
+                        this.showStatus('自动刷新须为 0（手动）或 5–1440 分钟整数', 'error'); return false;
+                    }
+                    if (f.keyListMode && payload.source !== 'account' && !payload.accessToken && !(f.apiKeys || []).some(key => key.id === payload.apiKeyId)) {
+                        this.showStatus('请选择用于余额查询的一把调用密钥，不自动轮换或求和', 'error'); return false;
+                    }
+                    return true;
+                },
+
+                providerBalanceIdentity(name) {
+                    const p = this.config.providers?.[name];
+                    return JSON.stringify([this.revision, p?.baseUrl, p?.balance, p?.apiKeys, p?.authType, p?.accountId]);
+                },
+
+                async loadProviderBalances() {
+                    if (this.refreshingProviderBalances.length || this._providerBalancesReadController) return;
+                    const controller = new AbortController();
+                    this._providerBalancesReadController = controller;
+                    const timeout = window.setTimeout(() => controller.abort(), 10_000);
+                    const sequence = ++this._providerBalancesSequence;
+                    const revision = this.revision;
+                    try {
+                        const res = await fetch('/api/providers/balances', { cache: 'no-store', signal: controller.signal });
+                        if (controller.signal.aborted || sequence !== this._providerBalancesSequence || revision !== this.revision) return;
+                        if (res.status === 404) { this.providerBalancesSupported = false; this.providerBalances = {}; return; }
+                        if (!res.ok) return;
+                        const data = await res.json();
+                        if (controller.signal.aborted || sequence !== this._providerBalancesSequence || revision !== this.revision || (data.revision && data.revision !== revision)) return;
+                        this.providerBalancesSupported = true;
+                        this.providerBalances = data.providers || {};
+                        this.providerBalanceResults = {};
+                    } catch { /* 只读缓存失败不触发上游或暴露网络错误原文。 */ }
+                    finally {
+                        window.clearTimeout(timeout);
+                        if (this._providerBalancesReadController === controller) this._providerBalancesReadController = null;
+                    }
+                },
+
+                visibleBalanceProviders() {
+                    return Object.entries(this.providersByEnabled()).filter(([name, p]) => this.providerMatchesFilter(name, p) && p.balance?.type).map(([name]) => name);
+                },
+
+                async refreshProviderBalances(names = this.visibleBalanceProviders()) {
+                    if (names.length > 50) { this.showStatus('当前筛选包含超过 50 个已配置项，请缩小筛选后刷新，不会截断列表', 'error'); return; }
+                    if (!names.length) { this.showStatus('当前列表没有已配置余额查询的提供商', 'error'); return; }
+                    if (this.isDirty()) { this.showStatus('请先保存配置，再查询已保存的余额设置', 'error'); return; }
+                    if (this.refreshingProviderBalances.length) return;
+                    this._providerBalancesSequence++;
+                    this._providerBalancesReadController?.abort();
+                    this._providerBalancesReadController = null;
+                    const revision = this.revision;
+                    const identities = Object.fromEntries(names.map(name => [name, this.providerBalanceIdentity(name)]));
+                    const controller = new AbortController();
+                    this._providerBalancesController = controller;
+                    this.refreshingProviderBalances = [...names];
+                    const timer = window.setTimeout(() => controller.abort(), 65_000);
+                    try {
+                        const res = await fetch('/api/providers/balances/refresh', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ revision, providers: names }), signal: controller.signal });
+                        if (res.status === 404) { this.providerBalancesSupported = false; return; }
+                        if (!res.ok) throw new Error('刷新未受理，请重新读取配置后重试');
+                        const data = await res.json();
+                        if (controller.signal.aborted || revision !== this.revision || (data.revision && data.revision !== revision)) return;
+                        for (const result of data.results || []) {
+                            if (identities[result.provider] !== this.providerBalanceIdentity(result.provider)) continue;
+                            if (result.balance) this.providerBalances[result.provider] = result.balance;
+                            this.providerBalanceResults[result.provider] = result.status;
+                        }
+                    } catch {
+                        this.showStatus(controller.signal.aborted ? '余额刷新已停止等待；已经发生的上游读取无法撤回，旧值保留' : '余额刷新失败，旧值保留，请稍后重试', 'error');
+                    } finally {
+                        window.clearTimeout(timer);
+                        if (this._providerBalancesController === controller) { this.refreshingProviderBalances = []; this._providerBalancesController = null; }
+                    }
+                },
+
+                providerBalanceView(name) { return this.providerBalances[name] || {}; },
+                providerBalanceKind(kind) { return ({ account_balance: '账户余额', key_quota: '密钥额度', subscription_quota: '订阅额度（非钱包）', usage_only: '仅用量，剩余未知' })[kind] || '未知口径'; },
+                providerBalanceValue(item) {
+                    if (item?.unlimited) return '不限额（仅此项）';
+                    return (item?.remaining == null ? '剩余未知' : String(item.remaining)) + (item?.unit ? ' ' + item.unit : '');
+                },
+                providerBalanceTime(value) { return value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '尚无成功查询'; },
+                providerBalanceState(name) {
+                    const view = this.providerBalanceView(name);
+                    if (this.refreshingProviderBalances.includes(name) || view.refreshing) return '查询中，保留上次结果';
+                    if (!this.providerBalancesSupported) return '当前后端不支持余额查询';
+                    const result = ({ success: '刷新成功', cached: '复用缓存／限频', failed: '刷新失败，旧值保留', skipped: '本次跳过', cancelled: '本次取消，未撤回已发生读取' })[this.providerBalanceResults[name]];
+                    return [result || ({ not_configured: '未配置查询', not_queried: '尚未查询', ok: '查询成功', failed: '查询失败，旧值保留', unsupported: '暂不支持', credentials_required: '需要查询凭据' })[view.state] || (this.config.providers?.[name]?.balance ? '尚未查询' : '未配置查询'), view.freshness === 'stale' ? '旧数据' : ''].filter(Boolean).join(' · ');
                 },
 
                 async loadChatGPTAccounts(showError = false, checkUsage = true) {
@@ -8695,7 +8972,9 @@
                         extraBody: [],
                         enabled: true,
                         apiKeyConfigured: false,
-                        clearApiKey: false
+                        clearApiKey: false,
+                        balance: this.providerBalanceForm(),
+                        modelCatalog: { clientVersion: '' }
                     };
                     this.openProviderDrawer();
                 },
@@ -8750,7 +9029,9 @@
                         // enabled 回填：后端 nil 表示启用（默认），前端归一成 true。
                         enabled: p.enabled !== false,
                         apiKeyConfigured: !!p.apiKeyConfigured,
-                        clearApiKey: false
+                        clearApiKey: false,
+                        balance: this.providerBalanceForm(p.balance),
+                        modelCatalog: { clientVersion: p.modelCatalog?.clientVersion || '' }
                     };
                     if (rawApiKeys !== null) await this.loadHealth(false);
                     this.openProviderDrawer();
@@ -8795,9 +9076,12 @@
                         // 否则用户复制后还要手动启用，与「复制=另起一个可用的」预期不符。
                         enabled: true,
                         apiKeyConfigured: false,
-                        clearApiKey: false
+                        clearApiKey: false,
+                        balance: this.providerBalanceForm(p.balance, true),
+                        modelCatalog: { clientVersion: p.modelCatalog?.clientVersion || '' }
                     };
                     this.openProviderDrawer();
+                    if (p.balance?.accessTokenConfigured) this.showStatus('副本的独立余额查询令牌需重新填写', 'success');
                     if (p.apiKeyConfigured || p.apiKeys?.length) {
                         this.showStatus(`已按「${name}」预填，API Key 需重新填写`, 'success');
                     }
@@ -8840,6 +9124,11 @@
                         return;
                     }
 
+                    if (!this.validateProviderBalance()) return;
+                    const catalogVersion = this.providerForm.modelCatalog?.clientVersion?.trim() || '';
+                    if (oauth && catalogVersion && !/^\d{1,6}\.\d{1,6}\.\d{1,6}$/.test(catalogVersion)) {
+                        this.showStatus('目录兼容版本须为 major.minor.patch，每段最多六位数字', 'error'); return;
+                    }
                     let apiKey = '';
                     let apiKeys;
                     let keyCooldown;
@@ -8870,6 +9159,8 @@
                         format: oauth ? 'openai-responses' : this.providerForm.format,
                         authType: oauth ? 'chatgptOAuth' : undefined,
                         accountId: oauth ? this.providerForm.accountId : undefined,
+                        balance: oauth ? undefined : this.providerBalancePayload(this.providerForm.balance),
+                        modelCatalog: oauth && catalogVersion ? { clientVersion: catalogVersion } : undefined,
                         maxConcurrent: this.providerForm.maxConcurrent || 5,
                         maxPerSecond: this.providerForm.maxPerSecond || 0,
                         maxQueueWait: this.providerForm.maxQueueWait || 30000,
@@ -9545,36 +9836,33 @@
                     this.routeForm.targets[ti].extraBody.splice(index, 1);
                 },
 
-                // 用已落盘 provider 配置里的 apiKey 拉上游 /v1/models。
-                // 结果按 provider 的 baseUrl+format 做指纹缓存到 localStorage，TTL 1 天：
-                // 同一上游反复查不重复打上游；改了 baseUrl/format 自动换 key 失效。
-                //
-                // 只负责「按 provider 名拿模型列表」，loading 态与结果落点交给调用方——
-                // 路由列表就地编辑与编辑抽屉两处共用它，缓存与错误口径因此只有一份。
-                // 返回 { models, message }：models 为 null 表示失败；message 是给下拉里显示的说明
-                // （失败原因、空列表、OAuth 没有模型目录）。不弹 toast：下拉一聚焦就会自动查询，
-                // 每失败一次弹一条 20 秒的报错只会刷屏，原因写在下拉里更贴近操作位置。
-                async fetchModelsFor(providerName) {
+                // 已保存 Provider 的统一目录入口；普通目录保留一天浏览器缓存，OAuth 只用服务端身份缓存。
+                // 失败只给固定安全提示，保持手填值；显式刷新携带 revision，不查询草稿。
+                async fetchModelsFor(providerName, refresh = false, signal) {
                     const provider = this.config.providers?.[providerName];
                     if (!provider) return { models: null, message: '找不到这个 Provider，请先保存配置' };
-                    if (provider.authType === 'chatgptOAuth') {
-                        return { models: [], message: 'ChatGPT OAuth 不提供模型目录，请直接输入模型名' };
-                    }
-                    const empty = '上游返回了空的模型列表，可直接输入模型名';
-
+                    const identity = JSON.stringify([this.revision, provider]);
+                    const oauth = provider.authType === 'chatgptOAuth';
                     const cacheKey = 'gw.models|' + [providerName, provider.baseUrl, provider.format].join('|');
-                    const cached = this.readModelCache(cacheKey);
-                    if (cached) return { models: cached, message: cached.length ? '' : empty };
-
+                    const empty = '上游返回了空的模型列表，可直接输入模型名';
+                    if (!oauth && !refresh) {
+                        const cached = this.readModelCache(cacheKey);
+                        if (cached) return { models: cached, message: '浏览器缓存（有效期 1 天） · ' + (cached.length ? '可明确刷新远端模型' : empty) };
+                    }
                     try {
-                        const res = await fetch(`/api/providers/models?provider=${encodeURIComponent(providerName)}`);
-                        if (!res.ok) throw new Error(await this.errorText(res, '上游查询失败'));
+                        if (refresh && this.isDirty()) return { models: null, message: '请先保存配置，再刷新已保存提供商的目录；手填值保留' };
+                        const res = await fetch(refresh ? '/api/providers/models/refresh' : `/api/providers/models?provider=${encodeURIComponent(providerName)}`,
+                            refresh ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ provider: providerName, revision: this.revision }), signal } : { signal, cache: 'no-store' });
+                        if (!res.ok) return { models: null, message: `模型目录查询失败（HTTP ${res.status}），可继续手动填写` };
                         const data = await res.json();
+                        if (signal?.aborted || identity !== JSON.stringify([this.revision, this.config.providers?.[providerName]])) return { models: null, message: '提供商身份已变化，请重新查询；手填值保留' };
                         const models = Array.isArray(data.models) ? data.models : [];
-                        this.writeModelCache(cacheKey, models);
-                        return { models, message: models.length ? '' : empty };
-                    } catch (err) {
-                        return { models: null, message: '查询模型列表失败：' + err.message + '。可直接输入模型名' };
+                        if (!oauth) this.writeModelCache(cacheKey, models);
+                        const when = data.queriedAt ? this.providerBalanceTime(data.queriedAt) : '查询时间未知';
+                        const source = data.source === 'chatgpt-codex' ? '绑定账户远端目录' : '上游模型目录';
+                        return { models, message: [source, when, data.stale ? '旧目录，刷新未成功' : data.cached ? '服务端缓存' : '已查询', data.message || '', models.length ? '' : empty].filter(Boolean).join(' · ') };
+                    } catch {
+                        return { models: null, message: signal?.aborted ? '已取消目录等待；已发生的令牌轮换仍会安全保存，可手动填写' : '模型目录暂不可用，可继续手动填写' };
                     }
                 },
 
@@ -9611,9 +9899,10 @@
                     return this.modelOptions(this.modelPicker.models, value, this.modelPicker.typed);
                 },
 
-                async openModelPicker(key, provider, value) {
+                async openModelPicker(key, provider, value, refresh = false) {
                     const current = this.modelPicker;
                     if (current.key !== key || current.provider !== provider) {
+                        this._modelPickerController?.abort();
                         this.modelPicker = { key, provider, models: [], loading: false, message: '', open: true, active: -1, typed: false, token: current.token + 1 };
                     } else {
                         current.open = true;
@@ -9623,14 +9912,17 @@
                         picker.message = '请先选择 Provider';
                         return;
                     }
-                    if (!picker.models.length && !picker.loading) {
+                    if ((!picker.models.length || refresh) && !picker.loading) {
+                        this._modelPickerController?.abort();
+                        const controller = new AbortController();
+                        this._modelPickerController = controller;
                         const token = picker.token;
                         picker.loading = true;
                         picker.message = '';
                         try {
-                            const { models, message } = await this.fetchModelsFor(provider);
-                            if (this.modelPicker.token !== token) return;
-                            this.modelPicker.models = models || [];
+                            const { models, message } = await this.fetchModelsFor(provider, refresh, controller.signal);
+                            if (controller.signal.aborted || this.modelPicker.token !== token) return;
+                            if (models !== null) this.modelPicker.models = models;
                             this.modelPicker.message = message;
                         } finally {
                             if (this.modelPicker.token === token) this.modelPicker.loading = false;
@@ -9653,12 +9945,16 @@
                 },
 
                 closeModelPicker() {
+                    this._modelPickerController?.abort();
+                    this.modelPicker.token++;
+                    this.modelPicker.loading = false;
                     this.modelPicker.open = false;
                     this.modelPicker.active = -1;
                 },
 
                 // Provider 换了，已拉的列表就作废：列表是上一个上游的，留着只会让人选错模型。
                 resetModelPicker() {
+                    this._modelPickerController?.abort();
                     this.modelPicker = { key: '', provider: '', models: [], loading: false, message: '', open: false, active: -1, typed: false, token: this.modelPicker.token + 1 };
                 },
 
@@ -9930,6 +10226,7 @@
                 },
 
                 beginInlineEdit(routeIndex, targetIndex, value, provider = '') {
+                    this._inlineModelController?.abort();
                     this.inlineModel = {
                         routeIndex,
                         targetIndex,
@@ -9970,6 +10267,7 @@
                 },
 
                 cancelInlineModel() {
+                    this._inlineModelController?.abort();
                     this.inlineModel = {
                         routeIndex: -1, targetIndex: -1, value: '', provider: '',
                         models: [], modelsLoading: false, message: '',
@@ -10067,17 +10365,20 @@
                 },
 
                 // 复用 fetchModelsFor：缓存与错误口径只有一份，这里只管 loading 态与结果落点。
-                async loadInlineModels() {
+                async loadInlineModels(refresh = false) {
+                    this._inlineModelController?.abort();
+                    const controller = new AbortController();
+                    this._inlineModelController = controller;
                     const provider = this.inlineModelProvider();
                     if (!provider) return;
                     const token = this.inlineModel.token;
                     this.inlineModel.modelsLoading = true;
                     this.inlineModel.message = '';
                     try {
-                        const { models, message } = await this.fetchModelsFor(provider);
-                        // 查询期间可能已经关掉或换去编辑别的格子，回来的结果就不该再落进去
-                        if (this.inlineModel.token !== token) return;
-                        this.inlineModel.models = models || [];
+                        const { models, message } = await this.fetchModelsFor(provider, refresh, controller.signal);
+                        // 取消、换格或换身份后丢弃迟到结果，不能覆盖新输入。
+                        if (controller.signal.aborted || this.inlineModel.token !== token) return;
+                        if (models !== null) this.inlineModel.models = models;
                         this.inlineModel.message = message;
                         this.positionInlineList();
                     } finally {
@@ -10968,8 +11269,9 @@
                     if (!provider) return '不存在';
                     if (provider.authType === 'chatgptOAuth' || provider.accountId) return 'OAuth 账户凭据';
                     const count = this.configTransferProviderKeyCount(provider);
-                    if (Array.isArray(provider.apiKeys) && provider.apiKeys.length) return `列表密钥 ${count} 个`;
-                    return count === 0 ? '无密钥' : '单值密钥已配置';
+                    const balance = provider.balance?.accessTokenConfigured || provider.balance?.accessToken ? ' · 独立余额查询令牌 1 个已配置' : '';
+                    if (Array.isArray(provider.apiKeys) && provider.apiKeys.length) return `列表密钥 ${count} 个${balance}`;
+                    return (count === 0 ? '无密钥' : '单值密钥已配置') + balance;
                 },
 
                 configTransferRouteDependencies(route) {
@@ -11069,7 +11371,7 @@
                     }
                     // 每次导出都单独确认：明文文件一旦落盘就脱离页面控制。
                     const ok = await this.askConfirm(
-                        '导出文件包含真实 API Key、列表密钥、代理密码和自定义请求头／请求体等敏感配置。请只在可信本机使用，并妥善保管下载文件。',
+                        '导出文件包含真实 API Key、列表密钥、独立余额查询令牌、代理密码和自定义请求头／请求体等敏感配置。请只在可信本机使用，并妥善保管下载文件。',
                         { title: '导出含凭据的配置', confirmText: '确认导出' }
                     );
                     if (!ok || !(await this.guardConfigTransferDraft())) return;
@@ -11226,6 +11528,7 @@
                     if (count > 0) parts.push(`密钥 ${count} 个`);
                     else if (provider?.apiKeyConfigured) parts.push('单值密钥已配置');
                     else parts.push('无密钥');
+                    if (provider?.balanceTokenConfigured) parts.push('独立余额查询令牌 1 个已配置');
                     if (provider?.sourceAccountId) parts.push(`OAuth 账户 ${provider.sourceAccountId}`);
                     return parts.join(' · ');
                 },

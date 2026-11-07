@@ -131,6 +131,23 @@ metrics:
 # 401/402/403/429 会触发密钥切换与冷却处理；若只剩一把可选密钥，短暂 429 可能先走本地重试。
 # keyCooldown 可覆盖默认冷却：authMs 300000（401/403）、quotaMs 60000（402）、
 # rateLimitMs 30000（429）；各项范围 0-86400000 毫秒，仅列表模式可配置。
+# balance 可选：仅显式适配 newapi/sub2api，不用于 ChatGPT OAuth；不配置时不查询。
+# source 省略/auto：有独立 accessToken 时查账户，否则查询已保存的模型密钥额度。
+# account 必须有独立令牌；apiKey 与独立令牌互斥。模型密钥查询不得跨 origin。
+# baseUrl 默认仅移除提供商 URL 末尾 /v1，保留其他子路径；显式基址不能含用户信息、查询或片段。
+# 多密钥查询必须明确 apiKeyId，单密钥与账户查询均不填；停用或冷却由运行时处理。
+# 下面仅为假值说明，不应请求真实上游验证：
+# balance:
+#   type: newapi                 # newapi / sub2api
+#   source: account              # auto / account / apiKey
+#   baseUrl: https://panel.example.invalid/team  # 独立令牌可显式指定不同站点
+#   accessToken: fake-query-token # 独立面板令牌，最多 16 KiB，不含控制字符，不用于模型转发
+#   userId: "123"                # 仅 New API：正整数十进制字符串，不超过 int64 上限
+#   quotaPerUnit: "500000"       # 仅 New API：每 USD 配额，正数、最多 64 字节/18 位小数/10^18
+#   refreshIntervalMinutes: 0    # 省略/0 仅手动；自动刷新 5-1440 分钟
+# modelCatalog 仅可用于 authType: chatgptOAuth，未配置块不写入默认值：
+# modelCatalog:
+#   clientVersion: "0.167.0"     # 目录协议默认版本；三段非负数字，每段最多 6 位、总计最多 32 字节
 providers:
   mimo:
     baseUrl: "https://token-plan-cn.xiaomimimo.com"

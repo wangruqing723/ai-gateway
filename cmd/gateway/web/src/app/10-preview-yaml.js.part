@@ -141,6 +141,16 @@
                         }
                         if (p.authType) lines.push(`    authType: ${p.authType}`);
                         if (p.accountId) lines.push(`    accountId: ${p.accountId}`);
+                        const balance = this.providerBalancePayload(p.balance);
+                        if (balance) {
+                            lines.push('    balance:');
+                            for (const [key, value] of Object.entries(balance)) {
+                                if (value === undefined) continue;
+                                const safe = key === 'accessToken' && value ? '__AI_GATEWAY_KEEP_BALANCE_TOKEN__' : value;
+                                lines.push(`      ${key}: ${JSON.stringify(safe)}`);
+                            }
+                        }
+                        if (p.modelCatalog && p.authType === 'chatgptOAuth') lines.push('    modelCatalog:', `      clientVersion: ${JSON.stringify(p.modelCatalog.clientVersion || '0.167.0')}`);
                         // 只在配了时才输出，与后端 yaml omitempty 一致，避免预览里
                         // 给每个 provider 都摆一行空 userAgent；配了却不显示则是假预览。
                         if (p.userAgent) lines.push(`    userAgent: "${p.userAgent}"`);

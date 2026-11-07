@@ -40,7 +40,9 @@ import (
 	"ai-gateway/internal/httpclient"
 	"ai-gateway/internal/keypool"
 	"ai-gateway/internal/metrics"
+	"ai-gateway/internal/providerbalance"
 	"ai-gateway/internal/providerhealth"
+	"ai-gateway/internal/providermodels"
 	"ai-gateway/internal/proxy"
 	"ai-gateway/internal/queue"
 	"ai-gateway/internal/router"
@@ -166,6 +168,7 @@ func main() {
 	httpServer := newGatewayHTTPServer(addr, mux)
 	srv.startProviderHealthLoop(context.Background())
 	srv.applyChatGPTBackground(cfg)
+	srv.initProviderQueries()
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	shutdownDone := make(chan struct{})
@@ -173,6 +176,7 @@ func main() {
 		<-stop
 		srv.stopProviderHealthLoop()
 		srv.stopChatGPTBackground()
+		srv.stopProviderQueries()
 		logSystem("收到退出信号，正在关闭...")
 		if err := shutdownThenClose(httpServer, 30*time.Second, func() error {
 			var callbackShutdownErr error
@@ -191,6 +195,7 @@ func main() {
 	if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		srv.stopProviderHealthLoop()
 		srv.stopChatGPTBackground()
+		srv.stopProviderQueries()
 		signal.Stop(stop)
 		_ = imgCache.Close()
 		if oauthCallbackServer != nil {
@@ -269,6 +274,13 @@ type server struct {
 	metrics           *metrics.Collector
 	providerHealth    providerHealthRuntime
 	chatgptAuth       *chatgptauth.Manager
+	// 查询服务与转发隔离；配置发布时协调，网络期间不持有查询控制锁。
+	providerQueryMu        sync.Mutex
+	providerBalances       *providerbalance.Manager
+	providerQueryContext   context.Context
+	providerQueryCancel    context.CancelFunc
+	providerQueriesStopped bool
+	modelCatalogCache      providermodels.Cache
 	// chatGPTDiagnosing 记录正在诊断的账户 ID，同一账户同一时间只允许一个诊断，避免重复消耗额度。
 	chatGPTDiagnosing sync.Map
 	// chatGPTBatchRefreshing 保证同一时间只有一个批量用量刷新，避免重复消耗查询额度。
@@ -494,6 +506,9 @@ func (s *server) resolveClient(proxyURL string) (*http.Client, error) {
 func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 	urlPath := strings.Split(r.URL.Path, "?")[0]
 	setSecurityHeaders(w)
+	if isProviderQueryPath(urlPath) {
+		setProviderQueryHeaders(w)
+	}
 
 	// 前端页面：GET/HEAD / 返回 index.html
 	if urlPath == "/" {
@@ -616,6 +631,27 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.handleProviderModels(w, r)
+		return
+	}
+
+	if urlPath == "/api/providers/models/refresh" {
+		s.handleProviderModelsRefresh(w, r)
+		return
+	}
+	if urlPath == "/api/providers/balances/refresh" {
+		s.handleProviderBalancesRefresh(w, r)
+		return
+	}
+	if urlPath == "/api/providers/balances" {
+		if r.Method != http.MethodGet {
+			writeMethodNotAllowed(w, http.MethodGet)
+			return
+		}
+		if isCrossSiteRequest(r) {
+			writeForbiddenOrigin(w)
+			return
+		}
+		s.handleProviderBalances(w, r)
 		return
 	}
 
@@ -2987,74 +3023,20 @@ func writeProviderHealthResponse(w http.ResponseWriter, statuses map[string]prov
 	w.Write(out)
 }
 
-// handleProviderModels 拉取指定 provider 上游的真实 /v1/models 列表。
-//
-// 用已落盘配置里的 apiKey 探测，不复用 providerhealth：那个只判断状态码、
-// 不解析模型列表，且带结果缓存与并发节流，语义不匹配。这里是一次性透传查询，
-// 供前端配置路由时选择目标模型。失败时返回 502 并带上上游状态码与消息，
-// 前端据此弹提示、保留手动输入。
+// handleProviderModels 使用已保存的提供商查询真实目录，OAuth 与 API Key 认证分别处理。
 func (s *server) handleProviderModels(w http.ResponseWriter, r *http.Request) {
+	setProviderQueryHeaders(w)
 	name := r.URL.Query().Get("provider")
 	if name == "" {
 		writeJSONError(w, http.StatusBadRequest, "gateway_error", "缺少 provider 参数")
 		return
 	}
-
-	s.cfgMu.RLock()
-	cfg := s.cfg
-	provider, ok := cfg.Providers[name]
-	s.cfgMu.RUnlock()
-	if !ok || provider == nil {
-		writeJSONError(w, http.StatusNotFound, "gateway_error", fmt.Sprintf("未找到 provider: %s", name))
+	provider, _ := s.providerQuerySnapshot(name)
+	if provider == nil {
+		writeJSONError(w, http.StatusNotFound, "gateway_error", "未找到指定提供商")
 		return
 	}
-	if provider.AuthType == "chatgptOAuth" {
-		out, _ := json.Marshal(map[string]any{
-			"provider":   name,
-			"models":     []string{},
-			"manualOnly": true,
-			"message":    "ChatGPT OAuth 不提供 /v1/models 目录，请在路由目标中手动填写模型名",
-		})
-		w.Header().Set("content-type", "application/json")
-		w.Header().Set("content-length", fmt.Sprintf("%d", len(out)))
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(out)
-		return
-	}
-	providerCopy := *provider
-	if providerCopy.Name == "" {
-		providerCopy.Name = name
-	}
-	provider = &providerCopy
-	if provider.UsesKeyList() && (s.keyPool == nil || !s.keyPool.HasSelectable(name, provider, nil)) {
-		writeJSONError(w, http.StatusServiceUnavailable, "no_selectable_provider_key", fmt.Sprintf("provider %s 没有可选择的 Provider 密钥", name))
-		return
-	}
-
-	client, err := s.resolveClient(provider.Proxy)
-	if err != nil {
-		writeJSONError(w, http.StatusBadGateway, "upstream_error", "解析 provider 代理失败: "+err.Error())
-		return
-	}
-	models, err := fetchUpstreamModels(r.Context(), provider, client, s.keyPool)
-	if err != nil {
-		var noSelectable *noSelectableProviderKeyError
-		if errors.As(err, &noSelectable) {
-			writeJSONError(w, http.StatusServiceUnavailable, "no_selectable_provider_key", err.Error())
-			return
-		}
-		writeJSONError(w, http.StatusBadGateway, "upstream_error", err.Error())
-		return
-	}
-
-	out, _ := json.Marshal(map[string]any{
-		"provider": name,
-		"models":   models,
-	})
-	w.Header().Set("content-type", "application/json")
-	w.Header().Set("content-length", fmt.Sprintf("%d", len(out)))
-	w.WriteHeader(http.StatusOK)
-	w.Write(out)
+	s.writeProviderModels(w, r, name, provider, false)
 }
 
 func (s *server) handleChatGPTAuthAPI(w http.ResponseWriter, r *http.Request, path string) {
@@ -4276,6 +4258,9 @@ func (s *server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 	for name, provider := range cfg.Providers {
 		view, _ := providers[name].(map[string]any)
 		view["apiKeyConfigured"] = provider.APIKey == config.APIKeyKeepSentinel
+		if balanceView, ok := view["balance"].(map[string]any); ok && provider.Balance != nil {
+			balanceView["accessTokenConfigured"] = provider.Balance.AccessToken == config.BalanceTokenKeepSentinel
+		}
 		encodedKeys, _ := view["apiKeys"].([]any)
 		for index, encodedKey := range encodedKeys {
 			keyView, _ := encodedKey.(map[string]any)
@@ -4321,6 +4306,13 @@ func (s *server) configViewSnapshot() (*config.Config, string, []string, map[str
 	for name, provider := range s.cfg.Providers {
 		providerCopy := *provider
 		providerCopy.Name = ""
+		if provider.Balance != nil {
+			balanceCopy := *provider.Balance
+			if balanceCopy.AccessToken != "" {
+				balanceCopy.AccessToken = config.BalanceTokenKeepSentinel
+			}
+			providerCopy.Balance = &balanceCopy
+		}
 		if provider.APIKey != "" {
 			providerCopy.APIKey = config.APIKeyKeepSentinel
 		}
@@ -4438,6 +4430,10 @@ func (s *server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 
 	for name, p := range newCfg.Providers {
 		oldProvider, exists := oldCfg.Providers[name]
+		if err := refillBalanceToken(name, p, oldProvider); err != nil {
+			writeJSONError(w, http.StatusBadRequest, "config_validation_error", err.Error())
+			return
+		}
 		if p.APIKey == config.APIKeyKeepSentinel {
 			// 只校验磁盘上该 provider 名确有密钥可保留，不再用 SameProviderIdentity
 			// 限制「url/format 必须没变」：编辑 provider 改了 url 或格式时，
@@ -4646,6 +4642,7 @@ func (s *server) applyRuntimeConfig(newCfg *config.Config, revision string) []st
 	bindingChanges := chatGPTBindingChanges(oldCfg, newCfg)
 	s.cfg = newCfg
 	s.revision = revision
+	s.reconcileProviderQueriesLocked(newCfg)
 	s.cfgMu.Unlock()
 	if s.chatgptAuth != nil {
 		// 账户统计窗口与全局指标窗口一致；账户锁不与配置锁嵌套，放在释放 cfgMu 之后。

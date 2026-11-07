@@ -19,7 +19,7 @@
                     else await this.loadHealth(false);
                     this._monitorPollTimer = window.setInterval(() => {
                         if (this.monitorPollingAllowed()) this.refreshMonitor(false);
-                        else if (document.visibilityState === 'visible' && this.activeTab === 'providers') this.loadHealth(false);
+                        else if (document.visibilityState === 'visible' && this.activeTab === 'providers') { this.loadHealth(false); void this.loadProviderBalances(); }
                     }, 5000);
                     this._monitorVisibilityHandler = () => {
                         if (this.monitorPollingAllowed()) this.refreshMonitor(false);
@@ -28,7 +28,17 @@
                     document.addEventListener('visibilitychange', this._monitorVisibilityHandler);
                     this.$watch('activeTab', (tab, oldTab) => {
                         if (tab === oldTab) return;
-                        if (tab === 'providers') this.loadHealth(false);
+                        if (oldTab === 'providers') {
+                            this._providerBalancesSequence++;
+                            this._providerBalancesReadController?.abort();
+                            this._providerBalancesReadController = null;
+                            this._providerBalancesController?.abort();
+                        }
+                        if (oldTab === 'routes') {
+                            this.resetModelPicker();
+                            this.cancelInlineModel();
+                        }
+                        if (tab === 'providers') { this.loadHealth(false); this.loadProviderBalances(); }
                         else if (this.monitorPollingAllowed()) this.refreshMonitor(false);
                     });
                     // 直接编辑的字段仍需手动保存，关页面前拦一下，免得改了半天丢掉
@@ -39,8 +49,8 @@
                     });
                     window.addEventListener('keydown', (e) => this.onSaveShortcut(e));
                     // 抽屉无论从哪条路径关闭（保存成功、取消、Esc、放弃修改），焦点都还给打开它的按钮
-                    this.$watch('showProviderModal', (open) => { if (!open) this.restoreDrawerOpener(); });
-                    this.$watch('showRouteModal', (open) => { if (!open) this.restoreDrawerOpener(); });
+                    this.$watch('showProviderModal', (open) => { if (!open) { if (this.providerForm.balance) this.providerForm.balance.accessToken = ''; this._providerFormBaseline = ''; this.restoreDrawerOpener(); } });
+                    this.$watch('showRouteModal', (open) => { if (!open) { this.resetModelPicker(); this.restoreDrawerOpener(); } });
                     // 软刷新（F5）时浏览器会把刷新前的表单值恢复进 DOM，x-model 的
                     // input/change 监听再把它们写回 config。若这一步落在 loadConfig()
                     // 之后，config 就和 originalConfig 对不上，未保存浮层会在刚打开页面时
@@ -72,6 +82,11 @@
                 },
 
                 destroy() {
+                    this._providerBalancesSequence++;
+                    this._providerBalancesReadController?.abort();
+                    this._providerBalancesController?.abort();
+                    this._modelPickerController?.abort();
+                    this._inlineModelController?.abort();
                     this._chatGPTDiagnoseSequence++;
                     this._chatGPTDiagnoseController?.abort();
                     this._chatGPTDiagnoseController = null;

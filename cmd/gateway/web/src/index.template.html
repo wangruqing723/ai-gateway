@@ -950,6 +950,8 @@
                                             </svg>
                                             <span x-text="providerListExpanded ? '收起列表' : '展开列表'"></span>
                                         </button>
+                                        <button type="button" @click="refreshProviderBalances()" :disabled="refreshingProviderBalances.length > 0 || !providerBalancesSupported" class="btn btn-secondary" data-testid="balance-refresh-visible">刷新当前列表余额</button>
+                                        <button type="button" x-show="refreshingProviderBalances.length" @click="_providerBalancesController?.abort()" class="btn btn-secondary">停止等待</button>
                                         <button @click="addProvider()" class="btn btn-secondary">
                                             <span class="material-symbols-outlined">add</span>
                                             添加 Provider
@@ -981,6 +983,7 @@
                                                 <th scope="col" class="whitespace-nowrap px-3 py-3 font-bold">格式</th>
                                                 <th scope="col" class="whitespace-nowrap px-3 py-3 font-bold">Base URL</th>
                                                 <th scope="col" class="whitespace-nowrap px-3 py-3 font-bold">Key</th>
+                                                <th scope="col" class="whitespace-nowrap px-3 py-3 font-bold">余额 / 配额</th>
                                                 <th scope="col" class="whitespace-nowrap px-3 py-3 font-bold">代理</th>
                                                 <th scope="col" class="whitespace-nowrap px-3 py-3 text-right font-bold">并发</th>
                                                 <th scope="col" class="whitespace-nowrap px-3 py-3 text-right font-bold">速率</th>
@@ -1094,6 +1097,41 @@
                                                               @blur="hideTip()"
                                                               tabindex="0">key_off</span>
                                                     </td>
+                                                    <td class="px-3 py-2.5 text-xs" style="min-width: 15rem; max-width: 22rem" data-testid="provider-balance" :data-provider="name">
+                                                        <p class="text-muted" x-text="providerBalanceState(name)"></p>
+                                                        <template x-for="(item, bi) in (providerBalanceView(name).snapshot?.items || [])" :key="bi">
+                                                            <div class="mt-1">
+                                                                <p class="font-mono text-sm text-white" x-text="providerBalanceValue(item)"></p>
+                                                                <p class="text-muted" x-text="providerBalanceKind(item.kind)"></p>
+                                                            </div>
+                                                        </template>
+                                                        <div class="mt-1 flex flex-wrap gap-3">
+                                                            <button type="button" x-show="provider.balance?.type && providerBalancesSupported" @click="refreshProviderBalances([name])" :disabled="refreshingProviderBalances.length > 0" class="text-cyan disabled:opacity-50" :aria-label="'刷新「' + name + '」余额'">刷新</button>
+                                                            <details x-show="provider.balance?.type" class="min-w-0">
+                                                                <summary class="cursor-pointer text-cyan">查询详情</summary>
+                                                                <div class="mt-2 space-y-1 break-words text-xs leading-relaxed text-muted">
+                                                                    <p x-text="'适配器：' + (providerBalanceView(name).type || provider.balance?.type || '—') + ' · 来源：' + (providerBalanceView(name).source || provider.balance?.source || 'auto')"></p>
+                                                                    <p x-text="'成功时间：' + providerBalanceTime(providerBalanceView(name).lastSuccessAt)"></p>
+                                                                    <p x-show="providerBalanceView(name).lastAttemptAt" x-text="'最近尝试：' + providerBalanceTime(providerBalanceView(name).lastAttemptAt)"></p>
+                                                                    <p x-show="providerBalanceView(name).nextRefreshAt" x-text="'下次计划：' + providerBalanceTime(providerBalanceView(name).nextRefreshAt)"></p>
+                                                                    <p x-show="providerBalanceView(name).retryAfterSeconds != null" x-text="'建议等待：' + providerBalanceView(name).retryAfterSeconds + ' 秒；不代表额度恢复'"></p>
+                                                                    <p x-show="providerBalanceView(name).error" class="text-warn" x-text="providerBalanceView(name).error?.message || '查询失败，旧值保留'"></p>
+                                                                    <template x-for="(item, di) in (providerBalanceView(name).snapshot?.items || [])" :key="di">
+                                                                        <div class="border-t border-line pt-1">
+                                                                            <p x-text="providerBalanceKind(item.kind) + ' · ' + (item.source || '来源未知') + (item.keyId ? ' · 密钥 ' + item.keyId : '')"></p>
+                                                                            <p x-text="'已用：' + (item.used ?? '未知') + ' · 上限：' + (item.limit ?? '未知') + ' ' + (item.unit || '')"></p>
+                                                                            <p x-show="item.rawUnit" x-text="'原始剩余：' + (item.rawRemaining ?? '未知') + ' · 已用：' + (item.rawUsed ?? '未知') + ' ' + (item.rawUnit || '')"></p>
+                                                                            <p x-show="item.quotaPerUnit" x-text="'每 USD 配额：' + item.quotaPerUnit + ' · 换算来源：' + (item.conversionSource === 'configuration' ? '显式配置' : '上游公开设置')"></p>
+                                                                            <template x-for="(win, wi) in (item.windows || [])" :key="wi"><p x-text="(win.name || '周期') + '：剩余 ' + (win.remaining ?? '未知') + ' / 上限 ' + (win.limit ?? '未知') + '，已用 ' + (win.used ?? '未知') + ' ' + (win.unit || item.unit || '') + (win.resetAt ? ' · 重置 ' + providerBalanceTime(win.resetAt) : '') + (win.expiresAt ? ' · 到期 ' + providerBalanceTime(win.expiresAt) : '')"></p></template>
+                                                                        </div>
+                                                                    </template>
+                                                                    <template x-for="(warning, wi) in (providerBalanceView(name).snapshot?.warnings || [])" :key="wi"><p class="text-warn" x-text="warning"></p></template>
+                                                                    <p x-show="providerBalanceView(name).sharedProviders?.length" x-text="'与 ' + (providerBalanceView(name).sharedProviders || []).join('、') + ' 共享查询来源，不可相加'"></p>
+                                                                    <p>各口径不相加；共享来源的多行不代表独立余额。查询不改变启停和路由。</p>
+                                                                </div>
+                                                            </details>
+                                                        </div>
+                                                    </td>
                                                     <td class="max-w-0 px-3 py-2.5">
                                                         <span class="block truncate font-mono text-xs text-muted"
                                                               @mouseenter="showTip(proxyHost(provider.proxy), $event)"
@@ -1123,10 +1161,10 @@
                                                 </tr>
                                             </template>
                                             <tr x-show="!config.providers || Object.keys(config.providers).length === 0">
-                                                <td colspan="10" class="px-3 py-10 text-center text-sm text-muted">还没有 Provider</td>
+                                                <td colspan="11" class="px-3 py-10 text-center text-sm text-muted">还没有 Provider</td>
                                             </tr>
                                             <tr x-show="providerCount() > 0 && filteredProviderCount() === 0">
-                                                <td colspan="10" class="px-3 py-10 text-center text-sm text-muted">没有符合当前筛选条件的 Provider</td>
+                                                <td colspan="11" class="px-3 py-10 text-center text-sm text-muted">没有符合当前筛选条件的 Provider</td>
                                             </tr>
                                         </tbody>
                                     </table>
@@ -2848,6 +2886,42 @@
                     </div>
                 </section>
 
+                <section class="mt-6 border-t border-line pt-5" x-show="providerForm.authType !== 'chatgptOAuth'" data-testid="provider-balance-settings">
+                    <button type="button" @click="providerBalanceOpen = !providerBalanceOpen" :aria-expanded="String(providerBalanceOpen)" aria-controls="provider-balance-fields" class="btn btn-secondary w-full">
+                        <span class="flex-1 text-left">余额查询</span><span class="text-xs text-muted" x-text="providerForm.balance.type ? '已配置 · 独立于模型调用' : '未配置 · 默认不查询'"></span>
+                        <span class="material-symbols-outlined" x-text="providerBalanceOpen ? 'keyboard_arrow_up' : 'keyboard_arrow_down'"></span>
+                    </button>
+                    <div id="provider-balance-fields" x-show="providerBalanceOpen" class="mt-4 space-y-4">
+                        <p class="text-xs leading-relaxed text-muted">只查询本人账户或选定密钥，不自动轮换、不求和，不影响路由与启停。设置需保存后才能查询。</p>
+                        <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                            <label><span class="mb-1.5 block text-xs font-bold text-muted">适配类型</span><select x-model="providerForm.balance.type" class="field" aria-label="余额适配类型"><option value="">不启用</option><option value="newapi">New API</option><option value="sub2api">Sub2API</option></select></label>
+                            <label x-show="providerForm.balance.type"><span class="mb-1.5 block text-xs font-bold text-muted">查询来源</span><select x-model="providerForm.balance.source" class="field" aria-label="余额查询来源"><option value="auto">自动（独立令牌优先）</option><option value="account">账户（独立令牌）</option><option value="apiKey">选定调用密钥</option></select></label>
+                        </div>
+                        <div x-show="providerForm.balance.type" class="space-y-4">
+                            <label class="block"><span class="mb-1.5 block text-xs font-bold text-muted">管理站点基址（可选）</span><input autocomplete="off" x-model="providerForm.balance.baseUrl" class="field" placeholder="默认使用 Provider URL 去掉末尾 /v1" aria-label="余额管理站点基址"></label>
+                            <p class="break-words text-xs text-muted" x-text="'查询目标：' + providerBalanceTarget(providerForm)"></p>
+                            <p class="text-xs text-warn">修改适配类型、目标站点或名称后必须重新填写独立令牌；调用密钥只能发送到同源站点。</p>
+                            <div x-show="providerForm.balance.source !== 'apiKey'" class="space-y-2">
+                                <label class="block"><span class="mb-1.5 block text-xs font-bold text-muted">独立余额查询令牌（不是模型调用密钥）</span><input type="password" autocomplete="new-password" x-model="providerForm.balance.accessToken" :disabled="providerForm.balance.clearAccessToken" class="field" :placeholder="providerForm.balance.accessTokenConfigured ? '已配置，留空保留；改目标须重新填' : '账户来源必填；auto 留空则使用调用密钥'" aria-label="独立余额查询令牌"></label>
+                                <label class="flex items-center gap-2 text-xs text-muted"><input type="checkbox" x-model="providerForm.balance.clearAccessToken">明确清除已保存查询令牌</label>
+                                <p class="text-xs text-muted">New API 需本人读取权限；Sub2API 面板 JWT 可能到期或绑定 IP / UA，本功能不自动续期。</p>
+                            </div>
+                            <label x-show="providerForm.keyListMode && providerForm.balance.source !== 'account' && !providerForm.balance.accessToken && (!providerForm.balance.accessTokenConfigured || providerForm.balance.clearAccessToken || providerForm.balance.source === 'apiKey')" class="block"><span class="mb-1.5 block text-xs font-bold text-muted">用于查询的一把调用密钥</span><select x-model="providerForm.balance.apiKeyId" class="field" aria-label="余额查询密钥"><option value="">请选择，不自动轮换</option><template x-for="key in providerForm.apiKeys" :key="key.id"><option :value="key.id" x-text="key.name || key.id"></option></template></select></label>
+                            <div x-show="providerForm.balance.type === 'newapi'" class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                                <label><span class="mb-1.5 block text-xs font-bold text-muted">旧版 New API 用户 ID（可选）</span><input autocomplete="off" x-model="providerForm.balance.userId" class="field" inputmode="numeric" aria-label="New API 用户 ID"></label>
+                                <label><span class="mb-1.5 block text-xs font-bold text-muted">每 1 USD 的原始配额（可选）</span><input autocomplete="off" x-model="providerForm.balance.quotaPerUnit" class="field" inputmode="decimal" placeholder="留空由站点公开设置发现" aria-label="每 USD 配额"></label>
+                            </div>
+                            <p x-show="providerForm.balance.type === 'newapi'" class="text-xs text-muted">纯十进制，整数部分必填，最多 18 位小数；不接受正号、指数、.5 或 1.。无法确认换算时只显示原始配额，不默认除以 500000。</p>
+                            <label class="block"><span class="mb-1.5 block text-xs font-bold text-muted">自动刷新周期（分钟）</span><input type="number" autocomplete="off" x-model.number="providerForm.balance.refreshIntervalMinutes" min="0" max="1440" step="1" class="field" aria-label="余额自动刷新分钟"><span class="mt-1 block text-xs text-muted">0 = 手动（默认）；开启为 5–1440 分钟。自动刷新跳过停用项，手动仍可查询。</span></label>
+                        </div>
+                    </div>
+                </section>
+                <label x-show="providerForm.authType === 'chatgptOAuth'" class="mt-6 block border-t border-line pt-5">
+                    <span class="mb-1.5 block text-xs font-bold text-muted">模型目录兼容版本（可选）</span>
+                    <input autocomplete="off" x-model="providerForm.modelCatalog.clientVersion" class="field" placeholder="默认 0.167.0" aria-label="模型目录兼容版本">
+                    <span class="mt-1 block text-xs text-muted">仅作用于绑定账户的远端目录，不改变转发 UA；格式 major.minor.patch。</span>
+                </label>
+
                 <!-- 高级设置：默认折叠；编辑一个已带高级配置的 Provider 时自动展开——值已经在了，藏起来反而危险。
                      折叠条与路由抽屉的「高级设置」同一套交互：tune 图标 + 已配置个数 + 展开箭头。 -->
                 <div class="mt-6 border-t border-line pt-5">
@@ -3128,6 +3202,10 @@
                                                     <div x-show="modelPicker.loading" class="flex items-center gap-2 px-3 py-1.5 text-muted">
                                                         <span class="material-symbols-outlined gw-spin text-[14px]">progress_activity</span>正在查询上游模型列表…
                                                     </div>
+                                                    <div class="flex flex-wrap gap-3 border-b border-line px-3 py-2">
+                                                        <button type="button" @mousedown.prevent @click="openModelPicker(modelPicker.key, modelPicker.provider, '', true)" :disabled="modelPicker.loading" class="text-cyan disabled:opacity-50">刷新远端模型</button>
+                                                        <button type="button" x-show="modelPicker.loading" @mousedown.prevent @click="_modelPickerController?.abort(); modelPicker.loading = false; modelPicker.token++; modelPicker.message = '已取消等待；已轮换凭据仍会安全保存'" class="text-muted">取消等待</button>
+                                                    </div>
                                                     <div x-show="!modelPicker.loading && modelPicker.message" class="px-3 py-1.5 leading-relaxed text-muted" x-text="modelPicker.message"></div>
                                                     <div x-show="!modelPicker.loading && modelPicker.models.length && !modelPickerOptions(target.model).length"
                                                          class="px-3 py-1.5 leading-relaxed text-muted"
@@ -3264,6 +3342,10 @@
                                             class="absolute left-0 right-0 top-[calc(100%+4px)] z-30 max-h-44 overflow-y-auto rounded-lg border border-line bg-panel3 py-1 text-xs shadow-glow">
                                             <div x-show="modelPicker.loading" class="flex items-center gap-2 px-3 py-1.5 text-muted">
                                                 <span class="material-symbols-outlined gw-spin text-[14px]">progress_activity</span>正在查询上游模型列表…
+                                            </div>
+                                            <div class="flex flex-wrap gap-3 border-b border-line px-3 py-2">
+                                                <button type="button" @mousedown.prevent @click="openModelPicker(modelPicker.key, modelPicker.provider, '', true)" :disabled="modelPicker.loading" class="text-cyan disabled:opacity-50">刷新远端模型</button>
+                                                <button type="button" x-show="modelPicker.loading" @mousedown.prevent @click="_modelPickerController?.abort(); modelPicker.loading = false; modelPicker.token++; modelPicker.message = '已取消等待；已轮换凭据仍会安全保存'" class="text-muted">取消等待</button>
                                             </div>
                                             <div x-show="!modelPicker.loading && modelPicker.message" class="px-3 py-1.5 leading-relaxed text-muted" x-text="modelPicker.message"></div>
                                             <template x-for="(m, mi) in modelPickerOptions(routeForm.visionModel)" :key="m">
@@ -4024,6 +4106,10 @@
          class="fixed z-[60] max-h-60 overflow-y-auto rounded-lg border border-line bg-panel3 py-1 text-xs shadow-glow">
         <div x-show="inlineModel.modelsLoading" class="flex items-center gap-2 px-3 py-1.5 text-muted">
             <span class="material-symbols-outlined gw-spin text-[14px]">progress_activity</span>正在查询上游模型列表…
+        </div>
+        <div class="flex flex-wrap gap-3 border-b border-line px-3 py-2">
+            <button type="button" @mousedown.prevent @click="loadInlineModels(true)" :disabled="inlineModel.modelsLoading" class="text-cyan disabled:opacity-50">刷新远端模型</button>
+            <button type="button" x-show="inlineModel.modelsLoading" @mousedown.prevent @click="_inlineModelController?.abort(); inlineModel.modelsLoading = false; inlineModel.token++; inlineModel.message = '已取消等待；已轮换凭据仍会安全保存'" class="text-muted">取消等待</button>
         </div>
         <div x-show="!inlineModel.modelsLoading && inlineModel.message" class="px-3 py-1.5 leading-relaxed text-muted" x-text="inlineModel.message"></div>
         <div x-show="!inlineModel.modelsLoading && inlineModel.models.length && !inlineModelOptions().length"

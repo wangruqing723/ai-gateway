@@ -1,4 +1,142 @@
 
+                normalizeProviderBalance(raw) {
+                    if (!raw?.type) return undefined;
+                    const out = { ...raw };
+                    out.accessTokenConfigured = !!raw.accessTokenConfigured || !!raw.accessToken;
+                    if (out.accessTokenConfigured) out.accessToken = '__AI_GATEWAY_KEEP_BALANCE_TOKEN__';
+                    return out;
+                },
+
+                providerBalanceForm(raw, duplicate = false) {
+                    return { type: raw?.type || '', source: raw?.source || 'auto', baseUrl: raw?.baseUrl || '',
+                        accessToken: '', accessTokenConfigured: !duplicate && !!(raw?.accessTokenConfigured || raw?.accessToken), clearAccessToken: false,
+                        userId: raw?.userId || '', apiKeyId: duplicate ? '' : (raw?.apiKeyId || ''), quotaPerUnit: raw?.quotaPerUnit || '',
+                        refreshIntervalMinutes: raw?.refreshIntervalMinutes ?? 0 };
+                },
+
+                providerBalanceTarget(provider, balance = provider?.balance) {
+                    const raw = balance?.baseUrl || String(provider?.baseUrl || '').replace(/\/v1\/?$/, '');
+                    try { const url = new URL(raw); return url.origin + url.pathname.replace(/\/+$/, ''); } catch { return raw; }
+                },
+
+                providerBalancePayload(raw) {
+                    if (!raw?.type) return undefined;
+                    const { accessTokenConfigured, clearAccessToken, ...payload } = raw;
+                    if (payload.source === 'apiKey') payload.accessToken = '';
+                    else payload.accessToken = clearAccessToken ? '' : (payload.accessToken || (accessTokenConfigured ? '__AI_GATEWAY_KEEP_BALANCE_TOKEN__' : ''));
+                    if (payload.source === 'account' || (payload.source !== 'apiKey' && payload.accessToken)) delete payload.apiKeyId;
+                    for (const key of ['baseUrl', 'userId', 'apiKeyId', 'quotaPerUnit']) if (!payload[key]) delete payload[key];
+                    if (payload.type !== 'newapi') { delete payload.userId; delete payload.quotaPerUnit; }
+                    return payload;
+                },
+
+                validateProviderBalance() {
+                    const f = this.providerForm, b = f.balance;
+                    if (!b?.type || f.authType === 'chatgptOAuth') return true;
+                    const payload = this.providerBalancePayload(b);
+                    const old = this.config.providers?.[this.editingProvider];
+                    if (payload.accessToken === '__AI_GATEWAY_KEEP_BALANCE_TOKEN__' &&
+                        (!old || old.balance?.type !== b.type || this.providerBalanceTarget(old) !== this.providerBalanceTarget(f) || f.name !== this.editingProvider)) {
+                        this.showStatus('查询类型、目标站点或名称改变后，请重新填写独立余额查询令牌，或明确清除', 'error'); return false;
+                    }
+                    if (payload.source === 'account' && !payload.accessToken) { this.showStatus('账户余额查询需要独立令牌', 'error'); return false; }
+                    const quota = String(payload.quotaPerUnit || '');
+                    const [whole, fraction = ''] = quota.split('.');
+                    const integer = whole.replace(/^0+/, '') || '0';
+                    const quotaTooLarge = integer.length > 19 || (integer.length === 19 && (integer > '1000000000000000000' || (integer === '1000000000000000000' && /[1-9]/.test(fraction))));
+                    if (quota && (!/^\d+(?:\.\d{1,18})?$/.test(quota) || quota.length > 64 || !/[1-9]/.test(quota) || quotaTooLarge)) {
+                        this.showStatus('每 USD 配额须为正十进制数，整数部分必填，最多 18 位小数，不接受正号或指数', 'error'); return false;
+                    }
+                    if (payload.refreshIntervalMinutes !== 0 && (!Number.isInteger(payload.refreshIntervalMinutes) || payload.refreshIntervalMinutes < 5 || payload.refreshIntervalMinutes > 1440)) {
+                        this.showStatus('自动刷新须为 0（手动）或 5–1440 分钟整数', 'error'); return false;
+                    }
+                    if (f.keyListMode && payload.source !== 'account' && !payload.accessToken && !(f.apiKeys || []).some(key => key.id === payload.apiKeyId)) {
+                        this.showStatus('请选择用于余额查询的一把调用密钥，不自动轮换或求和', 'error'); return false;
+                    }
+                    return true;
+                },
+
+                providerBalanceIdentity(name) {
+                    const p = this.config.providers?.[name];
+                    return JSON.stringify([this.revision, p?.baseUrl, p?.balance, p?.apiKeys, p?.authType, p?.accountId]);
+                },
+
+                async loadProviderBalances() {
+                    if (this.refreshingProviderBalances.length || this._providerBalancesReadController) return;
+                    const controller = new AbortController();
+                    this._providerBalancesReadController = controller;
+                    const timeout = window.setTimeout(() => controller.abort(), 10_000);
+                    const sequence = ++this._providerBalancesSequence;
+                    const revision = this.revision;
+                    try {
+                        const res = await fetch('/api/providers/balances', { cache: 'no-store', signal: controller.signal });
+                        if (controller.signal.aborted || sequence !== this._providerBalancesSequence || revision !== this.revision) return;
+                        if (res.status === 404) { this.providerBalancesSupported = false; this.providerBalances = {}; return; }
+                        if (!res.ok) return;
+                        const data = await res.json();
+                        if (controller.signal.aborted || sequence !== this._providerBalancesSequence || revision !== this.revision || (data.revision && data.revision !== revision)) return;
+                        this.providerBalancesSupported = true;
+                        this.providerBalances = data.providers || {};
+                        this.providerBalanceResults = {};
+                    } catch { /* 只读缓存失败不触发上游或暴露网络错误原文。 */ }
+                    finally {
+                        window.clearTimeout(timeout);
+                        if (this._providerBalancesReadController === controller) this._providerBalancesReadController = null;
+                    }
+                },
+
+                visibleBalanceProviders() {
+                    return Object.entries(this.providersByEnabled()).filter(([name, p]) => this.providerMatchesFilter(name, p) && p.balance?.type).map(([name]) => name);
+                },
+
+                async refreshProviderBalances(names = this.visibleBalanceProviders()) {
+                    if (names.length > 50) { this.showStatus('当前筛选包含超过 50 个已配置项，请缩小筛选后刷新，不会截断列表', 'error'); return; }
+                    if (!names.length) { this.showStatus('当前列表没有已配置余额查询的提供商', 'error'); return; }
+                    if (this.isDirty()) { this.showStatus('请先保存配置，再查询已保存的余额设置', 'error'); return; }
+                    if (this.refreshingProviderBalances.length) return;
+                    this._providerBalancesSequence++;
+                    this._providerBalancesReadController?.abort();
+                    this._providerBalancesReadController = null;
+                    const revision = this.revision;
+                    const identities = Object.fromEntries(names.map(name => [name, this.providerBalanceIdentity(name)]));
+                    const controller = new AbortController();
+                    this._providerBalancesController = controller;
+                    this.refreshingProviderBalances = [...names];
+                    const timer = window.setTimeout(() => controller.abort(), 65_000);
+                    try {
+                        const res = await fetch('/api/providers/balances/refresh', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ revision, providers: names }), signal: controller.signal });
+                        if (res.status === 404) { this.providerBalancesSupported = false; return; }
+                        if (!res.ok) throw new Error('刷新未受理，请重新读取配置后重试');
+                        const data = await res.json();
+                        if (controller.signal.aborted || revision !== this.revision || (data.revision && data.revision !== revision)) return;
+                        for (const result of data.results || []) {
+                            if (identities[result.provider] !== this.providerBalanceIdentity(result.provider)) continue;
+                            if (result.balance) this.providerBalances[result.provider] = result.balance;
+                            this.providerBalanceResults[result.provider] = result.status;
+                        }
+                    } catch {
+                        this.showStatus(controller.signal.aborted ? '余额刷新已停止等待；已经发生的上游读取无法撤回，旧值保留' : '余额刷新失败，旧值保留，请稍后重试', 'error');
+                    } finally {
+                        window.clearTimeout(timer);
+                        if (this._providerBalancesController === controller) { this.refreshingProviderBalances = []; this._providerBalancesController = null; }
+                    }
+                },
+
+                providerBalanceView(name) { return this.providerBalances[name] || {}; },
+                providerBalanceKind(kind) { return ({ account_balance: '账户余额', key_quota: '密钥额度', subscription_quota: '订阅额度（非钱包）', usage_only: '仅用量，剩余未知' })[kind] || '未知口径'; },
+                providerBalanceValue(item) {
+                    if (item?.unlimited) return '不限额（仅此项）';
+                    return (item?.remaining == null ? '剩余未知' : String(item.remaining)) + (item?.unit ? ' ' + item.unit : '');
+                },
+                providerBalanceTime(value) { return value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '尚无成功查询'; },
+                providerBalanceState(name) {
+                    const view = this.providerBalanceView(name);
+                    if (this.refreshingProviderBalances.includes(name) || view.refreshing) return '查询中，保留上次结果';
+                    if (!this.providerBalancesSupported) return '当前后端不支持余额查询';
+                    const result = ({ success: '刷新成功', cached: '复用缓存／限频', failed: '刷新失败，旧值保留', skipped: '本次跳过', cancelled: '本次取消，未撤回已发生读取' })[this.providerBalanceResults[name]];
+                    return [result || ({ not_configured: '未配置查询', not_queried: '尚未查询', ok: '查询成功', failed: '查询失败，旧值保留', unsupported: '暂不支持', credentials_required: '需要查询凭据' })[view.state] || (this.config.providers?.[name]?.balance ? '尚未查询' : '未配置查询'), view.freshness === 'stale' ? '旧数据' : ''].filter(Boolean).join(' · ');
+                },
+
                 async loadChatGPTAccounts(showError = false, checkUsage = true) {
                     this.loadingChatGPTAccounts = true;
                     let loaded = false;
@@ -1338,7 +1476,9 @@
                         extraBody: [],
                         enabled: true,
                         apiKeyConfigured: false,
-                        clearApiKey: false
+                        clearApiKey: false,
+                        balance: this.providerBalanceForm(),
+                        modelCatalog: { clientVersion: '' }
                     };
                     this.openProviderDrawer();
                 },
@@ -1393,7 +1533,9 @@
                         // enabled 回填：后端 nil 表示启用（默认），前端归一成 true。
                         enabled: p.enabled !== false,
                         apiKeyConfigured: !!p.apiKeyConfigured,
-                        clearApiKey: false
+                        clearApiKey: false,
+                        balance: this.providerBalanceForm(p.balance),
+                        modelCatalog: { clientVersion: p.modelCatalog?.clientVersion || '' }
                     };
                     if (rawApiKeys !== null) await this.loadHealth(false);
                     this.openProviderDrawer();
@@ -1438,9 +1580,12 @@
                         // 否则用户复制后还要手动启用，与「复制=另起一个可用的」预期不符。
                         enabled: true,
                         apiKeyConfigured: false,
-                        clearApiKey: false
+                        clearApiKey: false,
+                        balance: this.providerBalanceForm(p.balance, true),
+                        modelCatalog: { clientVersion: p.modelCatalog?.clientVersion || '' }
                     };
                     this.openProviderDrawer();
+                    if (p.balance?.accessTokenConfigured) this.showStatus('副本的独立余额查询令牌需重新填写', 'success');
                     if (p.apiKeyConfigured || p.apiKeys?.length) {
                         this.showStatus(`已按「${name}」预填，API Key 需重新填写`, 'success');
                     }
@@ -1483,6 +1628,11 @@
                         return;
                     }
 
+                    if (!this.validateProviderBalance()) return;
+                    const catalogVersion = this.providerForm.modelCatalog?.clientVersion?.trim() || '';
+                    if (oauth && catalogVersion && !/^\d{1,6}\.\d{1,6}\.\d{1,6}$/.test(catalogVersion)) {
+                        this.showStatus('目录兼容版本须为 major.minor.patch，每段最多六位数字', 'error'); return;
+                    }
                     let apiKey = '';
                     let apiKeys;
                     let keyCooldown;
@@ -1513,6 +1663,8 @@
                         format: oauth ? 'openai-responses' : this.providerForm.format,
                         authType: oauth ? 'chatgptOAuth' : undefined,
                         accountId: oauth ? this.providerForm.accountId : undefined,
+                        balance: oauth ? undefined : this.providerBalancePayload(this.providerForm.balance),
+                        modelCatalog: oauth && catalogVersion ? { clientVersion: catalogVersion } : undefined,
                         maxConcurrent: this.providerForm.maxConcurrent || 5,
                         maxPerSecond: this.providerForm.maxPerSecond || 0,
                         maxQueueWait: this.providerForm.maxQueueWait || 30000,
