@@ -281,6 +281,8 @@ type server struct {
 	providerQueryCancel    context.CancelFunc
 	providerQueriesStopped bool
 	modelCatalogCache      providermodels.Cache
+	accountCatalogCache    providermodels.Cache
+	chatGPTBatchDiagnosing atomic.Bool
 	// chatGPTDiagnosing 记录正在诊断的账户 ID，同一账户同一时间只允许一个诊断，避免重复消耗额度。
 	chatGPTDiagnosing sync.Map
 	// chatGPTBatchRefreshing 保证同一时间只有一个批量用量刷新，避免重复消耗查询额度。
@@ -1617,6 +1619,8 @@ type forwardAttemptInput struct {
 	detail                *metrics.AttemptDetail
 	// diagnostic 禁止诊断调用打印原文或参与上游抓包，只由独立诊断入口设为 true。
 	diagnostic bool
+	// accountPreflight 复用协议与凭据路径，但只进入账户共享队列，使用管理代理客户端。
+	accountPreflight bool
 }
 
 // forwardAttemptOutcome 单次尝试结果。
@@ -1832,7 +1836,12 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 		// 并由外层在全部候选均不可构建时生成统一终态。
 		return forwardAttemptOutcome{buildErr: buildErr}
 	}
-	client, err := s.resolveClient(p.Proxy)
+	var client *http.Client
+	if in.accountPreflight {
+		client = s.chatgptAuth.ManagementClient()
+	} else {
+		client, err = s.resolveClient(p.Proxy)
+	}
 	if err != nil {
 		buildErr := "解析 provider 代理失败: " + err.Error()
 		if in.detail != nil {
@@ -1875,10 +1884,14 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 			s.recordChatGPTAdmissionSkip(r.Context(), p, in.diagnostic, chatgptauth.SkipCooldown)
 			return accountCooldownOutcome(in.detail, p.Name)
 		}
+		if watchErr != nil {
+			return forwardAttemptOutcome{oauthErr: watchErr, buildErr: "账户不可用"}
+		}
 		defer admission.Release()
 		invocation = s.chatgptAuth.BeginInvocationWith(p.AccountID, p.Name, targetModel, chatgptauth.InvocationSource{
-			Diagnostic: in.diagnostic,
-			LocalRetry: in.detail != nil && in.detail.LocalRetry,
+			Diagnostic:       in.diagnostic,
+			AccountPreflight: in.accountPreflight,
+			LocalRetry:       in.detail != nil && in.detail.LocalRetry,
 		})
 		oauthAccessToken, chatgptAccountID, err = s.chatgptAuth.AccessToken(r.Context(), p.AccountID, client)
 		if err == nil && (admission.Paused() || s.chatgptAuth.IsPaused(p.AccountID)) {
@@ -1911,7 +1924,7 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 
 	// 直通模式：跳过队列（并发/限速/排队），请求直接转发；超时用 direct* 配置。
 	// 非直通模式：先经队列获取执行槽位（并发 + 限速 + 等待超时）。
-	if !cfg.DirectMode {
+	if !cfg.DirectMode || in.accountPreflight {
 		waitCtx := r.Context()
 		if admission != nil {
 			waitCtx = admission.Context()
@@ -1921,7 +1934,9 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 			waitMs  int64
 			err     error
 		)
-		if admission != nil && cfg.ChatGPTAccountLimits.Enabled() {
+		if in.accountPreflight {
+			release, waitMs, err = s.qm.AcquireGroupOnly(waitCtx, p.AccountID, int(chatGPTDiagnoseBudget.Milliseconds()))
+		} else if admission != nil && cfg.ChatGPTAccountLimits.Enabled() {
 			// 账户共享约束：账户与 Provider 同时有空位才准入，等待期间不占用任何一方（DESIGN 6.4）。
 			release, waitMs, err = s.qm.AcquireGroup(waitCtx, p.Name, p.MaxConcurrent, p.MaxPerSecond, p.MaxQueueWait, p.AccountID)
 		} else {
@@ -1992,6 +2007,13 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 			s.recordChatGPTAdmissionSkip(r.Context(), p, in.diagnostic, chatgptauth.SkipCooldown)
 			return accountCooldownOutcome(in.detail, p.Name)
 		}
+	}
+	// 诊断不能将排队前的消费确认应用到之后被替换的账户凭据。
+	if in.diagnostic && invocation != nil && !s.chatgptAuth.InvocationCurrent(p.AccountID, invocation) {
+		return forwardAttemptOutcome{oauthErr: chatgptauth.ErrCredentialsReplaced, buildErr: "账户凭据已变化"}
+	}
+	if in.diagnostic && r.Context().Err() != nil {
+		return forwardAttemptOutcome{oauthErr: r.Context().Err(), buildErr: "诊断已取消"}
 	}
 	// 从这里开始即视为已准入：之后的暂停与冷却不再截断本次请求。
 	admission.Release()
@@ -3040,6 +3062,9 @@ func (s *server) handleProviderModels(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleChatGPTAuthAPI(w http.ResponseWriter, r *http.Request, path string) {
+	if strings.HasSuffix(path, "/diagnose") || strings.HasSuffix(path, "/diagnose/batch") || strings.HasSuffix(path, "/models") || strings.HasSuffix(path, "/models/refresh") {
+		setProviderQueryHeaders(w)
+	}
 	if path == "/api/chatgpt/accounts/backup/export" || path == "/api/chatgpt/accounts/backup/preview" || path == "/api/chatgpt/accounts/backup/apply" {
 		// 备份端点的所有响应（含下面的跨站 403 与管理器不可用 503）都不缓存。
 		setChatGPTBackupHeaders(w)
@@ -3171,6 +3196,8 @@ func (s *server) handleChatGPTAuthAPI(w http.ResponseWriter, r *http.Request, pa
 		s.handleChatGPTAccountBatch(w, r, false)
 	case "/api/chatgpt/accounts/batch/apply":
 		s.handleChatGPTAccountBatch(w, r, true)
+	case "/api/chatgpt/accounts/diagnose/batch":
+		s.handleChatGPTDiagnoseBatch(w, r)
 	case "/api/chatgpt/accounts/usage/batch-refresh":
 		s.handleChatGPTUsageBatchRefresh(w, r)
 	case "/api/chatgpt/accounts/usage/refresh":
@@ -3252,6 +3279,14 @@ func (s *server) handleChatGPTAuthAPI(w http.ResponseWriter, r *http.Request, pa
 	default:
 		if strings.HasPrefix(path, "/api/chatgpt/accounts/") {
 			relativePath := strings.TrimPrefix(path, "/api/chatgpt/accounts/")
+			if strings.HasSuffix(relativePath, "/models/refresh") {
+				s.handleChatGPTAccountModels(w, r, strings.TrimSuffix(relativePath, "/models/refresh"), true)
+				return
+			}
+			if strings.HasSuffix(relativePath, "/models") {
+				s.handleChatGPTAccountModels(w, r, strings.TrimSuffix(relativePath, "/models"), false)
+				return
+			}
 			if strings.HasSuffix(relativePath, "/usage/refresh") {
 				accountID := strings.TrimSuffix(relativePath, "/usage/refresh")
 				s.handleRefreshChatGPTAccountUsage(w, r, accountID)
@@ -3565,6 +3600,7 @@ func (s *server) handleDeleteChatGPTAccount(w http.ResponseWriter, r *http.Reque
 		writeJSONError(w, http.StatusInternalServerError, "gateway_error", "删除账户失败: "+err.Error())
 		return
 	}
+	s.reconcileAccountCatalogs()
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 

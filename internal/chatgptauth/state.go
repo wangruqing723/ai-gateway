@@ -39,6 +39,7 @@ type InvocationView struct {
 	State      string `json:"state"`
 	Message    string `json:"message"`
 	Provider   string `json:"provider,omitempty"`
+	Mode       string `json:"mode,omitempty"`
 	Model      string `json:"model,omitempty"`
 	ObservedAt string `json:"observedAt,omitempty"`
 	HTTPStatus int    `json:"httpStatus,omitempty"`
@@ -66,6 +67,8 @@ type InvocationSource struct {
 	Diagnostic bool
 	// LocalRetry 表示同一候选内的本地重试；仍计入真实调用，另计重试次数。
 	LocalRetry bool
+	// AccountPreflight 表示独立账户预检，不归属任何 Provider。
+	AccountPreflight bool
 }
 
 // InvocationResult 是一次真实上游尝试的安全结论，不含请求或响应正文。
@@ -80,6 +83,7 @@ type InvocationResult struct {
 }
 
 type invocationRecord struct {
+	mode       string
 	seq        uint64
 	at         time.Time
 	provider   string
@@ -123,6 +127,11 @@ func (m *Manager) FinishInvocation(ticket *InvocationTicket, result InvocationRe
 	record := &invocationRecord{
 		seq: ticket.seq, at: at, provider: ticket.provider, model: ticket.model,
 		success: result.Success, httpStatus: result.HTTPStatus, reason: result.Reason,
+	}
+	if ticket.source.AccountPreflight {
+		record.mode = "account"
+	} else if ticket.source.Diagnostic {
+		record.mode = "provider"
 	}
 	item := ticket.item
 	// 统计按尝试口径计数，与下面「最近调用」能否被覆盖无关：凭据替换前发出的尝试也真实发生过。
@@ -183,6 +192,9 @@ func (m *Manager) FinishInvocation(ticket *InvocationTicket, result InvocationRe
 	if item.invocation == nil || item.invocation.seq < ticket.seq {
 		item.invocation = record
 	}
+	if ticket.source.AccountPreflight {
+		return
+	}
 	if item.providerInvocations == nil {
 		item.providerInvocations = make(map[string]*invocationRecord)
 	}
@@ -235,7 +247,7 @@ func invocationViewOf(record *invocationRecord) InvocationView {
 		return InvocationView{State: "unknown", Message: "尚无经网关发出的真实调用记录"}
 	}
 	view := InvocationView{
-		Provider: record.provider, Model: record.model,
+		Provider: record.provider, Model: record.model, Mode: record.mode,
 		ObservedAt: record.at.Format(time.RFC3339), HTTPStatus: record.httpStatus, Reason: record.reason,
 	}
 	if record.success {

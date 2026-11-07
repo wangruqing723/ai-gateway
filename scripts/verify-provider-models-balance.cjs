@@ -66,8 +66,22 @@ const quota = { type: 'sub2api', source: 'apiKey', state: 'ok', freshness: 'fres
         await page.waitForFunction(() => window.Alpine?.$data(document.body).providerBalances.wallet);
         assert.equal(requests.filter(r => r.path.endsWith('/balances/refresh')).length, 0, '进入页面只读本地缓存');
         const row = page.locator('[data-testid="provider-balance"][data-provider="wallet"]');
-        assert.match(await row.textContent(), /0 USD/);
+        assert.match(await row.textContent(), /\$0/);
         assert.match(await page.locator('[data-provider="limited"]').textContent(), /不限额（仅此项）.*订阅额度（非钱包）.*仅用量/s);
+        await row.getByRole('button', { name: '查询详情', exact: true }).click();
+        await row.getByText('剩余：$0 · 已用：$2 · 上限：未知', { exact: true }).waitFor();
+        assert.match(await row.innerText(), /剩余：\$0 · 已用：\$2 · 上限：未知/);
+        assert(!/原始剩余|1000000|500000|每 USD 配额/.test(await row.innerText()), '详情不得展示原始配额或换算比例');
+        const limitedRow = page.locator('[data-testid="provider-balance"][data-provider="limited"]');
+        await limitedRow.getByRole('button', { name: '查询详情', exact: true }).click();
+        await limitedRow.getByText(/daily：剩余 \$7/).waitFor();
+        assert.match(await limitedRow.innerText(), /daily：剩余 \$7 \/ 上限 \$10，已用 \$3/);
+        assert.match(await limitedRow.innerText(), /剩余：不限额 · 已用：\$3 · 上限：不限额/);
+        assert(!/USD/.test(await limitedRow.innerText()), '金额使用前置美元符号');
+        const dollarCases = await app(() => { const a = window.Alpine.$data(document.body); return [a.providerBalanceDollar('1000000', 'quota'), a.providerBalanceDollar(null, 'USD'), a.providerBalanceDollar('0', 'USD'), a.providerBalanceDollar('-1.25', 'USD')]; });
+        assert.deepEqual(dollarCases, ['暂无法换算为美元', '未知', '$0', '$-1.25']);
+        await row.getByRole('button', { name: '查询详情', exact: true }).click();
+        await limitedRow.getByRole('button', { name: '查询详情', exact: true }).click();
         const refreshCount = requests.filter(r => r.path.endsWith('/balances/refresh')).length;
         await app(async () => { await window.Alpine.$data(document.body).refreshProviderBalances(Array.from({ length: 51 }, (_, i) => 'fake-' + i)); });
         assert.equal(requests.filter(r => r.path.endsWith('/balances/refresh')).length, refreshCount, '超过50项必须提示并阻止，不静默截断');
@@ -76,7 +90,7 @@ const quota = { type: 'sub2api', source: 'apiKey', state: 'ok', freshness: 'fres
         assert.deepEqual(JSON.parse(requests.filter(r => r.path.endsWith('/balances/refresh')).at(-1).body).providers, ['wallet']);
         fail = true;
         await app(async () => { await window.Alpine.$data(document.body).refreshProviderBalances(['wallet']); });
-        assert.match(await row.textContent(), /0 USD/); assert.match(await row.textContent(), /旧值保留.*旧数据/s);
+        assert.match(await row.textContent(), /\$0/); assert.match(await row.textContent(), /旧值保留.*旧数据/s);
         await app(async () => { await window.Alpine.$data(document.body).editProvider('wallet'); });
         await page.getByLabel('独立余额查询令牌', { exact: true }).fill(secret);
         const checks = await app(() => {

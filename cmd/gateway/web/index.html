@@ -973,7 +973,22 @@
                                          因而把并发/限速/队列等待三个数值合并成一列「限流」，否则表格会宽到
                                          必须横向滚动、操作列被裁掉；当时表头和数值都 nowrap 以避免行高撑高。
                                          预览抽屉化后恢复三个独立列，窄屏仍由外层横向滚动容器承接。 -->
-                                    <table class="w-full border-collapse text-left">
+                                    <!-- 各列按指定百分比分配，总和为 100%；列宽不随单元格内容变化。
+                                         窄屏由外层横向滚动，避免格式控件和操作按钮挤出单元格。 -->
+                                    <table class="w-full border-collapse text-left" style="table-layout: fixed; min-width: 75rem">
+                                        <colgroup>
+                                            <col style="width: 3%">
+                                            <col style="width: 11%">
+                                            <col style="width: 10%">
+                                            <col style="width: 16%">
+                                            <col style="width: 8%">
+                                            <col style="width: 26%">
+                                            <col style="width: 10%">
+                                            <col style="width: 2%">
+                                            <col style="width: 3%">
+                                            <col style="width: 3%">
+                                            <col style="width: 8%">
+                                        </colgroup>
                                         <thead class="sticky top-0 z-10 bg-panel2 text-xs text-muted">
                                             <tr>
                                                 <!-- 启用列放最前：它决定这一行的其余配置当下是否生效，
@@ -1010,11 +1025,7 @@
                                                                :aria-label="provider.enabled === false ? '启用「' + name + '」' : '禁用「' + name + '」'"
                                                                class="h-4 w-4 cursor-pointer rounded border-line bg-panel text-cyan2 focus:ring-cyan2 disabled:cursor-not-allowed disabled:opacity-60">
                                                     </td>
-                                                    <!-- 历史布局曾让名称、Base URL 两列各 w-1/2 + max-w-0：
-                                                         名称列按内容定宽会被超长名称撑到近千像素，后面几列被顶出容器；
-                                                         两列都写 w-full 时长名字仍独吞空间（实测 626px）。
-                                                         现在主表已拿回全宽，去掉固定 50% 预算；max-w-0 + truncate
-                                                         仍保留，超长内容交给即时 tooltip 展示全文。 -->
+                                                    <!-- 长名称保留省略显示，悬停或聚焦可查看全文。 -->
                                                     <td class="max-w-0 px-3 py-2.5">
                                                         <span class="block truncate font-mono text-sm font-bold text-white"
                                                               @mouseenter="showTip(name, $event)"
@@ -1038,8 +1049,7 @@
                                                             <option value="openai-responses">openai-responses</option>
                                                         </select>
                                                     </td>
-                                                    <!-- 历史上 URL 列与名称列同为 w-1/2 + max-w-0，实测 1440px 下曾溢出 116px；
-                                                         主表恢复全宽后不再固定半列，但保留 max-w-0 + truncate 保护窄屏。 -->
+                                                    <!-- URL 列预算由 colgroup 统一控制，长地址仍可悬停查看和复制。 -->
                                                     <td class="max-w-0 px-3 py-2.5">
                                                         <!-- 历史上为省宽度去掉 https://；现在恢复完整地址，截断处用即时 tooltip 看全文。 -->
                                                         <!-- http/https 地址渲染成链接、在新标签页打开；悬停这一行时右侧出现复制按钮。
@@ -1069,7 +1079,7 @@
                                                             </button>
                                                         </div>
                                                     </td>
-                                                    <td class="w-px whitespace-nowrap px-2 py-2.5 text-center">
+                                                    <td class="px-3 py-2.5 text-center" style="overflow-wrap: anywhere">
                                                 <span x-show="provider.authType === 'chatgptOAuth'"
                                                       class="tag" :class="providerChatGPTAccountPaused(provider) ? 'bg-warn/10 text-amber-100' : 'bg-cyan2/10 text-cyan'"
                                                       data-testid="provider-oauth-badge"
@@ -1097,19 +1107,21 @@
                                                               @blur="hideTip()"
                                                               tabindex="0">key_off</span>
                                                     </td>
-                                                    <td class="px-3 py-2.5 text-xs" style="min-width: 15rem; max-width: 22rem" data-testid="provider-balance" :data-provider="name">
-                                                        <p class="text-muted" x-text="providerBalanceState(name)"></p>
-                                                        <template x-for="(item, bi) in (providerBalanceView(name).snapshot?.items || [])" :key="bi">
-                                                            <div class="mt-1">
-                                                                <p class="font-mono text-sm text-white" x-text="providerBalanceValue(item)"></p>
-                                                                <p class="text-muted" x-text="providerBalanceKind(item.kind)"></p>
+                                                    <td class="px-3 py-2.5 text-xs" style="overflow-wrap: anywhere" data-testid="provider-balance" :data-provider="name" x-data="{ balanceDetailsOpen: false }">
+                                                        <div class="overflow-x-auto">
+                                                            <div class="flex items-center gap-2 whitespace-nowrap" style="width: max-content; min-width: 100%">
+                                                                <p class="text-muted" x-text="providerBalanceState(name)"></p>
+                                                                <template x-for="(item, bi) in (providerBalanceView(name).snapshot?.items || [])" :key="bi">
+                                                                    <div class="flex items-center gap-2">
+                                                                        <p class="font-mono text-sm font-semibold text-good" x-text="providerBalanceValue(item)"></p>
+                                                                        <p class="text-muted" x-text="providerBalanceKind(item.kind)"></p>
+                                                                    </div>
+                                                                </template>
+                                                                <button type="button" x-show="provider.balance?.type && providerBalancesSupported" @click="refreshProviderBalances([name])" :disabled="refreshingProviderBalances.length > 0" class="text-cyan disabled:opacity-50" :aria-label="'刷新「' + name + '」余额'">刷新</button>
+                                                                <button type="button" x-show="provider.balance?.type" @click="balanceDetailsOpen = !balanceDetailsOpen" :aria-expanded="String(balanceDetailsOpen)" class="text-cyan">查询详情</button>
                                                             </div>
-                                                        </template>
-                                                        <div class="mt-1 flex flex-wrap gap-3">
-                                                            <button type="button" x-show="provider.balance?.type && providerBalancesSupported" @click="refreshProviderBalances([name])" :disabled="refreshingProviderBalances.length > 0" class="text-cyan disabled:opacity-50" :aria-label="'刷新「' + name + '」余额'">刷新</button>
-                                                            <details x-show="provider.balance?.type" class="min-w-0">
-                                                                <summary class="cursor-pointer text-cyan">查询详情</summary>
-                                                                <div class="mt-2 space-y-1 break-words text-xs leading-relaxed text-muted">
+                                                        </div>
+                                                        <div x-show="balanceDetailsOpen && provider.balance?.type" x-cloak class="mt-2 space-y-1 break-words text-xs leading-relaxed text-muted">
                                                                     <p x-text="'适配器：' + (providerBalanceView(name).type || provider.balance?.type || '—') + ' · 来源：' + (providerBalanceView(name).source || provider.balance?.source || 'auto')"></p>
                                                                     <p x-text="'成功时间：' + providerBalanceTime(providerBalanceView(name).lastSuccessAt)"></p>
                                                                     <p x-show="providerBalanceView(name).lastAttemptAt" x-text="'最近尝试：' + providerBalanceTime(providerBalanceView(name).lastAttemptAt)"></p>
@@ -1119,17 +1131,13 @@
                                                                     <template x-for="(item, di) in (providerBalanceView(name).snapshot?.items || [])" :key="di">
                                                                         <div class="border-t border-line pt-1">
                                                                             <p x-text="providerBalanceKind(item.kind) + ' · ' + (item.source || '来源未知') + (item.keyId ? ' · 密钥 ' + item.keyId : '')"></p>
-                                                                            <p x-text="'已用：' + (item.used ?? '未知') + ' · 上限：' + (item.limit ?? '未知') + ' ' + (item.unit || '')"></p>
-                                                                            <p x-show="item.rawUnit" x-text="'原始剩余：' + (item.rawRemaining ?? '未知') + ' · 已用：' + (item.rawUsed ?? '未知') + ' ' + (item.rawUnit || '')"></p>
-                                                                            <p x-show="item.quotaPerUnit" x-text="'每 USD 配额：' + item.quotaPerUnit + ' · 换算来源：' + (item.conversionSource === 'configuration' ? '显式配置' : '上游公开设置')"></p>
-                                                                            <template x-for="(win, wi) in (item.windows || [])" :key="wi"><p x-text="(win.name || '周期') + '：剩余 ' + (win.remaining ?? '未知') + ' / 上限 ' + (win.limit ?? '未知') + '，已用 ' + (win.used ?? '未知') + ' ' + (win.unit || item.unit || '') + (win.resetAt ? ' · 重置 ' + providerBalanceTime(win.resetAt) : '') + (win.expiresAt ? ' · 到期 ' + providerBalanceTime(win.expiresAt) : '')"></p></template>
+                                                                            <p x-text="'剩余：' + (item.unlimited ? '不限额' : providerBalanceDollar(item.remaining, item.unit)) + ' · 已用：' + providerBalanceDollar(item.used, item.unit) + ' · 上限：' + (item.unlimited ? '不限额' : providerBalanceDollar(item.limit, item.unit))"></p>
+                                                                            <template x-for="(win, wi) in (item.windows || [])" :key="wi"><p x-text="(win.name || '周期') + '：剩余 ' + providerBalanceDollar(win.remaining, win.unit || item.unit) + ' / 上限 ' + providerBalanceDollar(win.limit, win.unit || item.unit) + '，已用 ' + providerBalanceDollar(win.used, win.unit || item.unit) + (win.resetAt ? ' · 重置 ' + providerBalanceTime(win.resetAt) : '') + (win.expiresAt ? ' · 到期 ' + providerBalanceTime(win.expiresAt) : '')"></p></template>
                                                                         </div>
                                                                     </template>
-                                                                    <template x-for="(warning, wi) in (providerBalanceView(name).snapshot?.warnings || [])" :key="wi"><p class="text-warn" x-text="warning"></p></template>
+                                                                    <template x-for="(warning, wi) in (providerBalanceView(name).snapshot?.warnings || [])" :key="wi"><p class="text-warn" x-text="warning === '无法确认配额换算单位，保留原始 quota' ? '暂无法换算为美元，请配置每美元配额或检查上游换算设置' : warning"></p></template>
                                                                     <p x-show="providerBalanceView(name).sharedProviders?.length" x-text="'与 ' + (providerBalanceView(name).sharedProviders || []).join('、') + ' 共享查询来源，不可相加'"></p>
                                                                     <p>各口径不相加；共享来源的多行不代表独立余额。查询不改变启停和路由。</p>
-                                                                </div>
-                                                            </details>
                                                         </div>
                                                     </td>
                                                     <td class="max-w-0 px-3 py-2.5">
@@ -1295,6 +1303,8 @@
                                     <button type="button" x-show="chatGPTSelectionSummary().hidden" @click="clearHiddenChatGPTAccountSelection()" class="rounded text-xs text-cyan transition hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan2">取消隐藏项</button>
                                     <button type="button" x-show="chatGPTSelectionSummary().total < chatgptAccounts.length" @click="selectAllChatGPTAccounts()" class="rounded text-xs text-cyan transition hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan2" x-text="'选择全部 ' + chatgptAccounts.length + ' 个账户'"></button>
                                     <div class="ml-auto flex flex-wrap items-center gap-2">
+                                        <button type="button" @click="openChatGPTBatchDiagnoseDialog($event)" :disabled="diagnosingChatGPTAccount || chatGPTSelectedAccountIds.length > 50" data-testid="chatgpt-batch-diagnose" class="btn btn-secondary px-3 py-1.5 text-xs">批量预检</button>
+                                        <span x-show="chatGPTSelectedAccountIds.length > 50" class="text-xs text-warn">每批最多 50 个账户，请减少选择</span>
                                         <button type="button" @click="openChatGPTBatchDialog('tags', $event)" :disabled="!!chatGPTBatchBusy" data-testid="chatgpt-batch-tags" class="btn btn-secondary px-3 py-1.5 text-xs">标签</button>
                                         <button type="button" @click="openChatGPTBatchDialog('pause', $event)" :disabled="!!chatGPTBatchBusy" data-testid="chatgpt-batch-pause" class="btn btn-secondary px-3 py-1.5 text-xs">暂停</button>
                                         <button type="button" @click="openChatGPTBatchDialog('resume', $event)" :disabled="!!chatGPTBatchBusy" data-testid="chatgpt-batch-resume" class="btn btn-secondary px-3 py-1.5 text-xs">恢复</button>
@@ -3446,8 +3456,8 @@
                  role="dialog" aria-modal="true" aria-labelledby="chatgpt-diagnose-title" aria-describedby="chatgpt-diagnose-description">
             <header class="flex shrink-0 items-start justify-between gap-4 border-b border-line p-5">
                 <div class="min-w-0">
-                    <h3 id="chatgpt-diagnose-title" class="text-lg font-bold text-white">账户诊断</h3>
-                    <p class="mt-1 break-all text-sm text-text" x-text="chatGPTDiagnoseAccount()?.email || chatGPTDiagnoseAccountId"></p>
+                    <h3 id="chatgpt-diagnose-title" class="text-lg font-bold text-white" x-text="chatGPTDiagnoseBatchAccounts.length ? '批量账户预检' : '账户预检与链路诊断'"></h3>
+                    <p class="mt-1 break-all text-sm text-text" x-text="chatGPTDiagnoseBatchAccounts.length ? '已冻结本批 ' + chatGPTDiagnoseBatchAccounts.length + ' 个勾选账户（不随筛选变化）' : chatGPTDiagnoseAccount()?.email || chatGPTDiagnoseAccountId"></p>
                     <p id="chatgpt-diagnose-description" class="mt-2 text-sm leading-relaxed text-muted">本地检查始终执行。出网步骤由你选择，实际模型调用需要确认额度消耗。</p>
                 </div>
                 <button type="button" @click="closeChatGPTDiagnoseDialog()" class="btn btn-secondary shrink-0 px-2 py-2" aria-label="关闭账户诊断">
@@ -3493,14 +3503,29 @@
                                 <input type="checkbox" x-model="chatGPTDiagnoseChecks.inference" @change="resetChatGPTDiagnoseResult()" class="mt-1 h-4 w-4 shrink-0" data-testid="chatgpt-diagnose-inference">
                                 <span>
                                     <span class="block text-sm font-semibold text-text">实际模型调用 <span class="ml-1 text-xs font-normal text-warn">会消耗额度</span></span>
-                                    <span class="mt-1 block text-xs leading-relaxed text-muted">经已保存的 Provider 发起一次最小请求，沿用其代理和排队设置。</span>
+                                    <span class="mt-1 block text-xs leading-relaxed text-muted">独立账户预检或通过已保存的 Provider 发起一次实际请求，仅验证所选模型。</span>
                                 </span>
                             </label>
                             <div x-show="chatGPTDiagnoseChecks.inference" x-cloak class="ml-7 mt-3 space-y-3">
+                                <label x-show="!chatGPTDiagnoseBatchAccounts.length" class="block text-xs font-bold text-muted">检测模式
+                                    <select x-model="chatGPTDiagnoseMode" @change="resetModelPicker(); resetChatGPTDiagnoseResult()" data-testid="chatgpt-diagnose-mode" class="field mt-1.5 text-sm">
+                                        <option value="account">账户预检（无需绑定 Provider）</option>
+                                        <option value="provider">Provider 链路诊断（已保存绑定）</option>
+                                    </select>
+                                </label>
+                                <p class="text-xs leading-relaxed text-muted" x-text="chatGPTDiagnoseMode === 'account' ? '独立账户预检使用 OAuth 管理代理，不经过 Provider 队列或故障转移，不会创建绑定；暂停账户不执行实际调用，批量时仅执行本地检查。' : '通过所选 Provider 的地址、代理与队列验证链路。'"></p>
+                                <div x-show="chatGPTDiagnoseBatchAccounts.length" class="space-y-1.5">
+                                    <label for="chatgpt-diagnose-catalog-account" class="block text-xs font-bold text-muted">模型目录来源账户（可不查询，直接手填模型）</label>
+                                    <select id="chatgpt-diagnose-catalog-account" x-model="chatGPTDiagnoseCatalogAccountId" @change="resetModelPicker(); resetChatGPTDiagnoseResult()" class="field text-sm" data-testid="chatgpt-diagnose-catalog-account">
+                                        <option value="">请选择本批中的一个账户</option>
+                                        <template x-for="a in chatGPTDiagnoseBatchAccounts" :key="a.id"><option :value="a.id" x-text="a.email || a.id"></option></template>
+                                    </select>
+                                    <p class="text-xs leading-relaxed text-muted">目录仅来自所选账户，不代表其他账户拥有同样权限；不会遍历账户目录或自动换模型。</p>
+                                </div>
                                 <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                                    <div class="min-w-0">
+                                    <div class="min-w-0" x-show="chatGPTDiagnoseMode === 'provider'">
                                         <label for="chatgpt-diagnose-provider" class="mb-1.5 block text-xs font-bold text-muted">已绑定的 Provider</label>
-                                        <select id="chatgpt-diagnose-provider" x-model="chatGPTDiagnoseProvider" @change="resetChatGPTDiagnoseResult()" class="field text-sm" data-testid="chatgpt-diagnose-provider">
+                                        <select id="chatgpt-diagnose-provider" x-model="chatGPTDiagnoseProvider" @change="resetModelPicker(); resetChatGPTDiagnoseResult()" class="field text-sm" data-testid="chatgpt-diagnose-provider">
                                             <option value="">选择已保存的绑定</option>
                                             <template x-for="item in chatGPTDiagnoseProviders()" :key="item.name">
                                                 <option :value="item.name" x-text="item.name + (item.enabled ? '' : ' · 已停用，将跳过')"></option>
@@ -3509,11 +3534,56 @@
                                     </div>
                                     <div class="min-w-0">
                                         <label for="chatgpt-diagnose-model" class="mb-1.5 block text-xs font-bold text-muted">测试模型</label>
-                                        <input id="chatgpt-diagnose-model" autocomplete="off" spellcheck="false" type="text" x-model="chatGPTDiagnoseModel" @input="resetChatGPTDiagnoseResult()" placeholder="输入此账户可调用的模型名" maxlength="200" class="field font-mono text-sm" data-testid="chatgpt-diagnose-model">
+                                        <div class="relative min-w-0"
+                                             @click.away="isModelPickerOpen('diagnose') && closeModelPicker()">
+                                            <input autocomplete="off" :id="'chatgpt-diagnose-model'" type="text" x-model="chatGPTDiagnoseModel"
+                                                   @input="resetChatGPTDiagnoseResult(); onModelPickerInput('diagnose', chatGPTDiagnoseModelSource(), chatGPTDiagnoseModel)"
+                                                   @keydown="onModelPickerKeydown($event, 'diagnose', chatGPTDiagnoseModelSource(), chatGPTDiagnoseModel, (v) => { chatGPTDiagnoseModel = v; resetChatGPTDiagnoseResult(); })"
+                                                   @click="openModelPicker('diagnose', chatGPTDiagnoseModelSource(), chatGPTDiagnoseModel)"
+                                                   aria-label="测试模型" placeholder="上游模型名"
+                                                   role="combobox" aria-autocomplete="list" :aria-controls="'chatgpt-diagnose-model-list'"
+                                                   :aria-expanded="String(isModelPickerOpen('diagnose'))"
+                                                   maxlength="200" spellcheck="false" data-testid="chatgpt-diagnose-model" class="field pr-7 font-mono text-sm">
+                                            <button type="button" @mousedown.prevent="toggleModelPicker('diagnose', chatGPTDiagnoseModelSource(), chatGPTDiagnoseModel, 'chatgpt-diagnose-model')"
+                                                    :disabled="!chatGPTDiagnoseModelSource()"
+                                                    :title="chatGPTDiagnoseMode === 'account' ? '查询所选账户目录，可能刷新过期凭据' : '查询已保存 Provider 目录'"
+                                                    style="top: 0.625rem" class="absolute right-1 rounded p-0.5 text-muted hover:text-cyan disabled:opacity-40">
+                                                <span class="material-symbols-outlined text-[15px]" x-show="!isModelPickerOpen('diagnose')">search</span>
+                                                <span class="material-symbols-outlined text-[15px]" x-show="isModelPickerOpen('diagnose')" x-cloak>keyboard_arrow_up</span>
+                                            </button>
+                                            <!-- 模型下拉弹层 -->
+                                            <template x-if="isModelPickerOpen('diagnose')">
+                                                <ul :id="'chatgpt-diagnose-model-list'" role="listbox" aria-label="上游模型列表" x-transition
+                                                    class="mt-1 max-h-48 overflow-y-auto rounded-lg border border-line bg-panel3 py-1 text-xs shadow-glow">
+                                                    <div x-show="modelPicker.loading" class="flex items-center gap-2 px-3 py-1.5 text-muted">
+                                                        <span class="material-symbols-outlined gw-spin text-[14px]">progress_activity</span>正在查询上游模型列表…
+                                                    </div>
+                                                    <div class="flex flex-wrap gap-3 border-b border-line px-3 py-2">
+                                                        <button type="button" @mousedown.prevent @click="openModelPicker(modelPicker.key, modelPicker.provider, '', true)" :disabled="modelPicker.loading" class="text-cyan disabled:opacity-50">刷新远端模型</button>
+                                                        <button type="button" x-show="modelPicker.loading" @mousedown.prevent @click="_modelPickerController?.abort(); modelPicker.loading = false; modelPicker.token++; modelPicker.message = '已取消等待；已轮换凭据仍会安全保存'" class="text-muted">取消等待</button>
+                                                    </div>
+                                                    <div x-show="!modelPicker.loading && modelPicker.message" class="px-3 py-1.5 leading-relaxed text-muted" x-text="modelPicker.message"></div>
+                                                    <div x-show="!modelPicker.loading && modelPicker.models.length && !modelPickerOptions(chatGPTDiagnoseModel).length"
+                                                         class="px-3 py-1.5 leading-relaxed text-muted"
+                                                         x-text="'没有包含「' + String(chatGPTDiagnoseModel || '').trim() + '」的模型，回车直接使用输入的名字'"></div>
+                                                    <template x-for="(m, mi) in modelPickerOptions(chatGPTDiagnoseModel)" :key="m">
+                                                        <li :id="'model-picker-opt-' + mi" role="option" :aria-selected="mi === modelPicker.active"
+                                                            @mousedown.prevent="pickModel(m, (v) => { chatGPTDiagnoseModel = v; resetChatGPTDiagnoseResult(); })"
+                                                            @mouseenter="modelPicker.active = mi"
+                                                            :class="mi === modelPicker.active ? 'bg-cyan2/15 text-white' : (m === chatGPTDiagnoseModel ? 'text-cyan' : 'text-text')"
+                                                            class="cursor-pointer truncate px-3 py-1.5 font-mono" :title="m" x-text="m"></li>
+                                                    </template>
+                                                </ul>
+                                            </template>
+                                        </div>
                                     </div>
                                 </div>
-                                <p x-show="chatGPTDiagnoseProviders().length === 0" class="text-xs leading-relaxed text-warn">此账户没有已保存的 OAuth Provider 绑定。请先绑定并保存，其他检查仍可执行。</p>
+                                <p x-show="chatGPTDiagnoseMode === 'provider' && chatGPTDiagnoseProviders().length === 0" class="text-xs leading-relaxed text-warn">此账户没有已保存的 OAuth Provider 绑定。请先绑定并保存，其他检查仍可执行。</p>
                                 <p class="text-xs leading-relaxed text-muted">只验证所选模型，不自动遍历其他模型。停用的 Provider 不会调用。测试输出上限为 256 token，总预算为 45 秒。</p>
+                                <label for="chatgpt-diagnose-prompt" class="block text-xs font-bold text-muted">测试内容（选填；批量时统一使用）</label>
+                                <textarea id="chatgpt-diagnose-prompt" x-model="chatGPTDiagnosePrompt" @input="resetChatGPTDiagnoseResult()" rows="3" placeholder="Reply with OK." class="field text-sm" data-testid="chatgpt-diagnose-prompt" aria-describedby="chatgpt-diagnose-prompt-help"></textarea>
+                                <p id="chatgpt-diagnose-prompt-help" class="text-xs leading-relaxed" :class="chatGPTDiagnosePromptBytes() > 4096 || chatGPTDiagnosePrompt.includes('\0') ? 'text-danger' : 'text-muted'" x-text="chatGPTDiagnosePromptBytes() + '/4096 UTF-8 字节；不允许 NUL。空白使用 Reply with OK.；非空保留换行和首尾空白。仅本次使用，关闭清空，不存储内容或模型输出。'"></p>
+                                <p x-show="chatGPTDiagnoseBatchAccounts.length" class="text-xs text-amber-100">本批可能逐账户消耗额度；取消仅停止等待，不能撤回已经发送的调用。</p>
                                 <label class="flex cursor-pointer items-start gap-3 rounded-lg border border-warn/30 bg-warn/10 p-3">
                                     <input type="checkbox" x-model="chatGPTDiagnoseConfirmed" class="mt-1 h-4 w-4 shrink-0" data-testid="chatgpt-diagnose-confirm">
                                     <span class="text-xs leading-relaxed text-amber-100">我确认发起实际调用并消耗账户额度。关闭或取消不能撤回已经发送的请求，调用结果会写入账户的最近调用记录。</span>
@@ -3522,9 +3592,26 @@
                         </div>
                     </div>
                 </fieldset>
-                <p x-show="diagnosingChatGPTAccount" x-cloak role="status" class="mt-5 text-sm leading-relaxed text-muted" data-testid="chatgpt-diagnose-busy">正在按顺序执行所选检查，总预算为 45 秒。可随时取消等待，已经执行的操作不会回滚。</p>
+                <p x-show="diagnosingChatGPTAccount" x-cloak role="status" class="mt-5 text-sm leading-relaxed text-muted" data-testid="chatgpt-diagnose-busy">单账户最多 45 秒；批量并发 3，整批最多 15 分钟。可随时取消等待，已经执行的操作不会回滚。</p>
                 <p x-show="chatGPTDiagnoseError" x-cloak role="alert" class="mt-5 text-sm leading-relaxed text-danger" x-text="chatGPTDiagnoseError"></p>
                 <p x-show="chatGPTDiagnoseNotice" x-cloak role="status" class="mt-5 text-sm leading-relaxed text-warn" x-text="chatGPTDiagnoseNotice" data-testid="chatgpt-diagnose-notice"></p>
+                <section x-show="chatGPTDiagnoseBatchAccounts.length" class="mt-6 border-t border-line pt-5" aria-label="批量预检结果" data-testid="chatgpt-batch-diagnose-results">
+                    <h4 class="text-sm font-bold text-white" role="status" x-text="'已收到 ' + chatGPTDiagnoseBatchResults.length + ' / ' + chatGPTDiagnoseBatchAccounts.length + ' 个结果' + (chatGPTDiagnoseBatchDone ? ' · 本批结束' : diagnosingChatGPTAccount ? ' · 执行中' : ' · 尚未启动或等待已结束')"></h4>
+                    <ul class="mt-3 divide-y divide-line">
+                        <template x-for="a in chatGPTDiagnoseBatchAccounts" :key="a.id">
+                            <li class="py-3" data-testid="chatgpt-batch-diagnose-result">
+                                <div class="flex flex-wrap items-baseline justify-between gap-2"><h5 class="min-w-0 break-all text-sm font-semibold text-text" x-text="a.email || a.id"></h5><span class="text-xs text-muted" x-text="chatGPTBatchDiagnoseStatus(a.id)"></span></div>
+                                <p x-show="chatGPTBatchDiagnoseResult(a.id)?.message" class="mt-1 break-words text-xs text-muted" x-text="chatGPTBatchDiagnoseResult(a.id)?.message"></p>
+                                <ul class="mt-2 space-y-2">
+                                    <template x-for="step in (chatGPTBatchDiagnoseResult(a.id)?.report?.steps || [])" :key="step.name">
+                                        <li class="text-xs leading-relaxed text-muted"><span class="font-semibold text-text" x-text="chatGPTDiagnoseStepLabel(step.name) + ' · ' + chatGPTDiagnoseStatusInfo(step.status).label"></span><p class="break-words" x-text="step.message"></p><span x-text="[step.proxySource ? chatGPTDiagnoseProxyLabel(step.proxySource) : '', step.durationMs != null ? formatMs(step.durationMs) : ''].filter(Boolean).join(' · ')"></span></li>
+                                    </template>
+                                </ul>
+                                <p x-show="chatGPTDiagnoseBatchStarted && !diagnosingChatGPTAccount && !chatGPTBatchDiagnoseResult(a.id)" class="mt-1 text-xs text-warn">未收到结果；已取消等待或连接中断，结果未知，不代表账户失效。</p>
+                            </li>
+                        </template>
+                    </ul>
+                </section>
                 <section x-show="chatGPTDiagnoseReport" x-cloak x-ref="chatGPTDiagnoseResults" tabindex="-1" aria-label="诊断结果" class="mt-6 border-t border-line pt-5 focus:outline-none" data-testid="chatgpt-diagnose-results">
                     <div class="flex flex-wrap items-baseline justify-between gap-2">
                         <h4 class="text-sm font-bold text-white">诊断结果</h4>
@@ -3548,7 +3635,7 @@
                                     <span x-show="step.proxySource" x-text="chatGPTDiagnoseProxyLabel(step.proxySource)"></span>
                                     <span x-show="step.startedAt" x-text="formatMs(step.durationMs)"></span>
                                     <span x-show="step.tokenExchanged" class="text-warn">已尝试交换令牌</span>
-                                    <span x-show="step.provider" class="break-all font-mono" x-text="[step.provider, step.model].filter(Boolean).join(' · ')"></span>
+                                    <span x-show="step.model || step.provider" class="break-all font-mono" x-text="[step.mode === 'account' ? '独立账户预检' : step.provider, step.model].filter(Boolean).join(' · ')"></span>
                                 </div>
                                 <ul x-show="step.details?.length" class="mt-2 space-y-1 pl-4 text-xs leading-relaxed text-muted">
                                     <template x-for="(detail, index) in (step.details || [])" :key="index"><li class="list-disc break-words" x-text="detail"></li></template>
@@ -4619,6 +4706,13 @@
                 // 诊断只在用户启动时出网；请求、结果和消费确认均只属于这次浮层。
                 showChatGPTDiagnoseDialog: false,
                 chatGPTDiagnoseAccountId: '',
+                chatGPTDiagnoseMode: 'account',
+                chatGPTDiagnosePrompt: '',
+                chatGPTDiagnoseBatchAccounts: [],
+                chatGPTDiagnoseBatchResults: [],
+                chatGPTDiagnoseBatchDone: false,
+                chatGPTDiagnoseBatchStarted: false,
+                chatGPTDiagnoseCatalogAccountId: '',
                 chatGPTDiagnoseChecks: { refresh: false, usage: false, inference: false },
                 chatGPTDiagnoseRefreshMode: 'auto',
                 chatGPTDiagnoseProvider: '',
@@ -7622,7 +7716,16 @@
                 providerBalanceKind(kind) { return ({ account_balance: '账户余额', key_quota: '密钥额度', subscription_quota: '订阅额度（非钱包）', usage_only: '仅用量，剩余未知' })[kind] || '未知口径'; },
                 providerBalanceValue(item) {
                     if (item?.unlimited) return '不限额（仅此项）';
-                    return (item?.remaining == null ? '剩余未知' : String(item.remaining)) + (item?.unit ? ' ' + item.unit : '');
+                    if (item?.remaining == null) return '剩余未知';
+                    const symbols = { USD: '$', CNY: '¥', RMB: '¥', EUR: '€', GBP: '£', JPY: '¥', HKD: 'HK$', CAD: 'CA$', AUD: 'A$' };
+                    const symbol = symbols[String(item?.unit || '').toUpperCase()];
+                    return symbol ? symbol + String(item.remaining) : String(item.remaining) + (item?.unit ? ' ' + item.unit : '');
+                },
+                // 后端已按可信比例换算；详情不重复换算，也不将原始配额冒充美元。
+                providerBalanceDollar(value, unit) {
+                    if (value == null) return '未知';
+                    if (String(unit || '').toUpperCase() !== 'USD') return '暂无法换算为美元';
+                    return '$' + String(value);
                 },
                 providerBalanceTime(value) { return value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '尚无成功查询'; },
                 providerBalanceState(name) {
@@ -7668,7 +7771,15 @@
                 openChatGPTDiagnoseDialog(account, event) {
                     if (!account?.id || this.diagnosingChatGPTAccount) return;
                     this._chatGPTDiagnoseOpener = event?.currentTarget || document.activeElement;
+                    this.resetModelPicker();
                     this.chatGPTDiagnoseAccountId = account.id;
+                    this.chatGPTDiagnoseMode = 'account';
+                    this.chatGPTDiagnosePrompt = '';
+                    this.chatGPTDiagnoseBatchAccounts = [];
+                    this.chatGPTDiagnoseBatchResults = [];
+                    this.chatGPTDiagnoseBatchDone = false;
+                    this.chatGPTDiagnoseBatchStarted = false;
+                    this.chatGPTDiagnoseCatalogAccountId = account.id;
                     this.chatGPTDiagnoseChecks = { refresh: false, usage: false, inference: false };
                     this.chatGPTDiagnoseRefreshMode = 'auto';
                     this.chatGPTDiagnoseProvider = '';
@@ -7679,6 +7790,83 @@
                     this.chatGPTDiagnoseNotice = '';
                     this.showChatGPTDiagnoseDialog = true;
                     this.$nextTick(() => this.$refs.chatGPTDiagnoseStart?.focus());
+                },
+
+                openChatGPTBatchDiagnoseDialog(event) {
+                    const accounts = this.chatgptAccounts.filter(a => this.chatGPTSelectedAccountIds.includes(a.id));
+                    if (!accounts.length || accounts.length > 50 || this.diagnosingChatGPTAccount) return;
+                    this.openChatGPTDiagnoseDialog(accounts[0], event);
+                    // 冻结账户集合与名称，不随筛选或刷新改变本批范围。
+                    this.chatGPTDiagnoseBatchAccounts = accounts.map(a => ({ id: a.id, email: a.email }));
+                    this.chatGPTDiagnoseCatalogAccountId = '';
+                },
+
+                chatGPTDiagnoseModelSource() {
+                    return this.chatGPTDiagnoseMode === 'provider' ? this.chatGPTDiagnoseProvider
+                        : this.chatGPTDiagnoseCatalogAccountId ? { type: 'account', accountId: this.chatGPTDiagnoseCatalogAccountId } : null;
+                },
+
+                chatGPTDiagnosePromptBytes() { return new TextEncoder().encode(this.chatGPTDiagnosePrompt).length; },
+
+                chatGPTDiagnoseInput() {
+                    const input = { checks: ['local', ...['refresh', 'usage', 'inference'].filter(name => this.chatGPTDiagnoseChecks[name])] };
+                    if (this.chatGPTDiagnoseChecks.refresh) input.refreshMode = this.chatGPTDiagnoseRefreshMode;
+                    if (this.chatGPTDiagnoseChecks.inference) {
+                        Object.assign(input, { mode: this.chatGPTDiagnoseMode, model: this.chatGPTDiagnoseModel.trim(), prompt: this.chatGPTDiagnosePrompt, confirm: 'consume_quota' });
+                        if (this.chatGPTDiagnoseMode === 'provider') input.provider = this.chatGPTDiagnoseProvider;
+                    }
+                    return input;
+                },
+
+                chatGPTBatchDiagnoseResult(accountId) { return this.chatGPTDiagnoseBatchResults.find(item => item.accountId === accountId); },
+
+                chatGPTBatchDiagnoseStatus(accountId) {
+                    const item = this.chatGPTBatchDiagnoseResult(accountId);
+                    if (!item) return !this.chatGPTDiagnoseBatchStarted ? '尚未开始' : this.diagnosingChatGPTAccount ? '等待结果' : '结果未知';
+                    return ({ success: '成功', partial: '部分完成', failure: '失败', skipped: '已跳过', cancelled: '已取消', busy: '账户忙碌', not_found: '账户不存在' })[item.status] || '结果未知';
+                },
+
+                async startChatGPTBatchDiagnose(input, controller, sequence) {
+                    input.accountIds = this.chatGPTDiagnoseBatchAccounts.map(a => a.id);
+                    this.chatGPTDiagnoseBatchStarted = true;
+                    const res = await fetch('/api/chatgpt/accounts/diagnose/batch', {
+                        method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' }, body: JSON.stringify(input), signal: controller.signal
+                    });
+                    if (!res.ok) throw new Error(await this.errorText(res, '批量预检未启动'));
+                    if (!res.headers.get('content-type')?.includes('text/event-stream') || !res.body) throw new Error('未收到预检事件流，请检查服务后重新启动；不会自动重试');
+                    const reader = res.body.getReader(), decoder = new TextDecoder();
+                    let buffer = '', eventName = '', dataLines = [];
+                    const dispatch = () => {
+                        if (!dataLines.length) { eventName = ''; return; }
+                        const data = JSON.parse(dataLines.join('\n'));
+                        if (eventName === 'result') {
+                            if (input.accountIds[data.index] !== data.accountId || this.chatGPTBatchDiagnoseResult(data.accountId)) throw new Error('预检结果身份或序号不匹配，结果未完整收到');
+                            this.chatGPTDiagnoseBatchResults.push(data);
+                            if (data.report?.account?.id === data.accountId) this.chatgptAccounts = this.chatgptAccounts.map(account => account.id === data.accountId ? data.report.account : account);
+                        } else if (eventName === 'done') {
+                            if (this.chatGPTDiagnoseBatchResults.length !== input.accountIds.length) throw new Error('结果未完整收到，请逐账户核对；不会自动重试');
+                            this.chatGPTDiagnoseBatchDone = true;
+                            if (data.cancelled) this.chatGPTDiagnoseNotice = '服务端已取消本批，已发出的调用可能消耗额度。';
+                        } else if (eventName === 'error') throw new Error('服务端终止预检，结果未完整收到；不会自动重试');
+                        eventName = ''; dataLines = [];
+                    };
+                    try {
+                        while (true) {
+                            const { value, done } = await reader.read();
+                            if (sequence !== this._chatGPTDiagnoseSequence) return;
+                            buffer += done ? decoder.decode() : decoder.decode(value, { stream: true });
+                            let match;
+                            while ((match = /\r\n|\n|\r(?!$)/.exec(buffer))) {
+                                const line = buffer.slice(0, match.index);
+                                buffer = buffer.slice(match.index + match[0].length);
+                                if (!line) dispatch();
+                                else if (line.startsWith('event:')) eventName = line.slice(6).trim();
+                                else if (line.startsWith('data:')) dataLines.push(line.slice(5).replace(/^ /, ''));
+                            }
+                            if (done || this.chatGPTDiagnoseBatchDone) break;
+                        }
+                        if (!this.chatGPTDiagnoseBatchDone) throw new Error('结果未完整收到，未收到的账户结果未知；不会自动重试消费操作');
+                    } finally { await reader.cancel().catch(() => {}); reader.releaseLock(); }
                 },
 
                 chatGPTDiagnoseAccount() {
@@ -7694,6 +7882,9 @@
                 },
 
                 resetChatGPTDiagnoseResult() {
+                    this.chatGPTDiagnoseBatchResults = [];
+                    this.chatGPTDiagnoseBatchDone = false;
+                    this.chatGPTDiagnoseBatchStarted = false;
                     this.chatGPTDiagnoseReport = null;
                     this.chatGPTDiagnoseError = '';
                     this.chatGPTDiagnoseNotice = '';
@@ -7701,11 +7892,12 @@
                 },
 
                 canStartChatGPTDiagnose() {
-                    if (this.diagnosingChatGPTAccount || !this.chatGPTDiagnoseAccount()) return false;
+                    if (this.diagnosingChatGPTAccount || (!this.chatGPTDiagnoseBatchAccounts.length && !this.chatGPTDiagnoseAccount())) return false;
                     if (!this.chatGPTDiagnoseChecks.inference) return true;
                     const model = this.chatGPTDiagnoseModel.trim();
                     return !!model && new TextEncoder().encode(model).length <= 200 && !/\s|[\u0000-\u001f\u007f]/u.test(model)
-                        && this.chatGPTDiagnoseConfirmed && this.chatGPTDiagnoseProviders().some(item => item.name === this.chatGPTDiagnoseProvider);
+                        && this.chatGPTDiagnosePromptBytes() <= 4096 && !this.chatGPTDiagnosePrompt.includes('\0')
+                        && this.chatGPTDiagnoseConfirmed && (this.chatGPTDiagnoseMode === 'account' || this.chatGPTDiagnoseProviders().some(item => item.name === this.chatGPTDiagnoseProvider));
                 },
 
                 async startChatGPTDiagnose() {
@@ -7718,13 +7910,16 @@
                     this.chatGPTDiagnoseReport = null;
                     this.chatGPTDiagnoseError = '';
                     this.chatGPTDiagnoseNotice = '';
-                    const input = { checks: ['local', ...['refresh', 'usage', 'inference'].filter(name => this.chatGPTDiagnoseChecks[name])] };
-                    if (this.chatGPTDiagnoseChecks.refresh) input.refreshMode = this.chatGPTDiagnoseRefreshMode;
-                    if (this.chatGPTDiagnoseChecks.inference) Object.assign(input, {
-                        provider: this.chatGPTDiagnoseProvider, model: this.chatGPTDiagnoseModel.trim(), confirm: 'consume_quota'
-                    });
-                    const timeoutId = window.setTimeout(() => controller.abort('timeout'), 50_000);
+                    this.resetModelPicker();
+                    this.chatGPTDiagnoseBatchResults = [];
+                    this.chatGPTDiagnoseBatchDone = false;
+                    const input = this.chatGPTDiagnoseInput();
+                    const timeoutId = window.setTimeout(() => controller.abort('timeout'), this.chatGPTDiagnoseBatchAccounts.length ? 905_000 : 50_000);
                     try {
+                        if (this.chatGPTDiagnoseBatchAccounts.length) {
+                            await this.startChatGPTBatchDiagnose(input, controller, sequence);
+                            return;
+                        }
                         const res = await fetch('/api/chatgpt/accounts/' + encodeURIComponent(accountId) + '/diagnose', {
                             method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input), signal: controller.signal
                         });
@@ -7761,10 +7956,14 @@
                 closeChatGPTDiagnoseDialog(returnFocus = true) {
                     if (!this.showChatGPTDiagnoseDialog) return;
                     if (this.diagnosingChatGPTAccount) this.cancelChatGPTDiagnose();
+                    this.resetModelPicker();
                     this.showChatGPTDiagnoseDialog = false;
                     this.chatGPTDiagnoseAccountId = '';
                     this.chatGPTDiagnoseProvider = '';
                     this.chatGPTDiagnoseModel = '';
+                    this.chatGPTDiagnosePrompt = '';
+                    this.chatGPTDiagnoseBatchAccounts = [];
+                    this.chatGPTDiagnoseBatchResults = [];
                     this.resetChatGPTDiagnoseResult();
                     const opener = this._chatGPTDiagnoseOpener;
                     this._chatGPTDiagnoseOpener = null;
@@ -7775,6 +7974,10 @@
                     if (!this.showChatGPTDiagnoseDialog) return;
                     event?.preventDefault();
                     event?.stopImmediatePropagation();
+                    if (this.isModelPickerOpen('diagnose')) {
+                        this.closeModelPicker();
+                        return;
+                    }
                     this.closeChatGPTDiagnoseDialog();
                 },
 
@@ -8262,7 +8465,7 @@
                 // chatGPTInvocationInfo 描述最近一次经网关发出的真实上游调用；只在当前进程内有效，重启后回到未实测。
                 chatGPTInvocationInfo(account) {
                     const invocation = account?.invocation || null;
-                    const where = [invocation?.provider, invocation?.model].filter(Boolean).join(' · ');
+                    const where = [invocation?.mode === 'account' ? '独立账户预检' : invocation?.provider, invocation?.model].filter(Boolean).join(' · ');
                     const when = invocation?.observedAt ? this.formatChatGPTDate(invocation.observedAt) : '';
                     if (invocation?.state === 'success') {
                         return {
@@ -9866,6 +10069,20 @@
                     }
                 },
 
+                // 账户目录明确分流，不持久化 OAuth 目录。
+                async fetchChatGPTAccountModels(accountId, refresh, signal) {
+                    const identity = JSON.stringify(this.chatgptAccounts.find(a => a.id === accountId));
+                    if (!identity) return { models: null, message: '账户已移除，请重新选择目录来源' };
+                    try {
+                        const url = '/api/chatgpt/accounts/' + encodeURIComponent(accountId) + '/models' + (refresh ? '/refresh' : '');
+                        const res = await fetch(url, refresh ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}', signal, cache: 'no-store' } : { signal, cache: 'no-store' });
+                        if (!res.ok) return { models: null, message: `账户目录查询失败（HTTP ${res.status}），可手填模型或稍后刷新` };
+                        const data = await res.json();
+                        if (signal?.aborted || identity !== JSON.stringify(this.chatgptAccounts.find(a => a.id === accountId))) return { models: null, message: '账户状态已变化，请重新查询；手填值保留' };
+                        return { models: Array.isArray(data.models) ? data.models : [], message: [data.stale ? '旧目录，刷新未成功' : data.cached ? '服务端缓存' : '账户远端目录', '目录不代表模型调用成功，也不代表其他账户拥有同样权限', data.message || ''].join(' · ') };
+                    } catch { return { models: null, message: signal?.aborted ? '已取消目录等待，已完成的令牌轮换不会回滚' : '账户目录暂不可用，可继续手填模型' }; }
+                },
+
                 // ── 模型下拉：路由列表就地编辑与编辑抽屉共用的组合框行为 ─────────
                 // 打开时列出完整清单并定位到当前模型；开始输入后按包含关系过滤（不区分大小写）。
                 // 没开始输入时不过滤：输入框里预填的是当前模型全名，按它过滤只会剩下它自己。
@@ -9901,7 +10118,7 @@
 
                 async openModelPicker(key, provider, value, refresh = false) {
                     const current = this.modelPicker;
-                    if (current.key !== key || current.provider !== provider) {
+                    if (current.key !== key || JSON.stringify(current.provider) !== JSON.stringify(provider)) {
                         this._modelPickerController?.abort();
                         this.modelPicker = { key, provider, models: [], loading: false, message: '', open: true, active: -1, typed: false, token: current.token + 1 };
                     } else {
@@ -9920,7 +10137,7 @@
                         picker.loading = true;
                         picker.message = '';
                         try {
-                            const { models, message } = await this.fetchModelsFor(provider, refresh, controller.signal);
+                            const { models, message } = await (provider?.type === 'account' ? this.fetchChatGPTAccountModels(provider.accountId, refresh, controller.signal) : this.fetchModelsFor(provider, refresh, controller.signal));
                             if (controller.signal.aborted || this.modelPicker.token !== token) return;
                             if (models !== null) this.modelPicker.models = models;
                             this.modelPicker.message = message;

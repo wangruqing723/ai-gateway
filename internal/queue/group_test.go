@@ -330,3 +330,60 @@ func TestAcquireGroupConcurrentNeverExceedsLimits(t *testing.T) {
 		}
 	}
 }
+
+// 独立账户预检与绑定 Provider 共用账户槽，但不创建虚拟 Provider。
+func TestAcquireGroupOnlySharesSlotsAndDoesNotCreateProvider(t *testing.T) {
+	m := NewManager()
+	m.SetGroupLimits(GroupLimits{MaxConcurrent: 1})
+	m.Reconcile(map[string]Limits{"p": {MaxConcurrent: 5}})
+	release := mustAcquireGroup(t, m, "p", 5, "account")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ready := make(chan acquireResult, 1)
+	go func() {
+		r, wait, err := m.AcquireGroupOnly(ctx, "account", 1000)
+		ready <- acquireResult{release: r, waitMs: wait, err: err}
+	}()
+	waitForGroup(t, m, "account", func(s GroupStatus) bool { return s.Queued == 1 })
+	expectPending(t, ready)
+	release()
+	got := <-ready
+	if got.err != nil {
+		t.Fatal(got.err)
+	}
+	if s := m.GroupStatusOf("account"); s.Running != 1 {
+		t.Fatalf("账户槽未占用: %+v", s)
+	}
+	m.mu.Lock()
+	_, exists := m.queues[""]
+	m.mu.Unlock()
+	if exists {
+		t.Fatal("预检创建了虚拟 Provider")
+	}
+	got.release()
+	got.release()
+	if s := m.GroupStatusOf("account"); s.Running != 0 || s.Queued != 0 {
+		t.Fatalf("槽未释放: %+v", s)
+	}
+}
+
+func TestAcquireGroupOnlyCancellationAndRateLimit(t *testing.T) {
+	m := NewManager()
+	m.SetGroupLimits(GroupLimits{MaxConcurrent: 1, MaxPerSecond: 1})
+	release, _, err := m.AcquireGroupOnly(context.Background(), "account", 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, _, err = m.AcquireGroupOnly(ctx, "account", 1000); !errors.Is(err, context.Canceled) {
+		t.Fatalf("取消=%v", err)
+	}
+	release()
+	if _, _, err = m.AcquireGroupOnly(context.Background(), "account", 20); !errors.Is(err, ErrQueueTimeout) {
+		t.Fatalf("速率限制=%v", err)
+	}
+	if s := m.GroupStatusOf("account"); s.Queued != 0 || s.Running != 0 {
+		t.Fatalf("取消后资源泄漏: %+v", s)
+	}
+}

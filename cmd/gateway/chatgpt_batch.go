@@ -263,6 +263,7 @@ func (s *server) handleChatGPTAccountBatch(w http.ResponseWriter, r *http.Reques
 		writeChatGPTBatchError(w, err)
 		return
 	}
+	s.reconcileAccountCatalogs()
 	w.Header().Set("ETag", strconv.Quote(version))
 	writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{"operation": plan.Operation, "summary": plan.Summary, "entries": plan.Entries, "accounts": s.chatgptAuth.Views(request.AccountIDs, refs)}})
 }

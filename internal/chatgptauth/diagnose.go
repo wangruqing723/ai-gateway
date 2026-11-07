@@ -163,3 +163,43 @@ func usageSuccessMessage(usage UsageSnapshot) string {
 	}
 	return "用量查询成功；以下窗口额度已用尽：" + strings.Join(exhausted, "、")
 }
+
+// ManagementClient 返回管理请求使用的客户端副本，供固定官方端点诊断复用代理。
+// 不允许调用方修改管理器共享客户端，也不携带 cookie 或跟随重定向发送凭据。
+func (m *Manager) ManagementClient() *http.Client {
+	client := *m.client
+	client.Jar = nil
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	return &client
+}
+
+// DiagnosticIdentity 捕获账户对象及外部凭据替换边界；正常自动轮换不改变此身份。
+// 只在进程内传递，不能序列化或对外暴露。
+type DiagnosticIdentity struct {
+	item  *account
+	floor uint64
+}
+
+func (m *Manager) DiagnosticIdentity(id string) DiagnosticIdentity {
+	m.syncShared()
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	item := m.accounts[id]
+	if item == nil {
+		return DiagnosticIdentity{}
+	}
+	m.invocationMu.Lock()
+	defer m.invocationMu.Unlock()
+	return DiagnosticIdentity{item: item, floor: item.invocationFloor}
+}
+
+func (m *Manager) DiagnosticIdentityCurrent(id string, identity DiagnosticIdentity) bool {
+	current := m.DiagnosticIdentity(id)
+	return identity.item != nil && current == identity
+}
+
+// InvocationCurrent 防止排队期间删除重建或外部替换凭据后仍发送旧尝试。
+func (m *Manager) InvocationCurrent(id string, ticket *InvocationTicket) bool {
+	current := m.DiagnosticIdentity(id)
+	return ticket != nil && current.item == ticket.item && ticket.seq > current.floor
+}

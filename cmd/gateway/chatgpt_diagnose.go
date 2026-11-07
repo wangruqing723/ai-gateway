@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"ai-gateway/internal/chatgptauth"
 	"ai-gateway/internal/config"
@@ -25,10 +26,10 @@ import (
 // 诊断调用不写请求日志与指标，不上报熔断器，避免混入用户调用统计。
 
 const (
-	maxChatGPTDiagnoseRequestBytes = 4 << 10
+	maxChatGPTDiagnoseRequestBytes = 64 << 10
 	// chatGPTDiagnoseConfirm 是实际调用诊断的消费确认值，避免误触发消耗额度的请求。
 	chatGPTDiagnoseConfirm = "consume_quota"
-	// chatGPTDiagnoseMaxOutputTokens 限制测试调用的输出上限（暂定值，待确认）。
+	// chatGPTDiagnoseMaxOutputTokens 限制测试调用的输出预算，具体协议支持由适配层决定。
 	chatGPTDiagnoseMaxOutputTokens = 256
 	chatGPTDiagnoseMaxModelLength  = 200
 	chatGPTDiagnosePrompt          = "Reply with OK."
@@ -45,6 +46,8 @@ var chatGPTDiagnoseStepOrder = []string{"local", "refresh", "usage", "inference"
 var diagnoseReqCounter uint64
 
 type chatGPTDiagnoseRequest struct {
+	Mode        string   `json:"mode,omitempty"`
+	Prompt      string   `json:"prompt,omitempty"`
 	Checks      []string `json:"checks,omitempty"`
 	RefreshMode string   `json:"refreshMode,omitempty"`
 	Provider    string   `json:"provider,omitempty"`
@@ -55,6 +58,7 @@ type chatGPTDiagnoseRequest struct {
 // chatGPTDiagnoseStep 是一个步骤的结论。status 取 success、failure、skipped、cancelled，
 // 不用一个总「健康」掩盖部分失败。
 type chatGPTDiagnoseStep struct {
+	Mode           string   `json:"mode,omitempty"`
 	Name           string   `json:"name"`
 	Status         string   `json:"status"`
 	Category       string   `json:"category,omitempty"`
@@ -82,6 +86,9 @@ type chatGPTDiagnoseReport struct {
 }
 
 type chatGPTDiagnosePlan struct {
+	mode         string
+	prompt       string
+	batch        bool
 	selected     map[string]bool
 	forceRefresh bool
 	provider     string
@@ -120,15 +127,35 @@ func normalizeChatGPTDiagnoseRequest(input chatGPTDiagnoseRequest) (chatGPTDiagn
 		return plan, errors.New("未选择刷新链路时不能指定 refreshMode")
 	}
 	if !plan.selected["inference"] {
-		if input.Provider != "" || input.Model != "" || input.Confirm != "" {
-			return plan, errors.New("未选择实际调用时不能指定 provider、model 或 confirm")
+		if input.Mode != "" || input.Prompt != "" || input.Provider != "" || input.Model != "" || input.Confirm != "" {
+			return plan, errors.New("未选择实际调用时不能指定 mode、prompt、provider、model 或 confirm")
 		}
 		return plan, nil
 	}
 	plan.provider = input.Provider
 	plan.model = strings.TrimSpace(input.Model)
-	if plan.provider == "" || strings.Contains(plan.provider, "/") {
-		return plan, errors.New("实际调用需要指定已绑定此账户的 Provider")
+	plan.mode = input.Mode
+	if plan.mode == "" && plan.provider != "" {
+		plan.mode = "provider"
+	}
+	switch plan.mode {
+	case "account":
+		if plan.provider != "" {
+			return plan, errors.New("账户预检不能指定 Provider")
+		}
+	case "provider":
+		if plan.provider == "" || strings.Contains(plan.provider, "/") {
+			return plan, errors.New("实际调用需要指定已绑定此账户的 Provider")
+		}
+	default:
+		return plan, errors.New("实际调用需要指定 account 或 provider 模式")
+	}
+	if len(input.Prompt) > 4096 || !utf8.ValidString(input.Prompt) || strings.ContainsRune(input.Prompt, 0) {
+		return plan, errors.New("测试内容须为有效 UTF-8，不能包含 NUL，且最多 4096 字节")
+	}
+	plan.prompt = input.Prompt
+	if strings.TrimSpace(plan.prompt) == "" {
+		plan.prompt = chatGPTDiagnosePrompt
 	}
 	if plan.model == "" || len(plan.model) > chatGPTDiagnoseMaxModelLength || strings.IndexFunc(plan.model, unicode.IsSpace) >= 0 || strings.IndexFunc(plan.model, unicode.IsControl) >= 0 {
 		return plan, errors.New("实际调用需要指定有效的模型名")
@@ -170,7 +197,7 @@ func (s *server) handleChatGPTAccountDiagnose(w http.ResponseWriter, r *http.Req
 		return
 	}
 	var input chatGPTDiagnoseRequest
-	if err := decodeConfigTransferJSON(body, &input); err != nil {
+	if err := decodeChatGPTDiagnoseJSON(body, &input); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid_diagnose_request", "诊断请求 JSON 无效")
 		return
 	}
@@ -183,7 +210,7 @@ func (s *server) handleChatGPTAccountDiagnose(w http.ResponseWriter, r *http.Req
 		writeJSONError(w, http.StatusNotFound, "account_not_found", "ChatGPT OAuth 账户不存在")
 		return
 	}
-	if plan.selected["inference"] {
+	if plan.selected["inference"] && plan.mode == "provider" {
 		s.cfgMu.RLock()
 		provider := s.cfg.Providers[plan.provider]
 		s.cfgMu.RUnlock()
@@ -221,6 +248,7 @@ func (s *server) runChatGPTDiagnose(ctx context.Context, id string, plan chatGPT
 		AccountID: id, StartedAt: started.UTC().Format(time.RFC3339), BudgetMs: chatGPTDiagnoseBudget.Milliseconds(),
 	}
 	versionBefore, _ := s.chatgptAuth.CredentialVersion(id)
+	identity := s.chatgptAuth.DiagnosticIdentity(id)
 	checks := make([]string, 0, len(plan.selected))
 	for _, name := range chatGPTDiagnoseStepOrder {
 		if plan.selected[name] {
@@ -237,6 +265,10 @@ func (s *server) runChatGPTDiagnose(ctx context.Context, id string, plan chatGPT
 			step = chatGPTDiagnoseStep{Name: name, Status: "skipped", Message: "未选择此步骤"}
 		case name != "local" && ctx.Err() != nil:
 			step = chatGPTDiagnoseStep{Name: name, Status: "cancelled", Message: chatGPTDiagnoseCancelMessage(ctx) + "，此步骤未执行"}
+		case name != "local" && !s.chatgptAuth.DiagnosticIdentityCurrent(id, identity):
+			step = chatGPTDiagnoseStep{Name: name, Status: "skipped", Category: "conflict", Message: "账户或凭据已变化，未继续出网，请重新预检"}
+		case name != "local" && plan.batch && s.chatgptAuth.IsPaused(id):
+			step = chatGPTDiagnoseStep{Name: name, Status: "skipped", Message: "账户已暂停，批量预检只执行本地检查"}
 		case name != "local" && blocked != "":
 			step = chatGPTDiagnoseStep{Name: name, Status: "skipped", Message: blocked}
 		default:
@@ -249,7 +281,7 @@ func (s *server) runChatGPTDiagnose(ctx context.Context, id string, plan chatGPT
 			case "usage":
 				step = s.diagnoseChatGPTUsage(ctx, id)
 			case "inference":
-				step = s.diagnoseChatGPTInference(ctx, id, plan.provider, plan.model)
+				step = s.diagnoseChatGPTInferencePlan(ctx, id, plan)
 			}
 			step.Name = name
 			step.StartedAt = stepStarted.UTC().Format(time.RFC3339)
@@ -285,6 +317,9 @@ func (s *server) runChatGPTDiagnose(ctx context.Context, id string, plan chatGPT
 }
 
 func chatGPTDiagnoseCancelMessage(ctx context.Context) string {
+	if errors.Is(context.Cause(ctx), errChatGPTDiagnoseBatchBudget) {
+		return "批量预检总预算已耗尽"
+	}
 	if errors.Is(context.Cause(ctx), errChatGPTDiagnoseBudget) {
 		return "诊断超过总时长 " + chatGPTDiagnoseBudget.String()
 	}
@@ -346,6 +381,9 @@ func chatGPTDiagnoseInvocationSummary(invocation chatgptauth.InvocationView) str
 		return invocation.Message
 	}
 	summary := invocation.Message
+	if invocation.Mode == "account" {
+		summary += "（账户预检，模型 " + invocation.Model + "）"
+	}
 	if invocation.Provider != "" {
 		summary += "（Provider " + invocation.Provider
 		if invocation.Model != "" {
@@ -401,16 +439,30 @@ func chatGPTDiagnoseStepFromOutcome(ctx context.Context, outcome chatgptauth.Che
 // 队列限额和请求期刷新路径。结果会写回账户的最近调用记录（这是一次真实上游调用），
 // 但不写请求日志与指标，也不上报熔断器。
 func (s *server) diagnoseChatGPTInference(ctx context.Context, id, providerName, model string) chatGPTDiagnoseStep {
-	step := chatGPTDiagnoseStep{Provider: providerName, Model: model}
+	return s.diagnoseChatGPTInferencePlan(ctx, id, chatGPTDiagnosePlan{mode: "provider", provider: providerName, model: model, prompt: chatGPTDiagnosePrompt})
+}
+
+const chatGPTPreflightBaseURL = "https://chatgpt.com/backend-api/codex"
+
+func (s *server) diagnoseChatGPTInferencePlan(ctx context.Context, id string, plan chatGPTDiagnosePlan) chatGPTDiagnoseStep {
+	providerName, model := plan.provider, plan.model
+	step := chatGPTDiagnoseStep{Provider: providerName, Model: model, Mode: plan.mode}
 	s.cfgMu.RLock()
 	cfg := s.cfg
 	s.cfgMu.RUnlock()
 	provider := cfg.Providers[providerName]
+	if plan.mode == "account" {
+		// 仅作为复用协议适配的连接描述，不登记到配置、Provider 队列或熔断器。
+		provider = &config.Provider{BaseURL: chatGPTPreflightBaseURL, Format: "openai-responses", AuthType: "chatgptOAuth", AccountID: id}
+	}
 	if provider == nil || provider.AuthType != "chatgptOAuth" || provider.AccountID != id {
 		step.Status, step.Message = "skipped", "Provider 绑定在诊断期间已变化，未发起实际调用"
 		return step
 	}
 	step.ProxySource = chatGPTProviderProxySource(provider)
+	if plan.mode == "account" {
+		step.ProxySource = chatGPTManagementProxySource(chatGPTPreflightBaseURL)
+	}
 	if !provider.IsEnabled() {
 		step.Status, step.Message = "skipped", "Provider 已停用；诊断不绕过启停设置，未发起实际调用"
 		return step
@@ -432,7 +484,7 @@ func (s *server) diagnoseChatGPTInference(ctx context.Context, id, providerName,
 		"stream":            false,
 		"max_output_tokens": chatGPTDiagnoseMaxOutputTokens,
 		"input": []any{map[string]any{"type": "message", "role": "user",
-			"content": []any{map[string]any{"type": "input_text", "text": chatGPTDiagnosePrompt}}}},
+			"content": []any{map[string]any{"type": "input_text", "text": plan.prompt}}}},
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://127.0.0.1/v1/responses", nil)
 	if err != nil {
@@ -447,7 +499,7 @@ func (s *server) diagnoseChatGPTInference(ctx context.Context, id, providerName,
 		clientFormat: "openai-responses", originalModel: model,
 		internal: converter.FromOpenAIResponses(raw), rawBody: raw,
 		candidate: router.Candidate{Provider: &providerCopy, TargetModel: model, MaxTokens: provider.MaxTokens, ExtraBody: provider.ExtraBody},
-		attemptNo: 1, httpAttemptNo: 1, diagnostic: true,
+		attemptNo: 1, httpAttemptNo: 1, diagnostic: true, accountPreflight: plan.mode == "account",
 		// Provider 的 maxTokens 可硬覆盖请求值；再用 contextBudget 向下压，避免诊断上限被抬高。
 		contextBudget: chatGPTDiagnoseMaxOutputTokens,
 		reqLog:        &metrics.RequestLog{}, detail: detail,
@@ -463,8 +515,12 @@ func classifyChatGPTDiagnoseInference(ctx context.Context, step *chatGPTDiagnose
 		described := chatgptauth.DescribeCredentialError(outcome.oauthErr)
 		*step = mergeChatGPTDiagnoseStep(*step, chatGPTDiagnoseStepFromOutcome(ctx, described))
 		if step.Status == "failure" {
-			step.Message = "经该 Provider 获取访问令牌失败：" + described.Message
+			step.Message = "获取访问令牌失败：" + described.Message
 		}
+		return
+	}
+	if outcome.accountCooldown {
+		step.Status, step.Message = "skipped", "账户处于共享额度冷却，未发起实际调用"
 		return
 	}
 	if outcome.accountPaused {

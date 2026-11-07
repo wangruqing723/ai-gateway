@@ -291,6 +291,20 @@
                     }
                 },
 
+                // 账户目录明确分流，不持久化 OAuth 目录。
+                async fetchChatGPTAccountModels(accountId, refresh, signal) {
+                    const identity = JSON.stringify(this.chatgptAccounts.find(a => a.id === accountId));
+                    if (!identity) return { models: null, message: '账户已移除，请重新选择目录来源' };
+                    try {
+                        const url = '/api/chatgpt/accounts/' + encodeURIComponent(accountId) + '/models' + (refresh ? '/refresh' : '');
+                        const res = await fetch(url, refresh ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}', signal, cache: 'no-store' } : { signal, cache: 'no-store' });
+                        if (!res.ok) return { models: null, message: `账户目录查询失败（HTTP ${res.status}），可手填模型或稍后刷新` };
+                        const data = await res.json();
+                        if (signal?.aborted || identity !== JSON.stringify(this.chatgptAccounts.find(a => a.id === accountId))) return { models: null, message: '账户状态已变化，请重新查询；手填值保留' };
+                        return { models: Array.isArray(data.models) ? data.models : [], message: [data.stale ? '旧目录，刷新未成功' : data.cached ? '服务端缓存' : '账户远端目录', '目录不代表模型调用成功，也不代表其他账户拥有同样权限', data.message || ''].join(' · ') };
+                    } catch { return { models: null, message: signal?.aborted ? '已取消目录等待，已完成的令牌轮换不会回滚' : '账户目录暂不可用，可继续手填模型' }; }
+                },
+
                 // ── 模型下拉：路由列表就地编辑与编辑抽屉共用的组合框行为 ─────────
                 // 打开时列出完整清单并定位到当前模型；开始输入后按包含关系过滤（不区分大小写）。
                 // 没开始输入时不过滤：输入框里预填的是当前模型全名，按它过滤只会剩下它自己。
@@ -326,7 +340,7 @@
 
                 async openModelPicker(key, provider, value, refresh = false) {
                     const current = this.modelPicker;
-                    if (current.key !== key || current.provider !== provider) {
+                    if (current.key !== key || JSON.stringify(current.provider) !== JSON.stringify(provider)) {
                         this._modelPickerController?.abort();
                         this.modelPicker = { key, provider, models: [], loading: false, message: '', open: true, active: -1, typed: false, token: current.token + 1 };
                     } else {
@@ -345,7 +359,7 @@
                         picker.loading = true;
                         picker.message = '';
                         try {
-                            const { models, message } = await this.fetchModelsFor(provider, refresh, controller.signal);
+                            const { models, message } = await (provider?.type === 'account' ? this.fetchChatGPTAccountModels(provider.accountId, refresh, controller.signal) : this.fetchModelsFor(provider, refresh, controller.signal));
                             if (controller.signal.aborted || this.modelPicker.token !== token) return;
                             if (models !== null) this.modelPicker.models = models;
                             this.modelPicker.message = message;

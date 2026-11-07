@@ -126,7 +126,16 @@
                 providerBalanceKind(kind) { return ({ account_balance: '账户余额', key_quota: '密钥额度', subscription_quota: '订阅额度（非钱包）', usage_only: '仅用量，剩余未知' })[kind] || '未知口径'; },
                 providerBalanceValue(item) {
                     if (item?.unlimited) return '不限额（仅此项）';
-                    return (item?.remaining == null ? '剩余未知' : String(item.remaining)) + (item?.unit ? ' ' + item.unit : '');
+                    if (item?.remaining == null) return '剩余未知';
+                    const symbols = { USD: '$', CNY: '¥', RMB: '¥', EUR: '€', GBP: '£', JPY: '¥', HKD: 'HK$', CAD: 'CA$', AUD: 'A$' };
+                    const symbol = symbols[String(item?.unit || '').toUpperCase()];
+                    return symbol ? symbol + String(item.remaining) : String(item.remaining) + (item?.unit ? ' ' + item.unit : '');
+                },
+                // 后端已按可信比例换算；详情不重复换算，也不将原始配额冒充美元。
+                providerBalanceDollar(value, unit) {
+                    if (value == null) return '未知';
+                    if (String(unit || '').toUpperCase() !== 'USD') return '暂无法换算为美元';
+                    return '$' + String(value);
                 },
                 providerBalanceTime(value) { return value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '尚无成功查询'; },
                 providerBalanceState(name) {
@@ -172,7 +181,15 @@
                 openChatGPTDiagnoseDialog(account, event) {
                     if (!account?.id || this.diagnosingChatGPTAccount) return;
                     this._chatGPTDiagnoseOpener = event?.currentTarget || document.activeElement;
+                    this.resetModelPicker();
                     this.chatGPTDiagnoseAccountId = account.id;
+                    this.chatGPTDiagnoseMode = 'account';
+                    this.chatGPTDiagnosePrompt = '';
+                    this.chatGPTDiagnoseBatchAccounts = [];
+                    this.chatGPTDiagnoseBatchResults = [];
+                    this.chatGPTDiagnoseBatchDone = false;
+                    this.chatGPTDiagnoseBatchStarted = false;
+                    this.chatGPTDiagnoseCatalogAccountId = account.id;
                     this.chatGPTDiagnoseChecks = { refresh: false, usage: false, inference: false };
                     this.chatGPTDiagnoseRefreshMode = 'auto';
                     this.chatGPTDiagnoseProvider = '';
@@ -183,6 +200,83 @@
                     this.chatGPTDiagnoseNotice = '';
                     this.showChatGPTDiagnoseDialog = true;
                     this.$nextTick(() => this.$refs.chatGPTDiagnoseStart?.focus());
+                },
+
+                openChatGPTBatchDiagnoseDialog(event) {
+                    const accounts = this.chatgptAccounts.filter(a => this.chatGPTSelectedAccountIds.includes(a.id));
+                    if (!accounts.length || accounts.length > 50 || this.diagnosingChatGPTAccount) return;
+                    this.openChatGPTDiagnoseDialog(accounts[0], event);
+                    // 冻结账户集合与名称，不随筛选或刷新改变本批范围。
+                    this.chatGPTDiagnoseBatchAccounts = accounts.map(a => ({ id: a.id, email: a.email }));
+                    this.chatGPTDiagnoseCatalogAccountId = '';
+                },
+
+                chatGPTDiagnoseModelSource() {
+                    return this.chatGPTDiagnoseMode === 'provider' ? this.chatGPTDiagnoseProvider
+                        : this.chatGPTDiagnoseCatalogAccountId ? { type: 'account', accountId: this.chatGPTDiagnoseCatalogAccountId } : null;
+                },
+
+                chatGPTDiagnosePromptBytes() { return new TextEncoder().encode(this.chatGPTDiagnosePrompt).length; },
+
+                chatGPTDiagnoseInput() {
+                    const input = { checks: ['local', ...['refresh', 'usage', 'inference'].filter(name => this.chatGPTDiagnoseChecks[name])] };
+                    if (this.chatGPTDiagnoseChecks.refresh) input.refreshMode = this.chatGPTDiagnoseRefreshMode;
+                    if (this.chatGPTDiagnoseChecks.inference) {
+                        Object.assign(input, { mode: this.chatGPTDiagnoseMode, model: this.chatGPTDiagnoseModel.trim(), prompt: this.chatGPTDiagnosePrompt, confirm: 'consume_quota' });
+                        if (this.chatGPTDiagnoseMode === 'provider') input.provider = this.chatGPTDiagnoseProvider;
+                    }
+                    return input;
+                },
+
+                chatGPTBatchDiagnoseResult(accountId) { return this.chatGPTDiagnoseBatchResults.find(item => item.accountId === accountId); },
+
+                chatGPTBatchDiagnoseStatus(accountId) {
+                    const item = this.chatGPTBatchDiagnoseResult(accountId);
+                    if (!item) return !this.chatGPTDiagnoseBatchStarted ? '尚未开始' : this.diagnosingChatGPTAccount ? '等待结果' : '结果未知';
+                    return ({ success: '成功', partial: '部分完成', failure: '失败', skipped: '已跳过', cancelled: '已取消', busy: '账户忙碌', not_found: '账户不存在' })[item.status] || '结果未知';
+                },
+
+                async startChatGPTBatchDiagnose(input, controller, sequence) {
+                    input.accountIds = this.chatGPTDiagnoseBatchAccounts.map(a => a.id);
+                    this.chatGPTDiagnoseBatchStarted = true;
+                    const res = await fetch('/api/chatgpt/accounts/diagnose/batch', {
+                        method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' }, body: JSON.stringify(input), signal: controller.signal
+                    });
+                    if (!res.ok) throw new Error(await this.errorText(res, '批量预检未启动'));
+                    if (!res.headers.get('content-type')?.includes('text/event-stream') || !res.body) throw new Error('未收到预检事件流，请检查服务后重新启动；不会自动重试');
+                    const reader = res.body.getReader(), decoder = new TextDecoder();
+                    let buffer = '', eventName = '', dataLines = [];
+                    const dispatch = () => {
+                        if (!dataLines.length) { eventName = ''; return; }
+                        const data = JSON.parse(dataLines.join('\n'));
+                        if (eventName === 'result') {
+                            if (input.accountIds[data.index] !== data.accountId || this.chatGPTBatchDiagnoseResult(data.accountId)) throw new Error('预检结果身份或序号不匹配，结果未完整收到');
+                            this.chatGPTDiagnoseBatchResults.push(data);
+                            if (data.report?.account?.id === data.accountId) this.chatgptAccounts = this.chatgptAccounts.map(account => account.id === data.accountId ? data.report.account : account);
+                        } else if (eventName === 'done') {
+                            if (this.chatGPTDiagnoseBatchResults.length !== input.accountIds.length) throw new Error('结果未完整收到，请逐账户核对；不会自动重试');
+                            this.chatGPTDiagnoseBatchDone = true;
+                            if (data.cancelled) this.chatGPTDiagnoseNotice = '服务端已取消本批，已发出的调用可能消耗额度。';
+                        } else if (eventName === 'error') throw new Error('服务端终止预检，结果未完整收到；不会自动重试');
+                        eventName = ''; dataLines = [];
+                    };
+                    try {
+                        while (true) {
+                            const { value, done } = await reader.read();
+                            if (sequence !== this._chatGPTDiagnoseSequence) return;
+                            buffer += done ? decoder.decode() : decoder.decode(value, { stream: true });
+                            let match;
+                            while ((match = /\r\n|\n|\r(?!$)/.exec(buffer))) {
+                                const line = buffer.slice(0, match.index);
+                                buffer = buffer.slice(match.index + match[0].length);
+                                if (!line) dispatch();
+                                else if (line.startsWith('event:')) eventName = line.slice(6).trim();
+                                else if (line.startsWith('data:')) dataLines.push(line.slice(5).replace(/^ /, ''));
+                            }
+                            if (done || this.chatGPTDiagnoseBatchDone) break;
+                        }
+                        if (!this.chatGPTDiagnoseBatchDone) throw new Error('结果未完整收到，未收到的账户结果未知；不会自动重试消费操作');
+                    } finally { await reader.cancel().catch(() => {}); reader.releaseLock(); }
                 },
 
                 chatGPTDiagnoseAccount() {
@@ -198,6 +292,9 @@
                 },
 
                 resetChatGPTDiagnoseResult() {
+                    this.chatGPTDiagnoseBatchResults = [];
+                    this.chatGPTDiagnoseBatchDone = false;
+                    this.chatGPTDiagnoseBatchStarted = false;
                     this.chatGPTDiagnoseReport = null;
                     this.chatGPTDiagnoseError = '';
                     this.chatGPTDiagnoseNotice = '';
@@ -205,11 +302,12 @@
                 },
 
                 canStartChatGPTDiagnose() {
-                    if (this.diagnosingChatGPTAccount || !this.chatGPTDiagnoseAccount()) return false;
+                    if (this.diagnosingChatGPTAccount || (!this.chatGPTDiagnoseBatchAccounts.length && !this.chatGPTDiagnoseAccount())) return false;
                     if (!this.chatGPTDiagnoseChecks.inference) return true;
                     const model = this.chatGPTDiagnoseModel.trim();
                     return !!model && new TextEncoder().encode(model).length <= 200 && !/\s|[\u0000-\u001f\u007f]/u.test(model)
-                        && this.chatGPTDiagnoseConfirmed && this.chatGPTDiagnoseProviders().some(item => item.name === this.chatGPTDiagnoseProvider);
+                        && this.chatGPTDiagnosePromptBytes() <= 4096 && !this.chatGPTDiagnosePrompt.includes('\0')
+                        && this.chatGPTDiagnoseConfirmed && (this.chatGPTDiagnoseMode === 'account' || this.chatGPTDiagnoseProviders().some(item => item.name === this.chatGPTDiagnoseProvider));
                 },
 
                 async startChatGPTDiagnose() {
@@ -222,13 +320,16 @@
                     this.chatGPTDiagnoseReport = null;
                     this.chatGPTDiagnoseError = '';
                     this.chatGPTDiagnoseNotice = '';
-                    const input = { checks: ['local', ...['refresh', 'usage', 'inference'].filter(name => this.chatGPTDiagnoseChecks[name])] };
-                    if (this.chatGPTDiagnoseChecks.refresh) input.refreshMode = this.chatGPTDiagnoseRefreshMode;
-                    if (this.chatGPTDiagnoseChecks.inference) Object.assign(input, {
-                        provider: this.chatGPTDiagnoseProvider, model: this.chatGPTDiagnoseModel.trim(), confirm: 'consume_quota'
-                    });
-                    const timeoutId = window.setTimeout(() => controller.abort('timeout'), 50_000);
+                    this.resetModelPicker();
+                    this.chatGPTDiagnoseBatchResults = [];
+                    this.chatGPTDiagnoseBatchDone = false;
+                    const input = this.chatGPTDiagnoseInput();
+                    const timeoutId = window.setTimeout(() => controller.abort('timeout'), this.chatGPTDiagnoseBatchAccounts.length ? 905_000 : 50_000);
                     try {
+                        if (this.chatGPTDiagnoseBatchAccounts.length) {
+                            await this.startChatGPTBatchDiagnose(input, controller, sequence);
+                            return;
+                        }
                         const res = await fetch('/api/chatgpt/accounts/' + encodeURIComponent(accountId) + '/diagnose', {
                             method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input), signal: controller.signal
                         });
@@ -265,10 +366,14 @@
                 closeChatGPTDiagnoseDialog(returnFocus = true) {
                     if (!this.showChatGPTDiagnoseDialog) return;
                     if (this.diagnosingChatGPTAccount) this.cancelChatGPTDiagnose();
+                    this.resetModelPicker();
                     this.showChatGPTDiagnoseDialog = false;
                     this.chatGPTDiagnoseAccountId = '';
                     this.chatGPTDiagnoseProvider = '';
                     this.chatGPTDiagnoseModel = '';
+                    this.chatGPTDiagnosePrompt = '';
+                    this.chatGPTDiagnoseBatchAccounts = [];
+                    this.chatGPTDiagnoseBatchResults = [];
                     this.resetChatGPTDiagnoseResult();
                     const opener = this._chatGPTDiagnoseOpener;
                     this._chatGPTDiagnoseOpener = null;
@@ -279,6 +384,10 @@
                     if (!this.showChatGPTDiagnoseDialog) return;
                     event?.preventDefault();
                     event?.stopImmediatePropagation();
+                    if (this.isModelPickerOpen('diagnose')) {
+                        this.closeModelPicker();
+                        return;
+                    }
                     this.closeChatGPTDiagnoseDialog();
                 },
 
@@ -766,7 +875,7 @@
                 // chatGPTInvocationInfo 描述最近一次经网关发出的真实上游调用；只在当前进程内有效，重启后回到未实测。
                 chatGPTInvocationInfo(account) {
                     const invocation = account?.invocation || null;
-                    const where = [invocation?.provider, invocation?.model].filter(Boolean).join(' · ');
+                    const where = [invocation?.mode === 'account' ? '独立账户预检' : invocation?.provider, invocation?.model].filter(Boolean).join(' · ');
                     const when = invocation?.observedAt ? this.formatChatGPTDate(invocation.observedAt) : '';
                     if (invocation?.state === 'success') {
                         return {

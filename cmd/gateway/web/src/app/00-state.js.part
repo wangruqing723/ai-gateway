@@ -72,6 +72,13 @@
                 // 诊断只在用户启动时出网；请求、结果和消费确认均只属于这次浮层。
                 showChatGPTDiagnoseDialog: false,
                 chatGPTDiagnoseAccountId: '',
+                chatGPTDiagnoseMode: 'account',
+                chatGPTDiagnosePrompt: '',
+                chatGPTDiagnoseBatchAccounts: [],
+                chatGPTDiagnoseBatchResults: [],
+                chatGPTDiagnoseBatchDone: false,
+                chatGPTDiagnoseBatchStarted: false,
+                chatGPTDiagnoseCatalogAccountId: '',
                 chatGPTDiagnoseChecks: { refresh: false, usage: false, inference: false },
                 chatGPTDiagnoseRefreshMode: 'auto',
                 chatGPTDiagnoseProvider: '',
