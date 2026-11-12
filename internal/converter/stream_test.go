@@ -2,6 +2,7 @@ package converter
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -1447,4 +1448,59 @@ func TestResponsesMetadataEventIgnored(t *testing.T) {
 func jsonQuote(s string) string {
 	b, _ := json.Marshal(s)
 	return string(b)
+}
+
+// 上游晚到的输入用量必须补报，缓存命中不能与普通输入重复计数。
+func TestOpenAIStreamsReportInputUsage(t *testing.T) {
+	for _, provider := range []string{"openai", "openai-responses"} {
+		for _, cached := range []int{0, 40, 120} {
+			t.Run(fmt.Sprintf("%s/cache=%d", provider, cached), func(t *testing.T) {
+				var lines []string
+				if provider == "openai" {
+					lines = []string{
+						`data: {"choices":[{"delta":{"content":"ok"},"finish_reason":null}]}`,
+						`data: {"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+						fmt.Sprintf(`data: {"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":9,"prompt_tokens_details":{"cached_tokens":%d}}}`, cached),
+						`data: [DONE]`,
+					}
+				} else {
+					lines = []string{
+						`data: {"type":"response.created","response":{"model":"test"}}`,
+						fmt.Sprintf(`data: {"type":"response.completed","response":{"output":[],"usage":{"input_tokens":100,"output_tokens":9,"input_tokens_details":{"cached_tokens":%d}}}}`, cached),
+					}
+				}
+				tr := NewStreamTransformer(provider, "anthropic")
+				events := captureEvents(t, transformAll(t, tr, lines...))
+				last := findEvent(t, events, "message_delta")
+				if last["delta"].(map[string]any)["stop_reason"] != "end_turn" {
+					t.Fatalf("补报用量丢失结束原因: %#v", last)
+				}
+				usage := last["usage"].(map[string]any)
+				wantCache := min(cached, 100)
+				if usage["input_tokens"] != float64(100-wantCache) || usage["cache_read_input_tokens"] != float64(wantCache) || usage["output_tokens"] != float64(9) {
+					t.Fatalf("用量错误: %#v", usage)
+				}
+				if events[len(events)-1].event != "message_stop" || StreamError(tr) != nil {
+					t.Fatalf("流未正常结束: %#v", events)
+				}
+			})
+		}
+	}
+}
+
+func TestAnthropicStreamUsageMissingInput(t *testing.T) {
+	usage := anthropicStreamUsage(map[string]any{"output_tokens": 7})
+	if _, exists := usage["input_tokens"]; exists {
+		t.Fatal("未知输入不应补报为零")
+	}
+}
+
+func TestChatStreamRequestsUsage(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		body := ToOpenAIChatBody(&Internal{Stream: stream}, "test")
+		options, exists := body["stream_options"].(map[string]any)
+		if exists != stream || (stream && options["include_usage"] != true) {
+			t.Fatalf("stream=%v, options=%v", stream, options)
+		}
+	}
 }

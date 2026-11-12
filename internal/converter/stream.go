@@ -986,6 +986,7 @@ type openAIToAnthropic struct {
 	textStarted    bool
 	textStopped    bool
 	finishSent     bool
+	stopReason     string
 	messageStopped bool
 }
 
@@ -1132,7 +1133,27 @@ func (t *openAIToAnthropic) Transform(line string) []string {
 			"type": "message_delta", "delta": map[string]any{"stop_reason": stop, "stop_sequence": nil},
 			"usage": map[string]any{"output_tokens": 0},
 		}))
+		t.stopReason = stop
 		t.finishSent = true
+	}
+	// Chat 的用量通常在 finish_reason 之后的独立空 choices 分块中返回。
+	// 补报累计用量并保留结束原因，避免 SDK 合并事件时清空已收到的 stop_reason。
+	if usage, ok := data["usage"].(map[string]any); ok {
+		mapped := map[string]any{}
+		if value, exists := usage["prompt_tokens"]; exists {
+			mapped["input_tokens"] = value
+		}
+		if value, exists := usage["completion_tokens"]; exists {
+			mapped["output_tokens"] = value
+		}
+		mapped["input_tokens_details"] = usage["prompt_tokens_details"]
+		var stop any
+		if t.stopReason != "" {
+			stop = t.stopReason
+		}
+		out = append(out, sseEvent("message_delta", map[string]any{
+			"type": "message_delta", "delta": map[string]any{"stop_reason": stop, "stop_sequence": nil}, "usage": anthropicStreamUsage(mapped),
+		}))
 	}
 	return out
 }
@@ -1646,13 +1667,29 @@ func responsesEventUsage(data map[string]any) map[string]any {
 	return usage
 }
 
-// anthropicStreamUsage 把上游 usage 折成 Anthropic message_delta 的 usage 形状。
-//
-// 只带 output_tokens：Anthropic 原生流式在 message_delta 里只报增量产出，
-// input_tokens 已在 message_start 里给过。上游没给 usage 时退回 0，
-// 保持字段恒在，避免客户端读到缺字段。
+// anthropicStreamUsage 在流末补报上游累计用量。OpenAI 输入包含缓存命中，
+// Anthropic 则分开计数，必须扣除缓存部分，避免客户端重复计算上下文。
+// 未知输入保持缺失，不能用伪造的零覆盖客户端已有统计。
 func anthropicStreamUsage(usage map[string]any) map[string]any {
-	return map[string]any{"output_tokens": getIntDefault(usage, "output_tokens", 0)}
+	result := map[string]any{"output_tokens": getIntDefault(usage, "output_tokens", 0)}
+	if _, exists := usage["input_tokens"]; exists {
+		input := getIntDefault(usage, "input_tokens", 0)
+		if input < 0 {
+			input = 0
+		}
+		details, _ := usage["input_tokens_details"].(map[string]any)
+		cached := getIntDefault(details, "cached_tokens", 0)
+		if cached < 0 {
+			cached = 0
+		}
+		if cached > input {
+			cached = input
+		}
+		result["input_tokens"] = input - cached
+		result["cache_read_input_tokens"] = cached
+		result["cache_creation_input_tokens"] = 0
+	}
+	return result
 }
 
 // finish 收尾 Responses 流。usage 取自触发收尾的 response.completed /

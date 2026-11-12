@@ -292,6 +292,10 @@ func ToOpenAIChatBody(in *Internal, targetModel string) map[string]any {
 		"max_tokens": in.MaxTokens,
 		"stream":     in.Stream,
 	}
+	// 跨格式流式请求显式索取最终用量，供客户端统计上下文。
+	if in.Stream {
+		body["stream_options"] = map[string]any{"include_usage": true}
+	}
 	if in.Tools != nil {
 		body["tools"] = canonicalToolsToOpenAIChat(in.Tools)
 	}
