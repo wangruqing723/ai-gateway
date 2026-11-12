@@ -125,6 +125,8 @@ type Options struct {
 	OnUpstreamHeaders UpstreamHeadersFunc
 	// OnErrorBody 提供脱敏、最多 8 KiB 的上游错误正文。
 	OnErrorBody ErrorBodyFunc
+	// OnDiagnostic 只传播脱敏后的错误证据，不参与转移裁决。
+	OnDiagnostic func(ErrorDiagnostic)
 	// OnResponseStarted 在向客户端写出响应头前调用。
 	// 流式路径上它推迟到预读提交时（见 handleStream）：预读阶段发现上游流内失败
 	// 并放弃本次尝试时，客户端一个字节都没收到，不应算作「响应已开始」。
@@ -165,9 +167,23 @@ func recordUpstreamHeaders(opts *Options, resp *http.Response) {
 }
 
 func recordErrorBody(opts *Options, body string, truncated bool) {
+	body = SanitizeDiagnostic(body, diagnosticSecrets(opts)...)
 	if opts.OnErrorBody != nil {
 		opts.OnErrorBody(body, truncated)
 	}
+	d := ErrorDiagnostic{Source: "upstream", Category: "upstream_http_error", Body: body, Truncated: truncated}
+	if body == "" {
+		d.BodyState = "not_provided"
+	}
+	var data map[string]any
+	if json.Unmarshal([]byte(body), &data) == nil {
+		if e := converter.ParseUpstreamError(data, opts.Provider.Format); e != nil {
+			d.Code = e.Code
+			d.Type = e.Type
+			d.Message = e.Message
+		}
+	}
+	reportDiagnostic(opts, d)
 }
 
 func markResponseStarted(opts *Options) {
@@ -229,6 +245,9 @@ func upstreamRequestID(h http.Header) string {
 
 // abandonAttempt 在尚未写入客户端时询问是否放弃本次尝试。
 func abandonAttempt(opts *Options, upstreamCode int, retryAfter time.Duration, err error) bool {
+	if upstreamCode == 0 && err != nil {
+		classifyDiagnosticError(opts, err)
+	}
 	if opts.ShouldRetry == nil {
 		return false
 	}
@@ -247,19 +266,38 @@ var sensitiveErrorField = regexp.MustCompile(`(?i)(["']?(?:api[_-]?key|token|aut
 
 // readErrorBody 一次性消费最多 limit 字节的上游错误正文，同时产出用于日志的
 // 8 KiB 脱敏片段。回传分支用 maxErrorBodyBytes，放弃分支只用观测上限。
-func readErrorBody(r io.Reader, limit int) (raw []byte, observed string, truncated bool, err error) {
+func readErrorBody(r io.Reader, limit int, secrets ...string) (raw []byte, observed string, truncated bool, err error) {
 	if limit <= 0 {
 		return nil, "", false, fmt.Errorf("错误正文读取上限必须大于零")
 	}
 	raw, readErr := io.ReadAll(io.LimitReader(r, int64(limit)+1))
+	// 超出观测预算且不是完整 JSON 时不扫描大段自由文本；宁可不展示，
+	// 也不能让诊断脱敏耗尽转发超时，或在任意截断点暴露凭据。
+	if len(raw) > maxObservedErrorBodyBytes && !json.Valid(raw) {
+		if readErr != nil {
+			return raw, "", true, readErr
+		}
+		if len(raw) > limit {
+			return raw, "", true, fmt.Errorf("%w (%d bytes)", errResponseBodyTooLarge, limit)
+		}
+		return raw, "", true, nil
+	}
 	if len(raw) > maxObservedErrorBodyBytes {
 		truncated = true
 	}
-	observedRaw := raw
-	if len(observedRaw) > maxObservedErrorBodyBytes {
-		observedRaw = []byte(truncateUTF8(string(observedRaw), maxObservedErrorBodyBytes))
+	observedRaw := string(raw)
+	// 只有读取被截断时才遮蔽尾部凭据前缀，完整错误码不能因末字巧合被修改。
+	if len(raw) > limit || readErr != nil {
+		for _, secret := range secrets {
+			for n := len(secret) - 1; n > 0; n-- {
+				if strings.HasSuffix(observedRaw, secret[:n]) {
+					observedRaw = strings.TrimSuffix(observedRaw, secret[:n]) + "[REDACTED]"
+					break
+				}
+			}
+		}
 	}
-	observed = sanitizeErrorBody(observedRaw)
+	observed = SanitizeDiagnostic(sanitizeErrorBody([]byte(observedRaw)), secrets...)
 	if len(observed) > maxObservedErrorBodyBytes {
 		// 对无效 JSON 做正则脱敏时，替换后的字节数理论上可能略有变化；日志契约
 		// 仍必须严格保持 8 KiB 上限。
@@ -285,13 +323,13 @@ func truncateUTF8(value string, limit int) string {
 
 // readObservedErrorBody 读取即将放弃的候选的短错误正文，并在同一短计时器内 drain。
 // 计时器取消请求上下文以打断卡住的读取；正常完成时仍会 drain 以保持连接复用。
-func readObservedErrorBody(cancel context.CancelFunc, resp *http.Response) (string, bool) {
+func readObservedErrorBody(cancel context.CancelFunc, resp *http.Response, secrets ...string) (string, bool) {
 	timerDone := make(chan struct{})
 	timer := time.AfterFunc(observedErrorBodyTimeout, func() {
 		cancel()
 		close(timerDone)
 	})
-	_, observed, truncated, _ := readErrorBody(resp.Body, maxObservedErrorBodyBytes)
+	_, observed, truncated, _ := readErrorBody(resp.Body, maxObservedErrorBodyBytes, secrets...)
 	drainBody(resp)
 	if !timer.Stop() {
 		<-timerDone
@@ -313,7 +351,7 @@ func readStreamErrorBody(ctx context.Context, cancel context.CancelFunc, r io.Re
 		cancel()
 		close(timerDone)
 	})
-	raw, observed, truncated, err := readErrorBody(r, limit)
+	raw, observed, truncated, err := readErrorBody(r, limit, diagnosticSecrets(opts)...)
 	if !timer.Stop() {
 		<-timerDone
 	}
@@ -335,10 +373,10 @@ func sanitizeErrorBody(raw []byte) string {
 	if json.Unmarshal(raw, &value) == nil {
 		redactSensitiveJSON(value)
 		if encoded, err := json.Marshal(value); err == nil {
-			return string(encoded)
+			return SanitizeDiagnostic(string(encoded))
 		}
 	}
-	return sensitiveErrorField.ReplaceAllString(string(raw), "${1}[REDACTED]")
+	return SanitizeDiagnostic(sensitiveErrorField.ReplaceAllString(string(raw), "${1}[REDACTED]"))
 }
 
 func redactSensitiveJSON(value any) {
@@ -385,7 +423,23 @@ func parseRetryAfter(h http.Header, now time.Time) time.Duration {
 }
 
 // Forward 执行转发。返回时表示响应已完成（或已失败），调用方可释放队列 slot。
-func Forward(opts *Options) error {
+func Forward(opts *Options) (resultErr error) {
+	// 使用副本，避免包装日志函数改变调用方复用的配置。
+	copyOptions := *opts
+	opts = &copyOptions
+	callback := opts.OnDiagnostic
+	observed := false
+	opts.OnDiagnostic = func(d ErrorDiagnostic) {
+		if observed && d.Source != "upstream" && d.Source != "client" {
+			return
+		}
+		observed = true
+		if callback != nil {
+			callback(d)
+		}
+	}
+	opts.Log = diagnosticLog(opts.Log, opts)
+	defer func() { classifyDiagnosticError(opts, resultErr) }()
 	upstreamURL, upstreamPath := buildUpstreamURL(opts.Provider)
 
 	// 请求超时用 context 控制；流式响应的活跃超时单独处理（见 handleStream）
@@ -463,7 +517,7 @@ func Forward(opts *Options) error {
 		if resp.StatusCode >= 400 {
 			opts.Log("← HTTP %d [%dms]", resp.StatusCode, elapsed)
 			if abandonAttempt(opts, resp.StatusCode, parseRetryAfter(resp.Header, time.Now()), nil) {
-				observed, truncated := readObservedErrorBody(cancel, resp)
+				observed, truncated := readObservedErrorBody(cancel, resp, diagnosticSecrets(opts)...)
 				recordErrorBody(opts, observed, truncated)
 				return ErrAttemptAbandoned
 			}
@@ -523,11 +577,11 @@ func Forward(opts *Options) error {
 	if resp.StatusCode >= 400 {
 		opts.Log("← HTTP %d [%dms]", resp.StatusCode, elapsed)
 		if abandonAttempt(opts, resp.StatusCode, parseRetryAfter(resp.Header, time.Now()), nil) {
-			observed, truncated := readObservedErrorBody(cancel2, resp)
+			observed, truncated := readObservedErrorBody(cancel2, resp, diagnosticSecrets(opts)...)
 			recordErrorBody(opts, observed, truncated)
 			return ErrAttemptAbandoned
 		}
-		raw, observed, truncated, readErr := readErrorBody(resp.Body, maxErrorBodyBytes)
+		raw, observed, truncated, readErr := readErrorBody(resp.Body, maxErrorBodyBytes, diagnosticSecrets(opts)...)
 		recordErrorBody(opts, observed, truncated)
 		drainBody(resp)
 		return handleErrorPayload(ctx, resp.StatusCode, raw, readErr, opts)
@@ -561,11 +615,13 @@ func handleResponse(ctx context.Context, resp *http.Response, opts *Options) err
 			return err
 		}
 	} else if err := json.Unmarshal(raw, &data); err != nil {
+		reportDiagnostic(opts, ErrorDiagnostic{Source: "upstream", Category: "upstream_invalid_response", BodyState: "not_captured"})
 		markResponseStarted(opts)
 		writeJSONError(opts.ClientRes, http.StatusBadGateway, "parse_error", "上游响应解析失败: "+err.Error())
 		return err
 	}
 
+	reportUpstreamEvent(opts, converter.ParseUpstreamError(data, opts.Provider.Format))
 	var result map[string]any
 	var conversionErr error
 	if opts.Provider.Format == "anthropic" {
@@ -678,6 +734,10 @@ func handleStream(ctx context.Context, cancel context.CancelFunc, resp *http.Res
 	if pre.failure != nil {
 		cancel() // 停止后台读取，放弃这条流
 		recordErrorBody(opts, sanitizeErrorBody(pre.failure.Raw), false)
+		var event map[string]any
+		if json.Unmarshal(pre.failure.Raw, &event) == nil {
+			reportUpstreamEvent(opts, converter.ParseUpstreamError(event, opts.Provider.Format))
+		}
 		if abandonAttempt(opts, pre.failure.Status, 0, pre.failure) {
 			opts.Log("← 流内错误（等效 HTTP %d），放弃本候选", pre.failure.Status)
 			return ErrAttemptAbandoned
@@ -745,6 +805,8 @@ func handleStream(ctx context.Context, cancel context.CancelFunc, resp *http.Res
 	//
 	// 预读阶段消费掉的字节仍属于开场部分：提交后先原样补写（pending），客户端
 	// 收到的内容与改动前完全一致，只是开场部分晚到最多 streamPrereadHold。
+	observer := &streamErrorObserver{opts: opts}
+	defer observer.finish()
 	capture := newRawCapture(opts.OnStreamConversionError)
 	pending := pre.buffered
 	pendingErr := pre.readErr
@@ -846,6 +908,7 @@ func handleStream(ctx context.Context, cancel context.CancelFunc, resp *http.Res
 			pending = nil
 			markActivity()
 			capture.append(chunk)
+			observer.feed(chunk)
 			if done, err := handleChunk(chunk); done {
 				return err
 			}
@@ -870,6 +933,7 @@ func handleStream(ctx context.Context, cancel context.CancelFunc, resp *http.Res
 			if len(part.data) > 0 {
 				markActivity()
 				capture.append(part.data)
+				observer.feed(part.data)
 				if done, err := handleChunk(part.data); done {
 					return err
 				}

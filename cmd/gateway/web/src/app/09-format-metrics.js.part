@@ -103,6 +103,51 @@
                     return (Number(log?.attempts) || 0) > 1 ? `${log.attempts} 次尝试` : '--';
                 },
 
+                // 来源只使用后端明确记录的字段，历史记录不从状态码或错误文案反推。
+                errorSourceLabel(source) {
+                    const labels = { upstream: '上游返回错误', gateway: '网关处理错误', transport: '连接异常', client: '客户端中断', unknown: '来源未确定' };
+                    return Object.hasOwn(labels, source) ? labels[source] : labels.unknown;
+                },
+
+                logFailed(log) {
+                    return Boolean(log?.error) || Number(log?.status) >= 400;
+                },
+
+                logStatusLabel(log) {
+                    if (log?.errorSource === 'client') return '已取消';
+                    const status = Number(log?.status) || 0;
+                    if (!status || (!log?.upstreamStatus && !log?.responseBytes && log?.errorSource === 'gateway')) return '—';
+                    if (this.logFailed(log) && status < 400) {
+                        const started = (log?.attemptDetails || []).some(detail => detail.responseStarted);
+                        return log?.stream && started ? '流中断' : '失败';
+                    }
+                    return String(status);
+                },
+
+                logErrorSummary(log) {
+                    if (!this.logFailed(log)) return '—';
+                    return this.errorSourceLabel(log?.errorSource) + (log?.error ? ' · ' + log.error : '');
+                },
+
+                attemptHasError(detail) {
+                    return detail?.outcome !== 'success' && Boolean(detail?.error || detail?.errorSource || detail?.errorCategory
+                        || detail?.upstreamErrorMessage || detail?.errorBody || Number(detail?.upstreamStatus) >= 400
+                        || (detail?.outcome && detail.outcome !== 'success'));
+                },
+
+                attemptStatusLabel(detail) {
+                    const status = detail?.upstreamStatus;
+                    if (!status) return '--';
+                    return String(status);
+                },
+
+                errorBodyStateLabel(detail) {
+                    if (detail?.errorBodyTruncated || detail?.errorBodyState === 'truncated') return '已截断';
+                    const labels = { available: '已保留', not_provided: '上游未提供错误正文', not_captured: '未采集错误正文' };
+                    if (Object.hasOwn(labels, detail?.errorBodyState)) return labels[detail.errorBodyState];
+                    return detail?.errorBody ? '已保留' : '原文状态未记录';
+                },
+
                 attemptOutcomeLabel(outcome) {
                     if (outcome === 'key_switched') return '密钥切换';
                     return outcome || '--';

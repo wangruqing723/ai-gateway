@@ -1541,7 +1541,7 @@ func (t *responsesToChat) Transform(line string) []string {
 		if message == "" {
 			message = "Responses 上游流式响应失败"
 		}
-		t.s.addError(errors.New(message))
+		t.s.addError(ParseUpstreamError(data, "openai-responses"))
 	default:
 		eventType := getString(data, "type")
 		// reasoning item 的生命周期事件（summary part 增删、summary text 完成等）
@@ -1842,7 +1842,7 @@ func (t *responsesToAnthropic) Transform(line string) []string {
 		if message == "" {
 			message = "Responses 上游流式响应失败"
 		}
-		t.s.addError(errors.New(message))
+		t.s.addError(ParseUpstreamError(data, "openai-responses"))
 	default:
 		eventType := getString(data, "type")
 		// reasoning item 的生命周期事件（summary part 增删、summary text 完成等）

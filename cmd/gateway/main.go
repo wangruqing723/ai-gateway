@@ -739,6 +739,10 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		if reqLog.Error == "" && reqLog.Status >= 400 {
 			reqLog.Error = http.StatusText(reqLog.Status)
 		}
+		finalizeErrorProvenance(&reqLog, r)
+		if reqLog.Error != "" {
+			logf(reqID, "错误来源=%s 类别=%s: %s", reqLog.ErrorSource, reqLog.ErrorCategory, reqLog.Error)
+		}
 		s.metrics.Add(reqLog)
 	}()
 
@@ -747,10 +751,14 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 	raw, err := readBodyLimited(r, maxProxyBodyBytes)
 	if err != nil {
 		if errors.Is(err, errRequestBodyTooLarge) {
+			reqLog.ErrorSource = "gateway"
+			reqLog.ErrorCategory = "request_too_large"
 			reqLog.Error = err.Error()
 			writeJSONError(w, http.StatusRequestEntityTooLarge, "request_too_large", err.Error())
 			return
 		}
+		reqLog.ErrorSource = "client"
+		reqLog.ErrorCategory = "request_read_error"
 		reqLog.Error = "读取请求失败: " + err.Error()
 		writeJSONError(w, http.StatusBadRequest, "gateway_error", reqLog.Error)
 		return
@@ -758,6 +766,8 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 
 	var body map[string]any
 	if err := json.Unmarshal(raw, &body); err != nil {
+		reqLog.ErrorSource = "gateway"
+		reqLog.ErrorCategory = "request_invalid_json"
 		reqLog.Error = "请求体 JSON 解析失败: " + err.Error()
 		writeJSONError(w, http.StatusBadRequest, "gateway_error", reqLog.Error)
 		return
@@ -783,6 +793,8 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 	// 路由匹配：得到按配置顺序排列的候选列表，作为故障转移的尝试顺序
 	matched := router.MatchRoute(model, cfg)
 	if matched == nil {
+		reqLog.ErrorSource = "gateway"
+		reqLog.ErrorCategory = "route_not_found"
 		reqLog.Error = fmt.Sprintf("没有匹配 model %q 的路由规则", model)
 		writeJSONError(w, http.StatusBadRequest, "gateway_error", reqLog.Error)
 		return
@@ -830,6 +842,8 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		hasCompatibleFormat = true
 	}
 	if !hasCompatibleFormat {
+		reqLog.ErrorSource = "gateway"
+		reqLog.ErrorCategory = "gateway_conversion_unsupported"
 		trail := make([]string, 0, len(matched.Candidates))
 		for index, candidate := range matched.Candidates {
 			err := conversionErrors[candidate.Provider.Format]
@@ -1388,6 +1402,10 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if attempts == 0 && (disabledSkips > 0 || pausedSkips > 0 || keySkips > 0 || breakerSkips > 0 || contextSkips > 0 || buildErr != "") {
+		reqLog.ErrorSource = "gateway"
+		reqLog.ErrorCategory = "gateway_admission_error"
+	}
 	switch {
 	case attempts == 0 && (disabledSkips > 0 || pausedSkips > 0):
 		// 全部候选的 provider 都被禁用或账户被暂停：人工状态优先于自动熔断，单独一档。
@@ -2098,6 +2116,19 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 			in.detail.UpstreamRequestID = requestID
 			in.detail.RetryAfterMs = retryAfter.Milliseconds()
 		},
+		OnDiagnostic: func(d proxy.ErrorDiagnostic) {
+			if in.detail == nil {
+				return
+			}
+			in.detail.ErrorSource = d.Source
+			in.detail.ErrorCategory = d.Category
+			in.detail.UpstreamErrorType = d.Type
+			in.detail.UpstreamErrorCode = d.Code
+			in.detail.UpstreamErrorMessage = d.Message
+			in.detail.ErrorBodyState = d.BodyState
+			in.detail.ErrorBody = d.Body
+			in.detail.ErrorBodyTruncated = d.Truncated
+		},
 		OnErrorBody: func(body string, truncated bool) {
 			errorBody = body
 			if in.detail != nil {
@@ -2162,6 +2193,32 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 	upstreamStarted = time.Now()
 	forwardErr := proxy.Forward(opts)
 	upstreamDuration := time.Since(upstreamStarted)
+	_, clientToken, _ := strings.Cut(r.Header.Get("Authorization"), " ")
+	// 诊断失败不能反馈到重试与熔断判据；同格式流显式错误只修正观测结果。
+	defer func() {
+		if in.detail == nil {
+			return
+		}
+		secrets := []string{p.APIKey, oauthAccessToken, r.Header.Get("x-api-key"), clientToken}
+		in.detail.Error = proxy.SanitizeDiagnostic(in.detail.Error, secrets...)
+		in.reqLog.Error = proxy.SanitizeDiagnostic(in.reqLog.Error, secrets...)
+		if in.detail.ErrorSource == "client" {
+			in.detail.Error = "客户端中断"
+			if in.reqLog.Error == "" {
+				in.reqLog.Error = in.detail.Error
+			}
+		}
+		if in.detail.ErrorSource == "upstream" && in.detail.ErrorCategory == "upstream_error" {
+			in.detail.Error = in.detail.UpstreamErrorMessage
+			if in.detail.Outcome == "success" {
+				in.detail.Outcome = "final_error"
+			}
+			if !errors.Is(forwardErr, proxy.ErrAttemptAbandoned) {
+				in.reqLog.Error = in.detail.UpstreamErrorMessage
+			}
+			attemptLog("  错误来源=upstream 类别=%s 错误码=%s 消息=%s", in.detail.ErrorCategory, in.detail.UpstreamErrorCode, in.detail.UpstreamErrorMessage)
+		}
+	}()
 	if errors.Is(forwardErr, proxy.ErrAttemptAbandoned) {
 		// ErrAttemptAbandoned 只可能由上面的回调返回 true 触发，此时三个变量必已写入；
 		// 兜底值仅防御 proxy 侧未来改动，不代表正常路径。
@@ -2244,17 +2301,17 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 		}
 	}
 	if forwardErr != nil {
-		in.reqLog.Error = forwardErr.Error()
+		in.reqLog.Error = proxy.SanitizeDiagnostic(forwardErr.Error(), p.APIKey, oauthAccessToken, clientToken)
 		if in.detail != nil {
-			in.detail.Error = forwardErr.Error()
+			in.detail.Error = proxy.SanitizeDiagnostic(forwardErr.Error(), p.APIKey, oauthAccessToken, clientToken)
 		}
 		// 区分客户端断开、超时、其他错误，避免把正常断开误报为异常
 		if errors.Is(forwardErr, context.Canceled) {
 			attemptLog("  客户端断开连接")
 		} else if errors.Is(forwardErr, context.DeadlineExceeded) {
-			attemptLog("  转发超时（%d秒）: %s", timeoutMs/1000, forwardErr.Error())
+			attemptLog("  转发超时（%d秒）: %s", timeoutMs/1000, proxy.SanitizeDiagnostic(forwardErr.Error(), p.APIKey, oauthAccessToken, clientToken))
 		} else {
-			attemptLog("  转发结束（异常）: %s", forwardErr.Error())
+			attemptLog("  转发结束（异常）: %s", proxy.SanitizeDiagnostic(forwardErr.Error(), p.APIKey, oauthAccessToken, clientToken))
 		}
 	}
 	status := upstreamStatus

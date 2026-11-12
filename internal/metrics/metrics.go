@@ -175,10 +175,12 @@ type RequestLog struct {
 	//
 	// 判据是「写出内容事件」而非「写出响应头」：SSE 的 ping 注释行与空行不计入，
 	// 否则连接刚建立就被记成首字，这个数会恒等于一个很小的常数、失去意义。
-	FirstByteMs int64  `json:"firstByteMs,omitempty"`
-	QueueWaitMs int64  `json:"queueWaitMs,omitempty"`
-	Error       string `json:"error,omitempty"`
-	Vision      bool   `json:"vision,omitempty"`
+	FirstByteMs   int64  `json:"firstByteMs,omitempty"`
+	QueueWaitMs   int64  `json:"queueWaitMs,omitempty"`
+	Error         string `json:"error,omitempty"`
+	ErrorSource   string `json:"errorSource,omitempty"`
+	ErrorCategory string `json:"errorCategory,omitempty"`
+	Vision        bool   `json:"vision,omitempty"`
 	// VisionModel 是视觉翻译实际使用的模型名（vision 启用时才有值），
 	// 便于区分「这次图片是谁认的」——TargetModel 是下游对话模型，两者无关。
 	VisionModel    string `json:"visionModel,omitempty"`
@@ -215,24 +217,30 @@ type AttemptDetail struct {
 	KeyName        string `json:"keyName,omitempty"`
 	KeyFingerprint string `json:"keyFingerprint,omitempty"`
 	// AccountID 是 ChatGPT OAuth 候选在准入前取得的本地账户快照；换绑后旧尝试仍归属原账户。
-	AccountID          string `json:"accountId,omitempty"`
-	Kind               string `json:"kind"`
-	Provider           string `json:"provider"`
-	TargetModel        string `json:"targetModel,omitempty"`
-	ProviderFormat     string `json:"providerFormat"`
-	StartedAt          string `json:"startedAt"`
-	DurationMs         int64  `json:"durationMs"`
-	UpstreamStatus     int    `json:"upstreamStatus,omitempty"`
-	Outcome            string `json:"outcome"`
-	Reason             string `json:"reason,omitempty"`
-	Error              string `json:"error,omitempty"`
-	ErrorBody          string `json:"errorBody,omitempty"`
-	ErrorBodyTruncated bool   `json:"errorBodyTruncated,omitempty"`
-	UpstreamRequestID  string `json:"upstreamRequestId,omitempty"`
-	RetryAfterMs       int64  `json:"retryAfterMs,omitempty"`
-	FreeAttempt        bool   `json:"freeAttempt,omitempty"`
-	LocalRetry         bool   `json:"localRetry,omitempty"`
-	ResponseStarted    bool   `json:"responseStarted,omitempty"`
+	AccountID            string `json:"accountId,omitempty"`
+	Kind                 string `json:"kind"`
+	Provider             string `json:"provider"`
+	TargetModel          string `json:"targetModel,omitempty"`
+	ProviderFormat       string `json:"providerFormat"`
+	StartedAt            string `json:"startedAt"`
+	DurationMs           int64  `json:"durationMs"`
+	UpstreamStatus       int    `json:"upstreamStatus,omitempty"`
+	Outcome              string `json:"outcome"`
+	Reason               string `json:"reason,omitempty"`
+	Error                string `json:"error,omitempty"`
+	ErrorSource          string `json:"errorSource,omitempty"`
+	ErrorCategory        string `json:"errorCategory,omitempty"`
+	UpstreamErrorType    string `json:"upstreamErrorType,omitempty"`
+	UpstreamErrorCode    string `json:"upstreamErrorCode,omitempty"`
+	UpstreamErrorMessage string `json:"upstreamErrorMessage,omitempty"`
+	ErrorBodyState       string `json:"errorBodyState,omitempty"`
+	ErrorBody            string `json:"errorBody,omitempty"`
+	ErrorBodyTruncated   bool   `json:"errorBodyTruncated,omitempty"`
+	UpstreamRequestID    string `json:"upstreamRequestId,omitempty"`
+	RetryAfterMs         int64  `json:"retryAfterMs,omitempty"`
+	FreeAttempt          bool   `json:"freeAttempt,omitempty"`
+	LocalRetry           bool   `json:"localRetry,omitempty"`
+	ResponseStarted      bool   `json:"responseStarted,omitempty"`
 }
 
 // Summary 是仪表盘顶部指标。

@@ -2387,8 +2387,8 @@
                                             <!-- 徽章要连 log.error 一起看：流式响应头写出后才失败的请求（转换失败、
                                                  流中途断开、活跃超时）状态码停在 200，只按数字上色会给绿底，
                                                  而后端 isSuccess 要求 error 为空、这条在成功率里算失败，两边对不上。 -->
-                                            <span class="tag" :class="statusClass(log.status, log.error)"
-                                                  x-text="log.status || '--'"
+                                            <span class="tag max-w-full whitespace-normal" :class="log.errorSource === 'client' ? 'bg-white/[.05] text-muted' : statusClass(log.status, log.error)"
+                                                  x-text="logStatusLabel(log)"
                                                   @mouseenter="showTip(statusTip(log), $event)"
                                                   @mouseleave="hideTip()"
                                                   @focus="showTip(statusTip(log), $event)"
@@ -2465,10 +2465,13 @@
                                             @focus="showTip(log.attemptTrail || '', $event)"
                                             @blur="hideTip()" tabindex="0" x-text="attemptTrailText(log)"></td>
                                         <td class="truncate px-4 py-2.5 text-xs text-muted"
-                                            @mouseenter="showTip(log.error || '', $event)"
+                                            @mouseenter="showTip(logErrorSummary(log), $event)"
                                             @mouseleave="hideTip()"
-                                            @focus="showTip(log.error || '', $event)"
-                                            @blur="hideTip()" tabindex="0" x-text="log.error || '—'"></td>
+                                            @focus="showTip(logErrorSummary(log), $event)"
+                                            @blur="hideTip()" tabindex="0">
+                                            <span x-show="logFailed(log)" class="block font-semibold text-rose-100" x-text="errorSourceLabel(log.errorSource)"></span>
+                                            <span class="block truncate" x-text="log.error || '—'"></span>
+                                        </td>
                                     </tr>
                                     <tr x-show="isLogExpanded(log)" x-transition x-cloak class="bg-ink/70">
                                         <td colspan="9" class="px-3 py-4 sm:px-4">
@@ -2499,8 +2502,16 @@
                                                     <dd class="mt-1 break-words font-mono text-text" x-text="log.time || log.startedAt || '--'"></dd>
                                                 </div>
                                                 <div>
-                                                    <dt class="text-muted">状态</dt>
-                                                    <dd class="mt-1 font-mono text-text" x-text="log.status || '--'"></dd>
+                                                    <dt class="text-muted">HTTP 状态</dt>
+                                                    <dd class="mt-1 font-mono text-text" x-text="log.status || '—'"></dd>
+                                                </div>
+                                                <div x-show="logFailed(log)">
+                                                    <dt class="text-muted">错误来源</dt>
+                                                    <dd class="mt-1 text-rose-100" x-text="errorSourceLabel(log.errorSource)"></dd>
+                                                </div>
+                                                <div x-show="logFailed(log) && log.errorCategory">
+                                                    <dt class="text-muted">错误类别</dt>
+                                                    <dd class="mt-1 break-all font-mono text-text" x-text="log.errorCategory"></dd>
                                                 </div>
                                                 <div>
                                                     <dt class="text-muted">客户端模型</dt>
@@ -2606,11 +2617,19 @@
                                                                     <div x-show="detail.keyFingerprint" class="font-mono text-[11px] text-muted" x-text="'密钥指纹：' + detail.keyFingerprint"></div>
                                                                 </td>
                                                                 <td class="whitespace-nowrap px-3 py-2 font-mono text-muted" x-text="detail.providerFormat"></td>
-                                                                <td class="whitespace-nowrap px-3 py-2 font-mono" :class="Number(detail.upstreamStatus) >= 500 ? 'text-danger' : Number(detail.upstreamStatus) >= 400 ? 'text-warn' : 'text-text'" x-text="detail.upstreamStatus || '--'"></td>
+                                                                <td class="whitespace-nowrap px-3 py-2 font-mono" :class="attemptHasError(detail) ? 'text-rose-100' : 'text-text'" x-text="attemptStatusLabel(detail)"></td>
                                                                 <td class="px-3 py-2">
                                                                     <div class="font-mono text-text" x-text="attemptOutcomeLabel(detail.outcome)"></div>
                                                                     <div class="mt-0.5 text-[11px] text-muted" x-text="attemptDetailExplanation(detail)"></div>
-                                                                    <div x-show="detail.responseStarted && detail.outcome !== 'success'" class="mt-0.5 text-xs text-warn">已开始响应，未转移</div>
+                                                                    <div x-show="attemptHasError(detail)" class="mt-1 font-semibold text-rose-100" x-text="errorSourceLabel(detail.errorSource)"></div>
+                                                                    <dl x-show="attemptHasError(detail)" class="mt-1 space-y-1 text-xs">
+                                                                        <div x-show="detail.errorCategory"><dt class="text-muted">错误类别</dt><dd class="break-all font-mono text-text" x-text="detail.errorCategory"></dd></div>
+                                                                        <div x-show="detail.upstreamErrorType"><dt class="text-muted">上游错误类型</dt><dd class="break-all font-mono text-text" x-text="detail.upstreamErrorType"></dd></div>
+                                                                        <div x-show="detail.upstreamErrorCode"><dt class="text-muted">上游错误码</dt><dd class="break-all font-mono text-text" x-text="detail.upstreamErrorCode"></dd></div>
+                                                                        <div x-show="detail.upstreamErrorMessage"><dt class="text-muted">上游原消息（脱敏后）</dt><dd class="whitespace-pre-wrap break-words text-rose-100 [overflow-wrap:anywhere]" x-text="detail.upstreamErrorMessage"></dd></div>
+                                                                        <div><dt class="text-muted">响应是否已开始</dt><dd class="text-text" x-text="detail.responseStarted === true ? '是' : detail.responseStarted === false ? '否' : '未记录'"></dd></div>
+                                                                    </dl>
+                                                                    <div x-show="detail.responseStarted && attemptHasError(detail)" class="mt-1 text-xs text-warn">网关说明：响应已开始，未执行故障转移</div>
                                                                     <div x-show="detail.upstreamRequestId" class="mt-0.5 break-all font-mono text-[11px] text-muted">
                                                                         request-id:
                                                                         <span class="cursor-copy rounded transition hover:text-cyan" role="button" tabindex="0"
@@ -2621,9 +2640,13 @@
                                                                     <div x-show="detail.retryAfterMs" class="mt-0.5 font-mono text-[11px] text-muted" x-text="'retry-after: ' + detail.retryAfterMs + 'ms'"></div>
                                                                     <div x-show="detail.freeAttempt" class="mt-0.5 text-xs text-warn">不占尝试额度</div>
                                                                     <div x-show="detail.error" class="mt-1 whitespace-pre-wrap break-words rounded bg-danger/10 p-1.5 text-[11px] text-rose-100 [overflow-wrap:anywhere]" x-text="detail.error"></div>
-                                                                    <div x-show="detail.errorBody" class="mt-1">
-                                                                        <div class="text-xs text-muted" x-text="detail.errorBodyTruncated ? '上游错误正文（已截断）' : '上游错误正文'"></div>
-                                                                        <pre class="mt-1 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded bg-ink/70 p-2 text-[11px] text-rose-100 [overflow-wrap:anywhere]" x-text="detail.errorBody"></pre>
+                                                                    <div x-show="attemptHasError(detail) || detail.errorBodyState" class="mt-2">
+                                                                        <div class="text-xs text-muted" x-text="'上游错误原文：' + errorBodyStateLabel(detail)"></div>
+                                                                        <details x-show="detail.errorBody" class="mt-1">
+                                                                            <summary class="cursor-pointer rounded text-xs text-cyan focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyan">查看原始错误（脱敏后）</summary>
+                                                                            <p class="mt-1 text-xs text-muted">已对可识别凭据脱敏；原文仍可能包含业务信息，分享前请检查。</p>
+                                                                            <pre class="mt-1 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded bg-ink/70 p-2 text-[11px] text-rose-100 [overflow-wrap:anywhere]" x-text="detail.errorBody"></pre>
+                                                                        </details>
                                                                     </div>
                                                                 </td>
                                                                 <td class="whitespace-nowrap px-3 py-2 text-right font-mono" :class="slowClass(detail.durationMs)" x-text="durationText(detail.durationMs)"></td>
