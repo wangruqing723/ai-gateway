@@ -86,6 +86,30 @@
                     return Object.keys(out).length ? out : undefined;
                 },
 
+                // 默认启用只保存显式关闭的格式；旧配置缺少该字段时仍保持原样生效。
+                globalUserAgentEnabledPayload() {
+                    const source = this.config.globalUserAgentEnabled || {};
+                    const out = {};
+                    ['anthropic', 'openai', 'openai-responses'].forEach((format) => {
+                        if (source[format] === false) out[format] = false;
+                    });
+                    return Object.keys(out).length ? out : undefined;
+                },
+
+                disabledGlobalExtraKeys(rows, values) {
+                    if (!Array.isArray(rows) || !values) return undefined;
+                    const stateByKey = new Map();
+                    rows.forEach((row) => {
+                        const key = (row?.key || '').trim();
+                        if (key && Object.prototype.hasOwnProperty.call(values, key)) {
+                            // 与 rowsToHeaders / rowsToBody 一致：同名项由最后一行决定。
+                            stateByKey.set(key, row.enabled === false);
+                        }
+                    });
+                    const disabled = [...stateByKey].filter(([, isDisabled]) => isDisabled).map(([key]) => key).sort();
+                    return disabled.length ? disabled : undefined;
+                },
+
                 // 将全局按格式的行编辑表单折回后端配置形状。空格式项与整块空配置都不下发，
                 // 保持 yaml/json omitempty 的干净语义；headers/body 仍复用现有解析与黑名单校验。
                 globalUpstreamExtrasPayload() {
@@ -95,7 +119,11 @@
                         const entry = source[format] || {};
                         const headers = this.rowsToHeaders(entry.headers);
                         const body = this.rowsToBody(entry.body);
-                        if (headers || body) out[format] = { headers, body };
+                        const disabledHeaders = this.disabledGlobalExtraKeys(entry.headers, headers);
+                        const disabledBody = this.disabledGlobalExtraKeys(entry.body, body);
+                        if (headers || body || disabledHeaders || disabledBody) {
+                            out[format] = { headers, body, disabledHeaders, disabledBody };
+                        }
                     });
                     return Object.keys(out).length ? out : undefined;
                 },
@@ -170,6 +198,7 @@
                         contextSafetyMargin: this.numOrNull(this.config.contextSafetyMargin),
                         // globalUserAgent 是按上游格式区分的独立字段，不能写入通用 headers。
                         globalUserAgent: this.globalUserAgentPayload(),
+                        globalUserAgentEnabled: this.globalUserAgentEnabledPayload(),
                         globalUpstreamExtras: this.globalUpstreamExtrasPayload(),
                         providers,
                         routes: JSON.parse(JSON.stringify(this.config.routes || [])),

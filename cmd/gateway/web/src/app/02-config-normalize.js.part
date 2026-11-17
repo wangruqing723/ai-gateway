@@ -135,6 +135,8 @@
                         contextSafetyMargin: pick(data, 'contextSafetyMargin', 'ContextSafetyMargin') ?? 4096,
                         // 全局 UA 按实际上游格式保存；兼容早期开发版的单字符串并迁移到三种格式。
                         globalUserAgent: this.normalizeGlobalUserAgent(pick(data, 'globalUserAgent', 'GlobalUserAgent')),
+                        // 缺省等同启用，保证没有开关字段的存量配置继续生效。
+                        globalUserAgentEnabled: this.normalizeGlobalUserAgentEnabled(pick(data, 'globalUserAgentEnabled', 'GlobalUserAgentEnabled')),
                         // 全局按格式扩展的配置表单使用行数组，避免直接编辑 map 时行顺序抖动；
                         // 未配置时仍给完整可绑定形状，保存端会把空项省略。
                         globalUpstreamExtras: this.normalizeGlobalUpstreamExtras(pick(data, 'globalUpstreamExtras', 'GlobalUpstreamExtras')),
@@ -163,15 +165,23 @@
                     return Object.fromEntries(formats.map(format => [format, typeof value[format] === 'string' ? value[format] : '']));
                 },
 
+                normalizeGlobalUserAgentEnabled(raw) {
+                    const formats = ['anthropic', 'openai', 'openai-responses'];
+                    const value = raw && typeof raw === 'object' ? raw : {};
+                    return Object.fromEntries(formats.map(format => [format, value[format] !== false]));
+                },
+
                 normalizeGlobalUpstreamExtras(raw) {
                     const value = raw && typeof raw === 'object' ? raw : {};
                     const pick = (obj, lower, upper) => obj?.[lower] ?? obj?.[upper];
                     const out = {};
                     ['anthropic', 'openai', 'openai-responses'].forEach((format) => {
                         const entry = value[format] && typeof value[format] === 'object' ? value[format] : {};
+                        const disabledHeaders = new Set((pick(entry, 'disabledHeaders', 'DisabledHeaders') || []).map(key => String(key).toLowerCase()));
+                        const disabledBody = new Set(pick(entry, 'disabledBody', 'DisabledBody') || []);
                         out[format] = {
-                            headers: this.headersToRows(pick(entry, 'headers', 'Headers')),
-                            body: this.bodyToRows(pick(entry, 'body', 'Body'))
+                            headers: this.headersToRows(pick(entry, 'headers', 'Headers')).map(row => ({ ...row, enabled: !disabledHeaders.has(row.key.toLowerCase()) })),
+                            body: this.bodyToRows(pick(entry, 'body', 'Body')).map(row => ({ ...row, enabled: !disabledBody.has(row.key) }))
                         };
                     });
                     return out;
@@ -291,6 +301,7 @@
                     });
                     this.config.globalUpstreamExtras = globalExtras;
                     this.config.globalUserAgent = this.normalizeGlobalUserAgent(this.config.globalUserAgent);
+                    this.config.globalUserAgentEnabled = this.normalizeGlobalUserAgentEnabled(this.config.globalUserAgentEnabled);
                     this.config.directTimeoutNoStream = this.config.directTimeoutNoStream || 60000;
                     this.config.directTimeoutStreamHeader = this.config.directTimeoutStreamHeader || 60000;
                     this.config.directTimeoutStreamActive = this.config.directTimeoutStreamActive || 120000;

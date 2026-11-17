@@ -43,6 +43,9 @@ cache:
 		if got := cfg.GlobalUserAgent.ForFormat(format); got != want {
 			t.Errorf("GlobalUserAgent.ForFormat(%q) = %q, want %q", format, got, want)
 		}
+		if got := cfg.GlobalUserAgentForFormat(format); got != want {
+			t.Errorf("GlobalUserAgentForFormat(%q) = %q, want legacy config to remain enabled with %q", format, got, want)
+		}
 	}
 
 	for _, tt := range []struct {
@@ -166,5 +169,71 @@ func TestGlobalUpstreamExtrasAndUserAgentKeepEmptyConfigClean(t *testing.T) {
 	cfg.GlobalUserAgent = &GlobalUserAgents{Anthropic: "bad\nagent"}
 	if err := validate(cfg); err == nil || !strings.Contains(err.Error(), "globalUserAgent.anthropic 不能包含 ASCII 控制字符") {
 		t.Fatalf("非法 globalUserAgent 校验错误 = %v", err)
+	}
+}
+
+func TestGlobalUpstreamDefaultsCanDisableIndividualItems(t *testing.T) {
+	raw := strings.Replace(validConfigYAML(), "cache:\n", `globalUserAgent:
+  openai: "global-openai-agent/1.0"
+globalUserAgentEnabled:
+  openai: false
+globalUpstreamExtras:
+  openai:
+    headers:
+      X-Disabled: omit
+      X-Enabled: keep
+    disabledHeaders:
+      - x-disabled
+    body:
+      disabled_field: omit
+      enabled_field: keep
+    disabledBody:
+      - disabled_field
+cache:
+`, 1)
+
+	cfg, err := DecodeAndValidate([]byte(raw))
+	if err != nil {
+		t.Fatalf("DecodeAndValidate() error = %v", err)
+	}
+	if got := cfg.GlobalUserAgentForFormat("openai"); got != "" {
+		t.Errorf("disabled global User-Agent = %q, want empty", got)
+	}
+	extra := cfg.GlobalUpstreamExtras.ForFormat("openai")
+	if got := extra.ActiveHeaders(); len(got) != 1 || got["X-Enabled"] != "keep" {
+		t.Errorf("ActiveHeaders() = %#v, want only X-Enabled", got)
+	}
+	if got := extra.ActiveBody(); len(got) != 1 || got["enabled_field"] != "keep" {
+		t.Errorf("ActiveBody() = %#v, want only enabled_field", got)
+	}
+
+	marshaled, err := yaml.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("yaml.Marshal() error = %v", err)
+	}
+	reloaded, err := DecodeAndValidate(marshaled)
+	if err != nil {
+		t.Fatalf("round-trip DecodeAndValidate() error = %v", err)
+	}
+	if reloaded.GlobalUserAgentEnabled == nil || reloaded.GlobalUserAgentEnabled.IsEnabled("openai") {
+		t.Fatalf("disabled User-Agent state was not preserved: %#v", reloaded.GlobalUserAgentEnabled)
+	}
+	reloadedExtra := reloaded.GlobalUpstreamExtras.ForFormat("openai")
+	if len(reloadedExtra.DisabledHeaders) != 1 || len(reloadedExtra.DisabledBody) != 1 {
+		t.Fatalf("disabled entry state was not preserved: %#v", reloadedExtra)
+	}
+}
+
+func TestGlobalUpstreamExtrasRejectUnknownDisabledKeys(t *testing.T) {
+	raw := strings.Replace(validConfigYAML(), "cache:\n", `globalUpstreamExtras:
+  openai:
+    headers:
+      X-Enabled: keep
+    disabledHeaders:
+      - X-Missing
+cache:
+`, 1)
+	if _, err := DecodeAndValidate([]byte(raw)); err == nil || !strings.Contains(err.Error(), "disabledHeaders") {
+		t.Fatalf("unknown disabled header error = %v, want disabledHeaders validation error", err)
 	}
 }

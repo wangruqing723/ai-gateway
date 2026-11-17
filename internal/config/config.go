@@ -261,8 +261,52 @@ type Provider struct {
 // 具体的受保护字段、长度与编码限制由与 Provider.extraHeaders / extraBody 相同的校验
 // 和运行时兜底统一维护。
 type UpstreamExtras struct {
-	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
-	Body    map[string]any    `yaml:"body,omitempty" json:"body,omitempty"`
+	Headers         map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
+	DisabledHeaders []string          `yaml:"disabledHeaders,omitempty" json:"disabledHeaders,omitempty"`
+	Body            map[string]any    `yaml:"body,omitempty" json:"body,omitempty"`
+	DisabledBody    []string          `yaml:"disabledBody,omitempty" json:"disabledBody,omitempty"`
+}
+
+// ActiveHeaders 返回启用的全局请求头；存量配置没有 disabledHeaders 时原样返回。
+func (e *UpstreamExtras) ActiveHeaders() map[string]string {
+	if e == nil || len(e.Headers) == 0 {
+		return nil
+	}
+	if len(e.DisabledHeaders) == 0 {
+		return e.Headers
+	}
+	disabled := make(map[string]struct{}, len(e.DisabledHeaders))
+	for _, key := range e.DisabledHeaders {
+		disabled[strings.ToLower(strings.TrimSpace(key))] = struct{}{}
+	}
+	active := make(map[string]string, len(e.Headers))
+	for key, value := range e.Headers {
+		if _, off := disabled[strings.ToLower(strings.TrimSpace(key))]; !off {
+			active[key] = value
+		}
+	}
+	return active
+}
+
+// ActiveBody 返回启用的全局请求体字段；请求体键区分大小写。
+func (e *UpstreamExtras) ActiveBody() map[string]any {
+	if e == nil || len(e.Body) == 0 {
+		return nil
+	}
+	if len(e.DisabledBody) == 0 {
+		return e.Body
+	}
+	disabled := make(map[string]struct{}, len(e.DisabledBody))
+	for _, key := range e.DisabledBody {
+		disabled[strings.TrimSpace(key)] = struct{}{}
+	}
+	active := make(map[string]any, len(e.Body))
+	for key, value := range e.Body {
+		if _, off := disabled[strings.TrimSpace(key)]; !off {
+			active[key] = value
+		}
+	}
+	return active
 }
 
 // GlobalUserAgents 是按实际发往上游的协议格式配置的专用 User-Agent 兜底。
@@ -334,6 +378,52 @@ func (g *GlobalUserAgents) empty() bool {
 	return g == nil || (g.Anthropic == "" && g.OpenAI == "" && g.OpenAIResponses == "")
 }
 
+// GlobalUserAgentEnablement 记录按格式的全局 User-Agent 开关。
+// 未配置（nil）等同启用，以保持既有配置加载后的行为。
+type GlobalUserAgentEnablement struct {
+	Anthropic       *bool `yaml:"anthropic,omitempty" json:"anthropic,omitempty"`
+	OpenAI          *bool `yaml:"openai,omitempty" json:"openai,omitempty"`
+	OpenAIResponses *bool `yaml:"openai-responses,omitempty" json:"openai-responses,omitempty"`
+}
+
+// IsEnabled 返回对应格式是否启用；未知格式默认禁用，避免跨格式误用。
+func (e *GlobalUserAgentEnablement) IsEnabled(format string) bool {
+	if e == nil {
+		return true
+	}
+	var enabled *bool
+	switch format {
+	case "anthropic":
+		enabled = e.Anthropic
+	case "openai":
+		enabled = e.OpenAI
+	case "openai-responses":
+		enabled = e.OpenAIResponses
+	default:
+		return false
+	}
+	return enabled == nil || *enabled
+}
+
+func (e *GlobalUserAgentEnablement) normalize() {
+	if e == nil {
+		return
+	}
+	if e.Anthropic != nil && *e.Anthropic {
+		e.Anthropic = nil
+	}
+	if e.OpenAI != nil && *e.OpenAI {
+		e.OpenAI = nil
+	}
+	if e.OpenAIResponses != nil && *e.OpenAIResponses {
+		e.OpenAIResponses = nil
+	}
+}
+
+func (e *GlobalUserAgentEnablement) empty() bool {
+	return e == nil || (e.Anthropic == nil && e.OpenAI == nil && e.OpenAIResponses == nil)
+}
+
 // GlobalUpstreamExtras 是顶层、按实际发往上游的协议格式选择的默认请求扩展。
 //
 // 它只提供最低优先级的默认值：真正转发时先写这里的 body / headers，再保留既有的
@@ -378,20 +468,38 @@ func (g *GlobalUpstreamExtras) normalize() {
 		if len(extra.Body) == 0 {
 			extra.Body = nil
 		}
+		if len(extra.DisabledHeaders) == 0 {
+			extra.DisabledHeaders = nil
+		}
+		if len(extra.DisabledBody) == 0 {
+			extra.DisabledBody = nil
+		}
 	}
-	if g.Anthropic != nil && len(g.Anthropic.Headers) == 0 && len(g.Anthropic.Body) == 0 {
+	if g.Anthropic != nil && g.Anthropic.empty() {
 		g.Anthropic = nil
 	}
-	if g.OpenAI != nil && len(g.OpenAI.Headers) == 0 && len(g.OpenAI.Body) == 0 {
+	if g.OpenAI != nil && g.OpenAI.empty() {
 		g.OpenAI = nil
 	}
-	if g.OpenAIResponses != nil && len(g.OpenAIResponses.Headers) == 0 && len(g.OpenAIResponses.Body) == 0 {
+	if g.OpenAIResponses != nil && g.OpenAIResponses.empty() {
 		g.OpenAIResponses = nil
 	}
 }
 
+func (e *UpstreamExtras) empty() bool {
+	return e == nil || (len(e.Headers) == 0 && len(e.DisabledHeaders) == 0 && len(e.Body) == 0 && len(e.DisabledBody) == 0)
+}
+
 func (g *GlobalUpstreamExtras) empty() bool {
 	return g == nil || (g.Anthropic == nil && g.OpenAI == nil && g.OpenAIResponses == nil)
+}
+
+// GlobalUserAgentForFormat 返回启用状态下对应格式的全局 UA；禁用时返回空值。
+func (c *Config) GlobalUserAgentForFormat(format string) string {
+	if c == nil || !c.GlobalUserAgentEnabled.IsEnabled(format) {
+		return ""
+	}
+	return c.GlobalUserAgent.ForFormat(format)
 }
 
 // Vision 路由上的视觉子配置
@@ -742,6 +850,8 @@ type Config struct {
 	// GlobalUserAgent 是按目标 Provider.Format 选择的专用 UA 兜底。Provider.userAgent
 	// 更高优先级；两者都未配置时，正常转发仍保留客户端 UA，最后才交给 Go 默认 UA。
 	GlobalUserAgent *GlobalUserAgents `yaml:"globalUserAgent,omitempty" json:"globalUserAgent,omitempty"`
+	// GlobalUserAgentEnabled 按格式启用/禁用专用全局 UA；缺省为启用。
+	GlobalUserAgentEnabled *GlobalUserAgentEnablement `yaml:"globalUserAgentEnabled,omitempty" json:"globalUserAgentEnabled,omitempty"`
 	// GlobalUpstreamExtras 按实际的目标 Provider.Format 选择请求头和请求体默认值。
 	// nil 与空对象都表示不追加，且绝不改变既有 Provider → Route → Target 的局部顺序。
 	GlobalUpstreamExtras *GlobalUpstreamExtras `yaml:"globalUpstreamExtras,omitempty" json:"globalUpstreamExtras,omitempty"`
@@ -796,6 +906,12 @@ func applyDefaults(c *Config) {
 	if c.GlobalUserAgent != nil {
 		if c.GlobalUserAgent.empty() {
 			c.GlobalUserAgent = nil
+		}
+	}
+	if c.GlobalUserAgentEnabled != nil {
+		c.GlobalUserAgentEnabled.normalize()
+		if c.GlobalUserAgentEnabled.empty() {
+			c.GlobalUserAgentEnabled = nil
 		}
 	}
 	if c.GlobalUpstreamExtras != nil {
@@ -1689,8 +1805,50 @@ func validateGlobalUpstreamExtras(all *GlobalUpstreamExtras) error {
 		if err := validateExtraHeadersAt(label+".headers", item.extra.Headers); err != nil {
 			return err
 		}
+		if err := validateDisabledKeysAt(label+".disabledHeaders", item.extra.DisabledHeaders, item.extra.Headers, true, maxExtraHeaderEntries); err != nil {
+			return err
+		}
 		if err := validateExtraBody(label+".body", item.extra.Body); err != nil {
 			return err
+		}
+		if err := validateDisabledKeysAt(label+".disabledBody", item.extra.DisabledBody, item.extra.Body, false, maxExtraBodyEntries); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateDisabledKeysAt[T any](label string, disabled []string, values map[string]T, caseInsensitive bool, limit int) error {
+	if len(disabled) > limit {
+		return fmt.Errorf("%s 最多 %d 个条目（当前 %d）", label, limit, len(disabled))
+	}
+	seen := make(map[string]struct{}, len(disabled))
+	for i, key := range disabled {
+		trimmed := strings.TrimSpace(key)
+		if trimmed == "" || trimmed != key {
+			return fmt.Errorf("%s[%d] 必须是非空且无首尾空白的字段名", label, i)
+		}
+		identity := key
+		if caseInsensitive {
+			identity = strings.ToLower(identity)
+		}
+		if _, duplicate := seen[identity]; duplicate {
+			return fmt.Errorf("%s 包含重复字段 %q", label, key)
+		}
+		seen[identity] = struct{}{}
+		found := false
+		for configured := range values {
+			candidate := strings.TrimSpace(configured)
+			if caseInsensitive {
+				candidate = strings.ToLower(candidate)
+			}
+			if candidate == identity {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("%s[%d] %q 没有对应的已配置字段", label, i, key)
 		}
 	}
 	return nil

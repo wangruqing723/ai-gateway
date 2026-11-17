@@ -176,6 +176,53 @@ func TestGlobalUpstreamExtrasUseTargetFormatAndStayLowestPriority(t *testing.T) 
 	}
 }
 
+func TestGlobalUpstreamDefaultsCanDisableIndividualItems(t *testing.T) {
+	var captured globalExtrasCapture
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		captured = captureGlobalExtrasRequest(t, r)
+		w.Header().Set("content-type", "application/json")
+		_, _ = io.WriteString(w, openaiOKBody)
+	}))
+	defer upstream.Close()
+
+	provider := &config.Provider{Name: "target", BaseURL: upstream.URL, APIKey: "upstream-key", Format: "openai", MaxConcurrent: 1, MaxQueueWait: 1000}
+	route := singleCandidateRoute("target", "upstream-model")
+	srv := newFailoverTestServer(map[string]*config.Provider{"target": provider}, route, upstream.Client(), defaultTestFailover())
+	srv.cfg.GlobalUserAgent = &config.GlobalUserAgents{OpenAI: "disabled-global-agent/1.0"}
+	disabled := false
+	srv.cfg.GlobalUserAgentEnabled = &config.GlobalUserAgentEnablement{OpenAI: &disabled}
+	srv.cfg.GlobalUpstreamExtras = &config.GlobalUpstreamExtras{OpenAI: &config.UpstreamExtras{
+		Headers:         map[string]string{"X-Disabled": "omit", "X-Enabled": "keep"},
+		DisabledHeaders: []string{"x-disabled"},
+		Body:            map[string]any{"disabled_field": "omit", "enabled_field": "keep"},
+		DisabledBody:    []string{"disabled_field"},
+	}}
+
+	request := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:7789/v1/messages", strings.NewReader(anthropicReqBody))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("User-Agent", "client-agent/1.0")
+	recorder := httptest.NewRecorder()
+	srv.handle(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status/body = %d/%s", recorder.Code, recorder.Body.String())
+	}
+	if got := captured.header.Get("User-Agent"); got != "client-agent/1.0" {
+		t.Errorf("disabled global User-Agent = %q, want client User-Agent", got)
+	}
+	if got := captured.header.Get("X-Disabled"); got != "" {
+		t.Errorf("disabled header was sent with value %q", got)
+	}
+	if got := captured.header.Get("X-Enabled"); got != "keep" {
+		t.Errorf("enabled header = %q, want keep", got)
+	}
+	if _, exists := captured.body["disabled_field"]; exists {
+		t.Errorf("disabled body field was sent: %#v", captured.body["disabled_field"])
+	}
+	if got := captured.body["enabled_field"]; got != "keep" {
+		t.Errorf("enabled body field = %#v, want keep", got)
+	}
+}
+
 // 故障转移后每个候选都要按自己的实际目标格式重新取全局默认项，不能沿用第一次尝试的值。
 func TestGlobalUpstreamExtrasFollowFailoverTargetFormat(t *testing.T) {
 	var first, second globalExtrasCapture
@@ -321,12 +368,20 @@ func TestPutConfigPreservesGlobalUpstreamDefaults(t *testing.T) {
   openai: "openai-global-agent/1.0"
   anthropic: "anthropic-global-agent/1.0"
   openai-responses: "responses-global-agent/1.0"
+globalUserAgentEnabled:
+  openai: false
 globalUpstreamExtras:
   openai:
     headers:
       x-global-default: enabled
+      x-global-disabled: retained
+    disabledHeaders:
+      - x-global-disabled
     body:
       enable_thinking: true
+      global_disabled_field: retained
+    disabledBody:
+      - global_disabled_field
 routes:
 `, 1)
 	if recorder := putConfig(t, srv, body, ""); recorder.Code != http.StatusOK {
@@ -347,13 +402,14 @@ routes:
 		t.Fatalf("GET status/body = %d/%s", recorder.Code, recorder.Body.String())
 	}
 	var view struct {
-		GlobalUserAgent      *config.GlobalUserAgents     `json:"globalUserAgent"`
-		GlobalUpstreamExtras *config.GlobalUpstreamExtras `json:"globalUpstreamExtras"`
+		GlobalUserAgent        *config.GlobalUserAgents          `json:"globalUserAgent"`
+		GlobalUserAgentEnabled *config.GlobalUserAgentEnablement `json:"globalUserAgentEnabled"`
+		GlobalUpstreamExtras   *config.GlobalUpstreamExtras      `json:"globalUpstreamExtras"`
 	}
 	if err := json.Unmarshal(recorder.Body.Bytes(), &view); err != nil {
 		t.Fatal(err)
 	}
-	if view.GlobalUserAgent == nil || view.GlobalUserAgent.ForFormat("openai") != "openai-global-agent/1.0" || view.GlobalUpstreamExtras == nil || view.GlobalUpstreamExtras.OpenAI.Body["enable_thinking"] != true {
+	if view.GlobalUserAgent == nil || view.GlobalUserAgent.ForFormat("openai") != "openai-global-agent/1.0" || view.GlobalUserAgentEnabled == nil || view.GlobalUserAgentEnabled.IsEnabled("openai") || view.GlobalUpstreamExtras == nil || view.GlobalUpstreamExtras.OpenAI.Body["enable_thinking"] != true || len(view.GlobalUpstreamExtras.OpenAI.DisabledHeaders) != 1 || len(view.GlobalUpstreamExtras.OpenAI.DisabledBody) != 1 {
 		t.Fatalf("GET view global defaults = %#v", view)
 	}
 
@@ -367,15 +423,21 @@ routes:
 	if got := persisted.GlobalUserAgent.ForFormat("openai"); got != "openai-global-agent/1.0" {
 		t.Fatalf("disk global User-Agent = %q", got)
 	}
+	if persisted.GlobalUserAgentEnabled == nil || persisted.GlobalUserAgentEnabled.IsEnabled("openai") {
+		t.Fatalf("disk disabled User-Agent state = %#v", persisted.GlobalUserAgentEnabled)
+	}
+	if got := persisted.GlobalUpstreamExtras.ForFormat("openai"); len(got.DisabledHeaders) != 1 || len(got.DisabledBody) != 1 {
+		t.Fatalf("disk disabled entry state = %#v", got)
+	}
 }
 
 func TestFrontendKeepsGlobalUpstreamDefaultsInConfigPaths(t *testing.T) {
 	checks := map[string][]string{
-		filepath.Join("web", "src", "app", "02-config-normalize.js.part"): {"globalUserAgent", "normalizeGlobalUpstreamExtras"},
-		filepath.Join("web", "src", "app", "07-nav-payload.js.part"):      {"globalUserAgent", "globalUpstreamExtrasPayload"},
-		filepath.Join("web", "src", "app", "10-preview-yaml.js.part"):     {"globalUpstreamExtrasYaml"},
-		filepath.Join("web", "src", "app", "11-providers.js.part"):        {"globalUpstreamExtraForm"},
-		filepath.Join("web", "src", "index.template.html"):                {"global-upstream-extras", "全局 User-Agent"},
+		filepath.Join("web", "src", "app", "02-config-normalize.js.part"): {"globalUserAgentEnabled", "disabledHeaders", "disabledBody", "normalizeGlobalUpstreamExtras"},
+		filepath.Join("web", "src", "app", "07-nav-payload.js.part"):      {"globalUserAgentEnabledPayload", "disabledGlobalExtraKeys", "disabledHeaders", "disabledBody"},
+		filepath.Join("web", "src", "app", "10-preview-yaml.js.part"):     {"globalUserAgentEnabledYaml", "globalUpstreamExtrasYaml"},
+		filepath.Join("web", "src", "app", "11-providers.js.part"):        {"globalUpstreamExtraForm", "enabled: true"},
+		filepath.Join("web", "src", "index.template.html"):                {"global-upstream-extras", "全局 User-Agent", "启用请求头", "启用请求体字段"},
 	}
 	for path, required := range checks {
 		data, err := os.ReadFile(path)

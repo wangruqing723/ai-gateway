@@ -2088,11 +2088,13 @@
                     }
                     if (!Array.isArray(entry.headers)) entry.headers = this.headersToRows(entry.headers);
                     if (!Array.isArray(entry.body)) entry.body = this.bodyToRows(entry.body);
+                    entry.headers.forEach((row) => { row.enabled = row.enabled !== false; });
+                    entry.body.forEach((row) => { row.enabled = row.enabled !== false; });
                     return entry;
                 },
 
                 addGlobalExtraHeaderRow(format) {
-                    this.globalUpstreamExtraForm(format).headers.push({ key: '', value: '' });
+                    this.globalUpstreamExtraForm(format).headers.push({ key: '', value: '', enabled: true });
                 },
 
                 removeGlobalExtraHeaderRow(format, index) {
@@ -2100,7 +2102,7 @@
                 },
 
                 addGlobalExtraBodyRow(format) {
-                    this.globalUpstreamExtraForm(format).body.push({ key: '', value: '' });
+                    this.globalUpstreamExtraForm(format).body.push({ key: '', value: '', enabled: true });
                 },
 
                 removeGlobalExtraBodyRow(format, index) {

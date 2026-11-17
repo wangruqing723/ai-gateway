@@ -904,10 +904,10 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		// 视觉翻译固定构造 OpenAI Chat 请求，因此按 openai 取全局默认项，而不是按
 		// 视觉 Provider 的配置 format 猜测。Provider 局部 extraHeaders/body 维持
 		// 既有的不参与视觉请求的行为；UA 则仍是 Provider > 全局。
-		visionExtras := vision.RequestExtras{GlobalUserAgent: cfg.GlobalUserAgent.ForFormat("openai")}
+		visionExtras := vision.RequestExtras{GlobalUserAgent: cfg.GlobalUserAgentForFormat("openai")}
 		if extras := cfg.GlobalUpstreamExtras.ForFormat("openai"); extras != nil {
-			visionExtras.GlobalHeaders = extras.Headers
-			visionExtras.GlobalBody = extras.Body
+			visionExtras.GlobalHeaders = extras.ActiveHeaders()
+			visionExtras.GlobalBody = extras.ActiveBody()
 		}
 		reqLog.VisionModel = matched.VisionModel
 		var visionResult vision.Result
@@ -1834,11 +1834,11 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 	)
 	if cfg != nil {
 		globalExtras = cfg.GlobalUpstreamExtras.ForFormat(p.Format)
-		globalUserAgent = cfg.GlobalUserAgent.ForFormat(p.Format)
+		globalUserAgent = cfg.GlobalUserAgentForFormat(p.Format)
 	}
 	if globalExtras != nil {
-		globalHeaders = globalExtras.Headers
-		proxy.ApplyExtraBody(upstreamMap, globalExtras.Body)
+		globalHeaders = globalExtras.ActiveHeaders()
+		proxy.ApplyExtraBody(upstreamMap, globalExtras.ActiveBody())
 	}
 	// extraBody 在所有网关维护字段（maxTokens 等）写完之后合并，配置值最终生效；
 	// 候选的 ExtraBody 已由 router 按 provider → route → target 叠加好，用于上游

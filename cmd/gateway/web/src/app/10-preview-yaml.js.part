@@ -21,6 +21,7 @@
                 fullConfigPreview() {
                     const globalExtras = this.globalUpstreamExtrasYaml();
                     const globalUserAgent = this.globalUserAgentYaml();
+                    const globalUserAgentEnabled = this.globalUserAgentEnabledYaml();
                     return [
                         `host: "${this.config.host || '127.0.0.1'}"`,
                         `port: ${this.config.port || 7789}`,
@@ -35,6 +36,7 @@
                         `directTimeoutStreamActive: ${this.config.directTimeoutStreamActive || 120000}`,
                         `contextSafetyMargin: ${this.config.contextSafetyMargin ?? 4096}`,
                         ...(globalUserAgent ? [globalUserAgent] : []),
+                        ...(globalUserAgentEnabled ? [globalUserAgentEnabled] : []),
                         ...(globalExtras ? [globalExtras] : []),
                         this.failoverYaml(),
                         this.breakerYaml(),
@@ -99,6 +101,15 @@
                     return lines.join('\n');
                 },
 
+                globalUserAgentEnabledYaml() {
+                    const enabled = this.globalUserAgentEnabledPayload();
+                    if (!enabled) return '';
+                    return [
+                        'globalUserAgentEnabled:',
+                        ...Object.keys(enabled).sort().map(format => `  ${format}: false`)
+                    ].join('\n');
+                },
+
                 // 全局默认项只展示实际会保存的格式块。它按实际上游协议选择，不跟客户端
                 // 请求格式绑定；同名 Provider / 路由 / 候选项会在真实请求中覆盖这里的 body。
                 globalUpstreamExtrasYaml() {
@@ -116,6 +127,12 @@
                             });
                         }
                         lines.push(...this.renderExtraBodyLines(entry.body, '    ', 'body'));
+                        if (entry.disabledHeaders?.length) {
+                            lines.push('    disabledHeaders:', ...entry.disabledHeaders.map(key => `      - ${JSON.stringify(key)}`));
+                        }
+                        if (entry.disabledBody?.length) {
+                            lines.push('    disabledBody:', ...entry.disabledBody.map(key => `      - ${JSON.stringify(key)}`));
+                        }
                     });
                     return lines.join('\n');
                 },

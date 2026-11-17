@@ -37,12 +37,16 @@ contextSafetyMargin: 4096      # 估算误差补偿，默认 4096；允许写 0
 #   openai-responses: "gateway-responses/1.0"
 #   # 每种格式的优先级：Provider userAgent → 对应格式的全局值
 #   # → 客户端 User-Agent → Go 默认值。
+# globalUserAgentEnabled: # 按格式关闭全局 UA；未写的格式默认启用。
+#   openai: false
 # globalUpstreamExtras:
 #   anthropic:
 #     headers:
 #       anthropic-beta: "prompt-caching-2024-07-31"
+#     disabledHeaders: ["anthropic-beta"] # 值保留在 headers 中，只是不发给上游。
 #     body:
 #       metadata: { gateway: "ai-gateway" }
+#     disabledBody: ["metadata"]
 #   openai:
 #     headers:
 #       X-Gateway-Default: "shared"
@@ -56,6 +60,8 @@ contextSafetyMargin: 4096      # 估算误差补偿，默认 4096；允许写 0
 # x-api-key、Content-Type、User-Agent 以及 model/messages/input/stream/max_tokens 系列均
 # 不可在此覆盖。它们会用于对应格式的模型推理请求（含视觉识别）；/v1/models、健康
 # 检测等无请求体的管理请求不注入这些格式化默认 body。
+# 全局 User-Agent、请求头和请求体字段均可单独禁用。旧配置未记录开关时视为启用；禁用
+# 的请求头/请求体值会保留，重新启用时无需重新填写。
 
 # ── 故障转移（failover，可选）─────────────────────────────────
 # 给路由配多个候选目标（见下方 routes 的 targets 写法）后，某个候选失败时

@@ -694,10 +694,16 @@
                                                 <code class="rounded bg-white/[.06] px-1.5 py-0.5 text-xs text-cyan2" x-text="format.hint"></code>
                                             </div>
 
-                                            <label class="mb-4 block">
-                                                <span class="mb-1.5 block text-xs font-bold text-muted">该格式的全局 User-Agent</span>
-                                                <input autocomplete="off" type="text" x-model="config.globalUserAgent[format.key]" placeholder="留空则使用客户端 User-Agent 或 Go 默认值" class="field">
-                                            </label>
+                                            <div class="mb-4">
+                                                <div class="mb-1.5 flex items-center justify-between gap-3">
+                                                    <label :for="'global-user-agent-' + format.key" class="text-xs font-bold text-muted">该格式的全局 User-Agent</label>
+                                                    <label class="inline-flex min-h-10 cursor-pointer items-center gap-2 rounded-lg px-2 text-xs text-muted hover:bg-white/[.04] hover:text-text">
+                                                        <input type="checkbox" x-model="config.globalUserAgentEnabled[format.key]" :aria-label="'启用 ' + format.label + ' 全局 User-Agent'" class="h-4 w-4 rounded border-line bg-panel text-cyan2 focus:ring-cyan2">
+                                                        <span>启用</span>
+                                                    </label>
+                                                </div>
+                                                <input :id="'global-user-agent-' + format.key" autocomplete="off" type="text" x-model="config.globalUserAgent[format.key]" :disabled="config.globalUserAgentEnabled[format.key] === false" :class="config.globalUserAgentEnabled[format.key] === false ? 'opacity-50' : ''" placeholder="留空则使用客户端 User-Agent 或 Go 默认值" class="field">
+                                            </div>
 
                                             <div class="grid grid-cols-1 gap-3 lg:grid-cols-2">
                                                 <section class="min-w-0 rounded-lg border border-line bg-panel/50 p-3">
@@ -707,10 +713,18 @@
                                                     </div>
                                                     <div class="space-y-2">
                                                         <template x-for="(row, hi) in (config.globalUpstreamExtras[format.key].headers || [])" :key="format.key + '-header-' + hi">
-                                                            <div class="flex flex-col gap-2 sm:flex-row sm:items-center">
-                                                                <input autocomplete="off" type="text" x-model="row.key" :aria-label="format.label + ' 请求头名称 ' + (hi + 1)" placeholder="Header 名称" class="field min-w-0 flex-1 font-mono text-xs" :class="extraHeaderBlocked(row.key) ? 'border-danger' : ''">
-                                                                <input autocomplete="off" type="text" x-model="row.value" :aria-label="format.label + ' 请求头值 ' + (hi + 1)" placeholder="值" class="field min-w-0 flex-1 text-xs">
-                                                                <button type="button" @click="removeGlobalExtraHeaderRow(format.key, hi)" class="inline-flex h-11 w-11 shrink-0 items-center justify-center self-end rounded-lg text-muted transition hover:bg-danger/10 hover:text-danger sm:self-auto" :aria-label="'删除请求头 ' + (row.key || (hi + 1))" title="删除请求头"><span class="material-symbols-outlined text-[18px]">delete</span></button>
+                                                            <div class="flex flex-col gap-2 rounded-lg" :class="row.enabled === false ? 'opacity-50' : ''">
+                                                                <div class="flex flex-col gap-2 sm:flex-row sm:items-center">
+                                                                    <input autocomplete="off" type="text" x-model="row.key" :disabled="row.enabled === false" :aria-label="format.label + ' 请求头名称 ' + (hi + 1)" placeholder="Header 名称" class="field min-w-0 flex-1 font-mono text-xs" :class="extraHeaderBlocked(row.key) ? 'border-danger' : ''">
+                                                                    <input autocomplete="off" type="text" x-model="row.value" :disabled="row.enabled === false" :aria-label="format.label + ' 请求头值 ' + (hi + 1)" placeholder="值" class="field min-w-0 flex-1 text-xs">
+                                                                    <div class="flex h-11 shrink-0 items-center justify-end gap-1 self-end sm:self-auto">
+                                                                        <label class="inline-flex h-10 cursor-pointer items-center gap-1.5 rounded-lg px-2 text-xs text-muted hover:bg-white/[.04] hover:text-text">
+                                                                            <input type="checkbox" x-model="row.enabled" :aria-label="'启用请求头 ' + (row.key || (hi + 1))" class="h-4 w-4 rounded border-line bg-panel text-cyan2 focus:ring-cyan2">
+                                                                            <span>启用</span>
+                                                                        </label>
+                                                                        <button type="button" @click="removeGlobalExtraHeaderRow(format.key, hi)" class="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-muted transition hover:bg-danger/10 hover:text-danger" :aria-label="'删除请求头 ' + (row.key || (hi + 1))" title="删除请求头"><span class="material-symbols-outlined text-[18px]">delete</span></button>
+                                                                    </div>
+                                                                </div>
                                                             </div>
                                                         </template>
                                                         <p x-show="!(config.globalUpstreamExtras[format.key].headers || []).length" class="rounded-lg border border-dashed border-line px-3 py-2 text-xs text-muted">未配置默认请求头</p>
@@ -724,10 +738,18 @@
                                                     </div>
                                                     <div class="space-y-2">
                                                         <template x-for="(row, bi) in (config.globalUpstreamExtras[format.key].body || [])" :key="format.key + '-body-' + bi">
-                                                            <div class="flex flex-col gap-2 sm:flex-row sm:items-center">
-                                                                <input autocomplete="off" type="text" x-model="row.key" :aria-label="format.label + ' 请求体字段名 ' + (bi + 1)" placeholder="字段名" class="field min-w-0 flex-1 font-mono text-xs" :class="extraBodyBlocked(row.key) ? 'border-danger' : ''">
-                                                                <input autocomplete="off" type="text" x-model="row.value" :aria-label="format.label + ' 请求体字段值 ' + (bi + 1)" placeholder='JSON 值，例如 true、20、{"key":"value"}' class="field min-w-0 flex-1 font-mono text-xs">
-                                                                <button type="button" @click="removeGlobalExtraBodyRow(format.key, bi)" class="inline-flex h-11 w-11 shrink-0 items-center justify-center self-end rounded-lg text-muted transition hover:bg-danger/10 hover:text-danger sm:self-auto" :aria-label="'删除请求体字段 ' + (row.key || (bi + 1))" title="删除字段"><span class="material-symbols-outlined text-[18px]">delete</span></button>
+                                                            <div class="flex flex-col gap-2 rounded-lg" :class="row.enabled === false ? 'opacity-50' : ''">
+                                                                <div class="flex flex-col gap-2 sm:flex-row sm:items-center">
+                                                                    <input autocomplete="off" type="text" x-model="row.key" :disabled="row.enabled === false" :aria-label="format.label + ' 请求体字段名 ' + (bi + 1)" placeholder="字段名" class="field min-w-0 flex-1 font-mono text-xs" :class="extraBodyBlocked(row.key) ? 'border-danger' : ''">
+                                                                    <input autocomplete="off" type="text" x-model="row.value" :disabled="row.enabled === false" :aria-label="format.label + ' 请求体字段值 ' + (bi + 1)" placeholder='JSON 值，例如 true、20、{"key":"value"}' class="field min-w-0 flex-1 font-mono text-xs">
+                                                                    <div class="flex h-11 shrink-0 items-center justify-end gap-1 self-end sm:self-auto">
+                                                                        <label class="inline-flex h-10 cursor-pointer items-center gap-1.5 rounded-lg px-2 text-xs text-muted hover:bg-white/[.04] hover:text-text">
+                                                                            <input type="checkbox" x-model="row.enabled" :aria-label="'启用请求体字段 ' + (row.key || (bi + 1))" class="h-4 w-4 rounded border-line bg-panel text-cyan2 focus:ring-cyan2">
+                                                                            <span>启用</span>
+                                                                        </label>
+                                                                        <button type="button" @click="removeGlobalExtraBodyRow(format.key, bi)" class="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-muted transition hover:bg-danger/10 hover:text-danger" :aria-label="'删除请求体字段 ' + (row.key || (bi + 1))" title="删除字段"><span class="material-symbols-outlined text-[18px]">delete</span></button>
+                                                                    </div>
+                                                                </div>
                                                             </div>
                                                         </template>
                                                         <p x-show="!(config.globalUpstreamExtras[format.key].body || []).length" class="rounded-lg border border-dashed border-line px-3 py-2 text-xs text-muted">未配置默认请求体字段</p>
@@ -5444,6 +5466,8 @@
                         contextSafetyMargin: pick(data, 'contextSafetyMargin', 'ContextSafetyMargin') ?? 4096,
                         // 全局 UA 按实际上游格式保存；兼容早期开发版的单字符串并迁移到三种格式。
                         globalUserAgent: this.normalizeGlobalUserAgent(pick(data, 'globalUserAgent', 'GlobalUserAgent')),
+                        // 缺省等同启用，保证没有开关字段的存量配置继续生效。
+                        globalUserAgentEnabled: this.normalizeGlobalUserAgentEnabled(pick(data, 'globalUserAgentEnabled', 'GlobalUserAgentEnabled')),
                         // 全局按格式扩展的配置表单使用行数组，避免直接编辑 map 时行顺序抖动；
                         // 未配置时仍给完整可绑定形状，保存端会把空项省略。
                         globalUpstreamExtras: this.normalizeGlobalUpstreamExtras(pick(data, 'globalUpstreamExtras', 'GlobalUpstreamExtras')),
@@ -5472,15 +5496,23 @@
                     return Object.fromEntries(formats.map(format => [format, typeof value[format] === 'string' ? value[format] : '']));
                 },
 
+                normalizeGlobalUserAgentEnabled(raw) {
+                    const formats = ['anthropic', 'openai', 'openai-responses'];
+                    const value = raw && typeof raw === 'object' ? raw : {};
+                    return Object.fromEntries(formats.map(format => [format, value[format] !== false]));
+                },
+
                 normalizeGlobalUpstreamExtras(raw) {
                     const value = raw && typeof raw === 'object' ? raw : {};
                     const pick = (obj, lower, upper) => obj?.[lower] ?? obj?.[upper];
                     const out = {};
                     ['anthropic', 'openai', 'openai-responses'].forEach((format) => {
                         const entry = value[format] && typeof value[format] === 'object' ? value[format] : {};
+                        const disabledHeaders = new Set((pick(entry, 'disabledHeaders', 'DisabledHeaders') || []).map(key => String(key).toLowerCase()));
+                        const disabledBody = new Set(pick(entry, 'disabledBody', 'DisabledBody') || []);
                         out[format] = {
-                            headers: this.headersToRows(pick(entry, 'headers', 'Headers')),
-                            body: this.bodyToRows(pick(entry, 'body', 'Body'))
+                            headers: this.headersToRows(pick(entry, 'headers', 'Headers')).map(row => ({ ...row, enabled: !disabledHeaders.has(row.key.toLowerCase()) })),
+                            body: this.bodyToRows(pick(entry, 'body', 'Body')).map(row => ({ ...row, enabled: !disabledBody.has(row.key) }))
                         };
                     });
                     return out;
@@ -5600,6 +5632,7 @@
                     });
                     this.config.globalUpstreamExtras = globalExtras;
                     this.config.globalUserAgent = this.normalizeGlobalUserAgent(this.config.globalUserAgent);
+                    this.config.globalUserAgentEnabled = this.normalizeGlobalUserAgentEnabled(this.config.globalUserAgentEnabled);
                     this.config.directTimeoutNoStream = this.config.directTimeoutNoStream || 60000;
                     this.config.directTimeoutStreamHeader = this.config.directTimeoutStreamHeader || 60000;
                     this.config.directTimeoutStreamActive = this.config.directTimeoutStreamActive || 120000;
@@ -6256,6 +6289,30 @@
                     return Object.keys(out).length ? out : undefined;
                 },
 
+                // 默认启用只保存显式关闭的格式；旧配置缺少该字段时仍保持原样生效。
+                globalUserAgentEnabledPayload() {
+                    const source = this.config.globalUserAgentEnabled || {};
+                    const out = {};
+                    ['anthropic', 'openai', 'openai-responses'].forEach((format) => {
+                        if (source[format] === false) out[format] = false;
+                    });
+                    return Object.keys(out).length ? out : undefined;
+                },
+
+                disabledGlobalExtraKeys(rows, values) {
+                    if (!Array.isArray(rows) || !values) return undefined;
+                    const stateByKey = new Map();
+                    rows.forEach((row) => {
+                        const key = (row?.key || '').trim();
+                        if (key && Object.prototype.hasOwnProperty.call(values, key)) {
+                            // 与 rowsToHeaders / rowsToBody 一致：同名项由最后一行决定。
+                            stateByKey.set(key, row.enabled === false);
+                        }
+                    });
+                    const disabled = [...stateByKey].filter(([, isDisabled]) => isDisabled).map(([key]) => key).sort();
+                    return disabled.length ? disabled : undefined;
+                },
+
                 // 将全局按格式的行编辑表单折回后端配置形状。空格式项与整块空配置都不下发，
                 // 保持 yaml/json omitempty 的干净语义；headers/body 仍复用现有解析与黑名单校验。
                 globalUpstreamExtrasPayload() {
@@ -6265,7 +6322,11 @@
                         const entry = source[format] || {};
                         const headers = this.rowsToHeaders(entry.headers);
                         const body = this.rowsToBody(entry.body);
-                        if (headers || body) out[format] = { headers, body };
+                        const disabledHeaders = this.disabledGlobalExtraKeys(entry.headers, headers);
+                        const disabledBody = this.disabledGlobalExtraKeys(entry.body, body);
+                        if (headers || body || disabledHeaders || disabledBody) {
+                            out[format] = { headers, body, disabledHeaders, disabledBody };
+                        }
                     });
                     return Object.keys(out).length ? out : undefined;
                 },
@@ -6340,6 +6401,7 @@
                         contextSafetyMargin: this.numOrNull(this.config.contextSafetyMargin),
                         // globalUserAgent 是按上游格式区分的独立字段，不能写入通用 headers。
                         globalUserAgent: this.globalUserAgentPayload(),
+                        globalUserAgentEnabled: this.globalUserAgentEnabledPayload(),
                         globalUpstreamExtras: this.globalUpstreamExtrasPayload(),
                         providers,
                         routes: JSON.parse(JSON.stringify(this.config.routes || [])),
@@ -7623,6 +7685,7 @@
                 fullConfigPreview() {
                     const globalExtras = this.globalUpstreamExtrasYaml();
                     const globalUserAgent = this.globalUserAgentYaml();
+                    const globalUserAgentEnabled = this.globalUserAgentEnabledYaml();
                     return [
                         `host: "${this.config.host || '127.0.0.1'}"`,
                         `port: ${this.config.port || 7789}`,
@@ -7637,6 +7700,7 @@
                         `directTimeoutStreamActive: ${this.config.directTimeoutStreamActive || 120000}`,
                         `contextSafetyMargin: ${this.config.contextSafetyMargin ?? 4096}`,
                         ...(globalUserAgent ? [globalUserAgent] : []),
+                        ...(globalUserAgentEnabled ? [globalUserAgentEnabled] : []),
                         ...(globalExtras ? [globalExtras] : []),
                         this.failoverYaml(),
                         this.breakerYaml(),
@@ -7701,6 +7765,15 @@
                     return lines.join('\n');
                 },
 
+                globalUserAgentEnabledYaml() {
+                    const enabled = this.globalUserAgentEnabledPayload();
+                    if (!enabled) return '';
+                    return [
+                        'globalUserAgentEnabled:',
+                        ...Object.keys(enabled).sort().map(format => `  ${format}: false`)
+                    ].join('\n');
+                },
+
                 // 全局默认项只展示实际会保存的格式块。它按实际上游协议选择，不跟客户端
                 // 请求格式绑定；同名 Provider / 路由 / 候选项会在真实请求中覆盖这里的 body。
                 globalUpstreamExtrasYaml() {
@@ -7718,6 +7791,12 @@
                             });
                         }
                         lines.push(...this.renderExtraBodyLines(entry.body, '    ', 'body'));
+                        if (entry.disabledHeaders?.length) {
+                            lines.push('    disabledHeaders:', ...entry.disabledHeaders.map(key => `      - ${JSON.stringify(key)}`));
+                        }
+                        if (entry.disabledBody?.length) {
+                            lines.push('    disabledBody:', ...entry.disabledBody.map(key => `      - ${JSON.stringify(key)}`));
+                        }
                     });
                     return lines.join('\n');
                 },
@@ -9951,11 +10030,13 @@
                     }
                     if (!Array.isArray(entry.headers)) entry.headers = this.headersToRows(entry.headers);
                     if (!Array.isArray(entry.body)) entry.body = this.bodyToRows(entry.body);
+                    entry.headers.forEach((row) => { row.enabled = row.enabled !== false; });
+                    entry.body.forEach((row) => { row.enabled = row.enabled !== false; });
                     return entry;
                 },
 
                 addGlobalExtraHeaderRow(format) {
-                    this.globalUpstreamExtraForm(format).headers.push({ key: '', value: '' });
+                    this.globalUpstreamExtraForm(format).headers.push({ key: '', value: '', enabled: true });
                 },
 
                 removeGlobalExtraHeaderRow(format, index) {
@@ -9963,7 +10044,7 @@
                 },
 
                 addGlobalExtraBodyRow(format) {
-                    this.globalUpstreamExtraForm(format).body.push({ key: '', value: '' });
+                    this.globalUpstreamExtraForm(format).body.push({ key: '', value: '', enabled: true });
                 },
 
                 removeGlobalExtraBodyRow(format, index) {

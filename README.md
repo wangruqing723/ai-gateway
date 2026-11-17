@@ -166,15 +166,25 @@ globalUserAgent:
   anthropic: "gateway-anthropic/1.0"
   openai: "gateway-openai/1.0"
   openai-responses: "gateway-responses/1.0"
+globalUserAgentEnabled:
+  openai: false # 仅禁用 openai 格式的全局 User-Agent
 globalUpstreamExtras:
   openai:
     headers:
       X-Gateway-Default: "shared"
+      X-Optional: "retained while disabled"
+    disabledHeaders:
+      - X-Optional
     body:
       enable_thinking: true
+      optional_field: "retained while disabled"
+    disabledBody:
+      - optional_field
 ```
 
 这些项都是可选的最低优先级兜底。请求体的同名键按“全局 → Provider → 路由 → 候选”浅合并，后者覆盖前者；请求头按“全局 → Provider `extraHeaders`”写入。因此原有的 Provider／路由／候选顺序和覆盖语义不变。鉴权、内容类型、模型、消息、流式、输出上限等网关维护字段仍不能通过全局项覆盖。
+
+全局 User-Agent 可以通过 `globalUserAgentEnabled.<format>: false` 单独关闭；请求头和请求体字段分别列入对应格式的 `disabledHeaders`、`disabledBody`。禁用会保留配置值且不发送该项，未配置开关的旧配置默认启用。
 
 专用 `globalUserAgent` 也按实际上游格式分别配置。每种模型请求的 UA 优先级固定为：`provider.userAgent` → 对应格式的 `globalUserAgent` → 客户端 `User-Agent` → Go 默认值 `Go-http-client/1.1`。路由和候选没有独立 User-Agent 字段；当 Provider 未配置 `userAgent` 时，只使用当前目标格式的全局值，其他格式的值不会串用。设置页中的“全局上游默认项”区域默认折叠。
 

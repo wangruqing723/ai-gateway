@@ -694,10 +694,16 @@
                                                 <code class="rounded bg-white/[.06] px-1.5 py-0.5 text-xs text-cyan2" x-text="format.hint"></code>
                                             </div>
 
-                                            <label class="mb-4 block">
-                                                <span class="mb-1.5 block text-xs font-bold text-muted">该格式的全局 User-Agent</span>
-                                                <input autocomplete="off" type="text" x-model="config.globalUserAgent[format.key]" placeholder="留空则使用客户端 User-Agent 或 Go 默认值" class="field">
-                                            </label>
+                                            <div class="mb-4">
+                                                <div class="mb-1.5 flex items-center justify-between gap-3">
+                                                    <label :for="'global-user-agent-' + format.key" class="text-xs font-bold text-muted">该格式的全局 User-Agent</label>
+                                                    <label class="inline-flex min-h-10 cursor-pointer items-center gap-2 rounded-lg px-2 text-xs text-muted hover:bg-white/[.04] hover:text-text">
+                                                        <input type="checkbox" x-model="config.globalUserAgentEnabled[format.key]" :aria-label="'启用 ' + format.label + ' 全局 User-Agent'" class="h-4 w-4 rounded border-line bg-panel text-cyan2 focus:ring-cyan2">
+                                                        <span>启用</span>
+                                                    </label>
+                                                </div>
+                                                <input :id="'global-user-agent-' + format.key" autocomplete="off" type="text" x-model="config.globalUserAgent[format.key]" :disabled="config.globalUserAgentEnabled[format.key] === false" :class="config.globalUserAgentEnabled[format.key] === false ? 'opacity-50' : ''" placeholder="留空则使用客户端 User-Agent 或 Go 默认值" class="field">
+                                            </div>
 
                                             <div class="grid grid-cols-1 gap-3 lg:grid-cols-2">
                                                 <section class="min-w-0 rounded-lg border border-line bg-panel/50 p-3">
@@ -707,10 +713,18 @@
                                                     </div>
                                                     <div class="space-y-2">
                                                         <template x-for="(row, hi) in (config.globalUpstreamExtras[format.key].headers || [])" :key="format.key + '-header-' + hi">
-                                                            <div class="flex flex-col gap-2 sm:flex-row sm:items-center">
-                                                                <input autocomplete="off" type="text" x-model="row.key" :aria-label="format.label + ' 请求头名称 ' + (hi + 1)" placeholder="Header 名称" class="field min-w-0 flex-1 font-mono text-xs" :class="extraHeaderBlocked(row.key) ? 'border-danger' : ''">
-                                                                <input autocomplete="off" type="text" x-model="row.value" :aria-label="format.label + ' 请求头值 ' + (hi + 1)" placeholder="值" class="field min-w-0 flex-1 text-xs">
-                                                                <button type="button" @click="removeGlobalExtraHeaderRow(format.key, hi)" class="inline-flex h-11 w-11 shrink-0 items-center justify-center self-end rounded-lg text-muted transition hover:bg-danger/10 hover:text-danger sm:self-auto" :aria-label="'删除请求头 ' + (row.key || (hi + 1))" title="删除请求头"><span class="material-symbols-outlined text-[18px]">delete</span></button>
+                                                            <div class="flex flex-col gap-2 rounded-lg" :class="row.enabled === false ? 'opacity-50' : ''">
+                                                                <div class="flex flex-col gap-2 sm:flex-row sm:items-center">
+                                                                    <input autocomplete="off" type="text" x-model="row.key" :disabled="row.enabled === false" :aria-label="format.label + ' 请求头名称 ' + (hi + 1)" placeholder="Header 名称" class="field min-w-0 flex-1 font-mono text-xs" :class="extraHeaderBlocked(row.key) ? 'border-danger' : ''">
+                                                                    <input autocomplete="off" type="text" x-model="row.value" :disabled="row.enabled === false" :aria-label="format.label + ' 请求头值 ' + (hi + 1)" placeholder="值" class="field min-w-0 flex-1 text-xs">
+                                                                    <div class="flex h-11 shrink-0 items-center justify-end gap-1 self-end sm:self-auto">
+                                                                        <label class="inline-flex h-10 cursor-pointer items-center gap-1.5 rounded-lg px-2 text-xs text-muted hover:bg-white/[.04] hover:text-text">
+                                                                            <input type="checkbox" x-model="row.enabled" :aria-label="'启用请求头 ' + (row.key || (hi + 1))" class="h-4 w-4 rounded border-line bg-panel text-cyan2 focus:ring-cyan2">
+                                                                            <span>启用</span>
+                                                                        </label>
+                                                                        <button type="button" @click="removeGlobalExtraHeaderRow(format.key, hi)" class="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-muted transition hover:bg-danger/10 hover:text-danger" :aria-label="'删除请求头 ' + (row.key || (hi + 1))" title="删除请求头"><span class="material-symbols-outlined text-[18px]">delete</span></button>
+                                                                    </div>
+                                                                </div>
                                                             </div>
                                                         </template>
                                                         <p x-show="!(config.globalUpstreamExtras[format.key].headers || []).length" class="rounded-lg border border-dashed border-line px-3 py-2 text-xs text-muted">未配置默认请求头</p>
@@ -724,10 +738,18 @@
                                                     </div>
                                                     <div class="space-y-2">
                                                         <template x-for="(row, bi) in (config.globalUpstreamExtras[format.key].body || [])" :key="format.key + '-body-' + bi">
-                                                            <div class="flex flex-col gap-2 sm:flex-row sm:items-center">
-                                                                <input autocomplete="off" type="text" x-model="row.key" :aria-label="format.label + ' 请求体字段名 ' + (bi + 1)" placeholder="字段名" class="field min-w-0 flex-1 font-mono text-xs" :class="extraBodyBlocked(row.key) ? 'border-danger' : ''">
-                                                                <input autocomplete="off" type="text" x-model="row.value" :aria-label="format.label + ' 请求体字段值 ' + (bi + 1)" placeholder='JSON 值，例如 true、20、{"key":"value"}' class="field min-w-0 flex-1 font-mono text-xs">
-                                                                <button type="button" @click="removeGlobalExtraBodyRow(format.key, bi)" class="inline-flex h-11 w-11 shrink-0 items-center justify-center self-end rounded-lg text-muted transition hover:bg-danger/10 hover:text-danger sm:self-auto" :aria-label="'删除请求体字段 ' + (row.key || (bi + 1))" title="删除字段"><span class="material-symbols-outlined text-[18px]">delete</span></button>
+                                                            <div class="flex flex-col gap-2 rounded-lg" :class="row.enabled === false ? 'opacity-50' : ''">
+                                                                <div class="flex flex-col gap-2 sm:flex-row sm:items-center">
+                                                                    <input autocomplete="off" type="text" x-model="row.key" :disabled="row.enabled === false" :aria-label="format.label + ' 请求体字段名 ' + (bi + 1)" placeholder="字段名" class="field min-w-0 flex-1 font-mono text-xs" :class="extraBodyBlocked(row.key) ? 'border-danger' : ''">
+                                                                    <input autocomplete="off" type="text" x-model="row.value" :disabled="row.enabled === false" :aria-label="format.label + ' 请求体字段值 ' + (bi + 1)" placeholder='JSON 值，例如 true、20、{"key":"value"}' class="field min-w-0 flex-1 font-mono text-xs">
+                                                                    <div class="flex h-11 shrink-0 items-center justify-end gap-1 self-end sm:self-auto">
+                                                                        <label class="inline-flex h-10 cursor-pointer items-center gap-1.5 rounded-lg px-2 text-xs text-muted hover:bg-white/[.04] hover:text-text">
+                                                                            <input type="checkbox" x-model="row.enabled" :aria-label="'启用请求体字段 ' + (row.key || (bi + 1))" class="h-4 w-4 rounded border-line bg-panel text-cyan2 focus:ring-cyan2">
+                                                                            <span>启用</span>
+                                                                        </label>
+                                                                        <button type="button" @click="removeGlobalExtraBodyRow(format.key, bi)" class="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-muted transition hover:bg-danger/10 hover:text-danger" :aria-label="'删除请求体字段 ' + (row.key || (bi + 1))" title="删除字段"><span class="material-symbols-outlined text-[18px]">delete</span></button>
+                                                                    </div>
+                                                                </div>
                                                             </div>
                                                         </template>
                                                         <p x-show="!(config.globalUpstreamExtras[format.key].body || []).length" class="rounded-lg border border-dashed border-line px-3 py-2 text-xs text-muted">未配置默认请求体字段</p>
