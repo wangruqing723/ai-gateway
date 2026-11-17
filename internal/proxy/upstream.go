@@ -28,18 +28,29 @@ func buildUpstreamURL(p *config.Provider) (base, path string) {
 	}
 }
 
-// setUpstreamHeaders 按 provider 格式设置鉴权头，并按优先级设置 User-Agent。
+// setUpstreamHeaders 保留旧调用入口，供探测性单元测试锁定未配置全局项时的行为。
+// 正常转发使用 setUpstreamHeadersWithGlobal，把全局默认层插到既有 Provider 扩展之前。
 func setUpstreamHeaders(req *http.Request, p *config.Provider, clientUserAgent string) {
+	setUpstreamHeadersWithGlobal(req, p, clientUserAgent, "", nil)
+}
+
+// setUpstreamHeadersWithGlobal 按 provider 格式设置鉴权头，并按固定优先级设置
+// User-Agent：Provider > 全局 > 客户端 > Go 默认。globalHeaders 是最低优先级的
+// 格式默认头，必须在既有 Provider.ExtraHeaders 之前写入。
+func setUpstreamHeadersWithGlobal(req *http.Request, p *config.Provider, clientUserAgent, globalUserAgent string, globalHeaders map[string]string) {
 	req.Header.Set("content-type", "application/json")
 	req.Header.Set("accept", "application/json, text/event-stream")
 	if p.UserAgent != "" {
 		req.Header.Set("User-Agent", p.UserAgent)
+	} else if globalUserAgent != "" {
+		req.Header.Set("User-Agent", globalUserAgent)
 	} else if clientUserAgent != "" {
 		req.Header.Set("User-Agent", clientUserAgent)
 	}
 	SetUpstreamAuthHeaders(req.Header, p.Format, p.APIKey)
-	// 放在最后：允许覆盖上面的 anthropic-version / accept 这类协议头，
-	// 鉴权与 User-Agent 由黑名单挡住，不会被配置改坏。
+	// 先写全局默认，再保留 Provider 的既有最终覆盖位置。两层均复用同一运行时
+	// 黑名单，鉴权与 User-Agent 不会被配置改坏。
+	ApplyExtraHeaders(req.Header, globalHeaders)
 	ApplyExtraHeaders(req.Header, p.ExtraHeaders)
 }
 

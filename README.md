@@ -157,13 +157,30 @@ node scripts/verify-provider-route-transfer.cjs
 docker exec ai-gateway-dev-verify go test ./cmd/gateway -run TestConfigTransferSmokeLocalHTTP -count=1 -v
 ```
 
-### Provider 的 User-Agent
+### 全局默认请求扩展与 User-Agent
 
-每个 Provider 可选配 `userAgent`。取值优先级固定为：`provider.userAgent` 非空时使用该值；否则原样转发客户端请求中的 `User-Agent`；客户端也未携带时完全不设置该头，由 Go 自动填入 `Go-http-client/1.1`。
+全局设置可选配置 `globalUpstreamExtras`，按实际发往上游的协议格式分别追加默认请求头和请求体：`anthropic`、`openai`、`openai-responses`。例如 Claude 客户端被转成 OpenAI Chat 后，使用 `openai` 项，而不是 `anthropic` 项。
 
-该字段同时作用于模型列表查询（`GET /api/providers/models`）与 Provider 健康检测——它们探测上游 `/v1/models`，同样受 UA 准入影响。不配的话，按客户端类型准入的上游会出现「转发正常、但查不到模型列表、且健康检测显示不健康」这种割裂状态。这两条路径由网关自己发起，没有客户端 UA 可转发，所以只有「配了就用、没配就用 Go 默认值」两种情况。
+```yaml
+globalUserAgent:
+  anthropic: "gateway-anthropic/1.0"
+  openai: "gateway-openai/1.0"
+  openai-responses: "gateway-responses/1.0"
+globalUpstreamExtras:
+  openai:
+    headers:
+      X-Gateway-Default: "shared"
+    body:
+      enable_thinking: true
+```
 
-这是一次有意的行为变更：过去未配置时，所有上游都会收到 `Go-http-client/1.1`；现在未配置的 Provider 会转发客户端的真实 UA。这样可兼容按客户端类型准入的上游（例如 ar-gh），但会向上游泄露客户端身份和版本。若要固定值或避免随客户端变化，请为该 Provider 显式配置 `userAgent`。
+这些项都是可选的最低优先级兜底。请求体的同名键按“全局 → Provider → 路由 → 候选”浅合并，后者覆盖前者；请求头按“全局 → Provider `extraHeaders`”写入。因此原有的 Provider／路由／候选顺序和覆盖语义不变。鉴权、内容类型、模型、消息、流式、输出上限等网关维护字段仍不能通过全局项覆盖。
+
+专用 `globalUserAgent` 也按实际上游格式分别配置。每种模型请求的 UA 优先级固定为：`provider.userAgent` → 对应格式的 `globalUserAgent` → 客户端 `User-Agent` → Go 默认值 `Go-http-client/1.1`。路由和候选没有独立 User-Agent 字段；当 Provider 未配置 `userAgent` 时，只使用当前目标格式的全局值，其他格式的值不会串用。设置页中的“全局上游默认项”区域默认折叠。
+
+Provider 的 `userAgent` 仍同时作用于模型列表查询（`GET /api/providers/models`）和 Provider 健康检测——它们探测上游 `/v1/models`，同样受 UA 准入影响。`globalUpstreamExtras` 的格式化 body 只用于模型推理请求（含视觉识别），不会伪造到这些无请求体的管理请求中。
+
+未配置 Provider 或全局 UA 时，普通转发会继续原样转发客户端 UA；客户端也未携带时不显式设置该头，由 Go 自动填入 `Go-http-client/1.1`。这样可兼容按客户端类型准入的上游，但会向上游泄露客户端身份和版本；需要固定值时请配置全局或 Provider 的专用字段。
 
 ## 本地开发
 
@@ -211,7 +228,7 @@ http://127.0.0.1:7789/
 - 在“提供商”中可视化编辑 Provider、上游地址、协议格式、并发、限速、队列等待、User-Agent 和独立代理；弹窗可用当前未保存的表单值检测上游
 - 在“提供商”中连接、查看和删除 ChatGPT OAuth 账户，并将账户绑定到 Responses Provider；点击“连接账户”后可选择在当前浏览器窗口的新标签页打开授权页面，或一键复制授权链接。生成链接后，如果服务未自动接收授权回调，可粘贴 ChatGPT 返回的完整回调链接提交
 - 在“路由”中可视化编辑路由规则、目标模型和视觉伴随模型
-- 在“全局设置”中可视化编辑监听、超时、缓存配置和直通模式
+- 在“全局设置”中可视化编辑监听、超时、缓存、直通模式、全局 User-Agent 及按上游格式的默认请求头／请求体
 - 在“全局设置”中使用 YAML 原文编辑完整配置
 - 右侧配置预览与复制；提供商、路由菜单展示对应片段，全局设置展示完整配置
 - 保存配置并触发服务热重载

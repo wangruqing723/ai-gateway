@@ -257,6 +257,143 @@ type Provider struct {
 	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
 }
 
+// UpstreamExtras 是按上游格式追加的请求扩展。headers 和 body 均为可选的浅合并项；
+// 具体的受保护字段、长度与编码限制由与 Provider.extraHeaders / extraBody 相同的校验
+// 和运行时兜底统一维护。
+type UpstreamExtras struct {
+	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
+	Body    map[string]any    `yaml:"body,omitempty" json:"body,omitempty"`
+}
+
+// GlobalUserAgents 是按实际发往上游的协议格式配置的专用 User-Agent 兜底。
+// 通用 headers 仍禁止设置 User-Agent；每种格式都独立遵循 Provider > 全局 > 客户端 > Go 默认值。
+type GlobalUserAgents struct {
+	Anthropic       string `yaml:"anthropic,omitempty" json:"anthropic,omitempty"`
+	OpenAI          string `yaml:"openai,omitempty" json:"openai,omitempty"`
+	OpenAIResponses string `yaml:"openai-responses,omitempty" json:"openai-responses,omitempty"`
+}
+
+// UnmarshalYAML 同时接收先前开发版本写入的单字符串，并按旧语义迁移到三种格式。
+// 新配置使用格式映射；这里显式检查键，保留顶层 KnownFields 的严格校验效果。
+func (g *GlobalUserAgents) UnmarshalYAML(node *yaml.Node) error {
+	if node == nil || node.Tag == "!!null" {
+		return nil
+	}
+	if node.Kind == yaml.ScalarNode {
+		var legacy string
+		if err := node.Decode(&legacy); err != nil {
+			return fmt.Errorf("globalUserAgent 应为格式映射或字符串: %w", err)
+		}
+		g.Anthropic, g.OpenAI, g.OpenAIResponses = legacy, legacy, legacy
+		return nil
+	}
+	if node.Kind != yaml.MappingNode {
+		return fmt.Errorf("globalUserAgent 应为包含 anthropic、openai、openai-responses 的映射")
+	}
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		key, value := node.Content[i], node.Content[i+1]
+		if key.Kind != yaml.ScalarNode {
+			return fmt.Errorf("globalUserAgent 格式名称必须是字符串")
+		}
+		var target *string
+		switch key.Value {
+		case "anthropic":
+			target = &g.Anthropic
+		case "openai":
+			target = &g.OpenAI
+		case "openai-responses":
+			target = &g.OpenAIResponses
+		default:
+			return fmt.Errorf("globalUserAgent 包含未知上游格式 %q", key.Value)
+		}
+		if err := value.Decode(target); err != nil {
+			return fmt.Errorf("globalUserAgent.%s 应为字符串: %w", key.Value, err)
+		}
+	}
+	return nil
+}
+
+// ForFormat 返回指定上游格式的全局 User-Agent；未知格式返回空值。
+func (g *GlobalUserAgents) ForFormat(format string) string {
+	if g == nil {
+		return ""
+	}
+	switch format {
+	case "anthropic":
+		return g.Anthropic
+	case "openai":
+		return g.OpenAI
+	case "openai-responses":
+		return g.OpenAIResponses
+	default:
+		return ""
+	}
+}
+
+func (g *GlobalUserAgents) empty() bool {
+	return g == nil || (g.Anthropic == "" && g.OpenAI == "" && g.OpenAIResponses == "")
+}
+
+// GlobalUpstreamExtras 是顶层、按实际发往上游的协议格式选择的默认请求扩展。
+//
+// 它只提供最低优先级的默认值：真正转发时先写这里的 body / headers，再保留既有的
+// Provider、Route、Target 顺序与覆盖语义。使用具名字段而非 map，可以让严格 YAML
+// 解码拒绝拼错的格式名。
+type GlobalUpstreamExtras struct {
+	Anthropic       *UpstreamExtras `yaml:"anthropic,omitempty" json:"anthropic,omitempty"`
+	OpenAI          *UpstreamExtras `yaml:"openai,omitempty" json:"openai,omitempty"`
+	OpenAIResponses *UpstreamExtras `yaml:"openai-responses,omitempty" json:"openai-responses,omitempty"`
+}
+
+// ForFormat 返回指定上游格式的默认扩展。格式值已由 Provider 校验；未知格式返回 nil，
+// 让调用方保持空操作而不是把某个格式的私有字段串到另一个协议。
+func (g *GlobalUpstreamExtras) ForFormat(format string) *UpstreamExtras {
+	if g == nil {
+		return nil
+	}
+	switch format {
+	case "anthropic":
+		return g.Anthropic
+	case "openai":
+		return g.OpenAI
+	case "openai-responses":
+		return g.OpenAIResponses
+	default:
+		return nil
+	}
+}
+
+// normalize 删除语义为空的项，使配置 API 的全量保存不会把空对象物化回 YAML。
+func (g *GlobalUpstreamExtras) normalize() {
+	if g == nil {
+		return
+	}
+	for _, extra := range []*UpstreamExtras{g.Anthropic, g.OpenAI, g.OpenAIResponses} {
+		if extra == nil {
+			continue
+		}
+		if len(extra.Headers) == 0 {
+			extra.Headers = nil
+		}
+		if len(extra.Body) == 0 {
+			extra.Body = nil
+		}
+	}
+	if g.Anthropic != nil && len(g.Anthropic.Headers) == 0 && len(g.Anthropic.Body) == 0 {
+		g.Anthropic = nil
+	}
+	if g.OpenAI != nil && len(g.OpenAI.Headers) == 0 && len(g.OpenAI.Body) == 0 {
+		g.OpenAI = nil
+	}
+	if g.OpenAIResponses != nil && len(g.OpenAIResponses.Headers) == 0 && len(g.OpenAIResponses.Body) == 0 {
+		g.OpenAIResponses = nil
+	}
+}
+
+func (g *GlobalUpstreamExtras) empty() bool {
+	return g == nil || (g.Anthropic == nil && g.OpenAI == nil && g.OpenAIResponses == nil)
+}
+
 // Vision 路由上的视觉子配置
 type Vision struct {
 	Provider string `yaml:"provider" json:"provider"`
@@ -601,8 +738,14 @@ type Config struct {
 	// ChatGPTBackground 后台令牌预刷新与用量刷新，见 ChatGPTBackground。
 	ChatGPTBackground ChatGPTBackground `yaml:"chatgptBackground,omitempty" json:"chatgptBackground"`
 	// ContextSafetyMargin 是估算输入 token 时预留的安全余量，nil 时使用默认值。
-	ContextSafetyMargin *int   `yaml:"contextSafetyMargin,omitempty" json:"contextSafetyMargin,omitempty"`
-	Path                string `yaml:"-" json:"path,omitempty"`
+	ContextSafetyMargin *int `yaml:"contextSafetyMargin,omitempty" json:"contextSafetyMargin,omitempty"`
+	// GlobalUserAgent 是按目标 Provider.Format 选择的专用 UA 兜底。Provider.userAgent
+	// 更高优先级；两者都未配置时，正常转发仍保留客户端 UA，最后才交给 Go 默认 UA。
+	GlobalUserAgent *GlobalUserAgents `yaml:"globalUserAgent,omitempty" json:"globalUserAgent,omitempty"`
+	// GlobalUpstreamExtras 按实际的目标 Provider.Format 选择请求头和请求体默认值。
+	// nil 与空对象都表示不追加，且绝不改变既有 Provider → Route → Target 的局部顺序。
+	GlobalUpstreamExtras *GlobalUpstreamExtras `yaml:"globalUpstreamExtras,omitempty" json:"globalUpstreamExtras,omitempty"`
+	Path                 string                `yaml:"-" json:"path,omitempty"`
 
 	// ── 直通模式（direct mode）──────────────────────────────
 	// 开启后请求不进队列：跳过并发控制、限速与排队等待，直接转发到上游。
@@ -650,6 +793,17 @@ func findConfigPath() string {
 
 // applyDefaults 填充默认值并回写 provider 名称
 func applyDefaults(c *Config) {
+	if c.GlobalUserAgent != nil {
+		if c.GlobalUserAgent.empty() {
+			c.GlobalUserAgent = nil
+		}
+	}
+	if c.GlobalUpstreamExtras != nil {
+		c.GlobalUpstreamExtras.normalize()
+		if c.GlobalUpstreamExtras.empty() {
+			c.GlobalUpstreamExtras = nil
+		}
+	}
 	if c.Port == 0 {
 		c.Port = 7789
 	}
@@ -1227,6 +1381,12 @@ func validate(c *Config) error {
 	if c.ContextSafetyMargin != nil && *c.ContextSafetyMargin < 0 {
 		return fmt.Errorf("contextSafetyMargin 应大于等于 0")
 	}
+	if err := validateGlobalUserAgents(c.GlobalUserAgent); err != nil {
+		return err
+	}
+	if err := validateGlobalUpstreamExtras(c.GlobalUpstreamExtras); err != nil {
+		return err
+	}
 	if limit := c.ChatGPTAccountLimits.MaxConcurrent; limit != nil && (*limit < 1 || *limit > 100) {
 		return fmt.Errorf("chatgptAccountLimits.maxConcurrent 应在 1-100 之间；不限制请删除该项")
 	}
@@ -1332,15 +1492,8 @@ func validateProvider(name string, p *Provider, validateLimits bool) error {
 	// 整个配置文件，yaml 少了 omitempty 就会给每个没配该字段的 provider 落一行
 	// userAgent: ""，纯噪音；json 少了则前端拿到一堆空字段。
 	// 空值是合法终态（语义为「不配置」），applyDefaults 不碰它。
-	if p.UserAgent != "" {
-		if n := utf8.RuneCountInString(p.UserAgent); n > maxProviderUserAgentRunes {
-			return fmt.Errorf("providers.%s.userAgent 长度应不超过 %d 个字符（当前 %d）", name, maxProviderUserAgentRunes, n)
-		}
-		for _, r := range p.UserAgent {
-			if (r < 0x20 && r != '\t') || r == 0x7F {
-				return fmt.Errorf("providers.%s.userAgent 不能包含 ASCII 控制字符", name)
-			}
-		}
+	if err := validateUserAgent(fmt.Sprintf("providers.%s.userAgent", name), p.UserAgent); err != nil {
+		return err
 	}
 	// Proxy 与 UserAgent 同样是可选字段：空值表示继承全局环境代理（或直连），
 	// yaml/json 使用 omitempty，applyDefaults 不碰它，避免把空值物化进配置文件。
@@ -1479,38 +1632,112 @@ func validateOneMContext(name, value string) error {
 	}
 }
 
+// validateUserAgent 统一校验 Provider 与全局 UA。两层使用同一边界，避免全局兜底
+// 变成一个能绕过头值控制字符防护的特殊入口。
+func validateUserAgent(label, value string) error {
+	if value == "" {
+		return nil
+	}
+	if n := utf8.RuneCountInString(value); n > maxProviderUserAgentRunes {
+		return fmt.Errorf("%s 长度应不超过 %d 个字符（当前 %d）", label, maxProviderUserAgentRunes, n)
+	}
+	for _, r := range value {
+		if (r < 0x20 && r != '\t') || r == 0x7F {
+			return fmt.Errorf("%s 不能包含 ASCII 控制字符", label)
+		}
+	}
+	return nil
+}
+
+func validateGlobalUserAgents(all *GlobalUserAgents) error {
+	if all == nil {
+		return nil
+	}
+	for _, item := range []struct {
+		format string
+		value  string
+	}{
+		{format: "anthropic", value: all.Anthropic},
+		{format: "openai", value: all.OpenAI},
+		{format: "openai-responses", value: all.OpenAIResponses},
+	} {
+		if err := validateUserAgent("globalUserAgent."+item.format, item.value); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateGlobalUpstreamExtras 校验按格式的全局默认扩展。格式键由具名结构保证严格，
+// 每一项的 header/body 限制则完全复用 Provider 扩展的现有规则。
+func validateGlobalUpstreamExtras(all *GlobalUpstreamExtras) error {
+	if all == nil {
+		return nil
+	}
+	for _, item := range []struct {
+		format string
+		extra  *UpstreamExtras
+	}{
+		{format: "anthropic", extra: all.Anthropic},
+		{format: "openai", extra: all.OpenAI},
+		{format: "openai-responses", extra: all.OpenAIResponses},
+	} {
+		if item.extra == nil {
+			continue
+		}
+		label := "globalUpstreamExtras." + item.format
+		if err := validateExtraHeadersAt(label+".headers", item.extra.Headers); err != nil {
+			return err
+		}
+		if err := validateExtraBody(label+".body", item.extra.Body); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // validateExtraHeaders 校验自定义请求头的数量、名称与取值。
 func validateExtraHeaders(name string, headers map[string]string) error {
+	return validateExtraHeadersAt(fmt.Sprintf("providers.%s.extraHeaders", name), headers)
+}
+
+// validateExtraHeadersAt 与 validateExtraBody 一样接收完整路径，供 Provider 与顶层全局
+// 默认项复用同一套边界。保留 validateExtraHeaders 包装器以维持已有错误路径与调用点。
+func validateExtraHeadersAt(label string, headers map[string]string) error {
 	if len(headers) == 0 {
 		return nil
 	}
 	if len(headers) > maxExtraHeaderEntries {
-		return fmt.Errorf("providers.%s.extraHeaders 最多 %d 个条目（当前 %d）", name, maxExtraHeaderEntries, len(headers))
+		return fmt.Errorf("%s 最多 %d 个条目（当前 %d）", label, maxExtraHeaderEntries, len(headers))
 	}
 	// 遍历顺序随机，报错信息里带上头名即可定位，不依赖顺序稳定。
 	for key, value := range headers {
 		trimmed := strings.TrimSpace(key)
 		if trimmed == "" {
-			return fmt.Errorf("providers.%s.extraHeaders 的头名称不能为空", name)
+			return fmt.Errorf("%s 的头名称不能为空", label)
 		}
 		if n := utf8.RuneCountInString(trimmed); n > maxExtraHeaderNameRunes {
-			return fmt.Errorf("providers.%s.extraHeaders[%s] 头名称长度应不超过 %d 个字符（当前 %d）", name, trimmed, maxExtraHeaderNameRunes, n)
+			return fmt.Errorf("%s[%s] 头名称长度应不超过 %d 个字符（当前 %d）", label, trimmed, maxExtraHeaderNameRunes, n)
 		}
 		// HTTP 头名称只允许 RFC 7230 的 token 字符：放宽会让 http.Header.Set
 		// 之后产出不合法的请求，错误现场跑到上游侧才暴露。
 		if !isHTTPHeaderToken(trimmed) {
-			return fmt.Errorf("providers.%s.extraHeaders[%s] 头名称含非法字符（只允许字母、数字与 !#$%%&'*+-.^_`|~）", name, trimmed)
+			return fmt.Errorf("%s[%s] 头名称含非法字符（只允许字母、数字与 !#$%%&'*+-.^_`|~）", label, trimmed)
 		}
 		if ExtraHeaderBlocked(trimmed) {
-			return fmt.Errorf("providers.%s.extraHeaders 不能设置 %s（鉴权与正文类型头由网关维护，User-Agent 请用 userAgent 字段）", name, trimmed)
+			userAgentField := "userAgent"
+			if strings.HasPrefix(label, "globalUpstreamExtras.") {
+				userAgentField = "globalUserAgent.<format>"
+			}
+			return fmt.Errorf("%s 不能设置 %s（鉴权与正文类型头由网关维护，User-Agent 请用 %s 字段）", label, trimmed, userAgentField)
 		}
 		if n := utf8.RuneCountInString(value); n > maxExtraHeaderValueRunes {
-			return fmt.Errorf("providers.%s.extraHeaders[%s] 取值长度应不超过 %d 个字符（当前 %d）", name, trimmed, maxExtraHeaderValueRunes, n)
+			return fmt.Errorf("%s[%s] 取值长度应不超过 %d 个字符（当前 %d）", label, trimmed, maxExtraHeaderValueRunes, n)
 		}
 		for _, r := range value {
 			// 头值里的换行会被上游解析成新的头，属于请求头注入，必须拒绝。
 			if (r < 0x20 && r != '\t') || r == 0x7F {
-				return fmt.Errorf("providers.%s.extraHeaders[%s] 取值不能包含 ASCII 控制字符", name, trimmed)
+				return fmt.Errorf("%s[%s] 取值不能包含 ASCII 控制字符", label, trimmed)
 			}
 		}
 	}

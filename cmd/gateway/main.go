@@ -217,7 +217,7 @@ type cacheRuntime interface {
 }
 
 type visionRuntime interface {
-	Translate(context.Context, []any, *config.Provider, string, vision.LogFunc) ([]any, vision.Result)
+	Translate(context.Context, []any, *config.Provider, string, vision.LogFunc, ...vision.RequestExtras) ([]any, vision.Result)
 	SetDirectMode(bool)
 }
 
@@ -901,10 +901,18 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		if !vp.UsesKeyList() {
 			vp.APIKey = router.ResolveAPIKey(vp, r.Header)
 		}
+		// 视觉翻译固定构造 OpenAI Chat 请求，因此按 openai 取全局默认项，而不是按
+		// 视觉 Provider 的配置 format 猜测。Provider 局部 extraHeaders/body 维持
+		// 既有的不参与视觉请求的行为；UA 则仍是 Provider > 全局。
+		visionExtras := vision.RequestExtras{GlobalUserAgent: cfg.GlobalUserAgent.ForFormat("openai")}
+		if extras := cfg.GlobalUpstreamExtras.ForFormat("openai"); extras != nil {
+			visionExtras.GlobalHeaders = extras.Headers
+			visionExtras.GlobalBody = extras.Body
+		}
 		reqLog.VisionModel = matched.VisionModel
 		var visionResult vision.Result
 		internal.Messages, visionResult = s.translator.Translate(r.Context(), internal.Messages, vp, matched.VisionModel,
-			func(f string, a ...any) { logf(reqID, f, a...) })
+			func(f string, a ...any) { logf(reqID, f, a...) }, visionExtras)
 		reqLog.VisionImages = visionResult.Total
 		reqLog.VisionCached = visionResult.Cached
 		reqLog.VisionRecognized = visionResult.Recognized
@@ -1816,10 +1824,25 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 		// 仍须补上现有的全局默认值，保证改动前逐字节兼容。
 		converter.EnsureMaxTokens(upstreamMap, p.Format)
 	}
+	// 全局按格式 body 是最低优先级默认层，先于既有的 Provider → Route → Target
+	// 局部合并写入；不改动候选 ExtraBody 内已经固定的相对顺序或覆盖语义。
+	// model / messages / input / stream / max_tokens 系列仍由 ApplyExtraBody 的黑名单挡住。
+	var (
+		globalExtras    *config.UpstreamExtras
+		globalHeaders   map[string]string
+		globalUserAgent string
+	)
+	if cfg != nil {
+		globalExtras = cfg.GlobalUpstreamExtras.ForFormat(p.Format)
+		globalUserAgent = cfg.GlobalUserAgent.ForFormat(p.Format)
+	}
+	if globalExtras != nil {
+		globalHeaders = globalExtras.Headers
+		proxy.ApplyExtraBody(upstreamMap, globalExtras.Body)
+	}
 	// extraBody 在所有网关维护字段（maxTokens 等）写完之后合并，配置值最终生效；
-	// model / messages / input / stream / max_tokens 系列由黑名单挡住。候选的 ExtraBody
-	// 已由 router 按 provider → route → target 叠加好，用于上游要求而三种标准格式都
-	// 不产出的私有字段，典型如 enable_thinking: true。
+	// 候选的 ExtraBody 已由 router 按 provider → route → target 叠加好，用于上游
+	// 要求而三种标准格式都不产出的私有字段，典型如 enable_thinking: true。
 	proxy.ApplyExtraBody(upstreamMap, in.candidate.ExtraBody)
 	if p.AuthType == "chatgptOAuth" {
 		// ChatGPT Codex Responses 端点只接受流式请求；非流式客户端由 proxy 在
@@ -2093,6 +2116,8 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 		HeaderTimeoutMs:       headerTimeoutMs,
 		StreamActivityTimeout: activityTimeoutMs,
 		HTTPClient:            client,
+		GlobalUserAgent:       globalUserAgent,
+		GlobalHeaders:         globalHeaders,
 		// Codex 的 namespace 工具在请求侧被展平成顶层 function，响应侧要按这张映射
 		// 把扁平名改回 {name, namespace}，否则 Codex 报 unsupported call。
 		ToolNamespaces: in.internal.ToolNamespaces,

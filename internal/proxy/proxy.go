@@ -112,6 +112,12 @@ type Options struct {
 	HeaderTimeoutMs       int // 流式：等上游响应头的超时（毫秒）。为 0 时回退用 TimeoutMs，保证非直通调用方行为不变
 	StreamActivityTimeout int
 	HTTPClient            *http.Client
+	// GlobalHeaders 是已按实际目标 Provider.Format 选出的全局默认头。它必须在
+	// Provider.ExtraHeaders 之前写入，确保 Provider 的既有覆盖位置保持不变。
+	GlobalHeaders map[string]string
+	// GlobalUserAgent 是 Provider.userAgent 为空时的第二级 UA 兜底；再之后才转发
+	// 客户端 UA，三者都没有时不显式设头，保留 Go 默认行为。
+	GlobalUserAgent string
 	// ShouldRetry 为 nil 时行为与不支持转移的旧版本完全一致。
 	// 流式响应一旦向客户端提交（预读阶段结束、写出 200 头）就不再询问：已发出的
 	// SSE 字节不可回收。预读阶段发现上游流内失败事件时仍会询问一次，此时
@@ -652,7 +658,7 @@ func handleResponse(ctx context.Context, resp *http.Response, opts *Options) err
 
 // setRequestHeaders 在通用 provider 头基础上写入本次调用的 OAuth 凭据。
 func setRequestHeaders(req *http.Request, opts *Options, clientUserAgent string) {
-	setUpstreamHeaders(req, opts.Provider, clientUserAgent)
+	setUpstreamHeadersWithGlobal(req, opts.Provider, clientUserAgent, opts.GlobalUserAgent, opts.GlobalHeaders)
 	if opts.Provider.AuthType != "chatgptOAuth" {
 		return
 	}

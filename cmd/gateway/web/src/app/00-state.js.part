@@ -218,6 +218,14 @@
                     directTimeoutStreamActive: 120000,
                     // 留空由后端填默认安全余量；显式 0 也有意义，不能用 || 兜底。
                     contextSafetyMargin: 4096,
+                    // 按上游格式的全局默认扩展。表单用有序行数组，保存时再还原成 map；
+                    // 空数组等同未配置，不会在 YAML 里产生空对象。
+                    globalUserAgent: { anthropic: '', openai: '', 'openai-responses': '' },
+                    globalUpstreamExtras: {
+                        anthropic: { headers: [], body: [] },
+                        openai: { headers: [], body: [] },
+                        'openai-responses': { headers: [], body: [] }
+                    },
                     providers: {},
                     routes: [],
                     // 必须给出初始形状：loadConfig() 返回前 x-model / x-show 就会求值

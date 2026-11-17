@@ -96,6 +96,56 @@ func TestSetUpstreamHeadersExtraHeadersCannotBreakAuth(t *testing.T) {
 	}
 }
 
+// 全局默认头必须在 Provider 的既有 extraHeaders 之前写入；User-Agent 则走专用的
+// Provider > 全局 > 客户端 > Go 默认优先级，不能借通用 headers 绕过。
+func TestSetUpstreamHeadersWithGlobalDefaults(t *testing.T) {
+	tests := []struct {
+		name       string
+		providerUA string
+		globalUA   string
+		clientUA   string
+		wantUA     string
+	}{
+		{name: "provider wins", providerUA: "provider-agent/1.0", globalUA: "global-agent/1.0", clientUA: "client-agent/1.0", wantUA: "provider-agent/1.0"},
+		{name: "global wins over client", globalUA: "global-agent/1.0", clientUA: "client-agent/1.0", wantUA: "global-agent/1.0"},
+		{name: "client remains fallback", clientUA: "client-agent/1.0", wantUA: "client-agent/1.0"},
+		{name: "no explicit header leaves go default to transport", wantUA: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "http://gateway.invalid", nil)
+			setUpstreamHeadersWithGlobal(req, &config.Provider{
+				Format:    "openai",
+				APIKey:    "real-key",
+				UserAgent: tt.providerUA,
+				ExtraHeaders: map[string]string{
+					"x-collision":   "provider",
+					"authorization": "provider-hijack",
+				},
+			}, tt.clientUA, tt.globalUA, map[string]string{
+				"x-global":      "global",
+				"x-collision":   "global",
+				"Authorization": "global-hijack",
+				"User-Agent":    "global-hijack-agent",
+			})
+
+			if got := req.Header.Get("User-Agent"); got != tt.wantUA {
+				t.Fatalf("User-Agent = %q, want %q", got, tt.wantUA)
+			}
+			if got := req.Header.Get("x-global"); got != "global" {
+				t.Errorf("x-global = %q, want global", got)
+			}
+			if got := req.Header.Get("x-collision"); got != "provider" {
+				t.Errorf("x-collision = %q, want provider", got)
+			}
+			if got := req.Header.Get("Authorization"); got != "Bearer real-key" {
+				t.Errorf("Authorization = %q, want protected upstream credential", got)
+			}
+		})
+	}
+}
+
 func TestApplyExtraHeadersNilAndEmpty(t *testing.T) {
 	// nil 与空 map 都必须是空操作：逐字节兼容未配置该字段的既有行为。
 	for _, extra := range []map[string]string{nil, {}} {

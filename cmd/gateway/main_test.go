@@ -221,8 +221,16 @@ func TestHandleStoresVisionResultWithoutChangingRequestSuccess(t *testing.T) {
 			Host: "127.0.0.1", Port: 7789,
 			Timeout: 500, StreamActivityTimeout: 500,
 			DirectMode: true, DirectTimeoutNoStream: 500, DirectTimeoutStreamHeader: 500, DirectTimeoutStreamActive: 500,
-			Providers: map[string]*config.Provider{"primary": primary, "visual": visual},
-			Routes:    []config.Route{{Match: "*", Provider: "primary", Model: "upstream", Vision: &config.Vision{Provider: "visual", Model: "vision-model"}}},
+			Providers:       map[string]*config.Provider{"primary": primary, "visual": visual},
+			Routes:          []config.Route{{Match: "*", Provider: "primary", Model: "upstream", Vision: &config.Vision{Provider: "visual", Model: "vision-model"}}},
+			GlobalUserAgent: &config.GlobalUserAgents{OpenAI: "global-vision-agent/1.0"},
+			GlobalUpstreamExtras: &config.GlobalUpstreamExtras{
+				Anthropic: &config.UpstreamExtras{Headers: map[string]string{"x-wrong-format": "anthropic"}},
+				OpenAI: &config.UpstreamExtras{
+					Headers: map[string]string{"x-global-vision": "openai"},
+					Body:    map[string]any{"enable_thinking": true},
+				},
+			},
 		},
 		qm:                queue.NewManager(),
 		resolveHTTPClient: testClientResolver(upstream.Client()),
@@ -248,6 +256,16 @@ func TestHandleStoresVisionResultWithoutChangingRequestSuccess(t *testing.T) {
 	}
 	if logs[0].VisionFailCategory != "upstream_http" || logs[0].VisionFailMessage == "" {
 		t.Fatalf("vision failure detail = %#v", logs[0])
+	}
+	if len(spy.extras) != 1 {
+		t.Fatalf("vision extras calls = %#v, want exactly one", spy.extras)
+	}
+	gotExtras := spy.extras[0]
+	if gotExtras.GlobalUserAgent != "global-vision-agent/1.0" || gotExtras.GlobalHeaders["x-global-vision"] != "openai" || gotExtras.GlobalBody["enable_thinking"] != true {
+		t.Fatalf("vision should receive openai global defaults, got %#v", gotExtras)
+	}
+	if gotExtras.GlobalHeaders["x-wrong-format"] != "" {
+		t.Fatalf("vision must not receive a non-openai global default: %#v", gotExtras.GlobalHeaders)
 	}
 }
 
@@ -2540,10 +2558,14 @@ type runtimeVisionSpy struct {
 	// translateCalls 记录翻译器被调用的次数，供「vision provider 已禁用时
 	// 一次上游翻译都不该发生」这类断言使用。
 	translateCalls int
+	extras         []vision.RequestExtras
 }
 
-func (s *runtimeVisionSpy) Translate(_ context.Context, messages []any, _ *config.Provider, _ string, _ vision.LogFunc) ([]any, vision.Result) {
+func (s *runtimeVisionSpy) Translate(_ context.Context, messages []any, _ *config.Provider, _ string, _ vision.LogFunc, extras ...vision.RequestExtras) ([]any, vision.Result) {
 	s.translateCalls++
+	if len(extras) > 0 {
+		s.extras = append(s.extras, extras[0])
+	}
 	return messages, s.result
 }
 func (s *runtimeVisionSpy) SetDirectMode(enabled bool) { s.modes = append(s.modes, enabled) }

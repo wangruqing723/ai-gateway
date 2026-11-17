@@ -21,6 +21,7 @@ import (
 	"ai-gateway/internal/cache"
 	"ai-gateway/internal/config"
 	"ai-gateway/internal/keypool"
+	"ai-gateway/internal/proxy"
 	"ai-gateway/internal/queue"
 )
 
@@ -36,6 +37,15 @@ type LogFunc func(format string, args ...any)
 
 // ClientResolver 按视觉 provider 的代理配置返回该用的 HTTP client。
 type ClientResolver func(proxyURL string) (*http.Client, error)
+
+// RequestExtras 是网关为一次视觉 OpenAI Chat 请求传入的全局默认层。
+// Provider 自己的 extraHeaders / extraBody 过去从未用于视觉识别，因此这里有意只接收
+// 新增的全局项，避免改变既有 Provider 局部扩展的作用范围。
+type RequestExtras struct {
+	GlobalHeaders   map[string]string
+	GlobalBody      map[string]any
+	GlobalUserAgent string
+}
 
 // Translator 图片识别翻译器
 type Translator struct {
@@ -177,7 +187,12 @@ type stats struct {
 }
 
 // Translate 遍历消息，将图片块替换为文字描述，对齐 Node 版 translateImages。
-func (t *Translator) Translate(ctx context.Context, messages []any, vision *config.Provider, visionModel string, log LogFunc) ([]any, Result) {
+// extras 是可选参数，保留旧调用方的行为；网关主转发会传入全局 OpenAI 默认项。
+func (t *Translator) Translate(ctx context.Context, messages []any, vision *config.Provider, visionModel string, log LogFunc, values ...RequestExtras) ([]any, Result) {
+	extras := RequestExtras{}
+	if len(values) > 0 {
+		extras = values[0]
+	}
 	idx := 0
 	st := &stats{}
 	out := make([]any, 0, len(messages))
@@ -193,7 +208,7 @@ func (t *Translator) Translate(ctx context.Context, messages []any, vision *conf
 			out = append(out, m)
 			continue
 		}
-		newContent := t.processBlocks(ctx, content, vision, visionModel, &idx, st, log)
+		newContent := t.processBlocks(ctx, content, vision, visionModel, &idx, st, log, extras)
 		newMsg := make(map[string]any, len(msg))
 		for k, v := range msg {
 			newMsg[k] = v
@@ -233,7 +248,7 @@ func (t *Translator) Translate(ctx context.Context, messages []any, vision *conf
 }
 
 // processBlocks 递归处理 content 数组，替换 image 块为文字描述。
-func (t *Translator) processBlocks(ctx context.Context, blocks []any, vision *config.Provider, visionModel string, idx *int, st *stats, log LogFunc) []any {
+func (t *Translator) processBlocks(ctx context.Context, blocks []any, vision *config.Provider, visionModel string, idx *int, st *stats, log LogFunc, extras RequestExtras) []any {
 	out := make([]any, 0, len(blocks))
 	for _, b := range blocks {
 		if ctx.Err() != nil {
@@ -248,7 +263,7 @@ func (t *Translator) processBlocks(ctx context.Context, blocks []any, vision *co
 		case "image":
 			*idx++
 			n := *idx
-			text, fromCache, err := t.callVision(ctx, block, vision, visionModel)
+			text, fromCache, err := t.callVision(ctx, block, vision, visionModel, extras)
 			if err != nil {
 				st.failed++
 				if st.firstFailure == nil {
@@ -270,7 +285,7 @@ func (t *Translator) processBlocks(ctx context.Context, blocks []any, vision *co
 			out = append(out, map[string]any{"type": "text", "text": fmt.Sprintf("[图片描述 #%d]\n%s\n[/图片描述 #%d]", n, text, n)})
 		case "tool_result":
 			if inner, ok := block["content"].([]any); ok {
-				newInner := t.processBlocks(ctx, inner, vision, visionModel, idx, st, log)
+				newInner := t.processBlocks(ctx, inner, vision, visionModel, idx, st, log, extras)
 				newBlock := make(map[string]any, len(block))
 				for k, v := range block {
 					newBlock[k] = v
@@ -288,7 +303,11 @@ func (t *Translator) processBlocks(ctx context.Context, blocks []any, vision *co
 }
 
 // callVision 识别单张图片：先查缓存，再 singleflight 去重，最后经队列调用视觉 API。
-func (t *Translator) callVision(ctx context.Context, imageBlock map[string]any, vision *config.Provider, visionModel string) (text string, fromCache bool, err error) {
+func (t *Translator) callVision(ctx context.Context, imageBlock map[string]any, vision *config.Provider, visionModel string, values ...RequestExtras) (text string, fromCache bool, err error) {
+	extras := RequestExtras{}
+	if len(values) > 0 {
+		extras = values[0]
+	}
 	if err := ctx.Err(); err != nil {
 		return "", false, err
 	}
@@ -327,7 +346,7 @@ func (t *Translator) callVision(ctx context.Context, imageBlock map[string]any, 
 			waiters: 1,
 		}
 		t.pending[hash] = r
-		go t.runRecognition(sharedCtx, hash, r, imageBlock, vision, visionModel)
+		go t.runRecognition(sharedCtx, hash, r, imageBlock, vision, visionModel, extras)
 	}
 	t.mu.Unlock()
 	defer t.leaveRecognition(hash, r)
@@ -341,10 +360,10 @@ func (t *Translator) callVision(ctx context.Context, imageBlock map[string]any, 
 }
 
 // runRecognition 在独立 goroutine 中执行一次共享识别，并统一发布结果和写入缓存。
-func (t *Translator) runRecognition(ctx context.Context, hash string, r *recognition, imageBlock map[string]any, vision *config.Provider, visionModel string) {
+func (t *Translator) runRecognition(ctx context.Context, hash string, r *recognition, imageBlock map[string]any, vision *config.Provider, visionModel string, extras RequestExtras) {
 	defer r.cancel()
 
-	text, err := t.recognize(ctx, imageBlock, vision, visionModel)
+	text, err := t.recognize(ctx, imageBlock, vision, visionModel, extras)
 	if err == nil {
 		_ = t.cache.Set(hash, text)
 	}
@@ -358,13 +377,13 @@ func (t *Translator) runRecognition(ctx context.Context, hash string, r *recogni
 	t.mu.Unlock()
 }
 
-func (t *Translator) recognize(ctx context.Context, imageBlock map[string]any, vision *config.Provider, visionModel string) (string, error) {
+func (t *Translator) recognize(ctx context.Context, imageBlock map[string]any, vision *config.Provider, visionModel string, extras RequestExtras) (string, error) {
 	if vision.UsesKeyList() {
-		return t.doRecognize(ctx, imageBlock, vision, visionModel)
+		return t.doRecognize(ctx, imageBlock, vision, visionModel, extras)
 	}
 	if t.directMode.Load() {
 		// 直通模式：跳过队列，直接识别
-		return t.doRecognize(ctx, imageBlock, vision, visionModel)
+		return t.doRecognize(ctx, imageBlock, vision, visionModel, extras)
 	}
 
 	// 经队列控制视觉 provider 并发
@@ -373,7 +392,7 @@ func (t *Translator) recognize(ctx context.Context, imageBlock map[string]any, v
 		return "", err
 	}
 	defer release()
-	return t.doRecognize(ctx, imageBlock, vision, visionModel)
+	return t.doRecognize(ctx, imageBlock, vision, visionModel, extras)
 }
 
 // leaveRecognition 注销一个调用方；最后一个 waiter 离开时取消共享上游。
@@ -394,7 +413,11 @@ func (t *Translator) leaveRecognition(hash string, r *recognition) {
 }
 
 // doRecognize 实际调用视觉模型（OpenAI /chat/completions 格式）。
-func (t *Translator) doRecognize(ctx context.Context, imageBlock map[string]any, vision *config.Provider, visionModel string) (string, error) {
+func (t *Translator) doRecognize(ctx context.Context, imageBlock map[string]any, vision *config.Provider, visionModel string, values ...RequestExtras) (string, error) {
+	extras := RequestExtras{}
+	if len(values) > 0 {
+		extras = values[0]
+	}
 	if vision.UsesKeyList() {
 		if t.keyPool == nil {
 			return "", fmt.Errorf("没有可选择的 Provider 密钥")
@@ -410,7 +433,7 @@ func (t *Translator) doRecognize(ctx context.Context, imageBlock map[string]any,
 				return "", fmt.Errorf("没有可选择的 Provider 密钥")
 			}
 
-			text, err := t.recognizeWithKey(ctx, imageBlock, vision, visionModel, ticket.Key.Value)
+			text, err := t.recognizeWithKey(ctx, imageBlock, vision, visionModel, ticket.Key.Value, extras)
 			if err == nil {
 				t.keyPool.Report(ticket, http.StatusOK, 0)
 				return text, nil
@@ -425,35 +448,42 @@ func (t *Translator) doRecognize(ctx context.Context, imageBlock map[string]any,
 			lastErr = err
 		}
 	}
-	return t.doRecognizeRequest(ctx, imageBlock, vision, visionModel, vision.APIKey, false)
+	return t.doRecognizeRequest(ctx, imageBlock, vision, visionModel, vision.APIKey, false, extras)
 }
 
-func (t *Translator) recognizeWithKey(ctx context.Context, imageBlock map[string]any, vision *config.Provider, visionModel, apiKey string) (string, error) {
+func (t *Translator) recognizeWithKey(ctx context.Context, imageBlock map[string]any, vision *config.Provider, visionModel, apiKey string, extras RequestExtras) (string, error) {
 	if t.directMode.Load() {
-		return t.doRecognizeRequest(ctx, imageBlock, vision, visionModel, apiKey, true)
+		return t.doRecognizeRequest(ctx, imageBlock, vision, visionModel, apiKey, true, extras)
 	}
 	release, _, err := t.qm.Acquire(ctx, vision.Name, vision.MaxConcurrent, vision.MaxPerSecond, vision.MaxQueueWait)
 	if err != nil {
 		return "", err
 	}
 	defer release()
-	return t.doRecognizeRequest(ctx, imageBlock, vision, visionModel, apiKey, true)
+	return t.doRecognizeRequest(ctx, imageBlock, vision, visionModel, apiKey, true, extras)
 }
 
-func (t *Translator) doRecognizeRequest(ctx context.Context, imageBlock map[string]any, vision *config.Provider, visionModel, apiKey string, keyListMode bool) (string, error) {
+func (t *Translator) doRecognizeRequest(ctx context.Context, imageBlock map[string]any, vision *config.Provider, visionModel, apiKey string, keyListMode bool, extras RequestExtras) (string, error) {
 	openAIBlock, err := toOpenAIImageBlock(imageBlock)
 	if err != nil {
 		return "", err
 	}
 
-	reqBody, _ := json.Marshal(map[string]any{
+	body := map[string]any{
 		"model":                 visionModel,
 		"max_completion_tokens": 3000,
 		"messages": []any{map[string]any{
 			"role":    "user",
 			"content": []any{openAIBlock, map[string]any{"type": "text", "text": visionPrompt}},
 		}},
-	})
+	}
+	// 视觉请求固定使用 OpenAI Chat 协议；调用方已据此选择全局 openai body。全局层
+	// 放在网关维护字段之后，仍由 ApplyExtraBody 的运行时黑名单保护。
+	proxy.ApplyExtraBody(body, extras.GlobalBody)
+	reqBody, err := json.Marshal(body)
+	if err != nil {
+		return "", fmt.Errorf("视觉 API 请求体序列化失败: %w", err)
+	}
 
 	url := buildVisionURL(vision.BaseURL)
 	// 超时由共享识别 context 控制，无需在 HTTP 层重复叠加。
@@ -463,12 +493,16 @@ func (t *Translator) doRecognizeRequest(ctx context.Context, imageBlock map[stri
 	}
 	req.Header.Set("content-type", "application/json")
 	req.Header.Set("authorization", "Bearer "+apiKey)
-	// 视觉识别也是网关自己发起的上游请求，同样受 UA 门禁型 provider 影响
-	// （实测 agentrouter.org 系上游对 Go 默认 UA 返回 401 unauthorized client）。
-	// 与 providerhealth / fetchUpstreamModels 同语义：配了就用，没配不设头。
+	// 视觉识别也是网关自己发起的上游请求，同样受 UA 门禁型 provider 影响。
+	// 优先级与主转发一致：Provider > 全局；两者都空时不设头，交给 Go 默认值。
 	if vision.UserAgent != "" {
 		req.Header.Set("User-Agent", vision.UserAgent)
+	} else if extras.GlobalUserAgent != "" {
+		req.Header.Set("User-Agent", extras.GlobalUserAgent)
 	}
+	// 不接入 Provider.ExtraHeaders：它此前不属于视觉识别路径。这里只写新增的全局
+	// 默认头，并复用 proxy 的运行时黑名单，避免认证、Content-Type、UA 被绕过校验覆盖。
+	proxy.ApplyExtraHeaders(req.Header, extras.GlobalHeaders)
 
 	if t.resolve == nil {
 		return "", fmt.Errorf("HTTP client 解析器未初始化")

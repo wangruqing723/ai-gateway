@@ -25,6 +25,38 @@ directTimeoutStreamActive: 120000 # 流式活跃超时，5000-600000
 # 图片按每张固定 1500 token 估算，不按 base64 长度计；估算值只是安全近似值。
 contextSafetyMargin: 4096      # 估算误差补偿，默认 4096；允许写 0
 
+# ── 全局上游请求默认项（可选）─────────────────────────────────
+# 按实际目标 Provider 的 format 选择，不按客户端入口协议选择；例如 Claude 请求被
+# 转成 OpenAI Chat 后，使用的是 openai 这一项。每项都是最低优先级的兜底：
+# 请求体顺序为「全局 → Provider → 路由 → 候选」，同名键由后者覆盖；请求头则为
+# 「全局 → Provider extraHeaders」。不配置整段或其中任一格式都不会改变现有行为。
+#
+# globalUserAgent: # 可选专用 UA，按目标格式分别配置；不能放进 headers。
+#   anthropic: "gateway-anthropic/1.0"
+#   openai: "gateway-openai/1.0"
+#   openai-responses: "gateway-responses/1.0"
+#   # 每种格式的优先级：Provider userAgent → 对应格式的全局值
+#   # → 客户端 User-Agent → Go 默认值。
+# globalUpstreamExtras:
+#   anthropic:
+#     headers:
+#       anthropic-beta: "prompt-caching-2024-07-31"
+#     body:
+#       metadata: { gateway: "ai-gateway" }
+#   openai:
+#     headers:
+#       X-Gateway-Default: "shared"
+#     body:
+#       enable_thinking: true
+#   openai-responses:
+#     body:
+#       reasoning: { effort: "high" }
+#
+# headers/body 与 Provider 的 extraHeaders/extraBody 共用相同安全边界：Authorization、
+# x-api-key、Content-Type、User-Agent 以及 model/messages/input/stream/max_tokens 系列均
+# 不可在此覆盖。它们会用于对应格式的模型推理请求（含视觉识别）；/v1/models、健康
+# 检测等无请求体的管理请求不注入这些格式化默认 body。
+
 # ── 故障转移（failover，可选）─────────────────────────────────
 # 给路由配多个候选目标（见下方 routes 的 targets 写法）后，某个候选失败时
 # 自动换下一个候选重试。默认关闭；不写这个字段即为关闭，行为与单目标完全一致。

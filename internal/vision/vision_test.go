@@ -2,6 +2,7 @@ package vision
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -71,6 +72,83 @@ func TestDoRecognizeSendsConfiguredUserAgent(t *testing.T) {
 			case gotUA == "":
 				// 未配置时不得 Set 空 UA（那会让该头彻底消失），应留给 Go 默认值 Go-http-client/1.1。
 				t.Fatal("未配置 userAgent 时 User-Agent 头消失，服务端收不到任何 UA")
+			}
+		})
+	}
+}
+
+// 图片识别本身固定走 OpenAI Chat 请求，但仍必须接收网关选出的全局 openai 默认项。
+// Provider 局部 extraHeaders/extraBody 过去不参与视觉路径，不能因新增全局项而被顺手带入。
+func TestDoRecognizeAppliesGlobalRequestDefaults(t *testing.T) {
+	tests := []struct {
+		name       string
+		providerUA string
+		globalUA   string
+		wantUA     string
+	}{
+		{name: "provider user agent wins", providerUA: "vision-provider/1.0", globalUA: "global-agent/1.0", wantUA: "vision-provider/1.0"},
+		{name: "global user agent is fallback", globalUA: "global-agent/1.0", wantUA: "global-agent/1.0"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotHeader http.Header
+			var gotBody map[string]any
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotHeader = r.Header.Clone()
+				if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+					t.Errorf("decode vision body: %v", err)
+				}
+				writeVisionResponse(t, w, "ok")
+			}))
+			defer server.Close()
+
+			translator := &Translator{resolve: func(string) (*http.Client, error) { return server.Client(), nil }}
+			provider := &config.Provider{
+				BaseURL: server.URL, APIKey: "test-key", Format: "openai", UserAgent: tt.providerUA,
+				ExtraHeaders: map[string]string{"x-provider-only": "must-not-reach-vision"},
+				ExtraBody:    map[string]any{"provider_only": "must-not-reach-vision"},
+			}
+			extras := RequestExtras{
+				GlobalUserAgent: tt.globalUA,
+				GlobalHeaders: map[string]string{
+					"x-global-vision": "enabled",
+					"authorization":   "hijacked",
+					"User-Agent":      "hijacked-agent",
+				},
+				GlobalBody: map[string]any{
+					"enable_thinking":       true,
+					"model":                 "hijacked-model",
+					"max_completion_tokens": 1,
+				},
+			}
+
+			if _, err := translator.doRecognize(context.Background(), imageBlock("global-defaults"), provider, "vision-model", extras); err != nil {
+				t.Fatalf("doRecognize() error = %v", err)
+			}
+			if got := gotHeader.Get("User-Agent"); got != tt.wantUA {
+				t.Errorf("User-Agent = %q, want %q", got, tt.wantUA)
+			}
+			if got := gotHeader.Get("x-global-vision"); got != "enabled" {
+				t.Errorf("x-global-vision = %q", got)
+			}
+			if got := gotHeader.Get("authorization"); got != "Bearer test-key" {
+				t.Errorf("authorization = %q, want protected key", got)
+			}
+			if got := gotHeader.Get("x-provider-only"); got != "" {
+				t.Errorf("provider-only visual header unexpectedly reached request: %q", got)
+			}
+			if got := gotBody["enable_thinking"]; got != true {
+				t.Errorf("enable_thinking = %#v, want true", got)
+			}
+			if got := gotBody["model"]; got != "vision-model" {
+				t.Errorf("model = %#v, want managed vision-model", got)
+			}
+			if got := gotBody["max_completion_tokens"]; got != float64(3000) {
+				t.Errorf("max_completion_tokens = %#v, want managed 3000", got)
+			}
+			if _, ok := gotBody["provider_only"]; ok {
+				t.Errorf("provider-only visual body unexpectedly reached request: %#v", gotBody)
 			}
 		})
 	}

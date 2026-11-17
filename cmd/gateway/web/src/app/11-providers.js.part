@@ -2077,6 +2077,36 @@
                     this.providerForm.extraBody.splice(index, 1);
                 },
 
+                // 全局按格式默认项复用 Provider 的行编辑和 JSON 值解析体验；差别只在于
+                // 它们是最低优先级兜底，不属于某个 Provider 的局部高级设置。
+                globalUpstreamExtraForm(format) {
+                    this.config.globalUpstreamExtras = this.config.globalUpstreamExtras || {};
+                    let entry = this.config.globalUpstreamExtras[format];
+                    if (!entry || typeof entry !== 'object') {
+                        entry = { headers: [], body: [] };
+                        this.config.globalUpstreamExtras[format] = entry;
+                    }
+                    if (!Array.isArray(entry.headers)) entry.headers = this.headersToRows(entry.headers);
+                    if (!Array.isArray(entry.body)) entry.body = this.bodyToRows(entry.body);
+                    return entry;
+                },
+
+                addGlobalExtraHeaderRow(format) {
+                    this.globalUpstreamExtraForm(format).headers.push({ key: '', value: '' });
+                },
+
+                removeGlobalExtraHeaderRow(format, index) {
+                    this.globalUpstreamExtraForm(format).headers.splice(index, 1);
+                },
+
+                addGlobalExtraBodyRow(format) {
+                    this.globalUpstreamExtraForm(format).body.push({ key: '', value: '' });
+                },
+
+                removeGlobalExtraBodyRow(format, index) {
+                    this.globalUpstreamExtraForm(format).body.splice(index, 1);
+                },
+
                 // extraBodyBlocked 与后端 config.extraBodyBlocklist 同名单，表单里即时标红。
                 extraBodyBlocked(key) {
                     const name = (key || '').trim().toLowerCase();

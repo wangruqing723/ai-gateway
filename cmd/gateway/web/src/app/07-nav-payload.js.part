@@ -76,6 +76,30 @@
                     return ['providers', 'routes', 'settings'].includes(this.activeTab);
                 },
 
+                // 专用全局 User-Agent 按实际上游格式分别保存；空值不写入配置。
+                globalUserAgentPayload() {
+                    const source = this.config.globalUserAgent || {};
+                    const out = {};
+                    ['anthropic', 'openai', 'openai-responses'].forEach((format) => {
+                        if (source[format]) out[format] = source[format];
+                    });
+                    return Object.keys(out).length ? out : undefined;
+                },
+
+                // 将全局按格式的行编辑表单折回后端配置形状。空格式项与整块空配置都不下发，
+                // 保持 yaml/json omitempty 的干净语义；headers/body 仍复用现有解析与黑名单校验。
+                globalUpstreamExtrasPayload() {
+                    const source = this.config.globalUpstreamExtras || {};
+                    const out = {};
+                    ['anthropic', 'openai', 'openai-responses'].forEach((format) => {
+                        const entry = source[format] || {};
+                        const headers = this.rowsToHeaders(entry.headers);
+                        const body = this.rowsToBody(entry.body);
+                        if (headers || body) out[format] = { headers, body };
+                    });
+                    return Object.keys(out).length ? out : undefined;
+                },
+
                 configPayload() {
                     const providers = {};
                     Object.entries(this.config.providers || {}).forEach(([name, provider]) => {
@@ -144,6 +168,9 @@
                         directTimeoutStreamHeader: this.config.directTimeoutStreamHeader || 60000,
                         directTimeoutStreamActive: this.config.directTimeoutStreamActive || 120000,
                         contextSafetyMargin: this.numOrNull(this.config.contextSafetyMargin),
+                        // globalUserAgent 是按上游格式区分的独立字段，不能写入通用 headers。
+                        globalUserAgent: this.globalUserAgentPayload(),
+                        globalUpstreamExtras: this.globalUpstreamExtrasPayload(),
                         providers,
                         routes: JSON.parse(JSON.stringify(this.config.routes || [])),
                         // failover / breaker / providerHealth 必须带上：PUT 是全量替换，漏掉就会静默丢配置

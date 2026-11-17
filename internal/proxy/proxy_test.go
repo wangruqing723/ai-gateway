@@ -676,17 +676,25 @@ func TestForwardSendsExpectedUserAgent(t *testing.T) {
 	tests := []struct {
 		name       string
 		providerUA string
+		globalUA   string
 		clientUA   string
 		wantUA     string
 	}{
 		{
-			name:       "provider user agent overrides client user agent",
+			name:       "provider user agent overrides global and client user agent",
 			providerUA: "provider-agent/1.0",
+			globalUA:   "global-agent/1.0",
 			clientUA:   "client-agent/2.0",
 			wantUA:     "provider-agent/1.0",
 		},
 		{
-			name:     "client user agent is forwarded when provider is not configured",
+			name:     "global user agent overrides client user agent when provider is not configured",
+			globalUA: "global-agent/1.0",
+			clientUA: "client-agent/2.0",
+			wantUA:   "global-agent/1.0",
+		},
+		{
+			name:     "client user agent is forwarded when provider and global are not configured",
 			clientUA: "client-agent/2.0",
 			wantUA:   "client-agent/2.0",
 		},
@@ -714,6 +722,7 @@ func TestForwardSendsExpectedUserAgent(t *testing.T) {
 			recorder := httptest.NewRecorder()
 			opts := forwardTestOptions(upstream, recorder, "openai", "openai-chat", false, 0, 0)
 			opts.Provider.UserAgent = tt.providerUA
+			opts.GlobalUserAgent = tt.globalUA
 			if tt.clientUA != "" {
 				opts.ClientReq.Header.Set("User-Agent", tt.clientUA)
 			}

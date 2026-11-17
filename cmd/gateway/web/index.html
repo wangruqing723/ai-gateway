@@ -641,6 +641,104 @@
                                 </div>
                             </section>
 
+                            <details x-show="activeTab === 'settings'" @toggle="$refs.globalUpstreamExtrasChevron.style.transform = $el.open ? 'rotate(180deg)' : 'rotate(0deg)'" class="glass rounded-lg p-4 sm:p-5" data-testid="global-upstream-extras">
+                                <summary class="flex cursor-pointer list-none items-start justify-between gap-3">
+                                    <div class="min-w-0">
+                                        <div class="flex flex-wrap items-center gap-2">
+                                            <h2 class="text-base font-bold text-white sm:text-lg">全局上游默认项</h2>
+                                            <span class="rounded-full border border-cyan2/30 bg-cyan2/10 px-2 py-0.5 text-[11px] font-semibold text-cyan">按格式设置</span>
+                                        </div>
+                                        <p class="mt-1 text-xs text-muted">按实际上游格式设置 User-Agent、请求头和请求体，作为全局兜底。</p>
+                                        <p class="mt-1 text-[11px] leading-5 text-muted">全局项优先级最低 · User-Agent：Provider → 同格式全局 → 客户端 → Go 默认值</p>
+                                    </div>
+                                    <svg x-ref="globalUpstreamExtrasChevron" aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="mt-1 shrink-0 text-muted" style="transition: transform 150ms ease">
+                                        <path d="m6 9 6 6 6-6"></path>
+                                    </svg>
+                                </summary>
+
+                                <div x-data="{
+                                    activeGlobalUpstreamFormat: 'anthropic',
+                                    globalUpstreamFormats: [
+                                        { key: 'anthropic', label: 'Anthropic Messages', hint: 'anthropic' },
+                                        { key: 'openai', label: 'OpenAI Chat Completions', hint: 'openai' },
+                                        { key: 'openai-responses', label: 'OpenAI Responses', hint: 'openai-responses' }
+                                    ]
+                                }" class="mt-4 space-y-3 border-t border-line/70 pt-4">
+                                    <div>
+                                        <div class="mb-2 flex flex-wrap items-center justify-between gap-2">
+                                            <span class="text-xs font-bold text-muted">上游请求格式</span>
+                                            <span class="text-[11px] text-muted">每种格式单独保存一组默认项</span>
+                                        </div>
+                                        <div class="grid grid-cols-1 gap-2 sm:grid-cols-3" role="group" aria-label="上游请求格式">
+                                            <template x-for="format in globalUpstreamFormats" :key="format.key">
+                                                <button type="button" @click="activeGlobalUpstreamFormat = format.key"
+                                                        :aria-pressed="String(activeGlobalUpstreamFormat === format.key)"
+                                                        :class="activeGlobalUpstreamFormat === format.key ? 'border-cyan2/50 bg-cyan2/15 text-cyan' : 'border-line bg-ink text-muted hover:bg-white/[.05] hover:text-text'"
+                                                        class="flex min-w-0 items-center justify-between gap-3 rounded-lg border px-3 py-2.5 text-left transition">
+                                                    <span class="min-w-0">
+                                                        <span class="block text-sm font-bold" x-text="format.label"></span>
+                                                        <code class="mt-0.5 block truncate text-[11px] opacity-80" x-text="format.hint"></code>
+                                                    </span>
+                                                    <span x-show="activeGlobalUpstreamFormat === format.key" x-cloak aria-hidden="true" class="h-2 w-2 shrink-0 rounded-full bg-cyan2"></span>
+                                                </button>
+                                            </template>
+                                        </div>
+                                    </div>
+
+                                    <p class="rounded-lg border border-line bg-panel/70 px-3 py-2 text-xs leading-5 text-muted">这些默认项只用于对应格式的模型推理请求。鉴权、内容类型、模型、消息、流式和输出上限字段由网关控制。</p>
+
+                                    <template x-for="format in globalUpstreamFormats" :key="format.key + '-settings'">
+                                        <section x-show="activeGlobalUpstreamFormat === format.key" x-cloak :aria-label="format.label + ' 默认项'" class="rounded-lg border border-line bg-ink/70 p-3 sm:p-4">
+                                            <div class="mb-3 flex flex-wrap items-center justify-between gap-2 border-b border-line pb-3">
+                                                <h3 class="text-sm font-bold text-white" x-text="format.label"></h3>
+                                                <code class="rounded bg-white/[.06] px-1.5 py-0.5 text-xs text-cyan2" x-text="format.hint"></code>
+                                            </div>
+
+                                            <label class="mb-4 block">
+                                                <span class="mb-1.5 block text-xs font-bold text-muted">该格式的全局 User-Agent</span>
+                                                <input autocomplete="off" type="text" x-model="config.globalUserAgent[format.key]" placeholder="留空则使用客户端 User-Agent 或 Go 默认值" class="field">
+                                            </label>
+
+                                            <div class="grid grid-cols-1 gap-3 lg:grid-cols-2">
+                                                <section class="min-w-0 rounded-lg border border-line bg-panel/50 p-3">
+                                                    <div class="mb-2 flex items-center justify-between gap-2 border-b border-line pb-2">
+                                                        <h4 class="text-sm font-bold text-text">请求头</h4>
+                                                        <button type="button" @click="addGlobalExtraHeaderRow(format.key)" class="btn btn-secondary px-2 py-1 text-xs">添加请求头</button>
+                                                    </div>
+                                                    <div class="space-y-2">
+                                                        <template x-for="(row, hi) in (config.globalUpstreamExtras[format.key].headers || [])" :key="format.key + '-header-' + hi">
+                                                            <div class="flex flex-col gap-2 sm:flex-row sm:items-center">
+                                                                <input autocomplete="off" type="text" x-model="row.key" :aria-label="format.label + ' 请求头名称 ' + (hi + 1)" placeholder="Header 名称" class="field min-w-0 flex-1 font-mono text-xs" :class="extraHeaderBlocked(row.key) ? 'border-danger' : ''">
+                                                                <input autocomplete="off" type="text" x-model="row.value" :aria-label="format.label + ' 请求头值 ' + (hi + 1)" placeholder="值" class="field min-w-0 flex-1 text-xs">
+                                                                <button type="button" @click="removeGlobalExtraHeaderRow(format.key, hi)" class="inline-flex h-11 w-11 shrink-0 items-center justify-center self-end rounded-lg text-muted transition hover:bg-danger/10 hover:text-danger sm:self-auto" :aria-label="'删除请求头 ' + (row.key || (hi + 1))" title="删除请求头"><span class="material-symbols-outlined text-[18px]">delete</span></button>
+                                                            </div>
+                                                        </template>
+                                                        <p x-show="!(config.globalUpstreamExtras[format.key].headers || []).length" class="rounded-lg border border-dashed border-line px-3 py-2 text-xs text-muted">未配置默认请求头</p>
+                                                    </div>
+                                                </section>
+
+                                                <section class="min-w-0 rounded-lg border border-line bg-panel/50 p-3">
+                                                    <div class="mb-2 flex items-center justify-between gap-2 border-b border-line pb-2">
+                                                        <h4 class="text-sm font-bold text-text">请求体字段</h4>
+                                                        <button type="button" @click="addGlobalExtraBodyRow(format.key)" class="btn btn-secondary px-2 py-1 text-xs">添加字段</button>
+                                                    </div>
+                                                    <div class="space-y-2">
+                                                        <template x-for="(row, bi) in (config.globalUpstreamExtras[format.key].body || [])" :key="format.key + '-body-' + bi">
+                                                            <div class="flex flex-col gap-2 sm:flex-row sm:items-center">
+                                                                <input autocomplete="off" type="text" x-model="row.key" :aria-label="format.label + ' 请求体字段名 ' + (bi + 1)" placeholder="字段名" class="field min-w-0 flex-1 font-mono text-xs" :class="extraBodyBlocked(row.key) ? 'border-danger' : ''">
+                                                                <input autocomplete="off" type="text" x-model="row.value" :aria-label="format.label + ' 请求体字段值 ' + (bi + 1)" placeholder='JSON 值，例如 true、20、{"key":"value"}' class="field min-w-0 flex-1 font-mono text-xs">
+                                                                <button type="button" @click="removeGlobalExtraBodyRow(format.key, bi)" class="inline-flex h-11 w-11 shrink-0 items-center justify-center self-end rounded-lg text-muted transition hover:bg-danger/10 hover:text-danger sm:self-auto" :aria-label="'删除请求体字段 ' + (row.key || (bi + 1))" title="删除字段"><span class="material-symbols-outlined text-[18px]">delete</span></button>
+                                                            </div>
+                                                        </template>
+                                                        <p x-show="!(config.globalUpstreamExtras[format.key].body || []).length" class="rounded-lg border border-dashed border-line px-3 py-2 text-xs text-muted">未配置默认请求体字段</p>
+                                                    </div>
+                                                </section>
+                                            </div>
+                                        </section>
+                                    </template>
+                                </div>
+                            </details>
+
                             <section x-show="activeTab === 'settings'" class="glass rounded-lg p-4">
                                 <div class="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                                     <div>
@@ -4875,6 +4973,14 @@
                     directTimeoutStreamActive: 120000,
                     // 留空由后端填默认安全余量；显式 0 也有意义，不能用 || 兜底。
                     contextSafetyMargin: 4096,
+                    // 按上游格式的全局默认扩展。表单用有序行数组，保存时再还原成 map；
+                    // 空数组等同未配置，不会在 YAML 里产生空对象。
+                    globalUserAgent: { anthropic: '', openai: '', 'openai-responses': '' },
+                    globalUpstreamExtras: {
+                        anthropic: { headers: [], body: [] },
+                        openai: { headers: [], body: [] },
+                        'openai-responses': { headers: [], body: [] }
+                    },
                     providers: {},
                     routes: [],
                     // 必须给出初始形状：loadConfig() 返回前 x-model / x-show 就会求值
@@ -5336,6 +5442,11 @@
                         directTimeoutStreamHeader: pick(data, 'directTimeoutStreamHeader', 'DirectTimeoutStreamHeader') || 60000,
                         directTimeoutStreamActive: pick(data, 'directTimeoutStreamActive', 'DirectTimeoutStreamActive') || 120000,
                         contextSafetyMargin: pick(data, 'contextSafetyMargin', 'ContextSafetyMargin') ?? 4096,
+                        // 全局 UA 按实际上游格式保存；兼容早期开发版的单字符串并迁移到三种格式。
+                        globalUserAgent: this.normalizeGlobalUserAgent(pick(data, 'globalUserAgent', 'GlobalUserAgent')),
+                        // 全局按格式扩展的配置表单使用行数组，避免直接编辑 map 时行顺序抖动；
+                        // 未配置时仍给完整可绑定形状，保存端会把空项省略。
+                        globalUpstreamExtras: this.normalizeGlobalUpstreamExtras(pick(data, 'globalUpstreamExtras', 'GlobalUpstreamExtras')),
                         // failover / breaker 必须读出来再回传：PUT /api/config 是全量替换、
                         // 不与旧配置合并，漏读会让任何一次表单保存把这两个块抹成零值。
                         // 后端这两个字段是值类型且无 omitempty，GET 恒返回完整块（已填默认值），
@@ -5350,6 +5461,29 @@
                         // 后台刷新同理；旧后端整体缺失时回落为全部关闭。
                         chatgptBackground: this.normalizeChatGPTBackground(pick(data, 'chatgptBackground', 'ChatGPTBackground'))
                     };
+                },
+
+                normalizeGlobalUserAgent(raw) {
+                    const formats = ['anthropic', 'openai', 'openai-responses'];
+                    if (typeof raw === 'string') {
+                        return Object.fromEntries(formats.map(format => [format, raw]));
+                    }
+                    const value = raw && typeof raw === 'object' ? raw : {};
+                    return Object.fromEntries(formats.map(format => [format, typeof value[format] === 'string' ? value[format] : '']));
+                },
+
+                normalizeGlobalUpstreamExtras(raw) {
+                    const value = raw && typeof raw === 'object' ? raw : {};
+                    const pick = (obj, lower, upper) => obj?.[lower] ?? obj?.[upper];
+                    const out = {};
+                    ['anthropic', 'openai', 'openai-responses'].forEach((format) => {
+                        const entry = value[format] && typeof value[format] === 'object' ? value[format] : {};
+                        out[format] = {
+                            headers: this.headersToRows(pick(entry, 'headers', 'Headers')),
+                            body: this.bodyToRows(pick(entry, 'body', 'Body'))
+                        };
+                    });
+                    return out;
                 },
 
                 // 两个周期都是可选整数：缺省或非数字为 null，表示使用后端默认值（30 / 60 分钟）。
@@ -5457,6 +5591,15 @@
                     this.config.providerHealth = this.config.providerHealth || { checkIntervalSeconds: 0 };
                     if (this.config.providerHealth.checkIntervalSeconds == null) this.config.providerHealth.checkIntervalSeconds = 0;
                     this.config.chatgptBackground = this.config.chatgptBackground || this.normalizeChatGPTBackground(null);
+                    const globalExtras = this.config.globalUpstreamExtras || {};
+                    ['anthropic', 'openai', 'openai-responses'].forEach((format) => {
+                        const entry = globalExtras[format] || {};
+                        if (!Array.isArray(entry.headers)) entry.headers = this.headersToRows(entry.headers);
+                        if (!Array.isArray(entry.body)) entry.body = this.bodyToRows(entry.body);
+                        globalExtras[format] = entry;
+                    });
+                    this.config.globalUpstreamExtras = globalExtras;
+                    this.config.globalUserAgent = this.normalizeGlobalUserAgent(this.config.globalUserAgent);
                     this.config.directTimeoutNoStream = this.config.directTimeoutNoStream || 60000;
                     this.config.directTimeoutStreamHeader = this.config.directTimeoutStreamHeader || 60000;
                     this.config.directTimeoutStreamActive = this.config.directTimeoutStreamActive || 120000;
@@ -6103,6 +6246,30 @@
                     return ['providers', 'routes', 'settings'].includes(this.activeTab);
                 },
 
+                // 专用全局 User-Agent 按实际上游格式分别保存；空值不写入配置。
+                globalUserAgentPayload() {
+                    const source = this.config.globalUserAgent || {};
+                    const out = {};
+                    ['anthropic', 'openai', 'openai-responses'].forEach((format) => {
+                        if (source[format]) out[format] = source[format];
+                    });
+                    return Object.keys(out).length ? out : undefined;
+                },
+
+                // 将全局按格式的行编辑表单折回后端配置形状。空格式项与整块空配置都不下发，
+                // 保持 yaml/json omitempty 的干净语义；headers/body 仍复用现有解析与黑名单校验。
+                globalUpstreamExtrasPayload() {
+                    const source = this.config.globalUpstreamExtras || {};
+                    const out = {};
+                    ['anthropic', 'openai', 'openai-responses'].forEach((format) => {
+                        const entry = source[format] || {};
+                        const headers = this.rowsToHeaders(entry.headers);
+                        const body = this.rowsToBody(entry.body);
+                        if (headers || body) out[format] = { headers, body };
+                    });
+                    return Object.keys(out).length ? out : undefined;
+                },
+
                 configPayload() {
                     const providers = {};
                     Object.entries(this.config.providers || {}).forEach(([name, provider]) => {
@@ -6171,6 +6338,9 @@
                         directTimeoutStreamHeader: this.config.directTimeoutStreamHeader || 60000,
                         directTimeoutStreamActive: this.config.directTimeoutStreamActive || 120000,
                         contextSafetyMargin: this.numOrNull(this.config.contextSafetyMargin),
+                        // globalUserAgent 是按上游格式区分的独立字段，不能写入通用 headers。
+                        globalUserAgent: this.globalUserAgentPayload(),
+                        globalUpstreamExtras: this.globalUpstreamExtrasPayload(),
                         providers,
                         routes: JSON.parse(JSON.stringify(this.config.routes || [])),
                         // failover / breaker / providerHealth 必须带上：PUT 是全量替换，漏掉就会静默丢配置
@@ -7451,6 +7621,8 @@
                 },
 
                 fullConfigPreview() {
+                    const globalExtras = this.globalUpstreamExtrasYaml();
+                    const globalUserAgent = this.globalUserAgentYaml();
                     return [
                         `host: "${this.config.host || '127.0.0.1'}"`,
                         `port: ${this.config.port || 7789}`,
@@ -7464,6 +7636,8 @@
                         `directTimeoutStreamHeader: ${this.config.directTimeoutStreamHeader || 60000}`,
                         `directTimeoutStreamActive: ${this.config.directTimeoutStreamActive || 120000}`,
                         `contextSafetyMargin: ${this.config.contextSafetyMargin ?? 4096}`,
+                        ...(globalUserAgent ? [globalUserAgent] : []),
+                        ...(globalExtras ? [globalExtras] : []),
                         this.failoverYaml(),
                         this.breakerYaml(),
                         this.providerHealthYaml(),
@@ -7517,13 +7691,44 @@
                     return ['providerHealth:', `  checkIntervalSeconds: ${interval}`].join('\n');
                 },
 
+                globalUserAgentYaml() {
+                    const values = this.globalUserAgentPayload();
+                    if (!values) return '';
+                    const lines = ['globalUserAgent:'];
+                    ['anthropic', 'openai', 'openai-responses'].forEach((format) => {
+                        if (values[format]) lines.push(`  ${format}: ${JSON.stringify(values[format])}`);
+                    });
+                    return lines.join('\n');
+                },
+
+                // 全局默认项只展示实际会保存的格式块。它按实际上游协议选择，不跟客户端
+                // 请求格式绑定；同名 Provider / 路由 / 候选项会在真实请求中覆盖这里的 body。
+                globalUpstreamExtrasYaml() {
+                    const extras = this.globalUpstreamExtrasPayload();
+                    if (!extras) return '';
+                    const lines = ['globalUpstreamExtras:'];
+                    ['anthropic', 'openai', 'openai-responses'].forEach((format) => {
+                        const entry = extras[format];
+                        if (!entry) return;
+                        lines.push(`  ${format}:`);
+                        if (entry.headers && Object.keys(entry.headers).length) {
+                            lines.push('    headers:');
+                            Object.keys(entry.headers).sort().forEach((key) => {
+                                lines.push(`      ${key}: ${JSON.stringify(entry.headers[key])}`);
+                            });
+                        }
+                        lines.push(...this.renderExtraBodyLines(entry.body, '    ', 'body'));
+                    });
+                    return lines.join('\n');
+                },
+
                 // renderExtraBodyLines 把 extraBody map 渲染成缩进 YAML 行数组，provider /
                 // route / target 三处共用（pad 是 extraBody: 一行的缩进，键再缩进两格）。
                 // 值可能是 bool/number/对象：字符串加引号，其余用 JSON 内联渲染
                 // （YAML 是 JSON 的超集，{"k":v} 与 true / 20 都是合法 YAML 标量）。
-                renderExtraBodyLines(obj, pad) {
+                renderExtraBodyLines(obj, pad, label = 'extraBody') {
                     if (!obj || !Object.keys(obj).length) return [];
-                    const lines = [`${pad}extraBody:`];
+                    const lines = [`${pad}${label}:`];
                     Object.keys(obj).sort().forEach((k) => {
                         const v = obj[k];
                         const rendered = typeof v === 'string' ? `"${v}"` : JSON.stringify(v);
@@ -9733,6 +9938,36 @@
 
                 removeExtraBodyRow(index) {
                     this.providerForm.extraBody.splice(index, 1);
+                },
+
+                // 全局按格式默认项复用 Provider 的行编辑和 JSON 值解析体验；差别只在于
+                // 它们是最低优先级兜底，不属于某个 Provider 的局部高级设置。
+                globalUpstreamExtraForm(format) {
+                    this.config.globalUpstreamExtras = this.config.globalUpstreamExtras || {};
+                    let entry = this.config.globalUpstreamExtras[format];
+                    if (!entry || typeof entry !== 'object') {
+                        entry = { headers: [], body: [] };
+                        this.config.globalUpstreamExtras[format] = entry;
+                    }
+                    if (!Array.isArray(entry.headers)) entry.headers = this.headersToRows(entry.headers);
+                    if (!Array.isArray(entry.body)) entry.body = this.bodyToRows(entry.body);
+                    return entry;
+                },
+
+                addGlobalExtraHeaderRow(format) {
+                    this.globalUpstreamExtraForm(format).headers.push({ key: '', value: '' });
+                },
+
+                removeGlobalExtraHeaderRow(format, index) {
+                    this.globalUpstreamExtraForm(format).headers.splice(index, 1);
+                },
+
+                addGlobalExtraBodyRow(format) {
+                    this.globalUpstreamExtraForm(format).body.push({ key: '', value: '' });
+                },
+
+                removeGlobalExtraBodyRow(format, index) {
+                    this.globalUpstreamExtraForm(format).body.splice(index, 1);
                 },
 
                 // extraBodyBlocked 与后端 config.extraBodyBlocklist 同名单，表单里即时标红。

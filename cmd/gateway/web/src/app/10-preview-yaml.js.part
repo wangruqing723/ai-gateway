@@ -19,6 +19,8 @@
                 },
 
                 fullConfigPreview() {
+                    const globalExtras = this.globalUpstreamExtrasYaml();
+                    const globalUserAgent = this.globalUserAgentYaml();
                     return [
                         `host: "${this.config.host || '127.0.0.1'}"`,
                         `port: ${this.config.port || 7789}`,
@@ -32,6 +34,8 @@
                         `directTimeoutStreamHeader: ${this.config.directTimeoutStreamHeader || 60000}`,
                         `directTimeoutStreamActive: ${this.config.directTimeoutStreamActive || 120000}`,
                         `contextSafetyMargin: ${this.config.contextSafetyMargin ?? 4096}`,
+                        ...(globalUserAgent ? [globalUserAgent] : []),
+                        ...(globalExtras ? [globalExtras] : []),
                         this.failoverYaml(),
                         this.breakerYaml(),
                         this.providerHealthYaml(),
@@ -85,13 +89,44 @@
                     return ['providerHealth:', `  checkIntervalSeconds: ${interval}`].join('\n');
                 },
 
+                globalUserAgentYaml() {
+                    const values = this.globalUserAgentPayload();
+                    if (!values) return '';
+                    const lines = ['globalUserAgent:'];
+                    ['anthropic', 'openai', 'openai-responses'].forEach((format) => {
+                        if (values[format]) lines.push(`  ${format}: ${JSON.stringify(values[format])}`);
+                    });
+                    return lines.join('\n');
+                },
+
+                // 全局默认项只展示实际会保存的格式块。它按实际上游协议选择，不跟客户端
+                // 请求格式绑定；同名 Provider / 路由 / 候选项会在真实请求中覆盖这里的 body。
+                globalUpstreamExtrasYaml() {
+                    const extras = this.globalUpstreamExtrasPayload();
+                    if (!extras) return '';
+                    const lines = ['globalUpstreamExtras:'];
+                    ['anthropic', 'openai', 'openai-responses'].forEach((format) => {
+                        const entry = extras[format];
+                        if (!entry) return;
+                        lines.push(`  ${format}:`);
+                        if (entry.headers && Object.keys(entry.headers).length) {
+                            lines.push('    headers:');
+                            Object.keys(entry.headers).sort().forEach((key) => {
+                                lines.push(`      ${key}: ${JSON.stringify(entry.headers[key])}`);
+                            });
+                        }
+                        lines.push(...this.renderExtraBodyLines(entry.body, '    ', 'body'));
+                    });
+                    return lines.join('\n');
+                },
+
                 // renderExtraBodyLines 把 extraBody map 渲染成缩进 YAML 行数组，provider /
                 // route / target 三处共用（pad 是 extraBody: 一行的缩进，键再缩进两格）。
                 // 值可能是 bool/number/对象：字符串加引号，其余用 JSON 内联渲染
                 // （YAML 是 JSON 的超集，{"k":v} 与 true / 20 都是合法 YAML 标量）。
-                renderExtraBodyLines(obj, pad) {
+                renderExtraBodyLines(obj, pad, label = 'extraBody') {
                     if (!obj || !Object.keys(obj).length) return [];
-                    const lines = [`${pad}extraBody:`];
+                    const lines = [`${pad}${label}:`];
                     Object.keys(obj).sort().forEach((k) => {
                         const v = obj[k];
                         const rendered = typeof v === 'string' ? `"${v}"` : JSON.stringify(v);
