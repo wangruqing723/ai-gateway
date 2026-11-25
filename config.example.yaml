@@ -198,7 +198,7 @@ providers:
     maxPerSecond: 2       # 每秒最多请求数（默认 0，范围 0-100）
     maxQueueWait: 30000   # 队列最大等待毫秒（默认 30000，范围 1-600000）
     # localRetry:          # 可选：在该 Provider 的单个候选上重试；route/target 可逐字段覆盖
-    #   maxRetries: 2      # 额外重试次数（0-10）；0 表示本层关闭
+    #   maxRetries: 2      # 额外重试次数，不设上限且须为非负整数；0 表示本层关闭
     #   intervalMs: 1000   # 固定重试间隔毫秒（0-60000；省略时默认 1000）
     # maxTokens: 32768    # 可选：覆盖转发给该上游的输出上限（Anthropic/Chat 的 max_tokens、
     #                     # Responses 的 max_output_tokens），配了就硬覆盖客户端传入值。

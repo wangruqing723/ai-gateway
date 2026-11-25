@@ -580,6 +580,11 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if urlPath == "/api/debug/run" {
+		s.handleDebugRun(w, r)
+		return
+	}
+
 	if urlPath == "/api/providers/health" {
 		if r.Method != http.MethodPost {
 			writeMethodNotAllowed(w, http.MethodPost)
@@ -718,19 +723,30 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	reqID := nextReqID()
+	s.runInference(w, r, urlPath, cfg, clientFormat, inferenceHooks{})
+}
+
+func (s *server) runInference(w http.ResponseWriter, r *http.Request, urlPath string, cfg *config.Config, clientFormat string, hooks inferenceHooks) (result *metrics.RequestLog) {
+	reqID := hooks.RequestID
+	if reqID == "" {
+		reqID = nextReqID()
+	}
 	start := time.Now()
+	responseWriter := w
 	rec := &statusRecorder{ResponseWriter: w}
 	w = rec
 	reqLog := metrics.RequestLog{
 		ID:           reqID,
 		Started:      start,
+		StartedAt:    start.Format(time.RFC3339Nano),
 		Time:         start.In(beijingLoc).Format("2006-01-02 15:04:05"),
 		Method:       r.Method,
 		Path:         urlPath,
 		ClientIP:     clientIP(r),
 		ClientFormat: clientFormat,
 		Format:       clientFormat,
+		Debug:        hooks.DebugMode != "",
+		DebugMode:    hooks.DebugMode,
 	}
 	defer func() {
 		reqLog.Status = rec.Status()
@@ -743,7 +759,17 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		if reqLog.Error != "" {
 			logf(reqID, "错误来源=%s 类别=%s: %s", reqLog.ErrorSource, reqLog.ErrorCategory, reqLog.Error)
 		}
+		if hooks.DebugMode != "" {
+			if response, ok := responseWriter.(interface {
+				DebugResponseStatus() int
+				DebugResponseBytes() int64
+			}); ok {
+				reqLog.Status = response.DebugResponseStatus()
+				reqLog.ResponseBytes = response.DebugResponseBytes()
+			}
+		}
 		s.metrics.Add(reqLog)
+		result = &reqLog
 	}()
 
 	logf(reqID, "→ %s %s [%s]", r.Method, urlPath, clientFormat)
@@ -791,7 +817,35 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 	reqLog.Stream = internal.Stream
 
 	// 路由匹配：得到按配置顺序排列的候选列表，作为故障转移的尝试顺序
-	matched := router.MatchRoute(model, cfg)
+	var (
+		matched  *router.Match
+		routeErr error
+	)
+	if hooks.RouteResolver != nil {
+		matched, routeErr = hooks.RouteResolver(model, cfg)
+	} else {
+		matched = router.MatchRoute(model, cfg)
+	}
+	if routeErr != nil {
+		if matched != nil {
+			reqLog.Route = matched.RouteMatch
+		}
+		var debugErr *routeResolutionError
+		if errors.As(routeErr, &debugErr) {
+			reqLog.ErrorSource = "gateway"
+			reqLog.ErrorCategory = debugErr.Type
+			reqLog.Error = debugErr.Message
+			if debugErr.Status > 0 {
+				writeJSONError(w, debugErr.Status, debugErr.Type, debugErr.Message)
+			}
+			return
+		}
+		reqLog.ErrorSource = "gateway"
+		reqLog.ErrorCategory = "route_resolution_error"
+		reqLog.Error = routeErr.Error()
+		writeJSONError(w, http.StatusBadGateway, "gateway_error", reqLog.Error)
+		return
+	}
 	if matched == nil {
 		reqLog.ErrorSource = "gateway"
 		reqLog.ErrorCategory = "route_not_found"
@@ -844,7 +898,7 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 	if !hasCompatibleFormat {
 		reqLog.ErrorSource = "gateway"
 		reqLog.ErrorCategory = "gateway_conversion_unsupported"
-		trail := make([]string, 0, len(matched.Candidates))
+		var trail trailBuffer
 		for index, candidate := range matched.Candidates {
 			err := conversionErrors[candidate.Provider.Format]
 			if err == nil {
@@ -861,11 +915,11 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 			}
 			setAttemptBuildError(&detail, err)
 			detail.DurationMs = time.Since(started).Milliseconds()
-			reqLog.AttemptDetails = append(reqLog.AttemptDetails, detail)
-			trail = append(trail, candidate.Provider.Name+":build_error")
+			appendAttemptDetail(&reqLog, detail)
+			trail.Add(candidate.Provider.Name + ":build_error")
 		}
 		reqLog.Attempts = 0
-		reqLog.AttemptTrail = strings.Join(trail, " → ")
+		reqLog.AttemptTrail = trail.String()
 		reqLog.Error = "请求协议转换失败: " + firstConversionErr.Error()
 		logf(reqID, "  所有目标格式均不兼容，返回 conversion_error: %s", firstConversionErr)
 		writeJSONError(w, http.StatusBadRequest, "conversion_error", reqLog.Error)
@@ -949,7 +1003,7 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var (
-		trail         []string
+		trail         trailBuffer
 		buildErr      string
 		attempts      int
 		lastAbandoned bool
@@ -987,10 +1041,10 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		// 优先于熔断判断：禁用是稳定的人工状态，比瞬时熔断更该顶在前面。
 		if !candidate.Provider.IsEnabled() {
 			disabledSkips++
-			trail = append(trail, name+":provider_disabled")
+			trail.Add(name + ":provider_disabled")
 			skipStarted := time.Now()
 			nextDetailSequence++
-			reqLog.AttemptDetails = append(reqLog.AttemptDetails, metrics.AttemptDetail{
+			appendAttemptDetail(&reqLog, metrics.AttemptDetail{
 				Sequence:       nextDetailSequence,
 				Kind:           "provider_disabled",
 				Provider:       name,
@@ -1008,11 +1062,11 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		// 账户暂停过滤：与 Provider 停用同为人工状态，放在熔断之前，不调用 breaker.Allow。
 		if s.candidateAccountPaused(candidate.Provider) {
 			pausedSkips++
-			trail = append(trail, name+":account_paused")
+			trail.Add(name + ":account_paused")
 			s.recordChatGPTAdmissionSkip(r.Context(), candidate.Provider, false, chatgptauth.SkipAccountPaused)
 			skipStarted := time.Now()
 			nextDetailSequence++
-			reqLog.AttemptDetails = append(reqLog.AttemptDetails, metrics.AttemptDetail{
+			appendAttemptDetail(&reqLog, metrics.AttemptDetail{
 				Sequence:       nextDetailSequence,
 				Kind:           "account_paused",
 				Provider:       name,
@@ -1035,11 +1089,11 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 			if soonestCooldown.IsZero() || until.Before(soonestCooldown) {
 				soonestCooldown = until
 			}
-			trail = append(trail, name+":account_cooldown")
+			trail.Add(name + ":account_cooldown")
 			s.recordChatGPTAdmissionSkip(r.Context(), candidate.Provider, false, chatgptauth.SkipCooldown)
 			skipStarted := time.Now()
 			nextDetailSequence++
-			reqLog.AttemptDetails = append(reqLog.AttemptDetails, metrics.AttemptDetail{
+			appendAttemptDetail(&reqLog, metrics.AttemptDetail{
 				Sequence:       nextDetailSequence,
 				Kind:           "account_cooldown",
 				Provider:       name,
@@ -1058,7 +1112,7 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		// 目标协议不兼容是本地跳过：不占真实尝试额度，也不借用熔断探针。
 		if err := conversionErrors[candidate.Provider.Format]; err != nil {
 			buildErr = err.Error()
-			trail = append(trail, name+":build_error")
+			trail.Add(name + ":build_error")
 			nextDetailSequence++
 			started := time.Now()
 			detail := metrics.AttemptDetail{
@@ -1071,7 +1125,7 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 			}
 			setAttemptBuildError(&detail, err)
 			detail.DurationMs = time.Since(started).Milliseconds()
-			reqLog.AttemptDetails = append(reqLog.AttemptDetails, detail)
+			appendAttemptDetail(&reqLog, detail)
 			logf(reqID, "  候选 %s 目标格式不兼容，跳过: %s", name, err)
 			continue
 		}
@@ -1082,10 +1136,10 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 			if !retryAt.IsZero() && (soonestKeyRetry.IsZero() || retryAt.Before(soonestKeyRetry)) {
 				soonestKeyRetry = retryAt
 			}
-			trail = append(trail, name+":no_selectable_key")
+			trail.Add(name + ":no_selectable_key")
 			nextDetailSequence++
 			skipStarted := time.Now()
-			reqLog.AttemptDetails = append(reqLog.AttemptDetails, metrics.AttemptDetail{
+			appendAttemptDetail(&reqLog, metrics.AttemptDetail{
 				Sequence:       nextDetailSequence,
 				Kind:           "key_skip",
 				Provider:       name,
@@ -1105,9 +1159,9 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 			allowed, retryAfter := s.breaker.Allow(name)
 			if !allowed {
 				breakerSkips++
-				trail = append(trail, name+":breaker_open")
+				trail.Add(name + ":breaker_open")
 				nextDetailSequence++
-				reqLog.AttemptDetails = append(reqLog.AttemptDetails, metrics.AttemptDetail{
+				appendAttemptDetail(&reqLog, metrics.AttemptDetail{
 					Sequence:       nextDetailSequence,
 					Kind:           "breaker_skip",
 					Provider:       name,
@@ -1128,10 +1182,10 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		contextBudget, fits := resolveContextBudget(candidate.ContextWindow, estimatedInputTokens, cfg.SafetyMargin())
 		if !fits {
 			contextSkips++
-			trail = append(trail, name+":context_exceeded")
+			trail.Add(name + ":context_exceeded")
 			nextDetailSequence++
 			skipStarted := time.Now()
-			reqLog.AttemptDetails = append(reqLog.AttemptDetails, metrics.AttemptDetail{
+			appendAttemptDetail(&reqLog, metrics.AttemptDetail{
 				Sequence:       nextDetailSequence,
 				Kind:           "context_skip",
 				Provider:       name,
@@ -1193,10 +1247,10 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 						if candidateActualAttempts == 0 {
 							candidateNoKey = true
 							keySkips++
-							trail = append(trail, name+":no_selectable_key")
+							trail.Add(name + ":no_selectable_key")
 							nextDetailSequence++
 							started := time.Now()
-							reqLog.AttemptDetails = append(reqLog.AttemptDetails, metrics.AttemptDetail{
+							appendAttemptDetail(&reqLog, metrics.AttemptDetail{
 								Sequence:       nextDetailSequence,
 								Kind:           "key_skip",
 								Provider:       name,
@@ -1240,6 +1294,12 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 				}
 
 				previousOutcome := outcome
+				var onBeforeRequest proxy.BeforeRequestFunc
+				if hooks.UpstreamRequest != nil {
+					onBeforeRequest = func(method, requestURL string, headers http.Header, requestBody []byte) {
+						hooks.UpstreamRequest(detail.Sequence, candidate, method, requestURL, headers, requestBody)
+					}
+				}
 				outcome = s.forwardAttempt(w, r, forwardAttemptInput{
 					cfg:                             cfg,
 					reqID:                           reqID,
@@ -1261,10 +1321,11 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 					httpAttemptNo:                   nextHTTPAttemptNo + 1,
 					reqLog:                          &reqLog,
 					detail:                          &detail,
+					onBeforeRequest:                 onBeforeRequest,
 				})
 				outcomeTrailRecorded = false
 				detail.DurationMs = time.Since(attemptStarted).Milliseconds()
-				reqLog.AttemptDetails = append(reqLog.AttemptDetails, detail)
+				appendAttemptDetail(&reqLog, detail)
 				if !outcome.cooldownUntil.IsZero() {
 					cooldownTriggered = true
 					if soonestCooldown.IsZero() || outcome.cooldownUntil.Before(soonestCooldown) {
@@ -1277,7 +1338,7 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 					if candidateActualAttempts > 0 {
 						// 本地重试准入前被暂停：沿用上一次真实尝试的结论上报熔断和终态。
 						outcome = previousOutcome
-						trail = append(trail, name+":account_paused")
+						trail.Add(name + ":account_paused")
 						outcomeTrailRecorded = true
 					}
 					break
@@ -1300,7 +1361,7 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 
 				if outcome.keySwitch {
 					excludedKeys[ticket.Key.ID] = struct{}{}
-					trail = append(trail, outcome.trail)
+					trail.Add(outcome.trail)
 					outcomeTrailRecorded = true
 					if chainRemaining <= 0 {
 						candidateKeySelectionExhausted = true
@@ -1321,7 +1382,7 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 			}
 
 			localRetriesRemaining--
-			trail = append(trail, name+":local_retry")
+			trail.Add(name + ":local_retry")
 			if !waitLocalRetry(r.Context(), candidate.LocalRetryIntervalMs) {
 				localRetryCanceled = true
 				break
@@ -1336,7 +1397,7 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 			if s.breaker != nil {
 				s.breaker.Report(name, breaker.OutcomeIgnored)
 			}
-			trail = append(trail, outcome.trail)
+			trail.Add(outcome.trail)
 			if candidateCooledDown {
 				cooldownSkips++
 				if until := s.candidateAccountCooldown(candidate.Provider); !until.IsZero() && (soonestCooldown.IsZero() || until.Before(soonestCooldown)) {
@@ -1360,7 +1421,7 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 				s.breaker.Report(name, breaker.OutcomeIgnored)
 			}
 			buildErr = outcome.buildErr
-			trail = append(trail, fmt.Sprintf("%s:build_error", name))
+			trail.Add(fmt.Sprintf("%s:build_error", name))
 			logf(reqID, "  候选 %s 构建失败，跳过: %s", name, outcome.buildErr)
 			continue
 		}
@@ -1373,7 +1434,7 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 			// 待遇，不消耗额度，否则一个自曝限流的上游会挤掉本来还能试的健康候选。
 			freeSkips++
 			if !outcomeTrailRecorded {
-				trail = append(trail, outcome.trail)
+				trail.Add(outcome.trail)
 			}
 			lastAbandoned = true
 			lastCooldown = !outcome.cooldownUntil.IsZero()
@@ -1382,7 +1443,7 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		attempts++
 		if !outcomeTrailRecorded {
-			trail = append(trail, outcome.trail)
+			trail.Add(outcome.trail)
 		}
 		lastAbandoned = outcome.abandoned
 		lastCooldown = outcome.abandoned && !outcome.cooldownUntil.IsZero()
@@ -1401,8 +1462,8 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 	}
 
 	reqLog.Attempts = attempts
-	if len(trail) > 1 {
-		reqLog.AttemptTrail = strings.Join(trail, " → ")
+	if trail.Len() > 1 {
+		reqLog.AttemptTrail = trail.String()
 	}
 	if localRetryCanceled {
 		// 客户端在本地重试等待期间断开，不再转向下一个候选，也不写合成终态。
@@ -1419,7 +1480,7 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		// 全部候选的 provider 都被禁用或账户被暂停：人工状态优先于自动熔断，单独一档。
 		// 503 表达「服务端暂时不可用」，成因在配置侧、不是客户端请求问题。
 		// 不带 retry-after：人工禁用没有恢复时间，给假数字会误导客户端重试。
-		reqLog.AttemptTrail = strings.Join(trail, " → ")
+		reqLog.AttemptTrail = trail.String()
 		errorType := "all_candidates_disabled"
 		switch {
 		case disabledSkips > 0 && pausedSkips > 0:
@@ -1432,7 +1493,7 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSONError(w, http.StatusServiceUnavailable, errorType, reqLog.Error)
 	case attempts == 0 && keySkips > 0:
-		reqLog.AttemptTrail = strings.Join(trail, " → ")
+		reqLog.AttemptTrail = trail.String()
 		reqLog.Error = "没有可选择的 Provider 密钥"
 		if !soonestKeyRetry.IsZero() {
 			remaining := time.Until(soonestKeyRetry)
@@ -1447,11 +1508,11 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusServiceUnavailable, "no_selectable_provider_key", reqLog.Error)
 	case attempts == 0 && (cooldownSkips > 0 || cooldownTriggered):
 		// 账户共享冷却：上游明确报告额度耗尽，retry-after 取最早到期时间。排在无密钥之后、熔断之前。
-		reqLog.AttemptTrail = strings.Join(trail, " → ")
+		reqLog.AttemptTrail = trail.String()
 		reqLog.Error = writeAccountUsageLimited(w, soonestCooldown)
 	case attempts == 0 && breakerSkips > 0:
 		// 全部候选被熔断：给出最早恢复者的剩余冷却，让客户端知道何时重试
-		reqLog.AttemptTrail = strings.Join(trail, " → ")
+		reqLog.AttemptTrail = trail.String()
 		reqLog.Error = "全部候选上游已熔断"
 		if soonestRetry > 0 {
 			seconds := int(soonestRetry.Seconds())
@@ -1464,21 +1525,21 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 	case attempts == 0 && freeSkips > 0:
 		// 全部候选都自报限流（429 + 超阈值 Retry-After）且都没消耗额度：
 		// 这不是协议错误，必须透传 429 语义，否则客户端会收到误导性的 400。
-		reqLog.AttemptTrail = strings.Join(trail, " → ")
+		reqLog.AttemptTrail = trail.String()
 		reqLog.Error = "全部候选上游均在限流中"
 		writeJSONError(w, http.StatusTooManyRequests, "all_candidates_rate_limited", reqLog.Error)
 	case attempts == 0 && contextSkips > 0:
-		reqLog.AttemptTrail = strings.Join(trail, " → ")
+		reqLog.AttemptTrail = trail.String()
 		reqLog.Error = contextWindowExceededMessage(matched.Candidates, estimatedInputTokens, cfg.SafetyMargin())
 		writeJSONError(w, http.StatusRequestEntityTooLarge, "context_window_exceeded", reqLog.Error)
 	case attempts == 0 && buildErr != "":
 		// 全部候选都构建失败：此时没有任何一次真实转发，需自行写终态
 		reqLog.Error = "上游请求协议转换失败: " + buildErr
-		reqLog.AttemptTrail = strings.Join(trail, " → ")
+		reqLog.AttemptTrail = trail.String()
 		writeJSONError(w, http.StatusBadRequest, "conversion_error", reqLog.Error)
 	case attempts == 0:
 		// 兜底：一次都没真实尝试，但既没熔断跳过也没构建失败（理论上不可达）
-		reqLog.AttemptTrail = strings.Join(trail, " → ")
+		reqLog.AttemptTrail = trail.String()
 		reqLog.Error = "没有可用的候选上游"
 		writeJSONError(w, http.StatusBadGateway, "all_candidates_failed", reqLog.Error)
 	case lastAbandoned && lastCooldown:
@@ -1490,6 +1551,7 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		reqLog.Error = "全部候选上游均不可用"
 		writeJSONError(w, http.StatusBadGateway, "all_candidates_failed", reqLog.Error)
 	}
+	return
 }
 
 func requestChainBudgetMs(cfg *config.Config, streaming bool) int {
@@ -1641,6 +1703,8 @@ type forwardAttemptInput struct {
 	// 是否允许本次失败换候选 / 在当前候选内重试；两种决策互相独立。
 	allowFailoverTransfer bool
 	allowLocalRetry       bool
+	onBeforeRequest       proxy.BeforeRequestFunc
+	allowInactiveQueue    bool
 	reqLog                *metrics.RequestLog
 	detail                *metrics.AttemptDetail
 	// diagnostic 禁止诊断调用打印原文或参与上游抓包，只由独立诊断入口设为 true。
@@ -1979,9 +2043,17 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 			release, waitMs, err = s.qm.AcquireGroupOnly(waitCtx, p.AccountID, int(chatGPTDiagnoseBudget.Milliseconds()))
 		} else if admission != nil && cfg.ChatGPTAccountLimits.Enabled() {
 			// 账户共享约束：账户与 Provider 同时有空位才准入，等待期间不占用任何一方（DESIGN 6.4）。
-			release, waitMs, err = s.qm.AcquireGroup(waitCtx, p.Name, p.MaxConcurrent, p.MaxPerSecond, p.MaxQueueWait, p.AccountID)
+			if in.allowInactiveQueue {
+				release, waitMs, err = s.qm.AcquireGroupForDebug(waitCtx, p.Name, p.MaxConcurrent, p.MaxPerSecond, p.MaxQueueWait, p.AccountID)
+			} else {
+				release, waitMs, err = s.qm.AcquireGroup(waitCtx, p.Name, p.MaxConcurrent, p.MaxPerSecond, p.MaxQueueWait, p.AccountID)
+			}
 		} else {
-			release, waitMs, err = s.qm.Acquire(waitCtx, p.Name, p.MaxConcurrent, p.MaxPerSecond, p.MaxQueueWait)
+			if in.allowInactiveQueue {
+				release, waitMs, err = s.qm.AcquireForDebug(waitCtx, p.Name, p.MaxConcurrent, p.MaxPerSecond, p.MaxQueueWait)
+			} else {
+				release, waitMs, err = s.qm.Acquire(waitCtx, p.Name, p.MaxConcurrent, p.MaxPerSecond, p.MaxQueueWait)
+			}
 		}
 		in.reqLog.QueueWaitMs += waitMs
 		if err != nil && admission.Paused() && r.Context().Err() == nil {
@@ -2118,6 +2190,7 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 		HTTPClient:            client,
 		GlobalUserAgent:       globalUserAgent,
 		GlobalHeaders:         globalHeaders,
+		OnBeforeRequest:       in.onBeforeRequest,
 		// Codex 的 namespace 工具在请求侧被展平成顶层 function，响应侧要按这张映射
 		// 把扁平名改回 {name, namespace}，否则 Codex 报 unsupported call。
 		ToolNamespaces: in.internal.ToolNamespaces,
@@ -4078,6 +4151,17 @@ func (s *server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) handleLogs(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
+	debugFilter := ""
+	for _, value := range q["debug"] {
+		if value == "" {
+			continue
+		}
+		if (value != "only" && value != "exclude") || (debugFilter != "" && debugFilter != value) {
+			writeJSONError(w, http.StatusBadRequest, "invalid_debug_filter", "debug 参数只能是 only 或 exclude")
+			return
+		}
+		debugFilter = value
+	}
 	filter := metrics.LogFilter{
 		Provider:        q.Get("provider"),
 		Model:           q.Get("model"),
@@ -4088,6 +4172,7 @@ func (s *server) handleLogs(w http.ResponseWriter, r *http.Request) {
 		AttemptProvider: q.Get("attemptProvider"),
 		AttemptStatus:   q.Get("attemptStatus"),
 		AttemptOutcome:  q.Get("attemptOutcome"),
+		Debug:           debugFilter,
 	}
 	if limit, err := strconv.Atoi(q.Get("limit")); err == nil {
 		filter.Limit = limit

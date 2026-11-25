@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -22,6 +24,139 @@ func localRetryPolicy(maxRetries, intervalMs int) *config.LocalRetry {
 
 func localRetryProvider(name, baseURL string) *config.Provider {
 	return &config.Provider{Name: name, BaseURL: baseURL, Format: "anthropic", MaxConcurrent: 1, MaxQueueWait: 1000}
+}
+
+func TestAttemptDetailAndTrailFolding(t *testing.T) {
+	t.Run("details stay byte-compatible through the limit", func(t *testing.T) {
+		var reqLog metrics.RequestLog
+		appendAttemptDetail(&reqLog, metrics.AttemptDetail{Sequence: 1, Provider: "p"})
+
+		encoded, err := json.Marshal(reqLog)
+		if err != nil {
+			t.Fatalf("json.Marshal() error = %v", err)
+		}
+		const want = `{"id":"","time":"","startedAt":"","method":"","path":"","status":0,"clientFormat":"","format":"","model":"","provider":"","stream":false,"durationMs":0,"attemptDetails":[{"sequence":1,"kind":"","provider":"p","providerFormat":"","startedAt":"","durationMs":0,"outcome":""}]}`
+		if string(encoded) != want {
+			t.Fatalf("未超限的请求日志 JSON 变化:\n got: %s\nwant: %s", encoded, want)
+		}
+
+		for sequence := 2; sequence <= attemptDetailHeadLimit+attemptDetailTailLimit; sequence++ {
+			appendAttemptDetail(&reqLog, metrics.AttemptDetail{Sequence: sequence})
+		}
+		if len(reqLog.AttemptDetails) != 40 || reqLog.AttemptDetailsOmitted != 0 {
+			t.Fatalf("40 条明细折叠结果 = %d 条、省略 %d 条", len(reqLog.AttemptDetails), reqLog.AttemptDetailsOmitted)
+		}
+		for index, detail := range reqLog.AttemptDetails {
+			if detail.Sequence != index+1 {
+				t.Fatalf("未超限时第 %d 条序号变为 %d", index+1, detail.Sequence)
+			}
+		}
+		encoded, err = json.Marshal(reqLog)
+		if err != nil {
+			t.Fatalf("json.Marshal() 40 条明细时出错: %v", err)
+		}
+		if strings.Contains(string(encoded), "attemptDetailsOmitted") {
+			t.Fatalf("省略条数为 0 时仍输出 attemptDetailsOmitted: %s", encoded)
+		}
+	})
+
+	t.Run("overflow keeps first and last twenty details", func(t *testing.T) {
+		var reqLog metrics.RequestLog
+		for sequence := 1; sequence <= 61; sequence++ {
+			appendAttemptDetail(&reqLog, metrics.AttemptDetail{Sequence: sequence})
+		}
+		if len(reqLog.AttemptDetails) != 40 || reqLog.AttemptDetailsOmitted != 21 {
+			t.Fatalf("折叠结果 = %d 条、省略 %d 条，期望 40/21", len(reqLog.AttemptDetails), reqLog.AttemptDetailsOmitted)
+		}
+		for index, detail := range reqLog.AttemptDetails {
+			want := index + 1
+			if index >= attemptDetailHeadLimit {
+				want = 61 - (attemptDetailTailLimit - 1) + index - attemptDetailHeadLimit
+			}
+			if detail.Sequence != want {
+				t.Fatalf("第 %d 条保留序号 = %d，期望 %d", index+1, detail.Sequence, want)
+			}
+		}
+	})
+
+	t.Run("trail keeps first and last twenty segments", func(t *testing.T) {
+		var trail trailBuffer
+		for segment := 1; segment <= 40; segment++ {
+			trail.Add(strconv.Itoa(segment))
+		}
+		wantSegments := make([]string, 0, 40)
+		for segment := 1; segment <= 40; segment++ {
+			wantSegments = append(wantSegments, strconv.Itoa(segment))
+		}
+		if got, want := trail.String(), strings.Join(wantSegments, " → "); got != want {
+			t.Fatalf("40 段轨迹变化: %q", got)
+		}
+
+		trail = trailBuffer{}
+		for segment := 1; segment <= 61; segment++ {
+			trail.Add(strconv.Itoa(segment))
+		}
+		wantSegments = make([]string, 0, 41)
+		for segment := 1; segment <= 20; segment++ {
+			wantSegments = append(wantSegments, strconv.Itoa(segment))
+		}
+		wantSegments = append(wantSegments, "…省略 21 段…")
+		for segment := 42; segment <= 61; segment++ {
+			wantSegments = append(wantSegments, strconv.Itoa(segment))
+		}
+		if got, want := trail.String(), strings.Join(wantSegments, " → "); got != want {
+			t.Fatalf("折叠轨迹 = %q，期望 %q", got, want)
+		}
+	})
+}
+
+func TestLocalRetryLargeAttemptLogIsFoldedDuringRequest(t *testing.T) {
+	var hits atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = io.WriteString(w, `{"error":"temporary"}`)
+	}))
+	defer upstream.Close()
+
+	route := singleCandidateRoute("solo", "model")
+	route.Targets[0].LocalRetry = localRetryPolicy(60, 0)
+	srv := newFailoverTestServer(map[string]*config.Provider{"solo": localRetryProvider("solo", upstream.URL)}, route, upstream.Client(), config.Failover{})
+
+	response := postInference(srv, "/v1/messages", anthropicReqBody)
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("状态码 = %d，期望最后一次上游 503", response.Code)
+	}
+	if got := hits.Load(); got != 61 {
+		t.Fatalf("实际发出 %d 次上游请求，期望 61 次", got)
+	}
+
+	logsResponse := httptest.NewRecorder()
+	srv.handle(logsResponse, httptest.NewRequest(http.MethodGet, "http://127.0.0.1:7789/api/logs", nil))
+	if logsResponse.Code != http.StatusOK {
+		t.Fatalf("GET /api/logs 状态码 = %d，响应: %s", logsResponse.Code, logsResponse.Body.String())
+	}
+	var payload struct {
+		Data []metrics.RequestLog `json:"data"`
+	}
+	if err := json.Unmarshal(logsResponse.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("解析 /api/logs 响应失败: %v", err)
+	}
+	if len(payload.Data) != 1 {
+		t.Fatalf("/api/logs 记录数 = %d，期望 1", len(payload.Data))
+	}
+	entry := payload.Data[0]
+	if len(entry.AttemptDetails) != 40 || entry.AttemptDetailsOmitted != 21 {
+		t.Fatalf("/api/logs 尝试明细 = %d 条、省略 %d 条，期望 40/21", len(entry.AttemptDetails), entry.AttemptDetailsOmitted)
+	}
+	if entry.AttemptDetails[0].Sequence != 1 || entry.AttemptDetails[19].Sequence != 20 ||
+		entry.AttemptDetails[20].Sequence != 42 || entry.AttemptDetails[39].Sequence != 61 {
+		t.Fatalf("/api/logs 保留的尝试序号不正确: 首尾=%d,%d,%d,%d", entry.AttemptDetails[0].Sequence,
+			entry.AttemptDetails[19].Sequence, entry.AttemptDetails[20].Sequence, entry.AttemptDetails[39].Sequence)
+	}
+	if !strings.Contains(entry.AttemptTrail, "…省略 ") || !strings.Contains(entry.AttemptTrail, " 段…") {
+		t.Fatalf("/api/logs 轨迹没有省略段标记: %q", entry.AttemptTrail)
+	}
 }
 
 func TestLocalRetrySucceedsOnNthAttemptWithoutConsumingFailoverAttempt(t *testing.T) {

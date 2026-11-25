@@ -48,8 +48,14 @@ type Match struct {
 
 // MatchRoute 根据模型名匹配路由规则，首条启用且命中规则生效（对齐 minimatch nocase）。
 func MatchRoute(model string, cfg *config.Config) *Match {
+	matched, _ := MatchRouteIndex(model, cfg)
+	return matched
+}
+
+// MatchRouteIndex 返回首条命中路由及其在已保存配置中的下标。
+func MatchRouteIndex(model string, cfg *config.Config) (*Match, int) {
 	upstreamModel, oneMMarker, hasOneM := SplitOneMSuffix(model)
-	for _, route := range cfg.Routes {
+	for routeIndex, route := range cfg.Routes {
 		if !route.IsEnabled() {
 			continue
 		}
@@ -68,36 +74,7 @@ func MatchRoute(model string, cfg *config.Config) *Match {
 			// 那里能记 AttemptDetail(provider_disabled) 并给出 503 all_candidates_disabled
 			// 终态。在 router 剔除会让候选空时静默 continue 到下一条路由，请求可能
 			// 落到 catch-all 上一个完全不相关的模型，且诊断信息全无。
-			// 复制 Provider 结构体，避免并发请求修改共享指针字段（如 APIKey）
-			pCopy := *src
-			targetModel := target.Model
-			if targetModel == "" {
-				targetModel = upstreamModel
-			}
-			contextWindow := resolveContextWindow(target, route, src)
-			if hasOneM {
-				// [1M] 是客户端声明的本地标记，优先级高于配置窗口，但不改变
-				// maxTokens：大上下文不等于允许更大的输出。
-				oneMWindow := OneMContextWindow
-				contextWindow = &oneMWindow
-				// 上游侧识别与本地预算裁决是两件独立的事：窗口覆盖对两档都生效
-				// （网关得按 1M 算预算），而标记只在 preserve 档拼回 model 名。
-				// TargetModel 是发给上游 model 字段的唯一出口（透传路径与三条
-				// 跨格式转换都取它），在这里拼好，下游无需再感知该标记。
-				if pCopy.OneMContext == config.OneMContextPreserve {
-					targetModel += oneMMarker
-				}
-			}
-			localRetryMax, localRetryIntervalMs := resolveLocalRetry(target, route, src)
-			candidates = append(candidates, Candidate{
-				Provider:             &pCopy,
-				TargetModel:          targetModel,
-				MaxTokens:            resolveMaxTokens(target, route, src),
-				ContextWindow:        contextWindow,
-				ExtraBody:            resolveExtraBody(target, route, src),
-				LocalRetryMax:        localRetryMax,
-				LocalRetryIntervalMs: localRetryIntervalMs,
-			})
+			candidates = append(candidates, buildCandidate(target, route, src, upstreamModel, oneMMarker, hasOneM))
 		}
 		if len(candidates) == 0 {
 			continue
@@ -117,9 +94,51 @@ func MatchRoute(model string, cfg *config.Config) *Match {
 				}
 			}
 		}
-		return m
+		return m, routeIndex
 	}
-	return nil
+	return nil, -1
+}
+
+// CandidateForProvider 按 Provider 级配置构造隔离调试所需的单候选。
+// model 会按真实路由路径处理 [1M] 本地标记；Provider 级覆盖与三层解析共用同一实现。
+func CandidateForProvider(provider *config.Provider, model string) Candidate {
+	if provider == nil {
+		return Candidate{}
+	}
+	upstreamModel, marker, hasOneM := SplitOneMSuffix(model)
+	candidate := buildCandidate(config.Target{}, config.Route{}, provider, upstreamModel, marker, hasOneM)
+	// Provider 调试是隔离单发，不运行 Provider 配置中的本地重试。
+	candidate.LocalRetryMax = 0
+	candidate.LocalRetryIntervalMs = 0
+	return candidate
+}
+
+func buildCandidate(target config.Target, route config.Route, provider *config.Provider, upstreamModel, oneMMarker string, hasOneM bool) Candidate {
+	// 复制 Provider，避免并发请求修改共享指针字段（如 APIKey）。
+	pCopy := *provider
+	targetModel := target.Model
+	if targetModel == "" {
+		targetModel = upstreamModel
+	}
+	contextWindow := resolveContextWindow(target, route, provider)
+	if hasOneM {
+		// [1M] 是客户端声明的本地标记，优先级高于配置窗口，但不改变 maxTokens。
+		oneMWindow := OneMContextWindow
+		contextWindow = &oneMWindow
+		if pCopy.OneMContext == config.OneMContextPreserve {
+			targetModel += oneMMarker
+		}
+	}
+	localRetryMax, localRetryIntervalMs := resolveLocalRetry(target, route, provider)
+	return Candidate{
+		Provider:             &pCopy,
+		TargetModel:          targetModel,
+		MaxTokens:            resolveMaxTokens(target, route, provider),
+		ContextWindow:        contextWindow,
+		ExtraBody:            resolveExtraBody(target, route, provider),
+		LocalRetryMax:        localRetryMax,
+		LocalRetryIntervalMs: localRetryIntervalMs,
+	}
 }
 
 // resolveLocalRetry 按字段级优先级 target > route > provider 合成本地重试配置。

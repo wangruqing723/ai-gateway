@@ -264,7 +264,8 @@
                 // 已保存 Provider 的统一目录入口；普通目录保留一天浏览器缓存，OAuth 只用服务端身份缓存。
                 // 失败只给固定安全提示，保持手填值；显式刷新携带 revision，不查询草稿。
                 async fetchModelsFor(providerName, refresh = false, signal) {
-                    const provider = this.config.providers?.[providerName];
+                    const debugSnapshotProvider = this.activeTab === 'debug' ? this._debugConfigSnapshot?.providers?.[providerName] : null;
+                    const provider = debugSnapshotProvider || this.config.providers?.[providerName];
                     if (!provider) return { models: null, message: '找不到这个 Provider，请先保存配置' };
                     const identity = JSON.stringify([this.revision, provider]);
                     const oauth = provider.authType === 'chatgptOAuth';
@@ -280,7 +281,10 @@
                             refresh ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ provider: providerName, revision: this.revision }), signal } : { signal, cache: 'no-store' });
                         if (!res.ok) return { models: null, message: `模型目录查询失败（HTTP ${res.status}），可继续手动填写` };
                         const data = await res.json();
-                        if (signal?.aborted || identity !== JSON.stringify([this.revision, this.config.providers?.[providerName]])) return { models: null, message: '提供商身份已变化，请重新查询；手填值保留' };
+                        const currentProvider = this.activeTab === 'debug'
+                            ? (this._debugConfigSnapshot?.providers?.[providerName] || this.config.providers?.[providerName])
+                            : this.config.providers?.[providerName];
+                        if (signal?.aborted || identity !== JSON.stringify([this.revision, currentProvider])) return { models: null, message: '提供商身份已变化，请重新查询；手填值保留' };
                         const models = Array.isArray(data.models) ? data.models : [];
                         if (!oauth) this.writeModelCache(cacheKey, models);
                         const when = data.queriedAt ? this.providerBalanceTime(data.queriedAt) : '查询时间未知';

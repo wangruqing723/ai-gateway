@@ -36,6 +36,7 @@ type waiter struct {
 	ready   chan struct{}
 	state   waiterState
 	element *list.Element
+	debug   bool
 }
 
 // providerQueue 单个 provider 的队列状态。
@@ -45,13 +46,14 @@ type providerQueue struct {
 	m    *Manager
 	name string
 
-	maxConcurrent int
-	maxPerSecond  int
-	running       int
-	waiters       list.List
-	requestTimes  []time.Time
-	rateTimer     *time.Timer
-	retired       bool
+	maxConcurrent     int
+	maxPerSecond      int
+	running           int
+	waiters           list.List
+	requestTimes      []time.Time
+	debugRequestTimes []time.Time
+	rateTimer         *time.Timer
+	retired           bool
 }
 
 // Manager 管理所有 provider 的队列
@@ -110,7 +112,7 @@ func (m *Manager) ensureLocked(name string, maxConcurrent, maxPerSecond int) *pr
 
 // lockQueueForAcquire 在固定的 Manager -> provider 锁顺序下完成 active 校验和取队列。
 // 返回成功时 providerQueue.mu 仍由调用方持有，避免 Reconcile 在入队前回收该对象。
-func (m *Manager) lockQueueForAcquire(ctx context.Context, name string, maxConcurrent, maxPerSecond int, deadline time.Time) (*providerQueue, error) {
+func (m *Manager) lockQueueForAcquire(ctx context.Context, name string, maxConcurrent, maxPerSecond int, deadline time.Time, allowInactive bool) (*providerQueue, error) {
 	m.mu.Lock()
 	if err := ctx.Err(); err != nil {
 		m.mu.Unlock()
@@ -122,16 +124,24 @@ func (m *Manager) lockQueueForAcquire(ctx context.Context, name string, maxConcu
 	}
 	if m.activeProviders != nil {
 		limits, active := m.activeProviders[name]
-		if !active {
+		if !active && !allowInactive {
 			m.mu.Unlock()
 			return nil, ErrProviderRemoved
 		}
-		maxConcurrent = limits.MaxConcurrent
-		maxPerSecond = limits.MaxPerSecond
+		if active {
+			maxConcurrent = limits.MaxConcurrent
+			maxPerSecond = limits.MaxPerSecond
+		}
 	}
 
 	q := m.ensureLocked(name, maxConcurrent, maxPerSecond)
 	q.mu.Lock()
+	if allowInactive && m.activeProviders != nil {
+		if _, active := m.activeProviders[name]; !active {
+			q.retired = true
+			q.updateLimitsLocked(Limits{MaxConcurrent: maxConcurrent, MaxPerSecond: maxPerSecond})
+		}
+	}
 	m.mu.Unlock()
 	return q, nil
 }
@@ -139,6 +149,16 @@ func (m *Manager) lockQueueForAcquire(ctx context.Context, name string, maxConcu
 // Acquire 等待 FIFO admission。并发和速率限制共享同一个 maxQueueWait deadline；
 // ctx 取消或超时时，请求会从 waiters 中移除，且不会增加 running。
 func (m *Manager) Acquire(ctx context.Context, name string, maxConcurrent, maxPerSecond, maxQueueWaitMs int) (release func(), waitMs int64, err error) {
+	return m.acquire(ctx, name, maxConcurrent, maxPerSecond, maxQueueWaitMs, false)
+}
+
+// AcquireForDebug 对已停用的 Provider 使用相同的 FIFO 并发与限速规则。
+// 已停用 Provider 的队列保持 retired 状态，仅保留有效的调试限速窗口，过期后自动回收。
+func (m *Manager) AcquireForDebug(ctx context.Context, name string, maxConcurrent, maxPerSecond, maxQueueWaitMs int) (release func(), waitMs int64, err error) {
+	return m.acquire(ctx, name, maxConcurrent, maxPerSecond, maxQueueWaitMs, true)
+}
+
+func (m *Manager) acquire(ctx context.Context, name string, maxConcurrent, maxPerSecond, maxQueueWaitMs int, allowInactive bool) (release func(), waitMs int64, err error) {
 	start := time.Now()
 	var deadline time.Time
 	if maxQueueWaitMs > 0 {
@@ -148,19 +168,21 @@ func (m *Manager) Acquire(ctx context.Context, name string, maxConcurrent, maxPe
 		return nil, time.Since(start).Milliseconds(), err
 	}
 
-	q, err := m.lockQueueForAcquire(ctx, name, maxConcurrent, maxPerSecond, deadline)
+	q, err := m.lockQueueForAcquire(ctx, name, maxConcurrent, maxPerSecond, deadline, allowInactive)
 	if err != nil {
 		return nil, time.Since(start).Milliseconds(), err
 	}
-	w := &waiter{ready: make(chan struct{}), state: waiterQueued}
+	w := &waiter{ready: make(chan struct{}), state: waiterQueued, debug: allowInactive}
 
 	now := time.Now()
 	if err := ctx.Err(); err != nil {
 		q.mu.Unlock()
+		q.cleanupRetired()
 		return nil, time.Since(start).Milliseconds(), err
 	}
 	if !deadline.IsZero() && !now.Before(deadline) {
 		q.mu.Unlock()
+		q.cleanupRetired()
 		return nil, time.Since(start).Milliseconds(), ErrQueueTimeout
 	}
 	w.element = q.waiters.PushBack(w)
@@ -254,6 +276,9 @@ func (q *providerQueue) admitLocked(now time.Time) {
 		q.running++
 		if q.maxPerSecond > 0 {
 			q.requestTimes = append(q.requestTimes, now)
+			if w.debug {
+				q.debugRequestTimes = append(q.debugRequestTimes, now)
+			}
 		}
 		close(w.ready)
 	}
@@ -264,20 +289,28 @@ func (q *providerQueue) admitLocked(now time.Time) {
 func (q *providerQueue) pruneRequestTimesLocked(now time.Time) {
 	if q.maxPerSecond <= 0 {
 		q.requestTimes = nil
+		q.debugRequestTimes = nil
 		return
 	}
 
 	cutoff := now.Add(-time.Second)
+	q.requestTimes = pruneTimeSlice(q.requestTimes, cutoff)
+	q.debugRequestTimes = pruneTimeSlice(q.debugRequestTimes, cutoff)
+}
+
+func pruneTimeSlice(times []time.Time, cutoff time.Time) []time.Time {
 	firstKept := 0
-	for firstKept < len(q.requestTimes) && !q.requestTimes[firstKept].After(cutoff) {
+	for firstKept < len(times) && !times[firstKept].After(cutoff) {
 		firstKept++
 	}
-	if firstKept == len(q.requestTimes) {
-		q.requestTimes = nil
-	} else if firstKept > 0 {
-		copy(q.requestTimes, q.requestTimes[firstKept:])
-		q.requestTimes = q.requestTimes[:len(q.requestTimes)-firstKept]
+	if firstKept == len(times) {
+		return nil
 	}
+	if firstKept > 0 {
+		copy(times, times[firstKept:])
+		times = times[:len(times)-firstKept]
+	}
+	return times
 }
 
 func (q *providerQueue) scheduleRateWakeLocked(delay time.Duration) {
@@ -316,6 +349,21 @@ func (q *providerQueue) drainedLocked() bool {
 	return q.running == 0 && q.waiters.Len() == 0 && q.rateTimer == nil
 }
 
+// prepareRetiredCleanupLocked 只为仍处于一秒窗口内的调试记录保留队列并设置最终回收定时器。
+// 调用方必须持有 q.mu；返回 true 表示队列已可删除。
+func (q *providerQueue) prepareRetiredCleanupLocked(now time.Time) bool {
+	q.pruneRequestTimesLocked(now)
+	if q.running > 0 || q.waiters.Len() > 0 {
+		return false
+	}
+	if len(q.debugRequestTimes) > 0 {
+		q.scheduleRateWakeLocked(q.debugRequestTimes[0].Add(time.Second).Sub(now))
+		return false
+	}
+	q.stopRateTimerLocked()
+	return true
+}
+
 // cleanupRetired 必须在未持有 q.mu 时调用，内部始终按 Manager -> provider 加锁。
 func (q *providerQueue) cleanupRetired() {
 	if q.m == nil {
@@ -328,7 +376,7 @@ func (q *providerQueue) cleanupRetired() {
 		return
 	}
 	q.mu.Lock()
-	if q.retired && q.drainedLocked() {
+	if q.retired && q.prepareRetiredCleanupLocked(time.Now()) && q.drainedLocked() {
 		delete(q.m.queues, q.name)
 	}
 	q.mu.Unlock()
@@ -400,7 +448,7 @@ func (m *Manager) reconcileProviders(limits map[string]Limits) {
 		q.retired = !ok
 		if ok {
 			q.updateLimitsLocked(providerLimits)
-		} else if q.drainedLocked() {
+		} else if q.prepareRetiredCleanupLocked(time.Now()) && q.drainedLocked() {
 			delete(m.queues, name)
 		}
 		q.mu.Unlock()

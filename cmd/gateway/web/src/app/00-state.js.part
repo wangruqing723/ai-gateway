@@ -18,6 +18,7 @@
                     { id: 'monitor', label: '监控仪表盘', icon: 'monitoring', fillIcon: false },
                     { id: 'providers', label: '提供商', icon: 'dns', fillIcon: true },
                     { id: 'routes', label: '路由', icon: 'alt_route', fillIcon: true },
+                    { id: 'debug', label: '调试', icon: 'bolt', fillIcon: false },
                     { id: 'logs', label: '请求日志', icon: 'receipt_long', fillIcon: false },
                     { id: 'settings', label: '全局设置', icon: 'tune', fillIcon: true }
                 ],
@@ -221,6 +222,8 @@
                     // 按上游格式的全局默认扩展。表单用有序行数组，保存时再还原成 map；
                     // 空数组等同未配置，不会在 YAML 里产生空对象。
                     globalUserAgent: { anthropic: '', openai: '', 'openai-responses': '' },
+                    // 与 normalizeGlobalUserAgentEnabled 的缺省语义一致：三种格式默认启用。
+                    globalUserAgentEnabled: { anthropic: true, openai: true, 'openai-responses': true },
                     globalUpstreamExtras: {
                         anthropic: { headers: [], body: [] },
                         openai: { headers: [], body: [] },
@@ -310,7 +313,8 @@
                     q: '',
                     attemptProvider: '',
                     attemptStatus: '',
-                    attemptOutcome: ''
+                    attemptOutcome: '',
+                    debug: ''
                 },
                 yamlContent: '',
                 // ── 提供商 / 路由配置导入导出（两页共用弹窗）──────────────

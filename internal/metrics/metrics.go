@@ -151,6 +151,8 @@ type RequestLog struct {
 	KeySource      string `json:"keySource,omitempty"`
 	KeyFingerprint string `json:"keyFingerprint,omitempty"`
 	Status         int    `json:"status"`
+	Debug          bool   `json:"debug,omitempty"`
+	DebugMode      string `json:"debugMode,omitempty"`
 	ClientFormat   string `json:"clientFormat"`
 	// Format 是 ClientFormat 的历史别名，语义恒为「客户端格式」，保留给旧前端与
 	// 外部诊断脚本。上游格式看 UpstreamFormat，不要复用本字段。
@@ -189,10 +191,12 @@ type RequestLog struct {
 	// Attempts 保留既有的故障转移额度计数语义；超长 Retry-After 的 free attempt
 	// 不计入其中。严格的实际 HTTP 尝试编号见 AttemptDetails.AttemptNumber。
 	Attempts int `json:"attempts,omitempty"`
-	// AttemptTrail 故障转移轨迹，例如 "mimo:429/ratelimit → deepseek:200"。
+	// AttemptTrail 故障转移轨迹，例如 "mimo:429/ratelimit → deepseek:200"；超长时折叠中段。
 	AttemptTrail string `json:"attemptTrail,omitempty"`
-	// AttemptDetails 保留每一个候选的请求、跳过和转移明细；仍只生成一条顶层请求日志。
+	// AttemptDetails 保留请求、跳过和转移明细；超出 40 条时折叠保留头 20 条与尾 20 条。
 	AttemptDetails []AttemptDetail `json:"attemptDetails,omitempty"`
+	// AttemptDetailsOmitted 是追加阶段折叠掉的尝试明细条数。
+	AttemptDetailsOmitted int `json:"attemptDetailsOmitted,omitempty"`
 	// EstimatedInputTokens 是本次请求的估算输入 token 数；未启用 contextWindow 时为 0。
 	EstimatedInputTokens int `json:"estimatedInputTokens,omitempty"`
 	// Vision* 是图片块级别的独立统计，不参与 isSuccess 判定。
@@ -395,8 +399,10 @@ func (c *Collector) Add(record RequestLog) {
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.totalRequests++
-	c.addMetricLocked(record, observedAt)
+	if !record.Debug {
+		c.totalRequests++
+		c.addMetricLocked(record, observedAt)
+	}
 	if len(c.records) < cap(c.records) {
 		c.records = append(c.records, record)
 		return
@@ -531,6 +537,9 @@ func (c *Collector) Metrics(now time.Time) Response {
 	if len(providerTotals) == 0 {
 		fallbackProviderTotals = make(map[string]*logProviderStats)
 		c.forEachRecordOldestLocked(func(record RequestLog) bool {
+			if record.Debug {
+				return true
+			}
 			name := record.Provider
 			if name == "" {
 				name = "(未匹配)"
@@ -552,6 +561,9 @@ func (c *Collector) Metrics(now time.Time) Response {
 	// 日志环兜底，并且仍按窗口过滤，避免把历史图片请求带回当前汇总。
 	if visionImages == 0 {
 		c.forEachRecordOldestLocked(func(record RequestLog) bool {
+			if record.Debug {
+				return true
+			}
 			if record.Started.Unix() < cutoffSecond || record.Started.Unix() > nowSecond {
 				return true
 			}
@@ -622,6 +634,7 @@ type LogFilter struct {
 	AttemptProvider string
 	AttemptStatus   string
 	AttemptOutcome  string
+	Debug           string
 	Since           time.Time
 }
 
@@ -664,7 +677,7 @@ func (c *Collector) recentErrorsLocked(limit int) []RequestLog {
 		return out
 	}
 	c.forEachRecordNewestLocked(func(record RequestLog) bool {
-		if !isSuccess(record) {
+		if !record.Debug && !isSuccess(record) {
 			out = append(out, record)
 		}
 		return len(out) < limit
@@ -678,6 +691,9 @@ func (c *Collector) recentVisionFailuresLocked(limit int) []VisionFailureEntry {
 		return out
 	}
 	c.forEachRecordNewestLocked(func(record RequestLog) bool {
+		if record.Debug {
+			return true
+		}
 		if record.VisionFailed <= 0 {
 			return true
 		}
@@ -695,6 +711,16 @@ func (c *Collector) recentVisionFailuresLocked(limit int) []VisionFailureEntry {
 }
 
 func match(r RequestLog, f LogFilter) bool {
+	switch f.Debug {
+	case "only":
+		if !r.Debug {
+			return false
+		}
+	case "exclude":
+		if r.Debug {
+			return false
+		}
+	}
 	if f.Provider != "" && r.Provider != f.Provider {
 		return false
 	}

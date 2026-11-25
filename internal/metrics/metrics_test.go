@@ -201,6 +201,54 @@ func TestCollectorMetrics(t *testing.T) {
 	}
 }
 
+func TestCollectorDebugRecordsOnlyEnterLogRing(t *testing.T) {
+	c := NewCollectorWithWindow(10, 1)
+	now := time.Date(2026, 11, 25, 10, 0, 0, 0, time.UTC)
+	c.Add(RequestLog{
+		ID: "real", Started: now.Add(-time.Second), Status: 500, Provider: "primary", DurationMs: 20,
+		Error: "real failure", VisionImages: 2, VisionRecognized: 1, VisionFailed: 1,
+		VisionFailCategory: "network", VisionFailMessage: "连接失败",
+	})
+	c.Add(RequestLog{
+		ID: "debug", Started: now, Status: 200, Provider: "debug-provider", DurationMs: 500,
+		Error: "debug failure", Debug: true, DebugMode: "provider",
+		VisionImages: 9, VisionRecognized: 3, VisionFailed: 6,
+		VisionFailCategory: "debug", VisionFailMessage: "调试失败",
+	})
+
+	got := c.Metrics(now)
+	if got.Summary.TotalRequests != 1 || got.Summary.WindowRequests != 1 || got.Summary.LatencySamples != 1 {
+		t.Fatalf("调试记录影响请求数或延迟样本: %#v", got.Summary)
+	}
+	if got.StatusCodes["500"] != 1 || got.StatusCodes["200"] != 0 || len(got.Providers) != 1 ||
+		got.Providers[0].Name != "primary" || got.Providers[0].Requests != 1 || got.Providers[0].Errors != 1 {
+		t.Fatalf("调试记录影响状态码或 Provider 聚合: statuses=%#v providers=%#v", got.StatusCodes, got.Providers)
+	}
+	if len(got.RecentErrors) != 1 || got.RecentErrors[0].ID != "real" {
+		t.Fatalf("最近错误包含调试记录: %#v", got.RecentErrors)
+	}
+	if got.Vision.WindowImages != 2 || got.Vision.WindowRecognized != 1 || got.Vision.WindowFailed != 1 ||
+		len(got.Vision.RecentFailed) != 1 || got.Vision.RecentFailed[0].ID != "real" {
+		t.Fatalf("调试记录影响图片识别统计: %#v", got.Vision)
+	}
+	if logs := c.Logs(LogFilter{Debug: "only", Limit: 10}); len(logs) != 1 || logs[0].ID != "debug" {
+		t.Fatalf("调试记录未保留在日志环: %#v", logs)
+	}
+	if logs := c.Logs(LogFilter{Debug: "exclude", Limit: 10}); len(logs) != 1 || logs[0].ID != "real" {
+		t.Fatalf("排除调试记录的日志筛选错误: %#v", logs)
+	}
+
+	debugOnly := NewCollector(10)
+	debugOnly.Add(RequestLog{
+		ID: "debug-only", Started: now, Status: 500, Provider: "debug-provider", Debug: true,
+		VisionImages: 1, VisionFailed: 1,
+	})
+	debugOnlyMetrics := debugOnly.Metrics(now)
+	if len(debugOnlyMetrics.Providers) != 0 || len(debugOnlyMetrics.RecentErrors) != 0 || len(debugOnlyMetrics.Vision.RecentFailed) != 0 {
+		t.Fatalf("空聚合窗口从日志环回填了调试记录: %#v", debugOnlyMetrics)
+	}
+}
+
 func TestCollectorMetricsAggregatesVisionAndKeepsRequestSuccessIndependent(t *testing.T) {
 	c := NewCollectorWithWindow(20, 1)
 	now := time.Date(2026, 6, 27, 10, 1, 0, 0, time.UTC)

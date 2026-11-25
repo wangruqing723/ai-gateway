@@ -103,6 +103,25 @@
                     return (Number(log?.attempts) || 0) > 1 ? `${log.attempts} 次尝试` : '--';
                 },
 
+                // 为请求日志详情插入一个稳定键的省略占位行，供单根 tr 的 x-for 渲染。
+                attemptDetailRows(log) {
+                    const details = Array.isArray(log?.attemptDetails) ? log.attemptDetails : [];
+                    const rows = details.map(detail => ({
+                        ...detail,
+                        rowType: 'detail',
+                        rowKey: `detail-${detail.sequence}`
+                    }));
+                    const omitted = Number(log?.attemptDetailsOmitted) || 0;
+                    if (omitted > 0) {
+                        rows.splice(Math.min(20, rows.length), 0, {
+                            rowType: 'omitted',
+                            rowKey: 'omitted',
+                            omitted
+                        });
+                    }
+                    return rows;
+                },
+
                 // 来源只使用后端明确记录的字段，历史记录不从状态码或错误文案反推。
                 errorSourceLabel(source) {
                     const labels = { upstream: '上游返回错误', gateway: '网关处理错误', transport: '连接异常', client: '客户端中断', unknown: '来源未确定' };

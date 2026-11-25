@@ -38,6 +38,7 @@ type groupQueue struct {
 type groupWaiter struct {
 	provider      string
 	groupOnly     bool
+	allowInactive bool
 	maxConcurrent int
 	maxPerSecond  int
 
@@ -83,15 +84,23 @@ func (m *Manager) AcquireGroup(ctx context.Context, name string, maxConcurrent, 
 	if group == "" || !m.GroupLimitsSnapshot().Enabled() {
 		return m.Acquire(ctx, name, maxConcurrent, maxPerSecond, maxQueueWaitMs)
 	}
-	return m.acquireGroup(ctx, name, maxConcurrent, maxPerSecond, maxQueueWaitMs, group, false)
+	return m.acquireGroup(ctx, name, maxConcurrent, maxPerSecond, maxQueueWaitMs, group, false, false)
+}
+
+// AcquireGroupForDebug 保留账户共享队列限制，并允许已停用的 Provider 进入独立调试队列。
+func (m *Manager) AcquireGroupForDebug(ctx context.Context, name string, maxConcurrent, maxPerSecond, maxQueueWaitMs int, group string) (release func(), waitMs int64, err error) {
+	if group == "" || !m.GroupLimitsSnapshot().Enabled() {
+		return m.AcquireForDebug(ctx, name, maxConcurrent, maxPerSecond, maxQueueWaitMs)
+	}
+	return m.acquireGroup(ctx, name, maxConcurrent, maxPerSecond, maxQueueWaitMs, group, false, true)
 }
 
 // AcquireGroupOnly 只占共享账户槽，不创建或占用 Provider 队列；未设组限制时仍跟踪在途数。
 func (m *Manager) AcquireGroupOnly(ctx context.Context, group string, maxQueueWaitMs int) (func(), int64, error) {
-	return m.acquireGroup(ctx, "", 0, 0, maxQueueWaitMs, group, true)
+	return m.acquireGroup(ctx, "", 0, 0, maxQueueWaitMs, group, true, false)
 }
 
-func (m *Manager) acquireGroup(ctx context.Context, name string, maxConcurrent, maxPerSecond, maxQueueWaitMs int, group string, groupOnly bool) (release func(), waitMs int64, err error) {
+func (m *Manager) acquireGroup(ctx context.Context, name string, maxConcurrent, maxPerSecond, maxQueueWaitMs int, group string, groupOnly, allowInactive bool) (release func(), waitMs int64, err error) {
 	start := time.Now()
 	var deadline time.Time
 	if maxQueueWaitMs > 0 {
@@ -104,6 +113,7 @@ func (m *Manager) acquireGroup(ctx context.Context, name string, maxConcurrent, 
 	w := &groupWaiter{
 		provider:      name,
 		groupOnly:     groupOnly,
+		allowInactive: allowInactive,
 		maxConcurrent: maxConcurrent,
 		maxPerSecond:  maxPerSecond,
 		ready:         make(chan struct{}),
@@ -196,8 +206,15 @@ func (m *Manager) cancelGroupWaiter(g *groupQueue, w *groupWaiter) bool {
 	w.state = waiterCanceled
 	m.mu.Lock()
 	m.leaveGroupWaitingLocked(w.provider)
+	var q *providerQueue
+	if w.allowInactive {
+		q = m.queues[w.provider]
+	}
 	m.mu.Unlock()
 	g.mu.Unlock()
+	if q != nil {
+		q.cleanupRetired()
+	}
 	m.cleanupGroup(g)
 	return true
 }
@@ -259,14 +276,22 @@ func (m *Manager) tryAdmitProvider(w *groupWaiter, now time.Time) (*providerQueu
 	maxConcurrent, maxPerSecond := w.maxConcurrent, w.maxPerSecond
 	if m.activeProviders != nil {
 		limits, active := m.activeProviders[w.provider]
-		if !active {
+		if !active && !w.allowInactive {
 			m.leaveGroupWaitingLocked(w.provider)
 			return nil, 0, ErrProviderRemoved
 		}
-		maxConcurrent, maxPerSecond = limits.MaxConcurrent, limits.MaxPerSecond
+		if active {
+			maxConcurrent, maxPerSecond = limits.MaxConcurrent, limits.MaxPerSecond
+		}
 	}
 	q := m.ensureLocked(w.provider, maxConcurrent, maxPerSecond)
 	q.mu.Lock()
+	if w.allowInactive && m.activeProviders != nil {
+		if _, active := m.activeProviders[w.provider]; !active {
+			q.retired = true
+			q.updateLimitsLocked(Limits{MaxConcurrent: maxConcurrent, MaxPerSecond: maxPerSecond})
+		}
+	}
 	defer q.mu.Unlock()
 	q.pruneRequestTimesLocked(now)
 	if q.waiters.Len() > 0 || q.running >= q.maxConcurrent {
@@ -278,6 +303,9 @@ func (m *Manager) tryAdmitProvider(w *groupWaiter, now time.Time) (*providerQueu
 	q.running++
 	if q.maxPerSecond > 0 {
 		q.requestTimes = append(q.requestTimes, now)
+		if w.allowInactive {
+			q.debugRequestTimes = append(q.debugRequestTimes, now)
+		}
 	}
 	m.leaveGroupWaitingLocked(w.provider)
 	return q, 0, nil
@@ -358,10 +386,16 @@ func (m *Manager) cleanupGroup(g *groupQueue) {
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	g.pruneLocked(time.Now())
-	if g.running == 0 && g.waiters.Len() == 0 && g.timer == nil && len(g.requestTimes) == 0 {
-		delete(m.groups, g.name)
+	now := time.Now()
+	g.pruneLocked(now)
+	if g.running != 0 || g.waiters.Len() != 0 || g.timer != nil {
+		return
 	}
+	if len(g.requestTimes) > 0 {
+		m.setGroupTimerLocked(g, g.requestTimes[0].Add(time.Second).Sub(now), now)
+		return
+	}
+	delete(m.groups, g.name)
 }
 
 func (g *groupQueue) pruneLocked(now time.Time) {

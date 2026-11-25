@@ -23,7 +23,7 @@
                 resetLogFilters() {
                     this.logFilters = {
                         status: '', provider: '', stream: '', model: '', q: '',
-                        attemptProvider: '', attemptStatus: '', attemptOutcome: ''
+                        attemptProvider: '', attemptStatus: '', attemptOutcome: '', debug: ''
                     };
                     this.logAdvancedFiltersOpen = false;
                     this.loadRequestLogs();

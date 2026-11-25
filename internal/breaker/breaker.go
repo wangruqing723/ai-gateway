@@ -24,7 +24,7 @@ const (
 	OutcomeFailure
 	// OutcomeIgnored 不参与熔断判据。
 	//
-		// 所有 4xx：是否换候选由 failover 控制，不作为上游故障判据。
+	// 所有 4xx：是否换候选由 failover 控制，不作为上游故障判据。
 	// 本地队列超时：属于网关侧背压，与上游健康无关。
 	OutcomeIgnored
 )

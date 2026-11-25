@@ -106,7 +106,6 @@ const (
 	defaultFailoverAttempts      = 2
 	defaultMaxRetryAfterMs       = 5000
 	defaultLocalRetryIntervalMs  = 1000
-	maxLocalRetries              = 10
 	maxLocalRetryIntervalMs      = 60000
 	defaultBreakerFailures       = 3
 	defaultBreakerOpenMs         = 30_000
@@ -2077,8 +2076,8 @@ func validateLocalRetry(label string, retry *LocalRetry) error {
 	if retry == nil {
 		return nil
 	}
-	if retry.MaxRetries != nil && (*retry.MaxRetries < 0 || *retry.MaxRetries > maxLocalRetries) {
-		return fmt.Errorf("%s.maxRetries 应在 0-%d 之间", label, maxLocalRetries)
+	if retry.MaxRetries != nil && *retry.MaxRetries < 0 {
+		return fmt.Errorf("%s.maxRetries 不能为负数", label)
 	}
 	if retry.IntervalMs != nil && (*retry.IntervalMs < 0 || *retry.IntervalMs > maxLocalRetryIntervalMs) {
 		return fmt.Errorf("%s.intervalMs 应在 0-%d 之间", label, maxLocalRetryIntervalMs)

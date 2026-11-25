@@ -441,6 +441,14 @@
 
                                                     <!-- 右侧操作栏：添加候选、启停规则、编辑与低频复制/删除 -->
                                                     <div class="flex shrink-0 items-center gap-1.5">
+                                                        <button type="button" @click="openDebugForRoute(debugSavedRouteIndexForDraft(route, index))"
+                                                                :disabled="debugSavedRouteIndexForDraft(route, index) < 0"
+                                                                class="inline-flex items-center gap-1 rounded-md border border-cyan/25 px-2 py-1 text-xs text-cyan transition hover:border-cyan/50 hover:bg-cyan/10 disabled:cursor-not-allowed disabled:opacity-40"
+                                                                :title="debugSavedRouteIndexForDraft(route, index) < 0 ? '此规则无法对应到唯一的已保存路由' : '使用已保存配置调试此路由'"
+                                                                :aria-label="'调试路由 ' + route.match">
+                                                            <span class="material-symbols-outlined text-[14px]" aria-hidden="true">bolt</span>
+                                                            调试
+                                                        </button>
                                                         <button type="button"
                                                                 @click="startInlineCandidateAdd(index)"
                                                                 :disabled="loading || inlineModel.routeIndex >= 0 || routeTargets(route).length >= maxRouteTargets"
@@ -1275,6 +1283,13 @@
                                                         x-text="formatMs(provider.maxQueueWait || 30000)"></td>
                                                     <td class="w-px whitespace-nowrap px-3 py-2.5">
                                                         <div class="flex justify-end gap-0.5">
+                                                            <button type="button" @click="openDebugForProvider(name)"
+                                                                    :disabled="!debugSavedProviderExists(name)"
+                                                                    class="btn btn-ghost disabled:cursor-not-allowed disabled:opacity-40"
+                                                                    :title="debugSavedProviderExists(name) ? '使用已保存配置调试 Provider' : '新 Provider 保存后才能调试'"
+                                                                    :aria-label="'调试 Provider ' + name">
+                                                                <span class="material-symbols-outlined text-[18px]">bolt</span>
+                                                            </button>
                                                             <button @click="editProvider(name)" class="btn btn-ghost" title="编辑 Provider" aria-label="编辑 Provider">
                                                                 <span class="material-symbols-outlined text-[18px]">edit</span>
                                                             </button>
@@ -1820,6 +1835,259 @@
                                   class="min-h-[680px] w-full resize-y rounded-b-lg border-0 bg-ink p-4 font-mono text-sm leading-6 text-slate-200 outline-none focus:ring-0 lg:min-h-0 lg:flex-1 lg:resize-none"
                                   placeholder="加载中..."></textarea>
                     </div>
+                </section>
+
+                <section x-ref="debugScroll" x-show="activeTab === 'debug'" x-cloak class="min-w-0 space-y-5 lg:h-full lg:min-h-0 lg:overflow-y-auto lg:pr-2">
+                    <section class="glass min-w-0 rounded-xl p-4 sm:p-5">
+                        <div class="mb-4 flex flex-wrap items-start justify-between gap-3 border-b border-line pb-4">
+                            <div class="min-w-0">
+                                <div class="flex flex-wrap items-center gap-2">
+                                    <h2 class="text-lg font-bold text-white">调试请求</h2>
+                                    <code class="rounded bg-ink px-2 py-1 font-mono text-xs text-cyan">POST /api/debug/run</code>
+                                </div>
+                                <p class="mt-1 text-xs leading-5 text-muted">配置对象来自最近一次加载的已保存快照；请求正文、响应与错误仅保留在当前页面内存。</p>
+                            </div>
+                            <span class="inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-semibold"
+                                  :class="debugStatusClass()" role="status" aria-live="polite">
+                                <span x-show="['running', 'aborting'].includes(debugStatus)" x-cloak class="material-symbols-outlined gw-spin text-[15px]" aria-hidden="true">progress_activity</span>
+                                <span x-text="debugStatusLabel()"></span>
+                            </span>
+                        </div>
+
+                        <div x-show="debugConfigHasUnsavedChanges()" x-cloak class="mb-4 flex items-start gap-2 rounded-lg border border-warn/30 bg-warn/10 px-3 py-2.5 text-xs leading-5 text-amber-100" role="status">
+                            <span class="material-symbols-outlined mt-0.5 shrink-0 text-[16px] text-warn" aria-hidden="true">info</span>
+                            <span>调试使用已保存的配置。当前页面的未保存修改不会发送；新 Provider 或新路由保存后才可调试。</span>
+                        </div>
+
+                        <div class="mb-4 rounded-lg border border-warn/25 bg-warn/5 px-3 py-2.5 text-xs leading-5 text-muted">
+                            Provider 模式为隔离单发；路由和指定候选模式执行真实链路，会影响熔断器与密钥冷却，并消耗真实上游额度。所有调试日志都不计入网关监控聚合。
+                        </div>
+
+                        <div class="grid min-w-0 grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                            <label class="min-w-0 text-xs font-bold text-muted">调试模式
+                                <select :value="debugMode" @change="debugChangeMode($event.target.value)" class="field mt-1.5 w-full text-sm" aria-label="调试模式">
+                                    <option value="provider">Provider（隔离单发）</option>
+                                    <option value="route">路由（完整链路）</option>
+                                    <option value="target">指定候选（不转移）</option>
+                                </select>
+                            </label>
+
+                            <label x-show="debugMode === 'provider'" x-cloak class="min-w-0 text-xs font-bold text-muted">已保存 Provider
+                                <select :value="debugProvider" @change="debugChangeProvider($event.target.value)" class="field mt-1.5 w-full text-sm" aria-label="已保存 Provider">
+                                    <option value="">选择 Provider</option>
+                                    <template x-for="entry in debugSavedProviders()" :key="entry.name">
+                                        <option :value="entry.name" x-text="entry.name + (entry.provider?.enabled === false ? '（已停用）' : '')"></option>
+                                    </template>
+                                </select>
+                            </label>
+
+                            <label x-show="debugMode !== 'provider'" x-cloak class="min-w-0 text-xs font-bold text-muted">已保存路由
+                                <select :value="String(debugRouteIndex)" @change="debugChangeRoute($event.target.value)" class="field mt-1.5 w-full text-sm" aria-label="已保存路由">
+                                    <option value="-1">选择路由</option>
+                                    <template x-for="entry in debugSavedRoutes()" :key="entry.index">
+                                        <option :value="String(entry.index)" x-text="'#' + (entry.index + 1) + ' · ' + entry.route.match + (entry.route.enabled === false ? '（已停用）' : '')"></option>
+                                    </template>
+                                </select>
+                            </label>
+
+                            <label x-show="debugMode === 'target'" x-cloak class="min-w-0 text-xs font-bold text-muted">已保存候选
+                                <select :value="String(debugTargetIndex)" @change="debugChangeTarget($event.target.value)" class="field mt-1.5 w-full text-sm" aria-label="已保存候选">
+                                    <option value="-1">选择候选</option>
+                                    <template x-for="(target, index) in debugSelectedTargets()" :key="index">
+                                        <option :value="String(index)" x-text="'#' + (index + 1) + ' · ' + target.provider + (target.model ? ' / ' + target.model : '') + (_debugConfigSnapshot?.providers?.[target.provider]?.enabled === false ? '（Provider 已停用）' : '')"></option>
+                                    </template>
+                                </select>
+                            </label>
+
+                            <label class="min-w-0 text-xs font-bold text-muted">客户端格式
+                                <select :value="debugClientFormat" @change="debugChangeClientFormat($event.target.value)" class="field mt-1.5 w-full text-sm" aria-label="客户端格式">
+                                    <option value="anthropic">Anthropic</option>
+                                    <option value="openai-chat">OpenAI Chat</option>
+                                    <option value="openai-responses">OpenAI Responses</option>
+                                </select>
+                            </label>
+                        </div>
+
+                        <div x-show="debugMode === 'provider'" x-cloak class="mt-4 grid min-w-0 grid-cols-1 gap-2 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
+                            <label class="min-w-0 text-xs font-bold text-muted">目标模型
+                                <input autocomplete="off" list="debug-provider-model-options" x-model="debugSimple.model"
+                                       class="field mt-1.5 w-full font-mono text-sm" placeholder="可从模型列表选择，也可手动填写" aria-label="Provider 目标模型">
+                                <datalist id="debug-provider-model-options">
+                                    <template x-for="model in debugProviderModels" :key="model"><option :value="model"></option></template>
+                                </datalist>
+                            </label>
+                            <div class="flex min-w-0 flex-wrap items-center gap-2">
+                                <button type="button" @click="loadDebugProviderModels(true)" :disabled="!debugProvider || debugProviderModelsLoading"
+                                        class="btn btn-secondary px-3 py-2 disabled:cursor-wait disabled:opacity-50" aria-label="刷新 Provider 模型列表">
+                                    <span class="material-symbols-outlined text-[17px]" :class="debugProviderModelsLoading ? 'gw-spin' : ''" aria-hidden="true" x-text="debugProviderModelsLoading ? 'progress_activity' : 'refresh'"></span>
+                                    <span>查询模型</span>
+                                </button>
+                                <span class="min-w-0 text-[11px] leading-4 text-muted" role="status" x-text="debugProviderModelsMessage"></span>
+                            </div>
+                        </div>
+
+                        <div x-show="debugMode !== 'provider'" x-cloak class="mt-4 grid min-w-0 grid-cols-1 gap-3 sm:grid-cols-2">
+                            <label class="min-w-0 text-xs font-bold text-muted">客户端模型名
+                                <input autocomplete="off" x-model="debugSimple.model" class="field mt-1.5 w-full font-mono text-sm"
+                                       :placeholder="debugRouteModelPlaceholder()" aria-label="路由客户端模型名">
+                            </label>
+                            <p class="self-end text-xs leading-5 text-muted" x-show="debugRouteHasWildcard()" x-cloak>
+                                此路由包含通配符，必须填写具体模型名，不能把匹配模式直接作为 model 发送。
+                            </p>
+                        </div>
+
+                        <div class="mt-5 border-t border-line pt-4">
+                            <div class="mb-3 flex flex-wrap items-center justify-between gap-3">
+                                <div>
+                                    <h3 class="text-sm font-bold text-white">请求编辑</h3>
+                                    <p class="mt-1 text-xs text-muted">简易表单只支持 system、单条用户消息、stream 和 max tokens；复杂请求请用原始 JSON。</p>
+                                </div>
+                                <div class="inline-flex rounded-lg border border-line bg-ink/60 p-0.5" role="group" aria-label="请求编辑视图">
+                                    <button type="button" @click="debugChangeRequestView('simple')" :aria-pressed="String(debugRequestView === 'simple')"
+                                            :class="debugRequestView === 'simple' ? 'bg-panel3 text-text' : 'text-muted hover:text-text'"
+                                            class="rounded-md px-3 py-1.5 text-xs font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan2">简易表单</button>
+                                    <button type="button" @click="debugChangeRequestView('raw')" :aria-pressed="String(debugRequestView === 'raw')"
+                                            :class="debugRequestView === 'raw' ? 'bg-panel3 text-text' : 'text-muted hover:text-text'"
+                                            class="rounded-md px-3 py-1.5 text-xs font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan2">原始 JSON</button>
+                                </div>
+                            </div>
+
+                            <div x-show="debugRequestView === 'simple'" x-cloak class="grid min-w-0 grid-cols-1 gap-3 lg:grid-cols-2">
+                                <label class="min-w-0 text-xs font-bold text-muted">System 指令
+                                    <textarea autocomplete="off" x-model="debugSimple.system" rows="3" class="field mt-1.5 w-full resize-y text-sm" placeholder="可留空"></textarea>
+                                </label>
+                                <label class="min-w-0 text-xs font-bold text-muted">用户消息
+                                    <textarea autocomplete="off" x-model="debugSimple.message" rows="3" class="field mt-1.5 w-full resize-y text-sm" placeholder="输入一条用户消息"></textarea>
+                                </label>
+                                <label class="min-w-0 text-xs font-bold text-muted">Max tokens
+                                    <input autocomplete="off" type="number" min="1" step="1" x-model="debugSimple.maxTokens" class="field mt-1.5 w-full font-mono text-sm" placeholder="留空：由网关配置优先级决定">
+                                </label>
+                                <label class="flex min-h-11 min-w-0 cursor-pointer items-center gap-2 rounded-lg border border-line bg-ink/50 px-3 text-sm text-text">
+                                    <input type="checkbox" x-model="debugSimple.stream" class="h-4 w-4 rounded border-line bg-panel text-cyan2 focus:ring-cyan2">
+                                    <span>流式响应</span><span class="text-xs text-muted">默认开启</span>
+                                </label>
+                            </div>
+
+                            <div x-show="debugRequestView === 'raw'" x-cloak class="min-w-0">
+                                <p class="mb-2 text-xs leading-5 text-muted">以下 JSON 对象会原样作为 body 发送，不会自动补入或覆盖 model、messages、stream 等字段。切换回简易表单会先确认。</p>
+                                <textarea autocomplete="off" spellcheck="false" x-model="debugRawJSON"
+                                          @input="debugRawEdited = true; debugNotice = ''"
+                                          rows="14" class="field min-h-64 w-full min-w-0 resize-y font-mono text-xs leading-5"
+                                          aria-label="原始请求 JSON" placeholder="输入完整 JSON 对象"></textarea>
+                            </div>
+
+                            <p x-show="debugNotice" x-cloak class="mt-3 rounded-lg border border-cyan/25 bg-cyan/5 px-3 py-2 text-xs leading-5 text-cyan" role="status" x-text="debugNotice"></p>
+                            <p x-show="!debugRequestValidation().valid" x-cloak class="mt-3 flex items-start gap-2 text-xs leading-5 text-danger" role="alert">
+                                <span class="material-symbols-outlined mt-0.5 text-[15px]" aria-hidden="true">error</span>
+                                <span x-text="debugRequestValidation().error"></span>
+                            </p>
+                            <div class="mt-4 flex flex-wrap items-center gap-2">
+                                <button type="button" @click="debugRun()" :disabled="!debugCanRun()"
+                                        class="btn btn-primary px-4 py-2.5 disabled:cursor-not-allowed disabled:opacity-50">
+                                    <span class="material-symbols-outlined text-[18px]" aria-hidden="true" x-text="_debugRunActive ? 'progress_activity' : 'bolt'" :class="_debugRunActive ? 'gw-spin' : ''"></span>
+                                    <span x-text="_debugRunActive ? '正在运行' : '发送调试请求'"></span>
+                                </button>
+                                <button type="button" x-show="_debugRunActive" x-cloak @click="stopDebugRun()"
+                                        class="btn btn-secondary border-danger/35 px-4 py-2.5 text-danger hover:bg-danger/10" aria-label="中止调试请求">
+                                    <span class="material-symbols-outlined text-[18px]" aria-hidden="true">close</span>中止
+                                </button>
+                                <span class="text-xs text-muted" role="status" aria-live="polite" x-text="debugStatusMessage"></span>
+                            </div>
+                        </div>
+                    </section>
+
+                    <section class="glass min-w-0 rounded-xl p-4 sm:p-5">
+                        <div class="mb-4 flex flex-wrap items-start justify-between gap-3 border-b border-line pb-4">
+                            <div class="min-w-0">
+                                <h2 class="text-lg font-bold text-white">响应结果</h2>
+                                <p class="mt-1 text-xs text-muted">响应正文按纯文本显示；思考内容和工具调用仅在原始响应中查看。</p>
+                            </div>
+                            <button type="button" @click="copyText(debugRawResponse, $event)" :disabled="!debugRawResponse"
+                                    class="btn btn-secondary px-3 py-2 disabled:cursor-not-allowed disabled:opacity-40" aria-label="复制原始响应">
+                                <span class="material-symbols-outlined text-[16px]" aria-hidden="true">content_copy</span>复制原始响应
+                            </button>
+                        </div>
+                        <div x-show="debugStatus === 'idle'" x-cloak class="rounded-lg border border-dashed border-line px-4 py-10 text-center text-sm text-muted">
+                            选择已保存的配置并填写请求后，调试结果会显示在这里。
+                        </div>
+                        <div x-show="debugStatus !== 'idle'" x-cloak class="min-w-0">
+                            <div class="grid min-w-0 grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-6">
+                                <div class="rounded-lg border border-line bg-ink/45 p-3"><div class="text-[11px] text-muted">HTTP 状态</div><div class="mt-1 font-mono text-sm text-text" x-text="debugResponseStart?.status ?? debugLog?.status ?? '--'"></div></div>
+                                <div class="rounded-lg border border-line bg-ink/45 p-3"><div class="text-[11px] text-muted">总耗时</div><div class="mt-1 font-mono text-sm text-text" x-text="debugLog && debugLog.durationMs != null ? durationText(debugLog.durationMs) : '--'"></div></div>
+                                <div class="rounded-lg border border-line bg-ink/45 p-3"><div class="text-[11px] text-muted">首字耗时</div><div class="mt-1 font-mono text-sm text-text" x-text="debugLog?.firstByteMs != null ? durationText(debugLog.firstByteMs) : '--'"></div></div>
+                                <div class="min-w-0 rounded-lg border border-line bg-ink/45 p-3"><div class="text-[11px] text-muted">实际 Provider</div><div class="mt-1 break-words font-mono text-sm text-text" x-text="debugLog?.provider || '--'"></div></div>
+                                <div class="min-w-0 rounded-lg border border-line bg-ink/45 p-3"><div class="text-[11px] text-muted">目标模型</div><div class="mt-1 break-words font-mono text-sm text-text" x-text="debugLog?.targetModel || '--'"></div></div>
+                                <div class="rounded-lg border border-line bg-ink/45 p-3"><div class="text-[11px] text-muted">尝试次数</div><div class="mt-1 font-mono text-sm text-text" x-text="debugLog?.attempts ?? '--'"></div></div>
+                            </div>
+                            <div class="mt-3 grid min-w-0 grid-cols-1 gap-3 lg:grid-cols-2">
+                                <div class="min-w-0 rounded-lg border border-line bg-ink/45 p-3"><div class="text-[11px] font-bold text-muted">尝试轨迹</div><p class="mt-1 break-words font-mono text-xs leading-5 text-text" x-text="debugLog?.attemptTrail || '—'"></p></div>
+                                <div class="min-w-0 rounded-lg border border-line bg-ink/45 p-3">
+                                    <div class="text-[11px] font-bold text-muted">用量</div>
+                                    <div x-show="debugUsageRows().length" x-cloak class="mt-1 flex flex-wrap gap-x-4 gap-y-1">
+                                        <template x-for="usage in debugUsageRows()" :key="usage.key">
+                                            <span class="text-xs text-text"><span class="text-muted" x-text="usage.label + '：'"></span><span class="font-mono" x-text="usage.value"></span></span>
+                                        </template>
+                                    </div>
+                                    <p x-show="!debugUsageRows().length" class="mt-1 text-xs text-muted">响应未提供可识别的 usage。</p>
+                                </div>
+                            </div>
+                            <div x-show="debugErrorMessage" x-cloak class="mt-3 rounded-lg border border-danger/35 bg-danger/10 px-3 py-2.5 text-sm leading-5 text-rose-100" role="alert" x-text="debugErrorMessage"></div>
+                            <div class="mt-4 flex min-w-0 flex-wrap gap-1 border-b border-line" role="tablist" aria-label="响应视图">
+                                <template x-for="view in [{id:'text',label:'渲染文本'},{id:'raw',label:'原始响应'},{id:'upstream',label:'上游请求'},{id:'attempts',label:'尝试明细'},{id:'headers',label:'响应头'}]" :key="view.id">
+                                    <button type="button" role="tab" @click="debugResponseView = view.id" :aria-selected="String(debugResponseView === view.id)"
+                                            :class="debugResponseView === view.id ? 'border-cyan2 text-cyan' : 'border-transparent text-muted hover:text-text'"
+                                            class="border-b-2 px-3 py-2 text-xs font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan2" x-text="view.label"></button>
+                                </template>
+                            </div>
+                            <div x-show="debugResponseView === 'text'" x-cloak class="mt-3 min-w-0">
+                                <pre class="max-h-[32rem] min-h-28 max-w-full overflow-auto whitespace-pre-wrap break-words rounded-lg border border-line bg-ink/75 p-3 font-mono text-xs leading-5 text-text [overflow-wrap:anywhere]" x-text="debugRenderedText || '暂无可显示文本。思考内容与工具调用请查看原始响应。'"></pre>
+                            </div>
+                            <div x-show="debugResponseView === 'raw'" x-cloak class="mt-3 min-w-0">
+                                <pre class="max-h-[32rem] min-h-28 max-w-full overflow-auto whitespace-pre-wrap break-words rounded-lg border border-line bg-ink/75 p-3 font-mono text-xs leading-5 text-text [overflow-wrap:anywhere]" x-text="debugRawResponse || '尚未收到响应正文。'"></pre>
+                            </div>
+                            <div x-show="debugResponseView === 'upstream'" x-cloak class="mt-3 min-w-0 space-y-2">
+                                <p x-show="!debugUpstreamRequests.length" class="rounded-lg border border-dashed border-line px-3 py-6 text-center text-xs text-muted">尚未收到上游请求记录。</p>
+                                <template x-for="(request, index) in debugUpstreamRequests" :key="request.sequence || index">
+                                    <details class="min-w-0 rounded-lg border border-line bg-ink/45">
+                                        <summary class="flex cursor-pointer flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2.5 text-xs">
+                                            <span class="font-bold text-cyan" x-text="'尝试 #' + (request.sequence || index + 1)"></span>
+                                            <span class="font-mono text-text" x-text="request.provider || '--'"></span>
+                                            <span class="min-w-0 break-all font-mono text-muted" x-text="request.method + ' ' + request.url"></span>
+                                        </summary>
+                                        <div class="grid min-w-0 grid-cols-1 gap-3 border-t border-line p-3 lg:grid-cols-2">
+                                            <div class="min-w-0"><div class="mb-1 text-[11px] font-bold text-muted">脱敏请求头</div><pre class="max-h-64 max-w-full overflow-auto whitespace-pre-wrap break-words rounded bg-ink p-2 font-mono text-[11px] leading-5 text-text [overflow-wrap:anywhere]" x-text="JSON.stringify(request.headers || {}, null, 2)"></pre></div>
+                                            <div class="min-w-0"><div class="mb-1 text-[11px] font-bold text-muted">请求体<span x-show="request.bodyTruncated" x-cloak class="ml-2 text-warn">已截断</span></div><pre class="max-h-64 max-w-full overflow-auto whitespace-pre-wrap break-words rounded bg-ink p-2 font-mono text-[11px] leading-5 text-text [overflow-wrap:anywhere]" x-text="request.body || ''"></pre></div>
+                                        </div>
+                                    </details>
+                                </template>
+                            </div>
+                            <div x-show="debugResponseView === 'attempts'" x-cloak class="mt-3 min-w-0 space-y-2">
+                                <p x-show="!debugLog?.attemptDetails?.length" class="rounded-lg border border-dashed border-line px-3 py-6 text-center text-xs text-muted">暂无尝试明细。</p>
+                                <template x-for="detail in attemptDetailRows(debugLog)" :key="detail.rowKey">
+                                    <div class="min-w-0 rounded-lg border border-line bg-ink/45 p-3">
+                                        <p x-show="detail.rowType === 'omitted'" x-cloak class="text-xs font-semibold text-muted" x-text="'已省略 ' + detail.omitted + ' 条尝试明细'"></p>
+                                        <div x-show="detail.rowType === 'detail'" x-cloak class="grid min-w-0 grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4">
+                                            <div class="min-w-0"><div class="text-[11px] text-muted">序号 / Provider</div><div class="mt-1 break-words font-mono text-xs text-text" x-text="detail.sequence + ' · ' + detail.provider"></div></div>
+                                            <div class="min-w-0"><div class="text-[11px] text-muted">目标模型 / 格式</div><div class="mt-1 break-words font-mono text-xs text-text" x-text="(detail.targetModel || '--') + ' · ' + (detail.providerFormat || '--')"></div></div>
+                                            <div class="min-w-0"><div class="text-[11px] text-muted">结果 / 上游状态</div><div class="mt-1 break-words font-mono text-xs text-text" x-text="detail.outcome + (detail.upstreamStatus != null ? ' · HTTP ' + detail.upstreamStatus : '')"></div></div>
+                                            <div class="min-w-0"><div class="text-[11px] text-muted">耗时 / 错误</div><div class="mt-1 break-words text-xs text-text" x-text="durationText(detail.durationMs) + (detail.error ? ' · ' + detail.error : '')"></div></div>
+                                        </div>
+                                    </div>
+                                </template>
+                            </div>
+                            <div x-show="debugResponseView === 'headers'" x-cloak class="mt-3 min-w-0">
+                                <p x-show="!debugResponseStart?.headers || !Object.keys(debugResponseStart.headers).length" class="rounded-lg border border-dashed border-line px-3 py-6 text-center text-xs text-muted">尚未收到响应头。</p>
+                                <div x-show="debugResponseStart?.headers && Object.keys(debugResponseStart.headers).length" class="overflow-x-auto rounded-lg border border-line">
+                                    <template x-for="header in debugResponseHeaderRows(debugResponseStart?.headers)" :key="header.name">
+                                        <div class="grid min-w-0 grid-cols-1 gap-1 border-b border-line px-3 py-2 last:border-b-0 sm:grid-cols-[minmax(10rem,0.4fr)_minmax(0,1fr)] sm:gap-3">
+                                            <span class="break-all font-mono text-xs text-cyan" x-text="header.name"></span>
+                                            <span class="break-all font-mono text-xs text-text [overflow-wrap:anywhere]" x-text="header.value"></span>
+                                        </div>
+                                    </template>
+                                </div>
+                            </div>
+                        </div>
+                    </section>
                 </section>
 
                 <section x-ref="monitorScroll" x-show="activeTab === 'monitor'" x-cloak class="space-y-5 lg:h-full lg:min-h-0 lg:overflow-y-auto lg:pr-2">
@@ -2390,7 +2658,12 @@
                         <!-- 常用筛选与 attempt 诊断筛选分层：前者描述客户端最终结果，后者定位
                              中间上游尝试。平铺会显得 provider / 尝试 Provider、状态 / 尝试状态
                              重复，并挤占关键词搜索空间。宽屏一行展示 5 个常用项和操作；窄屏自然换行。 -->
-                        <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
+                        <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
+                            <select autocomplete="off" x-model="logFilters.debug" @change="loadRequestLogs()" class="field text-sm" aria-label="调试日志筛选">
+                                <option value="">全部日志</option>
+                                <option value="only">仅调试</option>
+                                <option value="exclude">排除调试</option>
+                            </select>
                             <select autocomplete="off" x-model="logFilters.status" @change="loadRequestLogs()" class="field text-sm">
                                 <option value="">全部状态</option>
                                 <option value="success">成功</option>
@@ -2557,6 +2830,8 @@
                                                   class="tag mt-1 w-fit bg-cyan2/10 text-cyan"
                                                   x-text="log.visionModel ? '视觉 · ' + log.visionModel : '视觉'"
                                                   :title="log.visionModel ? '视觉模型: ' + log.visionModel : ''"></span>
+                                            <span x-show="log.debug" x-cloak class="tag mt-1 w-fit bg-cyan2/10 text-cyan"
+                                                  x-text="'调试' + (log.debugMode ? ' · ' + debugModeLabel(log.debugMode) : '')"></span>
                                         </td>
                                         <!-- Provider 列只留 provider 名：上游目标模型已并入模型列的 modelTrail，
                                              避免把同一次映射拆到两列去拼。该 provider 把请求打到了 modelTrail
@@ -2726,19 +3001,19 @@
                                                         </tr>
                                                     </thead>
                                                     <tbody class="divide-y divide-line">
-                                                        <template x-for="detail in log.attemptDetails" :key="detail.sequence">
+                                                        <template x-for="detail in attemptDetailRows(log)" :key="detail.rowKey">
                                                             <tr>
-                                                                <td class="whitespace-nowrap px-3 py-2 font-mono text-muted" x-text="detail.sequence + (detail.attemptNumber ? ' / #' + detail.attemptNumber : '')"></td>
-                                                                <td class="whitespace-nowrap px-3 py-2">
+                                                                <td class="whitespace-nowrap px-3 py-2 font-mono text-muted" :colspan="detail.rowType === 'omitted' ? 6 : 1" x-text="detail.rowType === 'omitted' ? '已省略 ' + detail.omitted + ' 条尝试明细' : detail.sequence + (detail.attemptNumber ? ' / #' + detail.attemptNumber : '')"></td>
+                                                                <td x-show="detail.rowType === 'detail'" class="whitespace-nowrap px-3 py-2">
                                                                     <div class="font-mono text-text" x-text="detail.provider"></div>
                                                                     <div class="font-mono text-[11px] text-cyan" x-text="detail.targetModel || '--'"></div>
                                                                     <div x-show="detail.keyName" class="mt-0.5 text-[11px] text-muted" x-text="'密钥名称：' + detail.keyName"></div>
                                                                     <div x-show="detail.keyId" class="font-mono text-[11px] text-muted" x-text="'密钥身份：' + detail.keyId"></div>
                                                                     <div x-show="detail.keyFingerprint" class="font-mono text-[11px] text-muted" x-text="'密钥指纹：' + detail.keyFingerprint"></div>
                                                                 </td>
-                                                                <td class="whitespace-nowrap px-3 py-2 font-mono text-muted" x-text="detail.providerFormat"></td>
-                                                                <td class="whitespace-nowrap px-3 py-2 font-mono" :class="attemptHasError(detail) ? 'text-rose-100' : 'text-text'" x-text="attemptStatusLabel(detail)"></td>
-                                                                <td class="px-3 py-2">
+                                                                <td x-show="detail.rowType === 'detail'" class="whitespace-nowrap px-3 py-2 font-mono text-muted" x-text="detail.providerFormat"></td>
+                                                                <td x-show="detail.rowType === 'detail'" class="whitespace-nowrap px-3 py-2 font-mono" :class="attemptHasError(detail) ? 'text-rose-100' : 'text-text'" x-text="attemptStatusLabel(detail)"></td>
+                                                                <td x-show="detail.rowType === 'detail'" class="px-3 py-2">
                                                                     <div class="font-mono text-text" x-text="attemptOutcomeLabel(detail.outcome)"></div>
                                                                     <div class="mt-0.5 text-[11px] text-muted" x-text="attemptDetailExplanation(detail)"></div>
                                                                     <div x-show="attemptHasError(detail)" class="mt-1 font-semibold text-rose-100" x-text="errorSourceLabel(detail.errorSource)"></div>
@@ -2769,7 +3044,7 @@
                                                                         </details>
                                                                     </div>
                                                                 </td>
-                                                                <td class="whitespace-nowrap px-3 py-2 text-right font-mono" :class="slowClass(detail.durationMs)" x-text="durationText(detail.durationMs)"></td>
+                                                                <td x-show="detail.rowType === 'detail'" class="whitespace-nowrap px-3 py-2 text-right font-mono" :class="slowClass(detail.durationMs)" x-text="durationText(detail.durationMs)"></td>
                                                             </tr>
                                                         </template>
                                                     </tbody>
@@ -3121,14 +3396,14 @@
                             <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
                                 <label class="block">
                                     <span class="mb-1.5 block text-xs font-bold text-muted">最大重试次数</span>
-                                    <input autocomplete="off" type="number" min="0" max="10" step="1" x-model.number="providerForm.localRetry.maxRetries" placeholder="留空 = 不设置；0 = 关闭" class="field">
+                                    <input autocomplete="off" type="number" min="0" step="1" x-model.number="providerForm.localRetry.maxRetries" placeholder="留空 = 不设置；0 = 关闭" class="field">
                                 </label>
                                 <label class="block">
                                     <span class="mb-1.5 block text-xs font-bold text-muted">重试间隔 ms</span>
                                     <input autocomplete="off" type="number" min="0" max="60000" step="1" x-model.number="providerForm.localRetry.intervalMs" placeholder="留空 = 默认 1000 ms" class="field">
                                 </label>
                             </div>
-                            <span class="mt-2 block text-xs text-muted">同一候选失败后再试；留空字段不覆盖路由或候选配置。若上层未配置重试次数，Provider 级留空表示不启用；次数允许 0–10，间隔允许 0–60000 ms。</span>
+                            <span class="mt-2 block text-xs text-muted">同一候选失败后再试；留空字段不覆盖路由或候选配置。若上层未配置重试次数，Provider 级留空表示不启用。次数不设上限；次数很大时每次失败都会完整重试一轮，只有成功、次数用尽或客户端断开才会停，建议配合间隔使用；间隔允许 0–60000 ms。</span>
                         </section>
                         <section class="mt-6 border-t border-line pt-5">
                             <h4 class="mb-3 text-sm font-semibold text-white">网络</h4>
@@ -3408,7 +3683,7 @@
                                             </label>
                                             <label :for="'route-target-local-retries-' + ti" class="block">
                                                 <span class="mb-1 block text-xs text-muted">最大本地重试次数</span>
-                                                <input autocomplete="off" :id="'route-target-local-retries-' + ti" type="number" min="0" max="10" step="1" x-model.number="target.localRetry.maxRetries"
+                                                <input autocomplete="off" :id="'route-target-local-retries-' + ti" type="number" min="0" step="1" x-model.number="target.localRetry.maxRetries"
                                                        placeholder="继承；0 = 关闭" class="field py-1 text-xs">
                                             </label>
                                             <label :for="'route-target-local-interval-' + ti" class="block">
@@ -3550,7 +3825,7 @@
                             <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
                                 <label class="block">
                                     <span class="mb-1 block text-xs text-muted">最大重试次数</span>
-                                    <input autocomplete="off" type="number" min="0" max="10" step="1" x-model.number="routeForm.localRetry.maxRetries" placeholder="留空 = 继承上游；0 = 关闭" class="field py-1 text-xs">
+                                    <input autocomplete="off" type="number" min="0" step="1" x-model.number="routeForm.localRetry.maxRetries" placeholder="留空 = 继承上游；0 = 关闭" class="field py-1 text-xs">
                                 </label>
                                 <label class="block">
                                     <span class="mb-1 block text-xs text-muted">重试间隔 ms</span>
@@ -4795,6 +5070,7 @@
                     { id: 'monitor', label: '监控仪表盘', icon: 'monitoring', fillIcon: false },
                     { id: 'providers', label: '提供商', icon: 'dns', fillIcon: true },
                     { id: 'routes', label: '路由', icon: 'alt_route', fillIcon: true },
+                    { id: 'debug', label: '调试', icon: 'bolt', fillIcon: false },
                     { id: 'logs', label: '请求日志', icon: 'receipt_long', fillIcon: false },
                     { id: 'settings', label: '全局设置', icon: 'tune', fillIcon: true }
                 ],
@@ -4998,6 +5274,8 @@
                     // 按上游格式的全局默认扩展。表单用有序行数组，保存时再还原成 map；
                     // 空数组等同未配置，不会在 YAML 里产生空对象。
                     globalUserAgent: { anthropic: '', openai: '', 'openai-responses': '' },
+                    // 与 normalizeGlobalUserAgentEnabled 的缺省语义一致：三种格式默认启用。
+                    globalUserAgentEnabled: { anthropic: true, openai: true, 'openai-responses': true },
                     globalUpstreamExtras: {
                         anthropic: { headers: [], body: [] },
                         openai: { headers: [], body: [] },
@@ -5087,7 +5365,8 @@
                     q: '',
                     attemptProvider: '',
                     attemptStatus: '',
-                    attemptOutcome: ''
+                    attemptOutcome: '',
+                    debug: ''
                 },
                 yamlContent: '',
                 // ── 提供商 / 路由配置导入导出（两页共用弹窗）──────────────
@@ -5682,6 +5961,8 @@
                         this.revision = data.revision || (res.headers.get('ETag') || '').replace(/^W\//, '').replaceAll('"', '');
                         this.restartRequired = data.restartRequired || [];
                         this._serverConfigData = data;
+                        // 独立保存服务端快照，调试页不读取当前可编辑草稿。
+                        this._debugConfigSnapshot = JSON.parse(JSON.stringify(data));
                         this.applyServerConfig();
                         return true;
                     } catch (err) {
@@ -5906,7 +6187,7 @@
                 resetLogFilters() {
                     this.logFilters = {
                         status: '', provider: '', stream: '', model: '', q: '',
-                        attemptProvider: '', attemptStatus: '', attemptOutcome: ''
+                        attemptProvider: '', attemptStatus: '', attemptOutcome: '', debug: ''
                     };
                     this.logAdvancedFiltersOpen = false;
                     this.loadRequestLogs();
@@ -6230,7 +6511,7 @@
 
                 navScrollContainers(tab) {
                     // 窄屏由 main 滚动，桌面由各页内容区滚动；两层都按页签隔离。
-                    const contentRef = tab === 'monitor' ? 'monitorScroll' : tab === 'logs' ? 'logScroll' : 'configScroll';
+                    const contentRef = tab === 'monitor' ? 'monitorScroll' : tab === 'logs' ? 'logScroll' : tab === 'debug' ? 'debugScroll' : 'configScroll';
                     return [this.$refs.mainScroll, this.$refs[contentRef]].filter(Boolean);
                 },
 
@@ -6263,6 +6544,7 @@
                     if (this.activeTab === 'settings') return '全局设置';
                     if (this.activeTab === 'monitor') return '监控仪表盘';
                     if (this.activeTab === 'logs') return '请求日志';
+                    if (this.activeTab === 'debug') return '调试控制台';
                     return '配置管理';
                 },
 
@@ -6272,6 +6554,7 @@
                     if (this.activeTab === 'settings') return '管理监听、超时、缓存、直通模式和 YAML 原文';
                     if (this.activeTab === 'monitor') return '查看运行状态和 Provider 指标';
                     if (this.activeTab === 'logs') return '查看最近请求记录和转发结果';
+                    if (this.activeTab === 'debug') return '使用已保存配置验证请求、路由和上游响应';
                     return '';
                 },
 
@@ -6841,6 +7124,25 @@
                 attemptTrailText(log) {
                     if (log?.attemptTrail) return log.attemptTrail;
                     return (Number(log?.attempts) || 0) > 1 ? `${log.attempts} 次尝试` : '--';
+                },
+
+                // 为请求日志详情插入一个稳定键的省略占位行，供单根 tr 的 x-for 渲染。
+                attemptDetailRows(log) {
+                    const details = Array.isArray(log?.attemptDetails) ? log.attemptDetails : [];
+                    const rows = details.map(detail => ({
+                        ...detail,
+                        rowType: 'detail',
+                        rowKey: `detail-${detail.sequence}`
+                    }));
+                    const omitted = Number(log?.attemptDetailsOmitted) || 0;
+                    if (omitted > 0) {
+                        rows.splice(Math.min(20, rows.length), 0, {
+                            rowType: 'omitted',
+                            rowKey: 'omitted',
+                            omitted
+                        });
+                    }
+                    return rows;
                 },
 
                 // 来源只使用后端明确记录的字段，历史记录不从状态码或错误文案反推。
@@ -10426,7 +10728,8 @@
                 // 已保存 Provider 的统一目录入口；普通目录保留一天浏览器缓存，OAuth 只用服务端身份缓存。
                 // 失败只给固定安全提示，保持手填值；显式刷新携带 revision，不查询草稿。
                 async fetchModelsFor(providerName, refresh = false, signal) {
-                    const provider = this.config.providers?.[providerName];
+                    const debugSnapshotProvider = this.activeTab === 'debug' ? this._debugConfigSnapshot?.providers?.[providerName] : null;
+                    const provider = debugSnapshotProvider || this.config.providers?.[providerName];
                     if (!provider) return { models: null, message: '找不到这个 Provider，请先保存配置' };
                     const identity = JSON.stringify([this.revision, provider]);
                     const oauth = provider.authType === 'chatgptOAuth';
@@ -10442,7 +10745,10 @@
                             refresh ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ provider: providerName, revision: this.revision }), signal } : { signal, cache: 'no-store' });
                         if (!res.ok) return { models: null, message: `模型目录查询失败（HTTP ${res.status}），可继续手动填写` };
                         const data = await res.json();
-                        if (signal?.aborted || identity !== JSON.stringify([this.revision, this.config.providers?.[providerName]])) return { models: null, message: '提供商身份已变化，请重新查询；手填值保留' };
+                        const currentProvider = this.activeTab === 'debug'
+                            ? (this._debugConfigSnapshot?.providers?.[providerName] || this.config.providers?.[providerName])
+                            : this.config.providers?.[providerName];
+                        if (signal?.aborted || identity !== JSON.stringify([this.revision, currentProvider])) return { models: null, message: '提供商身份已变化，请重新查询；手填值保留' };
                         const models = Array.isArray(data.models) ? data.models : [];
                         if (!oauth) this.writeModelCache(cacheKey, models);
                         const when = data.queriedAt ? this.providerBalanceTime(data.queriedAt) : '查询时间未知';
@@ -13753,6 +14059,638 @@
                     this.configTransferImportNotice = '已按备份恢复结果预填账户映射，请核对后重新预览再应用。';
                     return true;
                 },
+                // 调试控制台的请求、响应和配置快照都只保存在当前页面内存中。
+                debugMode: 'provider',
+                debugClientFormat: 'anthropic',
+                debugProvider: '',
+                debugRouteIndex: -1,
+                debugTargetIndex: 0,
+                debugRequestView: 'simple',
+                debugRawJSON: '',
+                debugRawEdited: false,
+                debugSimple: { model: '', system: '', message: '', stream: true, maxTokens: '' },
+                debugProviderModels: [],
+                debugProviderModelsMessage: '',
+                debugProviderModelsLoading: false,
+                debugStatus: 'idle',
+                debugStatusMessage: '',
+                debugErrorMessage: '',
+                debugMeta: null,
+                debugResponseStart: null,
+                debugRawResponse: '',
+                debugRenderedText: '',
+                debugUsage: {},
+                debugUpstreamRequests: [],
+                debugLog: null,
+                debugResponseView: 'text',
+                debugDoneReceived: false,
+                debugStreamError: '',
+                debugNotice: '',
+                _debugConfigSnapshot: null,
+                _debugRunSequence: 0,
+                _debugRunActive: false,
+                _debugController: null,
+                _debugReader: null,
+                _debugAbortRequested: false,
+                _debugModelsSequence: 0,
+                _debugModelsController: null,
+
+                debugSavedProviders() {
+                    return Object.entries(this._debugConfigSnapshot?.providers || {})
+                        .map(([name, provider]) => ({ name, provider }));
+                },
+
+                debugSavedRoutes() {
+                    return (this._debugConfigSnapshot?.routes || []).map((route, index) => ({ route, index }));
+                },
+
+                debugSavedProviderExists(name) {
+                    return !!name && Object.prototype.hasOwnProperty.call(this._debugConfigSnapshot?.providers || {}, name);
+                },
+
+                // 快捷入口只把当前规则映射到已保存快照中的同一条规则。
+                // 行被插入或重排后无法唯一确认身份时，要求用户从快照下拉框选择。
+                debugSavedRouteIndexForDraft(route, draftIndex) {
+                    const routes = this._debugConfigSnapshot?.routes || [];
+                    if (routes[draftIndex]?.match === route?.match) return draftIndex;
+                    const matches = routes.map((item, index) => item?.match === route?.match ? index : -1).filter(index => index >= 0);
+                    return matches.length === 1 ? matches[0] : -1;
+                },
+
+                debugSelectedRoute() {
+                    const index = Number(this.debugRouteIndex);
+                    return Number.isInteger(index) && index >= 0 ? this._debugConfigSnapshot?.routes?.[index] || null : null;
+                },
+
+                debugSelectedTargets() {
+                    const route = this.debugSelectedRoute();
+                    if (!route) return [];
+                    if (Array.isArray(route.targets)) return route.targets;
+                    if (route.provider) return [{ provider: route.provider, model: route.model || '' }];
+                    return [];
+                },
+
+                debugSelectedTarget() {
+                    return this.debugSelectedTargets()[Number(this.debugTargetIndex)] || null;
+                },
+
+                debugRouteHasWildcard() {
+                    return /[*?]/.test(this.debugSelectedRoute()?.match || '');
+                },
+
+                debugRouteModelPlaceholder() {
+                    const match = this.debugSelectedRoute()?.match || '';
+                    return this.debugRouteHasWildcard() ? `填写具体模型名（匹配模式：${match}）` : (match || '请选择路由');
+                },
+
+                debugDefaultRouteModel() {
+                    const match = this.debugSelectedRoute()?.match || '';
+                    return match && !/[*?]/.test(match) ? match : '';
+                },
+
+                debugConfigHasUnsavedChanges() {
+                    return typeof this.isDirty === 'function' && this.isDirty();
+                },
+
+                debugModeLabel(mode) {
+                    return ({ provider: 'Provider', route: '路由', target: '指定候选' })[mode] || '调试';
+                },
+
+                debugChangeMode(mode) {
+                    if (!['provider', 'route', 'target'].includes(mode)) return;
+                    this.debugMode = mode;
+                    if (mode !== 'provider' && !this.debugSelectedRoute()) {
+                        this.debugRouteIndex = this.debugSavedRoutes()[0]?.index ?? -1;
+                        this.debugTargetIndex = 0;
+                    }
+                    if (this.debugRequestView === 'simple') {
+                        this.debugSimple.model = mode === 'provider' ? '' : this.debugDefaultRouteModel();
+                    }
+                },
+
+                debugChangeProvider(name) {
+                    this._debugModelsSequence++;
+                    this._debugModelsController?.abort();
+                    this._debugModelsController = null;
+                    this.debugProviderModelsLoading = false;
+                    this.debugProvider = this.debugSavedProviderExists(name) ? name : '';
+                    this.debugProviderModels = [];
+                    this.debugProviderModelsMessage = '';
+                    if (this.debugRequestView === 'simple') this.debugSimple.model = '';
+                    if (this.debugRequestView === 'raw' && this.debugRawEdited) {
+                        this.debugNotice = '已保留原始 JSON 草稿；调试对象使用已保存的 Provider。';
+                    }
+                    if (this.debugProvider) void this.loadDebugProviderModels(false);
+                },
+
+                debugChangeRoute(index) {
+                    const numeric = Number(index);
+                    this.debugRouteIndex = Number.isInteger(numeric) && numeric >= 0 && this._debugConfigSnapshot?.routes?.[numeric] ? numeric : -1;
+                    this.debugTargetIndex = 0;
+                    if (this.debugRequestView === 'simple') this.debugSimple.model = this.debugDefaultRouteModel();
+                    if (this.debugRequestView === 'raw' && this.debugRawEdited) {
+                        this.debugNotice = '已保留原始 JSON 草稿；调试对象使用已保存的路由。';
+                    }
+                },
+
+                debugChangeTarget(index) {
+                    const numeric = Number(index);
+                    this.debugTargetIndex = Number.isInteger(numeric) && numeric >= 0 ? numeric : 0;
+                    if (this.debugRequestView === 'raw' && this.debugRawEdited) {
+                        this.debugNotice = '已保留原始 JSON 草稿；调试对象使用已保存的候选。';
+                    }
+                },
+
+                debugChangeClientFormat(format) {
+                    if (!['anthropic', 'openai-chat', 'openai-responses'].includes(format)) return;
+                    this.debugClientFormat = format;
+                    if (this.debugRequestView === 'raw' && this.debugRawEdited) {
+                        this.debugNotice = '已保留原始 JSON 草稿；发送时按所选客户端格式解释。';
+                    }
+                },
+
+                debugChangeRequestView(view) {
+                    if (!['simple', 'raw'].includes(view) || view === this.debugRequestView) return;
+                    if (view === 'raw') {
+                        this.debugRawJSON = JSON.stringify(this.debugBuildSimpleBody(), null, 2);
+                        this.debugRawEdited = false;
+                        this.debugNotice = '';
+                        this.debugRequestView = 'raw';
+                        return;
+                    }
+                    if (this.debugRawEdited && !window.confirm('切回简易表单会丢弃原始 JSON 中简易表单不支持的字段。继续？')) return;
+                    this.debugRequestView = 'simple';
+                    this.debugRawEdited = false;
+                    this.debugNotice = '';
+                },
+
+                debugBuildSimpleBody() {
+                    const simple = this.debugSimple || {};
+                    const body = { model: String(simple.model || '').trim(), stream: simple.stream !== false };
+                    const system = String(simple.system || '');
+                    const message = String(simple.message || '');
+                    const maxText = String(simple.maxTokens ?? '').trim();
+                    const maxTokens = maxText === '' ? null : Number(maxText);
+                    if (this.debugClientFormat === 'anthropic') {
+                        body.messages = [{ role: 'user', content: message }];
+                        if (system.trim()) body.system = system;
+                        if (maxTokens !== null && Number.isFinite(maxTokens)) body.max_tokens = maxTokens;
+                    } else if (this.debugClientFormat === 'openai-chat') {
+                        body.messages = [];
+                        if (system.trim()) body.messages.push({ role: 'system', content: system });
+                        body.messages.push({ role: 'user', content: message });
+                        if (maxTokens !== null && Number.isFinite(maxTokens)) body.max_tokens = maxTokens;
+                        if (body.stream) body.stream_options = { include_usage: true };
+                    } else {
+                        body.input = message;
+                        if (system.trim()) body.instructions = system;
+                        if (maxTokens !== null && Number.isFinite(maxTokens)) body.max_output_tokens = maxTokens;
+                    }
+                    return body;
+                },
+
+                debugEffectiveBody() {
+                    if (this.debugRequestView === 'simple') return this.debugBuildSimpleBody();
+                    try {
+                        const body = JSON.parse(this.debugRawJSON);
+                        return body && typeof body === 'object' && !Array.isArray(body) ? body : null;
+                    } catch (_) {
+                        return null;
+                    }
+                },
+
+                debugRequestValidation() {
+                    if (!this._debugConfigSnapshot) return { valid: false, error: '正在加载已保存配置。' };
+                    if (!['anthropic', 'openai-chat', 'openai-responses'].includes(this.debugClientFormat)) {
+                        return { valid: false, error: '请选择有效的客户端格式。' };
+                    }
+                    const body = this.debugEffectiveBody();
+                    if (!body) return { valid: false, error: '原始 JSON 必须是一个合法的 JSON 对象。' };
+                    if (typeof body.model !== 'string' || !body.model.trim()) {
+                        return { valid: false, error: '请求体必须包含非空字符串 model。' };
+                    }
+                    const maxField = this.debugClientFormat === 'openai-responses' ? 'max_output_tokens' : 'max_tokens';
+                    if (this.debugRequestView === 'simple') {
+                        const value = String(this.debugSimple.maxTokens ?? '').trim();
+                        if (value && (!/^\d+$/.test(value) || Number(value) < 1)) {
+                            return { valid: false, error: 'max tokens 留空表示不传；填写时请输入正整数。' };
+                        }
+                    } else if (Object.prototype.hasOwnProperty.call(body, maxField) &&
+                        (!Number.isInteger(body[maxField]) || body[maxField] < 1)) {
+                        return { valid: false, error: `${maxField} 必须是正整数。` };
+                    }
+                    if (this.debugMode === 'provider') {
+                        if (!this.debugSavedProviderExists(this.debugProvider)) return { valid: false, error: '请选择已保存配置中的 Provider。' };
+                    } else {
+                        const route = this.debugSelectedRoute();
+                        if (!route || typeof route.match !== 'string') return { valid: false, error: '请选择已保存配置中的路由。' };
+                        if (this.debugMode === 'target' && !this.debugSelectedTarget()) return { valid: false, error: '请选择该路由下已保存的候选。' };
+                        if (this.debugRouteHasWildcard() && /[*?]/.test(body.model)) {
+                            return { valid: false, error: `路由 ${route.match} 含通配符，请填写具体模型名。` };
+                        }
+                    }
+                    return { valid: true, body };
+                },
+
+                debugBuildRequest() {
+                    const validation = this.debugRequestValidation();
+                    if (!validation.valid) return { valid: false, error: validation.error, payload: null };
+                    const payload = {
+                        mode: this.debugMode,
+                        clientFormat: this.debugClientFormat,
+                        body: validation.body
+                    };
+                    if (this.debugMode === 'provider') {
+                        payload.provider = this.debugProvider;
+                    } else {
+                        const route = this.debugSelectedRoute();
+                        payload.routeIndex = Number(this.debugRouteIndex);
+                        payload.routeMatch = route.match;
+                        if (this.debugMode === 'target') {
+                            payload.targetIndex = Number(this.debugTargetIndex);
+                            payload.targetProvider = this.debugSelectedTarget().provider;
+                        }
+                    }
+                    return { valid: true, error: '', payload };
+                },
+
+                debugCanRun() {
+                    return !this._debugRunActive && this.debugBuildRequest().valid;
+                },
+
+                async loadDebugProviderModels(refresh = false) {
+                    if (!this.debugSavedProviderExists(this.debugProvider)) return;
+                    const sequence = ++this._debugModelsSequence;
+                    this._debugModelsController?.abort();
+                    const controller = new AbortController();
+                    this._debugModelsController = controller;
+                    this.debugProviderModelsLoading = true;
+                    this.debugProviderModelsMessage = refresh ? '正在刷新已保存 Provider 的模型目录…' : '正在读取模型目录…';
+                    try {
+                        const result = await this.fetchModelsFor(this.debugProvider, refresh, controller.signal);
+                        if (sequence !== this._debugModelsSequence || controller.signal.aborted) return;
+                        this.debugProviderModels = Array.isArray(result.models) ? result.models : [];
+                        this.debugProviderModelsMessage = result.message || '模型目录不可用，可手动填写模型名。';
+                    } catch (_) {
+                        if (sequence === this._debugModelsSequence && !controller.signal.aborted) {
+                            this.debugProviderModels = [];
+                            this.debugProviderModelsMessage = '模型目录不可用，可手动填写模型名。';
+                        }
+                    } finally {
+                        if (sequence === this._debugModelsSequence) {
+                            this.debugProviderModelsLoading = false;
+                            this._debugModelsController = null;
+                        }
+                    }
+                },
+
+                openDebugForProvider(name) {
+                    this.selectNav('debug');
+                    if (!this.debugSavedProviderExists(name)) {
+                        this.debugErrorMessage = '该 Provider 尚未保存在配置中，不能用于调试。';
+                        return;
+                    }
+                    this.debugMode = 'provider';
+                    this.debugProvider = name;
+                    this.debugProviderModels = [];
+                    this.debugSimple.model = '';
+                    this.debugNotice = this.debugConfigHasUnsavedChanges() ? '调试使用已保存的配置；页面中的未保存修改不会发送。' : '';
+                    this.debugErrorMessage = '';
+                    void this.loadDebugProviderModels(false);
+                },
+
+                openDebugForRoute(index) {
+                    this.selectNav('debug');
+                    const route = this._debugConfigSnapshot?.routes?.[Number(index)];
+                    if (!route) {
+                        this.debugErrorMessage = '该路由尚未保存在配置中，不能用于调试。';
+                        return;
+                    }
+                    this.debugMode = 'route';
+                    this.debugRouteIndex = Number(index);
+                    this.debugTargetIndex = 0;
+                    this.debugSimple.model = this.debugDefaultRouteModel();
+                    this.debugNotice = this.debugConfigHasUnsavedChanges() ? '调试使用已保存的配置；页面中的未保存修改不会发送。' : '';
+                    this.debugErrorMessage = '';
+                },
+
+                debugResetResponse() {
+                    this.debugStatus = 'running';
+                    this.debugStatusMessage = '正在连接调试接口…';
+                    this.debugErrorMessage = '';
+                    this.debugMeta = null;
+                    this.debugResponseStart = null;
+                    this.debugRawResponse = '';
+                    this.debugRenderedText = '';
+                    this.debugUsage = {};
+                    this.debugUpstreamRequests = [];
+                    this.debugLog = null;
+                    this.debugDoneReceived = false;
+                    this.debugStreamError = '';
+                    this.debugResponseView = 'text';
+                    this._debugOuterParser = this.debugCreateSSEParser();
+                    this._debugInnerParser = this.debugCreateSSEParser();
+                },
+
+                debugCreateSSEParser() {
+                    return { buffer: '', event: '', data: [] };
+                },
+
+                // 通用 SSE 行解析器：保留跨 chunk 的 CRLF、行尾與未完成事件。
+                debugFeedSSE(parser, chunk, final = false) {
+                    parser.buffer += String(chunk || '');
+                    const events = [];
+                    const consumeLine = (line) => {
+                        if (line === '') {
+                            if (parser.data.length) events.push({ event: parser.event || 'message', data: parser.data.join('\n') });
+                            parser.event = '';
+                            parser.data = [];
+                            return;
+                        }
+                        if (line.startsWith(':')) return;
+                        const colon = line.indexOf(':');
+                        const field = colon < 0 ? line : line.slice(0, colon);
+                        let value = colon < 0 ? '' : line.slice(colon + 1);
+                        if (value.startsWith(' ')) value = value.slice(1);
+                        if (field === 'event') parser.event = value;
+                        else if (field === 'data') parser.data.push(value);
+                    };
+                    while (parser.buffer.length) {
+                        let end = -1;
+                        for (let i = 0; i < parser.buffer.length; i++) {
+                            if (parser.buffer[i] === '\n' || parser.buffer[i] === '\r') { end = i; break; }
+                        }
+                        if (end < 0) break;
+                        if (parser.buffer[end] === '\r' && end === parser.buffer.length - 1 && !final) break;
+                        const line = parser.buffer.slice(0, end);
+                        const delimiterLength = parser.buffer[end] === '\r' && parser.buffer[end + 1] === '\n' ? 2 : 1;
+                        parser.buffer = parser.buffer.slice(end + delimiterLength);
+                        consumeLine(line);
+                    }
+                    if (final) {
+                        if (parser.buffer.length) {
+                            consumeLine(parser.buffer);
+                            parser.buffer = '';
+                        }
+                        if (parser.data.length) events.push({ event: parser.event || 'message', data: parser.data.join('\n') });
+                        parser.event = '';
+                        parser.data = [];
+                    }
+                    return events;
+                },
+
+                debugRunIsCurrent(sequence, controller) {
+                    return sequence === this._debugRunSequence && this._debugController === controller;
+                },
+
+                async debugRun() {
+                    if (this._debugRunActive) return;
+                    const built = this.debugBuildRequest();
+                    if (!built.valid) {
+                        this.debugErrorMessage = built.error;
+                        return;
+                    }
+                    const sequence = ++this._debugRunSequence;
+                    const controller = new AbortController();
+                    this._debugRunActive = true;
+                    this._debugController = controller;
+                    this._debugAbortRequested = false;
+                    this.debugResetResponse();
+                    try {
+                        const response = await fetch('/api/debug/run', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(built.payload),
+                            signal: controller.signal
+                        });
+                        if (!this.debugRunIsCurrent(sequence, controller)) return;
+                        const contentType = response.headers.get('content-type') || '';
+                        if (!contentType.toLowerCase().includes('text/event-stream')) {
+                            const responseText = await response.text();
+                            if (!this.debugRunIsCurrent(sequence, controller) || controller.signal.aborted) return;
+                            this.debugResponseStart = {
+                                status: response.status,
+                                headers: Object.fromEntries(response.headers.entries())
+                            };
+                            this.debugRawResponse = responseText;
+                            this.debugErrorMessage = this.debugErrorFromBody(responseText, response.status);
+                            this.debugStatus = 'failure';
+                            this.debugStatusMessage = '调试请求在事件流建立前失败。';
+                            return;
+                        }
+                        if (!response.body?.getReader) throw new Error('浏览器不支持读取流式响应。');
+                        const reader = response.body.getReader();
+                        this._debugReader = reader;
+                        const decoder = new TextDecoder('utf-8');
+                        while (true) {
+                            const result = await reader.read();
+                            if (!this.debugRunIsCurrent(sequence, controller)) return;
+                            if (result.done) break;
+                            this.debugConsumeOuterText(sequence, controller, decoder.decode(result.value, { stream: true }), false);
+                        }
+                        this.debugConsumeOuterText(sequence, controller, decoder.decode(), true);
+                        if (!this.debugRunIsCurrent(sequence, controller)) return;
+                        if (controller.signal.aborted || this._debugAbortRequested) {
+                            this.debugStatus = 'aborted';
+                            this.debugStatusMessage = '调试请求已中止。';
+                        } else if (!this.debugDoneReceived) {
+                            this.debugStatus = 'incomplete';
+                            this.debugStatusMessage = '事件流异常结束：未收到 done 事件。';
+                            this.debugErrorMessage = this.debugStreamError || this.debugErrorMessage || this.debugStatusMessage;
+                        } else {
+                            this.debugFinalizeInnerResponse();
+                            const status = this.debugResponseStart?.status ?? this.debugLog?.status;
+                            const failed = Number(status) >= 400 || !!this.debugLog?.error || !!this.debugStreamError;
+                            this.debugStatus = failed ? 'failure' : 'success';
+                            this.debugStatusMessage = failed ? '调试请求已结束，但响应包含错误。' : '调试请求已完成。';
+                            if (this.debugStreamError) this.debugErrorMessage = this.debugStreamError;
+                        }
+                    } catch (error) {
+                        if (!this.debugRunIsCurrent(sequence, controller)) return;
+                        if (controller.signal.aborted || error?.name === 'AbortError' || this._debugAbortRequested) {
+                            this.debugStatus = 'aborted';
+                            this.debugStatusMessage = '调试请求已中止。';
+                        } else {
+                            this.debugStatus = 'failure';
+                            this.debugStatusMessage = '调试请求失败。';
+                            this.debugErrorMessage = error?.message || '读取调试响应失败。';
+                        }
+                    } finally {
+                        if (this.debugRunIsCurrent(sequence, controller)) {
+                            this._debugRunActive = false;
+                            this._debugController = null;
+                            this._debugReader = null;
+                            if (this.debugStatus === 'running' || this.debugStatus === 'aborting') {
+                                this.debugStatus = this._debugAbortRequested ? 'aborted' : 'incomplete';
+                                this.debugStatusMessage = this._debugAbortRequested ? '调试请求已中止。' : '事件流异常结束：未收到 done 事件。';
+                            }
+                        }
+                    }
+                },
+
+                stopDebugRun() {
+                    if (!this._debugRunActive || !this._debugController) return;
+                    this._debugAbortRequested = true;
+                    this.debugStatus = 'aborting';
+                    this.debugStatusMessage = '正在中止并关闭连接…';
+                    this._debugController.abort();
+                    if (this._debugReader) void this._debugReader.cancel().catch(() => {});
+                },
+
+                debugConsumeOuterText(sequence, controller, text, final) {
+                    if (!this.debugRunIsCurrent(sequence, controller) || controller.signal.aborted) return;
+                    const events = this.debugFeedSSE(this._debugOuterParser, text, final);
+                    for (const event of events) this.debugHandleOuterEvent(event);
+                },
+
+                debugHandleOuterEvent(event) {
+                    let data;
+                    try {
+                        data = JSON.parse(event.data);
+                    } catch (_) {
+                        this.debugStreamError = `SSE ${event.event} 事件包含无效 JSON。`;
+                        return;
+                    }
+                    if (event.event === 'meta') this.debugMeta = data;
+                    else if (event.event === 'upstream_request') this.debugUpstreamRequests.push(data);
+                    else if (event.event === 'response_start') this.debugResponseStart = data;
+                    else if (event.event === 'response_chunk') {
+                        if (typeof data?.data !== 'string') {
+                            this.debugStreamError = 'response_chunk 缺少字符串 data。';
+                            return;
+                        }
+                        this.debugRawResponse += data.data;
+                        if (this.debugIsInnerSSE()) {
+                            const inner = this.debugFeedSSE(this._debugInnerParser, data.data, false);
+                            for (const item of inner) this.debugHandleInnerEvent(item);
+                        }
+                    } else if (event.event === 'done') {
+                        this.debugDoneReceived = true;
+                        this.debugLog = data.log && typeof data.log === 'object' ? data.log : null;
+                        if (!this.debugLog) this.debugStreamError = this.debugStreamError || 'done 事件缺少请求日志。';
+                        if (data.aborted === true) this._debugAbortRequested = true;
+                    }
+                },
+
+                debugIsInnerSSE() {
+                    const headers = this.debugResponseStart?.headers || {};
+                    const contentType = Object.entries(headers).find(([name]) => name.toLowerCase() === 'content-type')?.[1] || '';
+                    return String(contentType).toLowerCase().includes('text/event-stream');
+                },
+
+                debugHandleInnerEvent(event) {
+                    if (event.data === '[DONE]') return;
+                    let data;
+                    try {
+                        data = JSON.parse(event.data);
+                    } catch (_) {
+                        this.debugStreamError = `上游 ${event.event} 事件包含无效 JSON。`;
+                        return;
+                    }
+                    const format = this.debugMeta?.clientFormat || this.debugClientFormat;
+                    if (format === 'anthropic') {
+                        if (event.event === 'content_block_delta' && data.delta?.type === 'text_delta') this.debugAppendText(data.delta.text);
+                        this.debugMergeUsage(data.message?.usage || data.usage, format);
+                    } else if (format === 'openai-chat') {
+                        const delta = data.choices?.[0]?.delta?.content;
+                        if (typeof delta === 'string') this.debugAppendText(delta);
+                        else if (Array.isArray(delta)) delta.forEach(part => this.debugAppendText(part?.text));
+                        this.debugMergeUsage(data.usage, format);
+                    } else {
+                        if (event.event === 'response.output_text.delta') this.debugAppendText(data.delta);
+                        this.debugMergeUsage(data.response?.usage || data.usage, format);
+                    }
+                },
+
+                debugAppendText(value) {
+                    if (typeof value === 'string') this.debugRenderedText += value;
+                },
+
+                debugMergeUsage(usage, format) {
+                    if (!usage || typeof usage !== 'object') return;
+                    const fields = format === 'anthropic'
+                        ? [['input_tokens', 'inputTokens'], ['output_tokens', 'outputTokens']]
+                        : format === 'openai-chat'
+                            ? [['prompt_tokens', 'inputTokens'], ['completion_tokens', 'outputTokens'], ['total_tokens', 'totalTokens']]
+                            : [['input_tokens', 'inputTokens'], ['output_tokens', 'outputTokens'], ['total_tokens', 'totalTokens']];
+                    const next = { ...this.debugUsage };
+                    for (const [source, target] of fields) {
+                        if (typeof usage[source] === 'number' && Number.isFinite(usage[source])) next[target] = usage[source];
+                    }
+                    this.debugUsage = next;
+                },
+
+                debugExtractJSONText(body, format) {
+                    const textParts = [];
+                    const add = value => { if (typeof value === 'string') textParts.push(value); };
+                    if (format === 'anthropic') {
+                        (Array.isArray(body?.content) ? body.content : []).forEach(part => { if (part?.type === 'text') add(part.text); });
+                        this.debugMergeUsage(body?.usage, format);
+                    } else if (format === 'openai-chat') {
+                        const content = body?.choices?.[0]?.message?.content;
+                        if (typeof content === 'string') add(content);
+                        else if (Array.isArray(content)) content.forEach(part => add(part?.text));
+                        this.debugMergeUsage(body?.usage, format);
+                    } else {
+                        (Array.isArray(body?.output) ? body.output : []).forEach(item => {
+                            (Array.isArray(item?.content) ? item.content : []).forEach(part => {
+                                if (part?.type === 'output_text' || part?.type === 'text') add(part.text);
+                            });
+                        });
+                        this.debugMergeUsage(body?.usage, format);
+                    }
+                    this.debugRenderedText = textParts.join('');
+                },
+
+                debugFinalizeInnerResponse() {
+                    const format = this.debugMeta?.clientFormat || this.debugClientFormat;
+                    if (this.debugIsInnerSSE()) {
+                        const tail = this.debugFeedSSE(this._debugInnerParser, '', true);
+                        for (const event of tail) this.debugHandleInnerEvent(event);
+                        return;
+                    }
+                    if (!this.debugRawResponse.trim()) return;
+                    try {
+                        this.debugExtractJSONText(JSON.parse(this.debugRawResponse), format);
+                    } catch (_) {
+                        // 原始响应仍完整保留；非 JSON 错误正文不猜测其含义。
+                    }
+                },
+
+                debugErrorFromBody(text, status) {
+                    try {
+                        const body = JSON.parse(text);
+                        const message = body?.message || body?.error?.message || body?.error || body?.detail;
+                        if (typeof message === 'string' && message) return message;
+                        if (typeof body?.type === 'string') return `${body.type}${status ? `（HTTP ${status}）` : ''}`;
+                    } catch (_) { /* 展示安全的纯文本回退 */ }
+                    return String(text || `HTTP ${status}`).trim().slice(0, 4000);
+                },
+
+                debugResponseHeaderRows(headers) {
+                    return Object.entries(headers || {}).map(([name, value]) => ({ name, value: Array.isArray(value) ? value.join(', ') : String(value) }));
+                },
+
+                debugUsageRows() {
+                    return [
+                        ['inputTokens', '输入 tokens'],
+                        ['outputTokens', '输出 tokens'],
+                        ['totalTokens', '总 tokens']
+                    ].filter(([key]) => Object.prototype.hasOwnProperty.call(this.debugUsage, key))
+                        .map(([key, label]) => ({ key, label, value: this.debugUsage[key] }));
+                },
+
+                debugStatusLabel() {
+                    return ({ idle: '待运行', running: '运行中', aborting: '正在中止', success: '成功', failure: '失败', aborted: '已中止', incomplete: '异常终止' })[this.debugStatus] || '待运行';
+                },
+
+                debugStatusClass() {
+                    if (this.debugStatus === 'success') return 'border-good/40 bg-good/10 text-good';
+                    if (['failure', 'incomplete'].includes(this.debugStatus)) return 'border-danger/40 bg-danger/10 text-danger';
+                    if (['running', 'aborting'].includes(this.debugStatus)) return 'border-cyan/40 bg-cyan/10 text-cyan';
+                    if (this.debugStatus === 'aborted') return 'border-warn/40 bg-warn/10 text-warn';
+                    return 'border-line bg-white/[.04] text-muted';
+                }
             };
         }
     </script>

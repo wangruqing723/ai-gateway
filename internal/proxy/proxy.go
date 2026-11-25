@@ -94,6 +94,9 @@ type FirstByteFunc func()
 // raw 是原始字节（含 SSE 换行），truncated 表示超出缓冲上限后被截断。
 type StreamConversionErrorFunc func(raw []byte, truncated bool, convErr error)
 
+// BeforeRequestFunc 在最终请求头构造完成后、HTTPClient.Do 前同步调用。
+type BeforeRequestFunc func(method, requestURL string, headers http.Header, body []byte)
+
 // Options 转发选项
 type Options struct {
 	ClientReq    *http.Request
@@ -118,6 +121,8 @@ type Options struct {
 	// GlobalUserAgent 是 Provider.userAgent 为空时的第二级 UA 兜底；再之后才转发
 	// 客户端 UA，三者都没有时不显式设头，保留 Go 默认行为。
 	GlobalUserAgent string
+	// OnBeforeRequest 可选地采集即将发送的最终上游请求。
+	OnBeforeRequest BeforeRequestFunc
 	// ShouldRetry 为 nil 时行为与不支持转移的旧版本完全一致。
 	// 流式响应一旦向客户端提交（预读阶段结束、写出 200 头）就不再询问：已发出的
 	// SSE 字节不可回收。预读阶段发现上游流内失败事件时仍会询问一次，此时
@@ -474,6 +479,9 @@ func Forward(opts *Options) (resultErr error) {
 			clientUserAgent = opts.ClientReq.Header.Get("User-Agent")
 		}
 		setRequestHeaders(req, opts, clientUserAgent)
+		if opts.OnBeforeRequest != nil {
+			opts.OnBeforeRequest(req.Method, req.URL.String(), req.Header.Clone(), append([]byte(nil), opts.UpstreamBody...))
+		}
 
 		var headerTimedOut atomic.Bool
 		headerTimerDone := make(chan struct{})
@@ -551,6 +559,9 @@ func Forward(opts *Options) (resultErr error) {
 		clientUserAgent = opts.ClientReq.Header.Get("User-Agent")
 	}
 	setRequestHeaders(req, opts, clientUserAgent)
+	if opts.OnBeforeRequest != nil {
+		opts.OnBeforeRequest(req.Method, req.URL.String(), req.Header.Clone(), append([]byte(nil), opts.UpstreamBody...))
+	}
 
 	resp, err := opts.HTTPClient.Do(req)
 	if err != nil {

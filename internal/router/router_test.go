@@ -125,6 +125,48 @@ func TestMatchRouteProviderCopyIsolatesAPIKeyWrite(t *testing.T) {
 	}
 }
 
+func TestCandidateForProviderUsesProviderOverridesAndOneMHandling(t *testing.T) {
+	maxTokens := 321
+	contextWindow := 32_000
+	maxRetries := 7
+	intervalMs := 15
+	provider := &config.Provider{
+		Name:          "isolated",
+		Format:        "anthropic",
+		OneMContext:   config.OneMContextPreserve,
+		MaxTokens:     &maxTokens,
+		ContextWindow: &contextWindow,
+		LocalRetry:    &config.LocalRetry{MaxRetries: &maxRetries, IntervalMs: &intervalMs},
+		ExtraBody:     map[string]any{"providerOnly": true},
+	}
+
+	candidate := CandidateForProvider(provider, "claude-sonnet-4-6 [1M]")
+	if candidate.Provider == provider {
+		t.Fatal("候选 Provider 必须是值拷贝")
+	}
+	if candidate.TargetModel != "claude-sonnet-4-6[1M]" {
+		t.Errorf("TargetModel = %q，期望保留原始 [1M] 标记", candidate.TargetModel)
+	}
+	if candidate.MaxTokens == nil || *candidate.MaxTokens != maxTokens {
+		t.Errorf("MaxTokens = %#v，期望 %d", candidate.MaxTokens, maxTokens)
+	}
+	if candidate.ContextWindow == nil || *candidate.ContextWindow != OneMContextWindow {
+		t.Errorf("带 [1M] 的 ContextWindow = %#v，期望 %d", candidate.ContextWindow, OneMContextWindow)
+	}
+	if candidate.ExtraBody["providerOnly"] != true {
+		t.Errorf("ExtraBody = %#v，未继承 Provider 覆盖", candidate.ExtraBody)
+	}
+	if candidate.LocalRetryMax != 0 {
+		t.Errorf("Provider 隔离调试的 LocalRetryMax = %d，期望 0", candidate.LocalRetryMax)
+	}
+
+	candidate.Provider.APIKey = "request-key"
+	candidate.ExtraBody["providerOnly"] = false
+	if provider.APIKey != "" || provider.ExtraBody["providerOnly"] != true {
+		t.Errorf("修改候选污染了配置: APIKey=%q ExtraBody=%#v", provider.APIKey, provider.ExtraBody)
+	}
+}
+
 func TestMatchRouteEmptyTargetModelInheritsRequestModel(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Routes = []config.Route{{Match: "*", Provider: "alpha"}}
@@ -285,7 +327,9 @@ func TestMatchRouteContextWindowPriority(t *testing.T) {
 			cfg := baseConfig()
 			cfg.Providers["alpha"].ContextWindow = tt.provider
 			cfg.Routes = []config.Route{{
-				Match: "*", Provider: "alpha", Model: "upstream",
+				Match:         "*",
+				Provider:      "alpha",
+				Model:         "upstream",
 				ContextWindow: tt.route,
 				Targets:       nil,
 			}}

@@ -441,6 +441,14 @@
 
                                                     <!-- 右侧操作栏：添加候选、启停规则、编辑与低频复制/删除 -->
                                                     <div class="flex shrink-0 items-center gap-1.5">
+                                                        <button type="button" @click="openDebugForRoute(debugSavedRouteIndexForDraft(route, index))"
+                                                                :disabled="debugSavedRouteIndexForDraft(route, index) < 0"
+                                                                class="inline-flex items-center gap-1 rounded-md border border-cyan/25 px-2 py-1 text-xs text-cyan transition hover:border-cyan/50 hover:bg-cyan/10 disabled:cursor-not-allowed disabled:opacity-40"
+                                                                :title="debugSavedRouteIndexForDraft(route, index) < 0 ? '此规则无法对应到唯一的已保存路由' : '使用已保存配置调试此路由'"
+                                                                :aria-label="'调试路由 ' + route.match">
+                                                            <span class="material-symbols-outlined text-[14px]" aria-hidden="true">bolt</span>
+                                                            调试
+                                                        </button>
                                                         <button type="button"
                                                                 @click="startInlineCandidateAdd(index)"
                                                                 :disabled="loading || inlineModel.routeIndex >= 0 || routeTargets(route).length >= maxRouteTargets"
@@ -1275,6 +1283,13 @@
                                                         x-text="formatMs(provider.maxQueueWait || 30000)"></td>
                                                     <td class="w-px whitespace-nowrap px-3 py-2.5">
                                                         <div class="flex justify-end gap-0.5">
+                                                            <button type="button" @click="openDebugForProvider(name)"
+                                                                    :disabled="!debugSavedProviderExists(name)"
+                                                                    class="btn btn-ghost disabled:cursor-not-allowed disabled:opacity-40"
+                                                                    :title="debugSavedProviderExists(name) ? '使用已保存配置调试 Provider' : '新 Provider 保存后才能调试'"
+                                                                    :aria-label="'调试 Provider ' + name">
+                                                                <span class="material-symbols-outlined text-[18px]">bolt</span>
+                                                            </button>
                                                             <button @click="editProvider(name)" class="btn btn-ghost" title="编辑 Provider" aria-label="编辑 Provider">
                                                                 <span class="material-symbols-outlined text-[18px]">edit</span>
                                                             </button>
@@ -1820,6 +1835,259 @@
                                   class="min-h-[680px] w-full resize-y rounded-b-lg border-0 bg-ink p-4 font-mono text-sm leading-6 text-slate-200 outline-none focus:ring-0 lg:min-h-0 lg:flex-1 lg:resize-none"
                                   placeholder="加载中..."></textarea>
                     </div>
+                </section>
+
+                <section x-ref="debugScroll" x-show="activeTab === 'debug'" x-cloak class="min-w-0 space-y-5 lg:h-full lg:min-h-0 lg:overflow-y-auto lg:pr-2">
+                    <section class="glass min-w-0 rounded-xl p-4 sm:p-5">
+                        <div class="mb-4 flex flex-wrap items-start justify-between gap-3 border-b border-line pb-4">
+                            <div class="min-w-0">
+                                <div class="flex flex-wrap items-center gap-2">
+                                    <h2 class="text-lg font-bold text-white">调试请求</h2>
+                                    <code class="rounded bg-ink px-2 py-1 font-mono text-xs text-cyan">POST /api/debug/run</code>
+                                </div>
+                                <p class="mt-1 text-xs leading-5 text-muted">配置对象来自最近一次加载的已保存快照；请求正文、响应与错误仅保留在当前页面内存。</p>
+                            </div>
+                            <span class="inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-semibold"
+                                  :class="debugStatusClass()" role="status" aria-live="polite">
+                                <span x-show="['running', 'aborting'].includes(debugStatus)" x-cloak class="material-symbols-outlined gw-spin text-[15px]" aria-hidden="true">progress_activity</span>
+                                <span x-text="debugStatusLabel()"></span>
+                            </span>
+                        </div>
+
+                        <div x-show="debugConfigHasUnsavedChanges()" x-cloak class="mb-4 flex items-start gap-2 rounded-lg border border-warn/30 bg-warn/10 px-3 py-2.5 text-xs leading-5 text-amber-100" role="status">
+                            <span class="material-symbols-outlined mt-0.5 shrink-0 text-[16px] text-warn" aria-hidden="true">info</span>
+                            <span>调试使用已保存的配置。当前页面的未保存修改不会发送；新 Provider 或新路由保存后才可调试。</span>
+                        </div>
+
+                        <div class="mb-4 rounded-lg border border-warn/25 bg-warn/5 px-3 py-2.5 text-xs leading-5 text-muted">
+                            Provider 模式为隔离单发；路由和指定候选模式执行真实链路，会影响熔断器与密钥冷却，并消耗真实上游额度。所有调试日志都不计入网关监控聚合。
+                        </div>
+
+                        <div class="grid min-w-0 grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                            <label class="min-w-0 text-xs font-bold text-muted">调试模式
+                                <select :value="debugMode" @change="debugChangeMode($event.target.value)" class="field mt-1.5 w-full text-sm" aria-label="调试模式">
+                                    <option value="provider">Provider（隔离单发）</option>
+                                    <option value="route">路由（完整链路）</option>
+                                    <option value="target">指定候选（不转移）</option>
+                                </select>
+                            </label>
+
+                            <label x-show="debugMode === 'provider'" x-cloak class="min-w-0 text-xs font-bold text-muted">已保存 Provider
+                                <select :value="debugProvider" @change="debugChangeProvider($event.target.value)" class="field mt-1.5 w-full text-sm" aria-label="已保存 Provider">
+                                    <option value="">选择 Provider</option>
+                                    <template x-for="entry in debugSavedProviders()" :key="entry.name">
+                                        <option :value="entry.name" x-text="entry.name + (entry.provider?.enabled === false ? '（已停用）' : '')"></option>
+                                    </template>
+                                </select>
+                            </label>
+
+                            <label x-show="debugMode !== 'provider'" x-cloak class="min-w-0 text-xs font-bold text-muted">已保存路由
+                                <select :value="String(debugRouteIndex)" @change="debugChangeRoute($event.target.value)" class="field mt-1.5 w-full text-sm" aria-label="已保存路由">
+                                    <option value="-1">选择路由</option>
+                                    <template x-for="entry in debugSavedRoutes()" :key="entry.index">
+                                        <option :value="String(entry.index)" x-text="'#' + (entry.index + 1) + ' · ' + entry.route.match + (entry.route.enabled === false ? '（已停用）' : '')"></option>
+                                    </template>
+                                </select>
+                            </label>
+
+                            <label x-show="debugMode === 'target'" x-cloak class="min-w-0 text-xs font-bold text-muted">已保存候选
+                                <select :value="String(debugTargetIndex)" @change="debugChangeTarget($event.target.value)" class="field mt-1.5 w-full text-sm" aria-label="已保存候选">
+                                    <option value="-1">选择候选</option>
+                                    <template x-for="(target, index) in debugSelectedTargets()" :key="index">
+                                        <option :value="String(index)" x-text="'#' + (index + 1) + ' · ' + target.provider + (target.model ? ' / ' + target.model : '') + (_debugConfigSnapshot?.providers?.[target.provider]?.enabled === false ? '（Provider 已停用）' : '')"></option>
+                                    </template>
+                                </select>
+                            </label>
+
+                            <label class="min-w-0 text-xs font-bold text-muted">客户端格式
+                                <select :value="debugClientFormat" @change="debugChangeClientFormat($event.target.value)" class="field mt-1.5 w-full text-sm" aria-label="客户端格式">
+                                    <option value="anthropic">Anthropic</option>
+                                    <option value="openai-chat">OpenAI Chat</option>
+                                    <option value="openai-responses">OpenAI Responses</option>
+                                </select>
+                            </label>
+                        </div>
+
+                        <div x-show="debugMode === 'provider'" x-cloak class="mt-4 grid min-w-0 grid-cols-1 gap-2 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
+                            <label class="min-w-0 text-xs font-bold text-muted">目标模型
+                                <input autocomplete="off" list="debug-provider-model-options" x-model="debugSimple.model"
+                                       class="field mt-1.5 w-full font-mono text-sm" placeholder="可从模型列表选择，也可手动填写" aria-label="Provider 目标模型">
+                                <datalist id="debug-provider-model-options">
+                                    <template x-for="model in debugProviderModels" :key="model"><option :value="model"></option></template>
+                                </datalist>
+                            </label>
+                            <div class="flex min-w-0 flex-wrap items-center gap-2">
+                                <button type="button" @click="loadDebugProviderModels(true)" :disabled="!debugProvider || debugProviderModelsLoading"
+                                        class="btn btn-secondary px-3 py-2 disabled:cursor-wait disabled:opacity-50" aria-label="刷新 Provider 模型列表">
+                                    <span class="material-symbols-outlined text-[17px]" :class="debugProviderModelsLoading ? 'gw-spin' : ''" aria-hidden="true" x-text="debugProviderModelsLoading ? 'progress_activity' : 'refresh'"></span>
+                                    <span>查询模型</span>
+                                </button>
+                                <span class="min-w-0 text-[11px] leading-4 text-muted" role="status" x-text="debugProviderModelsMessage"></span>
+                            </div>
+                        </div>
+
+                        <div x-show="debugMode !== 'provider'" x-cloak class="mt-4 grid min-w-0 grid-cols-1 gap-3 sm:grid-cols-2">
+                            <label class="min-w-0 text-xs font-bold text-muted">客户端模型名
+                                <input autocomplete="off" x-model="debugSimple.model" class="field mt-1.5 w-full font-mono text-sm"
+                                       :placeholder="debugRouteModelPlaceholder()" aria-label="路由客户端模型名">
+                            </label>
+                            <p class="self-end text-xs leading-5 text-muted" x-show="debugRouteHasWildcard()" x-cloak>
+                                此路由包含通配符，必须填写具体模型名，不能把匹配模式直接作为 model 发送。
+                            </p>
+                        </div>
+
+                        <div class="mt-5 border-t border-line pt-4">
+                            <div class="mb-3 flex flex-wrap items-center justify-between gap-3">
+                                <div>
+                                    <h3 class="text-sm font-bold text-white">请求编辑</h3>
+                                    <p class="mt-1 text-xs text-muted">简易表单只支持 system、单条用户消息、stream 和 max tokens；复杂请求请用原始 JSON。</p>
+                                </div>
+                                <div class="inline-flex rounded-lg border border-line bg-ink/60 p-0.5" role="group" aria-label="请求编辑视图">
+                                    <button type="button" @click="debugChangeRequestView('simple')" :aria-pressed="String(debugRequestView === 'simple')"
+                                            :class="debugRequestView === 'simple' ? 'bg-panel3 text-text' : 'text-muted hover:text-text'"
+                                            class="rounded-md px-3 py-1.5 text-xs font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan2">简易表单</button>
+                                    <button type="button" @click="debugChangeRequestView('raw')" :aria-pressed="String(debugRequestView === 'raw')"
+                                            :class="debugRequestView === 'raw' ? 'bg-panel3 text-text' : 'text-muted hover:text-text'"
+                                            class="rounded-md px-3 py-1.5 text-xs font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan2">原始 JSON</button>
+                                </div>
+                            </div>
+
+                            <div x-show="debugRequestView === 'simple'" x-cloak class="grid min-w-0 grid-cols-1 gap-3 lg:grid-cols-2">
+                                <label class="min-w-0 text-xs font-bold text-muted">System 指令
+                                    <textarea autocomplete="off" x-model="debugSimple.system" rows="3" class="field mt-1.5 w-full resize-y text-sm" placeholder="可留空"></textarea>
+                                </label>
+                                <label class="min-w-0 text-xs font-bold text-muted">用户消息
+                                    <textarea autocomplete="off" x-model="debugSimple.message" rows="3" class="field mt-1.5 w-full resize-y text-sm" placeholder="输入一条用户消息"></textarea>
+                                </label>
+                                <label class="min-w-0 text-xs font-bold text-muted">Max tokens
+                                    <input autocomplete="off" type="number" min="1" step="1" x-model="debugSimple.maxTokens" class="field mt-1.5 w-full font-mono text-sm" placeholder="留空：由网关配置优先级决定">
+                                </label>
+                                <label class="flex min-h-11 min-w-0 cursor-pointer items-center gap-2 rounded-lg border border-line bg-ink/50 px-3 text-sm text-text">
+                                    <input type="checkbox" x-model="debugSimple.stream" class="h-4 w-4 rounded border-line bg-panel text-cyan2 focus:ring-cyan2">
+                                    <span>流式响应</span><span class="text-xs text-muted">默认开启</span>
+                                </label>
+                            </div>
+
+                            <div x-show="debugRequestView === 'raw'" x-cloak class="min-w-0">
+                                <p class="mb-2 text-xs leading-5 text-muted">以下 JSON 对象会原样作为 body 发送，不会自动补入或覆盖 model、messages、stream 等字段。切换回简易表单会先确认。</p>
+                                <textarea autocomplete="off" spellcheck="false" x-model="debugRawJSON"
+                                          @input="debugRawEdited = true; debugNotice = ''"
+                                          rows="14" class="field min-h-64 w-full min-w-0 resize-y font-mono text-xs leading-5"
+                                          aria-label="原始请求 JSON" placeholder="输入完整 JSON 对象"></textarea>
+                            </div>
+
+                            <p x-show="debugNotice" x-cloak class="mt-3 rounded-lg border border-cyan/25 bg-cyan/5 px-3 py-2 text-xs leading-5 text-cyan" role="status" x-text="debugNotice"></p>
+                            <p x-show="!debugRequestValidation().valid" x-cloak class="mt-3 flex items-start gap-2 text-xs leading-5 text-danger" role="alert">
+                                <span class="material-symbols-outlined mt-0.5 text-[15px]" aria-hidden="true">error</span>
+                                <span x-text="debugRequestValidation().error"></span>
+                            </p>
+                            <div class="mt-4 flex flex-wrap items-center gap-2">
+                                <button type="button" @click="debugRun()" :disabled="!debugCanRun()"
+                                        class="btn btn-primary px-4 py-2.5 disabled:cursor-not-allowed disabled:opacity-50">
+                                    <span class="material-symbols-outlined text-[18px]" aria-hidden="true" x-text="_debugRunActive ? 'progress_activity' : 'bolt'" :class="_debugRunActive ? 'gw-spin' : ''"></span>
+                                    <span x-text="_debugRunActive ? '正在运行' : '发送调试请求'"></span>
+                                </button>
+                                <button type="button" x-show="_debugRunActive" x-cloak @click="stopDebugRun()"
+                                        class="btn btn-secondary border-danger/35 px-4 py-2.5 text-danger hover:bg-danger/10" aria-label="中止调试请求">
+                                    <span class="material-symbols-outlined text-[18px]" aria-hidden="true">close</span>中止
+                                </button>
+                                <span class="text-xs text-muted" role="status" aria-live="polite" x-text="debugStatusMessage"></span>
+                            </div>
+                        </div>
+                    </section>
+
+                    <section class="glass min-w-0 rounded-xl p-4 sm:p-5">
+                        <div class="mb-4 flex flex-wrap items-start justify-between gap-3 border-b border-line pb-4">
+                            <div class="min-w-0">
+                                <h2 class="text-lg font-bold text-white">响应结果</h2>
+                                <p class="mt-1 text-xs text-muted">响应正文按纯文本显示；思考内容和工具调用仅在原始响应中查看。</p>
+                            </div>
+                            <button type="button" @click="copyText(debugRawResponse, $event)" :disabled="!debugRawResponse"
+                                    class="btn btn-secondary px-3 py-2 disabled:cursor-not-allowed disabled:opacity-40" aria-label="复制原始响应">
+                                <span class="material-symbols-outlined text-[16px]" aria-hidden="true">content_copy</span>复制原始响应
+                            </button>
+                        </div>
+                        <div x-show="debugStatus === 'idle'" x-cloak class="rounded-lg border border-dashed border-line px-4 py-10 text-center text-sm text-muted">
+                            选择已保存的配置并填写请求后，调试结果会显示在这里。
+                        </div>
+                        <div x-show="debugStatus !== 'idle'" x-cloak class="min-w-0">
+                            <div class="grid min-w-0 grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-6">
+                                <div class="rounded-lg border border-line bg-ink/45 p-3"><div class="text-[11px] text-muted">HTTP 状态</div><div class="mt-1 font-mono text-sm text-text" x-text="debugResponseStart?.status ?? debugLog?.status ?? '--'"></div></div>
+                                <div class="rounded-lg border border-line bg-ink/45 p-3"><div class="text-[11px] text-muted">总耗时</div><div class="mt-1 font-mono text-sm text-text" x-text="debugLog && debugLog.durationMs != null ? durationText(debugLog.durationMs) : '--'"></div></div>
+                                <div class="rounded-lg border border-line bg-ink/45 p-3"><div class="text-[11px] text-muted">首字耗时</div><div class="mt-1 font-mono text-sm text-text" x-text="debugLog?.firstByteMs != null ? durationText(debugLog.firstByteMs) : '--'"></div></div>
+                                <div class="min-w-0 rounded-lg border border-line bg-ink/45 p-3"><div class="text-[11px] text-muted">实际 Provider</div><div class="mt-1 break-words font-mono text-sm text-text" x-text="debugLog?.provider || '--'"></div></div>
+                                <div class="min-w-0 rounded-lg border border-line bg-ink/45 p-3"><div class="text-[11px] text-muted">目标模型</div><div class="mt-1 break-words font-mono text-sm text-text" x-text="debugLog?.targetModel || '--'"></div></div>
+                                <div class="rounded-lg border border-line bg-ink/45 p-3"><div class="text-[11px] text-muted">尝试次数</div><div class="mt-1 font-mono text-sm text-text" x-text="debugLog?.attempts ?? '--'"></div></div>
+                            </div>
+                            <div class="mt-3 grid min-w-0 grid-cols-1 gap-3 lg:grid-cols-2">
+                                <div class="min-w-0 rounded-lg border border-line bg-ink/45 p-3"><div class="text-[11px] font-bold text-muted">尝试轨迹</div><p class="mt-1 break-words font-mono text-xs leading-5 text-text" x-text="debugLog?.attemptTrail || '—'"></p></div>
+                                <div class="min-w-0 rounded-lg border border-line bg-ink/45 p-3">
+                                    <div class="text-[11px] font-bold text-muted">用量</div>
+                                    <div x-show="debugUsageRows().length" x-cloak class="mt-1 flex flex-wrap gap-x-4 gap-y-1">
+                                        <template x-for="usage in debugUsageRows()" :key="usage.key">
+                                            <span class="text-xs text-text"><span class="text-muted" x-text="usage.label + '：'"></span><span class="font-mono" x-text="usage.value"></span></span>
+                                        </template>
+                                    </div>
+                                    <p x-show="!debugUsageRows().length" class="mt-1 text-xs text-muted">响应未提供可识别的 usage。</p>
+                                </div>
+                            </div>
+                            <div x-show="debugErrorMessage" x-cloak class="mt-3 rounded-lg border border-danger/35 bg-danger/10 px-3 py-2.5 text-sm leading-5 text-rose-100" role="alert" x-text="debugErrorMessage"></div>
+                            <div class="mt-4 flex min-w-0 flex-wrap gap-1 border-b border-line" role="tablist" aria-label="响应视图">
+                                <template x-for="view in [{id:'text',label:'渲染文本'},{id:'raw',label:'原始响应'},{id:'upstream',label:'上游请求'},{id:'attempts',label:'尝试明细'},{id:'headers',label:'响应头'}]" :key="view.id">
+                                    <button type="button" role="tab" @click="debugResponseView = view.id" :aria-selected="String(debugResponseView === view.id)"
+                                            :class="debugResponseView === view.id ? 'border-cyan2 text-cyan' : 'border-transparent text-muted hover:text-text'"
+                                            class="border-b-2 px-3 py-2 text-xs font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan2" x-text="view.label"></button>
+                                </template>
+                            </div>
+                            <div x-show="debugResponseView === 'text'" x-cloak class="mt-3 min-w-0">
+                                <pre class="max-h-[32rem] min-h-28 max-w-full overflow-auto whitespace-pre-wrap break-words rounded-lg border border-line bg-ink/75 p-3 font-mono text-xs leading-5 text-text [overflow-wrap:anywhere]" x-text="debugRenderedText || '暂无可显示文本。思考内容与工具调用请查看原始响应。'"></pre>
+                            </div>
+                            <div x-show="debugResponseView === 'raw'" x-cloak class="mt-3 min-w-0">
+                                <pre class="max-h-[32rem] min-h-28 max-w-full overflow-auto whitespace-pre-wrap break-words rounded-lg border border-line bg-ink/75 p-3 font-mono text-xs leading-5 text-text [overflow-wrap:anywhere]" x-text="debugRawResponse || '尚未收到响应正文。'"></pre>
+                            </div>
+                            <div x-show="debugResponseView === 'upstream'" x-cloak class="mt-3 min-w-0 space-y-2">
+                                <p x-show="!debugUpstreamRequests.length" class="rounded-lg border border-dashed border-line px-3 py-6 text-center text-xs text-muted">尚未收到上游请求记录。</p>
+                                <template x-for="(request, index) in debugUpstreamRequests" :key="request.sequence || index">
+                                    <details class="min-w-0 rounded-lg border border-line bg-ink/45">
+                                        <summary class="flex cursor-pointer flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2.5 text-xs">
+                                            <span class="font-bold text-cyan" x-text="'尝试 #' + (request.sequence || index + 1)"></span>
+                                            <span class="font-mono text-text" x-text="request.provider || '--'"></span>
+                                            <span class="min-w-0 break-all font-mono text-muted" x-text="request.method + ' ' + request.url"></span>
+                                        </summary>
+                                        <div class="grid min-w-0 grid-cols-1 gap-3 border-t border-line p-3 lg:grid-cols-2">
+                                            <div class="min-w-0"><div class="mb-1 text-[11px] font-bold text-muted">脱敏请求头</div><pre class="max-h-64 max-w-full overflow-auto whitespace-pre-wrap break-words rounded bg-ink p-2 font-mono text-[11px] leading-5 text-text [overflow-wrap:anywhere]" x-text="JSON.stringify(request.headers || {}, null, 2)"></pre></div>
+                                            <div class="min-w-0"><div class="mb-1 text-[11px] font-bold text-muted">请求体<span x-show="request.bodyTruncated" x-cloak class="ml-2 text-warn">已截断</span></div><pre class="max-h-64 max-w-full overflow-auto whitespace-pre-wrap break-words rounded bg-ink p-2 font-mono text-[11px] leading-5 text-text [overflow-wrap:anywhere]" x-text="request.body || ''"></pre></div>
+                                        </div>
+                                    </details>
+                                </template>
+                            </div>
+                            <div x-show="debugResponseView === 'attempts'" x-cloak class="mt-3 min-w-0 space-y-2">
+                                <p x-show="!debugLog?.attemptDetails?.length" class="rounded-lg border border-dashed border-line px-3 py-6 text-center text-xs text-muted">暂无尝试明细。</p>
+                                <template x-for="detail in attemptDetailRows(debugLog)" :key="detail.rowKey">
+                                    <div class="min-w-0 rounded-lg border border-line bg-ink/45 p-3">
+                                        <p x-show="detail.rowType === 'omitted'" x-cloak class="text-xs font-semibold text-muted" x-text="'已省略 ' + detail.omitted + ' 条尝试明细'"></p>
+                                        <div x-show="detail.rowType === 'detail'" x-cloak class="grid min-w-0 grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4">
+                                            <div class="min-w-0"><div class="text-[11px] text-muted">序号 / Provider</div><div class="mt-1 break-words font-mono text-xs text-text" x-text="detail.sequence + ' · ' + detail.provider"></div></div>
+                                            <div class="min-w-0"><div class="text-[11px] text-muted">目标模型 / 格式</div><div class="mt-1 break-words font-mono text-xs text-text" x-text="(detail.targetModel || '--') + ' · ' + (detail.providerFormat || '--')"></div></div>
+                                            <div class="min-w-0"><div class="text-[11px] text-muted">结果 / 上游状态</div><div class="mt-1 break-words font-mono text-xs text-text" x-text="detail.outcome + (detail.upstreamStatus != null ? ' · HTTP ' + detail.upstreamStatus : '')"></div></div>
+                                            <div class="min-w-0"><div class="text-[11px] text-muted">耗时 / 错误</div><div class="mt-1 break-words text-xs text-text" x-text="durationText(detail.durationMs) + (detail.error ? ' · ' + detail.error : '')"></div></div>
+                                        </div>
+                                    </div>
+                                </template>
+                            </div>
+                            <div x-show="debugResponseView === 'headers'" x-cloak class="mt-3 min-w-0">
+                                <p x-show="!debugResponseStart?.headers || !Object.keys(debugResponseStart.headers).length" class="rounded-lg border border-dashed border-line px-3 py-6 text-center text-xs text-muted">尚未收到响应头。</p>
+                                <div x-show="debugResponseStart?.headers && Object.keys(debugResponseStart.headers).length" class="overflow-x-auto rounded-lg border border-line">
+                                    <template x-for="header in debugResponseHeaderRows(debugResponseStart?.headers)" :key="header.name">
+                                        <div class="grid min-w-0 grid-cols-1 gap-1 border-b border-line px-3 py-2 last:border-b-0 sm:grid-cols-[minmax(10rem,0.4fr)_minmax(0,1fr)] sm:gap-3">
+                                            <span class="break-all font-mono text-xs text-cyan" x-text="header.name"></span>
+                                            <span class="break-all font-mono text-xs text-text [overflow-wrap:anywhere]" x-text="header.value"></span>
+                                        </div>
+                                    </template>
+                                </div>
+                            </div>
+                        </div>
+                    </section>
                 </section>
 
                 <section x-ref="monitorScroll" x-show="activeTab === 'monitor'" x-cloak class="space-y-5 lg:h-full lg:min-h-0 lg:overflow-y-auto lg:pr-2">
@@ -2390,7 +2658,12 @@
                         <!-- 常用筛选与 attempt 诊断筛选分层：前者描述客户端最终结果，后者定位
                              中间上游尝试。平铺会显得 provider / 尝试 Provider、状态 / 尝试状态
                              重复，并挤占关键词搜索空间。宽屏一行展示 5 个常用项和操作；窄屏自然换行。 -->
-                        <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
+                        <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
+                            <select autocomplete="off" x-model="logFilters.debug" @change="loadRequestLogs()" class="field text-sm" aria-label="调试日志筛选">
+                                <option value="">全部日志</option>
+                                <option value="only">仅调试</option>
+                                <option value="exclude">排除调试</option>
+                            </select>
                             <select autocomplete="off" x-model="logFilters.status" @change="loadRequestLogs()" class="field text-sm">
                                 <option value="">全部状态</option>
                                 <option value="success">成功</option>
@@ -2557,6 +2830,8 @@
                                                   class="tag mt-1 w-fit bg-cyan2/10 text-cyan"
                                                   x-text="log.visionModel ? '视觉 · ' + log.visionModel : '视觉'"
                                                   :title="log.visionModel ? '视觉模型: ' + log.visionModel : ''"></span>
+                                            <span x-show="log.debug" x-cloak class="tag mt-1 w-fit bg-cyan2/10 text-cyan"
+                                                  x-text="'调试' + (log.debugMode ? ' · ' + debugModeLabel(log.debugMode) : '')"></span>
                                         </td>
                                         <!-- Provider 列只留 provider 名：上游目标模型已并入模型列的 modelTrail，
                                              避免把同一次映射拆到两列去拼。该 provider 把请求打到了 modelTrail
@@ -2726,19 +3001,19 @@
                                                         </tr>
                                                     </thead>
                                                     <tbody class="divide-y divide-line">
-                                                        <template x-for="detail in log.attemptDetails" :key="detail.sequence">
+                                                        <template x-for="detail in attemptDetailRows(log)" :key="detail.rowKey">
                                                             <tr>
-                                                                <td class="whitespace-nowrap px-3 py-2 font-mono text-muted" x-text="detail.sequence + (detail.attemptNumber ? ' / #' + detail.attemptNumber : '')"></td>
-                                                                <td class="whitespace-nowrap px-3 py-2">
+                                                                <td class="whitespace-nowrap px-3 py-2 font-mono text-muted" :colspan="detail.rowType === 'omitted' ? 6 : 1" x-text="detail.rowType === 'omitted' ? '已省略 ' + detail.omitted + ' 条尝试明细' : detail.sequence + (detail.attemptNumber ? ' / #' + detail.attemptNumber : '')"></td>
+                                                                <td x-show="detail.rowType === 'detail'" class="whitespace-nowrap px-3 py-2">
                                                                     <div class="font-mono text-text" x-text="detail.provider"></div>
                                                                     <div class="font-mono text-[11px] text-cyan" x-text="detail.targetModel || '--'"></div>
                                                                     <div x-show="detail.keyName" class="mt-0.5 text-[11px] text-muted" x-text="'密钥名称：' + detail.keyName"></div>
                                                                     <div x-show="detail.keyId" class="font-mono text-[11px] text-muted" x-text="'密钥身份：' + detail.keyId"></div>
                                                                     <div x-show="detail.keyFingerprint" class="font-mono text-[11px] text-muted" x-text="'密钥指纹：' + detail.keyFingerprint"></div>
                                                                 </td>
-                                                                <td class="whitespace-nowrap px-3 py-2 font-mono text-muted" x-text="detail.providerFormat"></td>
-                                                                <td class="whitespace-nowrap px-3 py-2 font-mono" :class="attemptHasError(detail) ? 'text-rose-100' : 'text-text'" x-text="attemptStatusLabel(detail)"></td>
-                                                                <td class="px-3 py-2">
+                                                                <td x-show="detail.rowType === 'detail'" class="whitespace-nowrap px-3 py-2 font-mono text-muted" x-text="detail.providerFormat"></td>
+                                                                <td x-show="detail.rowType === 'detail'" class="whitespace-nowrap px-3 py-2 font-mono" :class="attemptHasError(detail) ? 'text-rose-100' : 'text-text'" x-text="attemptStatusLabel(detail)"></td>
+                                                                <td x-show="detail.rowType === 'detail'" class="px-3 py-2">
                                                                     <div class="font-mono text-text" x-text="attemptOutcomeLabel(detail.outcome)"></div>
                                                                     <div class="mt-0.5 text-[11px] text-muted" x-text="attemptDetailExplanation(detail)"></div>
                                                                     <div x-show="attemptHasError(detail)" class="mt-1 font-semibold text-rose-100" x-text="errorSourceLabel(detail.errorSource)"></div>
@@ -2769,7 +3044,7 @@
                                                                         </details>
                                                                     </div>
                                                                 </td>
-                                                                <td class="whitespace-nowrap px-3 py-2 text-right font-mono" :class="slowClass(detail.durationMs)" x-text="durationText(detail.durationMs)"></td>
+                                                                <td x-show="detail.rowType === 'detail'" class="whitespace-nowrap px-3 py-2 text-right font-mono" :class="slowClass(detail.durationMs)" x-text="durationText(detail.durationMs)"></td>
                                                             </tr>
                                                         </template>
                                                     </tbody>
@@ -3121,14 +3396,14 @@
                             <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
                                 <label class="block">
                                     <span class="mb-1.5 block text-xs font-bold text-muted">最大重试次数</span>
-                                    <input autocomplete="off" type="number" min="0" max="10" step="1" x-model.number="providerForm.localRetry.maxRetries" placeholder="留空 = 不设置；0 = 关闭" class="field">
+                                    <input autocomplete="off" type="number" min="0" step="1" x-model.number="providerForm.localRetry.maxRetries" placeholder="留空 = 不设置；0 = 关闭" class="field">
                                 </label>
                                 <label class="block">
                                     <span class="mb-1.5 block text-xs font-bold text-muted">重试间隔 ms</span>
                                     <input autocomplete="off" type="number" min="0" max="60000" step="1" x-model.number="providerForm.localRetry.intervalMs" placeholder="留空 = 默认 1000 ms" class="field">
                                 </label>
                             </div>
-                            <span class="mt-2 block text-xs text-muted">同一候选失败后再试；留空字段不覆盖路由或候选配置。若上层未配置重试次数，Provider 级留空表示不启用；次数允许 0–10，间隔允许 0–60000 ms。</span>
+                            <span class="mt-2 block text-xs text-muted">同一候选失败后再试；留空字段不覆盖路由或候选配置。若上层未配置重试次数，Provider 级留空表示不启用。次数不设上限；次数很大时每次失败都会完整重试一轮，只有成功、次数用尽或客户端断开才会停，建议配合间隔使用；间隔允许 0–60000 ms。</span>
                         </section>
                         <section class="mt-6 border-t border-line pt-5">
                             <h4 class="mb-3 text-sm font-semibold text-white">网络</h4>
@@ -3408,7 +3683,7 @@
                                             </label>
                                             <label :for="'route-target-local-retries-' + ti" class="block">
                                                 <span class="mb-1 block text-xs text-muted">最大本地重试次数</span>
-                                                <input autocomplete="off" :id="'route-target-local-retries-' + ti" type="number" min="0" max="10" step="1" x-model.number="target.localRetry.maxRetries"
+                                                <input autocomplete="off" :id="'route-target-local-retries-' + ti" type="number" min="0" step="1" x-model.number="target.localRetry.maxRetries"
                                                        placeholder="继承；0 = 关闭" class="field py-1 text-xs">
                                             </label>
                                             <label :for="'route-target-local-interval-' + ti" class="block">
@@ -3550,7 +3825,7 @@
                             <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
                                 <label class="block">
                                     <span class="mb-1 block text-xs text-muted">最大重试次数</span>
-                                    <input autocomplete="off" type="number" min="0" max="10" step="1" x-model.number="routeForm.localRetry.maxRetries" placeholder="留空 = 继承上游；0 = 关闭" class="field py-1 text-xs">
+                                    <input autocomplete="off" type="number" min="0" step="1" x-model.number="routeForm.localRetry.maxRetries" placeholder="留空 = 继承上游；0 = 关闭" class="field py-1 text-xs">
                                 </label>
                                 <label class="block">
                                     <span class="mb-1 block text-xs text-muted">重试间隔 ms</span>

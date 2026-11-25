@@ -25,6 +25,8 @@
                         this.revision = data.revision || (res.headers.get('ETag') || '').replace(/^W\//, '').replaceAll('"', '');
                         this.restartRequired = data.restartRequired || [];
                         this._serverConfigData = data;
+                        // 独立保存服务端快照，调试页不读取当前可编辑草稿。
+                        this._debugConfigSnapshot = JSON.parse(JSON.stringify(data));
                         this.applyServerConfig();
                         return true;
                     } catch (err) {

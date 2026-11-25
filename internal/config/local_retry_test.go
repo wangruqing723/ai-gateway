@@ -13,9 +13,9 @@ func TestDecodeAndValidateLocalRetryBounds(t *testing.T) {
 		want  string
 	}{
 		{name: "zero is valid at provider", raw: strings.Replace(validConfigYAML(), "    maxQueueWait: 30000", "    maxQueueWait: 30000\n    localRetry:\n      maxRetries: 0\n      intervalMs: 0", 1), valid: true},
-		{name: "upper bounds are valid", raw: strings.Replace(validConfigYAML(), "    maxQueueWait: 30000", "    maxQueueWait: 30000\n    localRetry:\n      maxRetries: 10\n      intervalMs: 60000", 1), valid: true},
-		{name: "negative retries", raw: strings.Replace(validConfigYAML(), "    maxQueueWait: 30000", "    maxQueueWait: 30000\n    localRetry:\n      maxRetries: -1", 1), want: "providers.primary.localRetry.maxRetries"},
-		{name: "too many retries", raw: strings.Replace(validConfigYAML(), "    maxQueueWait: 30000", "    maxQueueWait: 30000\n    localRetry:\n      maxRetries: 11", 1), want: "providers.primary.localRetry.maxRetries"},
+		{name: "provider retries above old limit are valid", raw: strings.Replace(validConfigYAML(), "    maxQueueWait: 30000", "    maxQueueWait: 30000\n    localRetry:\n      maxRetries: 11\n      intervalMs: 60000", 1), valid: true},
+		{name: "large retry count is valid", raw: strings.Replace(validConfigYAML(), "    maxQueueWait: 30000", "    maxQueueWait: 30000\n    localRetry:\n      maxRetries: 100000", 1), valid: true},
+		{name: "negative retries report field path", raw: strings.Replace(validConfigYAML(), "    maxQueueWait: 30000", "    maxQueueWait: 30000\n    localRetry:\n      maxRetries: -1", 1), want: "providers.primary.localRetry.maxRetries 不能为负数"},
 		{name: "negative interval", raw: strings.Replace(validConfigYAML(), "    maxQueueWait: 30000", "    maxQueueWait: 30000\n    localRetry:\n      intervalMs: -1", 1), want: "providers.primary.localRetry.intervalMs"},
 		{name: "too long interval", raw: strings.Replace(validConfigYAML(), "    maxQueueWait: 30000", "    maxQueueWait: 30000\n    localRetry:\n      intervalMs: 60001", 1), want: "providers.primary.localRetry.intervalMs"},
 	}
@@ -37,8 +37,14 @@ func TestDecodeAndValidateLocalRetryBounds(t *testing.T) {
 
 func TestValidateLocalRetryAtRouteAndTargetLevels(t *testing.T) {
 	routeLevel := strings.Replace(validConfigYAML(), "    model: upstream-model", "    model: upstream-model\n    localRetry:\n      maxRetries: 11", 1)
-	if _, err := DecodeAndValidate([]byte(routeLevel)); err == nil || !strings.Contains(err.Error(), `route "*".localRetry.maxRetries`) {
-		t.Fatalf("路由级 localRetry 校验错误 = %v", err)
+	if _, err := DecodeAndValidate([]byte(routeLevel)); err != nil {
+		t.Fatalf("路由级 maxRetries 超过旧上限后仍报错: %v", err)
+	}
+
+	targetsWithLargeRetry := "  - match: \"*\"\n    targets:\n      - provider: primary\n        model: upstream-model\n        localRetry:\n          maxRetries: 100000"
+	targetWithLargeRetry := strings.Replace(validConfigYAML(), "  - match: \"*\"\n    provider: primary\n    model: upstream-model", targetsWithLargeRetry, 1)
+	if _, err := DecodeAndValidate([]byte(targetWithLargeRetry)); err != nil {
+		t.Fatalf("候选级大数值 maxRetries 校验错误: %v", err)
 	}
 
 	targets := "  - match: \"*\"\n    targets:\n      - provider: primary\n        model: upstream-model\n        localRetry:\n          intervalMs: 60001"

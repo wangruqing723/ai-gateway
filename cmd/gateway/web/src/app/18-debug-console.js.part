@@ -1,0 +1,632 @@
+                // 调试控制台的请求、响应和配置快照都只保存在当前页面内存中。
+                debugMode: 'provider',
+                debugClientFormat: 'anthropic',
+                debugProvider: '',
+                debugRouteIndex: -1,
+                debugTargetIndex: 0,
+                debugRequestView: 'simple',
+                debugRawJSON: '',
+                debugRawEdited: false,
+                debugSimple: { model: '', system: '', message: '', stream: true, maxTokens: '' },
+                debugProviderModels: [],
+                debugProviderModelsMessage: '',
+                debugProviderModelsLoading: false,
+                debugStatus: 'idle',
+                debugStatusMessage: '',
+                debugErrorMessage: '',
+                debugMeta: null,
+                debugResponseStart: null,
+                debugRawResponse: '',
+                debugRenderedText: '',
+                debugUsage: {},
+                debugUpstreamRequests: [],
+                debugLog: null,
+                debugResponseView: 'text',
+                debugDoneReceived: false,
+                debugStreamError: '',
+                debugNotice: '',
+                _debugConfigSnapshot: null,
+                _debugRunSequence: 0,
+                _debugRunActive: false,
+                _debugController: null,
+                _debugReader: null,
+                _debugAbortRequested: false,
+                _debugModelsSequence: 0,
+                _debugModelsController: null,
+
+                debugSavedProviders() {
+                    return Object.entries(this._debugConfigSnapshot?.providers || {})
+                        .map(([name, provider]) => ({ name, provider }));
+                },
+
+                debugSavedRoutes() {
+                    return (this._debugConfigSnapshot?.routes || []).map((route, index) => ({ route, index }));
+                },
+
+                debugSavedProviderExists(name) {
+                    return !!name && Object.prototype.hasOwnProperty.call(this._debugConfigSnapshot?.providers || {}, name);
+                },
+
+                // 快捷入口只把当前规则映射到已保存快照中的同一条规则。
+                // 行被插入或重排后无法唯一确认身份时，要求用户从快照下拉框选择。
+                debugSavedRouteIndexForDraft(route, draftIndex) {
+                    const routes = this._debugConfigSnapshot?.routes || [];
+                    if (routes[draftIndex]?.match === route?.match) return draftIndex;
+                    const matches = routes.map((item, index) => item?.match === route?.match ? index : -1).filter(index => index >= 0);
+                    return matches.length === 1 ? matches[0] : -1;
+                },
+
+                debugSelectedRoute() {
+                    const index = Number(this.debugRouteIndex);
+                    return Number.isInteger(index) && index >= 0 ? this._debugConfigSnapshot?.routes?.[index] || null : null;
+                },
+
+                debugSelectedTargets() {
+                    const route = this.debugSelectedRoute();
+                    if (!route) return [];
+                    if (Array.isArray(route.targets)) return route.targets;
+                    if (route.provider) return [{ provider: route.provider, model: route.model || '' }];
+                    return [];
+                },
+
+                debugSelectedTarget() {
+                    return this.debugSelectedTargets()[Number(this.debugTargetIndex)] || null;
+                },
+
+                debugRouteHasWildcard() {
+                    return /[*?]/.test(this.debugSelectedRoute()?.match || '');
+                },
+
+                debugRouteModelPlaceholder() {
+                    const match = this.debugSelectedRoute()?.match || '';
+                    return this.debugRouteHasWildcard() ? `填写具体模型名（匹配模式：${match}）` : (match || '请选择路由');
+                },
+
+                debugDefaultRouteModel() {
+                    const match = this.debugSelectedRoute()?.match || '';
+                    return match && !/[*?]/.test(match) ? match : '';
+                },
+
+                debugConfigHasUnsavedChanges() {
+                    return typeof this.isDirty === 'function' && this.isDirty();
+                },
+
+                debugModeLabel(mode) {
+                    return ({ provider: 'Provider', route: '路由', target: '指定候选' })[mode] || '调试';
+                },
+
+                debugChangeMode(mode) {
+                    if (!['provider', 'route', 'target'].includes(mode)) return;
+                    this.debugMode = mode;
+                    if (mode !== 'provider' && !this.debugSelectedRoute()) {
+                        this.debugRouteIndex = this.debugSavedRoutes()[0]?.index ?? -1;
+                        this.debugTargetIndex = 0;
+                    }
+                    if (this.debugRequestView === 'simple') {
+                        this.debugSimple.model = mode === 'provider' ? '' : this.debugDefaultRouteModel();
+                    }
+                },
+
+                debugChangeProvider(name) {
+                    this._debugModelsSequence++;
+                    this._debugModelsController?.abort();
+                    this._debugModelsController = null;
+                    this.debugProviderModelsLoading = false;
+                    this.debugProvider = this.debugSavedProviderExists(name) ? name : '';
+                    this.debugProviderModels = [];
+                    this.debugProviderModelsMessage = '';
+                    if (this.debugRequestView === 'simple') this.debugSimple.model = '';
+                    if (this.debugRequestView === 'raw' && this.debugRawEdited) {
+                        this.debugNotice = '已保留原始 JSON 草稿；调试对象使用已保存的 Provider。';
+                    }
+                    if (this.debugProvider) void this.loadDebugProviderModels(false);
+                },
+
+                debugChangeRoute(index) {
+                    const numeric = Number(index);
+                    this.debugRouteIndex = Number.isInteger(numeric) && numeric >= 0 && this._debugConfigSnapshot?.routes?.[numeric] ? numeric : -1;
+                    this.debugTargetIndex = 0;
+                    if (this.debugRequestView === 'simple') this.debugSimple.model = this.debugDefaultRouteModel();
+                    if (this.debugRequestView === 'raw' && this.debugRawEdited) {
+                        this.debugNotice = '已保留原始 JSON 草稿；调试对象使用已保存的路由。';
+                    }
+                },
+
+                debugChangeTarget(index) {
+                    const numeric = Number(index);
+                    this.debugTargetIndex = Number.isInteger(numeric) && numeric >= 0 ? numeric : 0;
+                    if (this.debugRequestView === 'raw' && this.debugRawEdited) {
+                        this.debugNotice = '已保留原始 JSON 草稿；调试对象使用已保存的候选。';
+                    }
+                },
+
+                debugChangeClientFormat(format) {
+                    if (!['anthropic', 'openai-chat', 'openai-responses'].includes(format)) return;
+                    this.debugClientFormat = format;
+                    if (this.debugRequestView === 'raw' && this.debugRawEdited) {
+                        this.debugNotice = '已保留原始 JSON 草稿；发送时按所选客户端格式解释。';
+                    }
+                },
+
+                debugChangeRequestView(view) {
+                    if (!['simple', 'raw'].includes(view) || view === this.debugRequestView) return;
+                    if (view === 'raw') {
+                        this.debugRawJSON = JSON.stringify(this.debugBuildSimpleBody(), null, 2);
+                        this.debugRawEdited = false;
+                        this.debugNotice = '';
+                        this.debugRequestView = 'raw';
+                        return;
+                    }
+                    if (this.debugRawEdited && !window.confirm('切回简易表单会丢弃原始 JSON 中简易表单不支持的字段。继续？')) return;
+                    this.debugRequestView = 'simple';
+                    this.debugRawEdited = false;
+                    this.debugNotice = '';
+                },
+
+                debugBuildSimpleBody() {
+                    const simple = this.debugSimple || {};
+                    const body = { model: String(simple.model || '').trim(), stream: simple.stream !== false };
+                    const system = String(simple.system || '');
+                    const message = String(simple.message || '');
+                    const maxText = String(simple.maxTokens ?? '').trim();
+                    const maxTokens = maxText === '' ? null : Number(maxText);
+                    if (this.debugClientFormat === 'anthropic') {
+                        body.messages = [{ role: 'user', content: message }];
+                        if (system.trim()) body.system = system;
+                        if (maxTokens !== null && Number.isFinite(maxTokens)) body.max_tokens = maxTokens;
+                    } else if (this.debugClientFormat === 'openai-chat') {
+                        body.messages = [];
+                        if (system.trim()) body.messages.push({ role: 'system', content: system });
+                        body.messages.push({ role: 'user', content: message });
+                        if (maxTokens !== null && Number.isFinite(maxTokens)) body.max_tokens = maxTokens;
+                        if (body.stream) body.stream_options = { include_usage: true };
+                    } else {
+                        body.input = message;
+                        if (system.trim()) body.instructions = system;
+                        if (maxTokens !== null && Number.isFinite(maxTokens)) body.max_output_tokens = maxTokens;
+                    }
+                    return body;
+                },
+
+                debugEffectiveBody() {
+                    if (this.debugRequestView === 'simple') return this.debugBuildSimpleBody();
+                    try {
+                        const body = JSON.parse(this.debugRawJSON);
+                        return body && typeof body === 'object' && !Array.isArray(body) ? body : null;
+                    } catch (_) {
+                        return null;
+                    }
+                },
+
+                debugRequestValidation() {
+                    if (!this._debugConfigSnapshot) return { valid: false, error: '正在加载已保存配置。' };
+                    if (!['anthropic', 'openai-chat', 'openai-responses'].includes(this.debugClientFormat)) {
+                        return { valid: false, error: '请选择有效的客户端格式。' };
+                    }
+                    const body = this.debugEffectiveBody();
+                    if (!body) return { valid: false, error: '原始 JSON 必须是一个合法的 JSON 对象。' };
+                    if (typeof body.model !== 'string' || !body.model.trim()) {
+                        return { valid: false, error: '请求体必须包含非空字符串 model。' };
+                    }
+                    const maxField = this.debugClientFormat === 'openai-responses' ? 'max_output_tokens' : 'max_tokens';
+                    if (this.debugRequestView === 'simple') {
+                        const value = String(this.debugSimple.maxTokens ?? '').trim();
+                        if (value && (!/^\d+$/.test(value) || Number(value) < 1)) {
+                            return { valid: false, error: 'max tokens 留空表示不传；填写时请输入正整数。' };
+                        }
+                    } else if (Object.prototype.hasOwnProperty.call(body, maxField) &&
+                        (!Number.isInteger(body[maxField]) || body[maxField] < 1)) {
+                        return { valid: false, error: `${maxField} 必须是正整数。` };
+                    }
+                    if (this.debugMode === 'provider') {
+                        if (!this.debugSavedProviderExists(this.debugProvider)) return { valid: false, error: '请选择已保存配置中的 Provider。' };
+                    } else {
+                        const route = this.debugSelectedRoute();
+                        if (!route || typeof route.match !== 'string') return { valid: false, error: '请选择已保存配置中的路由。' };
+                        if (this.debugMode === 'target' && !this.debugSelectedTarget()) return { valid: false, error: '请选择该路由下已保存的候选。' };
+                        if (this.debugRouteHasWildcard() && /[*?]/.test(body.model)) {
+                            return { valid: false, error: `路由 ${route.match} 含通配符，请填写具体模型名。` };
+                        }
+                    }
+                    return { valid: true, body };
+                },
+
+                debugBuildRequest() {
+                    const validation = this.debugRequestValidation();
+                    if (!validation.valid) return { valid: false, error: validation.error, payload: null };
+                    const payload = {
+                        mode: this.debugMode,
+                        clientFormat: this.debugClientFormat,
+                        body: validation.body
+                    };
+                    if (this.debugMode === 'provider') {
+                        payload.provider = this.debugProvider;
+                    } else {
+                        const route = this.debugSelectedRoute();
+                        payload.routeIndex = Number(this.debugRouteIndex);
+                        payload.routeMatch = route.match;
+                        if (this.debugMode === 'target') {
+                            payload.targetIndex = Number(this.debugTargetIndex);
+                            payload.targetProvider = this.debugSelectedTarget().provider;
+                        }
+                    }
+                    return { valid: true, error: '', payload };
+                },
+
+                debugCanRun() {
+                    return !this._debugRunActive && this.debugBuildRequest().valid;
+                },
+
+                async loadDebugProviderModels(refresh = false) {
+                    if (!this.debugSavedProviderExists(this.debugProvider)) return;
+                    const sequence = ++this._debugModelsSequence;
+                    this._debugModelsController?.abort();
+                    const controller = new AbortController();
+                    this._debugModelsController = controller;
+                    this.debugProviderModelsLoading = true;
+                    this.debugProviderModelsMessage = refresh ? '正在刷新已保存 Provider 的模型目录…' : '正在读取模型目录…';
+                    try {
+                        const result = await this.fetchModelsFor(this.debugProvider, refresh, controller.signal);
+                        if (sequence !== this._debugModelsSequence || controller.signal.aborted) return;
+                        this.debugProviderModels = Array.isArray(result.models) ? result.models : [];
+                        this.debugProviderModelsMessage = result.message || '模型目录不可用，可手动填写模型名。';
+                    } catch (_) {
+                        if (sequence === this._debugModelsSequence && !controller.signal.aborted) {
+                            this.debugProviderModels = [];
+                            this.debugProviderModelsMessage = '模型目录不可用，可手动填写模型名。';
+                        }
+                    } finally {
+                        if (sequence === this._debugModelsSequence) {
+                            this.debugProviderModelsLoading = false;
+                            this._debugModelsController = null;
+                        }
+                    }
+                },
+
+                openDebugForProvider(name) {
+                    this.selectNav('debug');
+                    if (!this.debugSavedProviderExists(name)) {
+                        this.debugErrorMessage = '该 Provider 尚未保存在配置中，不能用于调试。';
+                        return;
+                    }
+                    this.debugMode = 'provider';
+                    this.debugProvider = name;
+                    this.debugProviderModels = [];
+                    this.debugSimple.model = '';
+                    this.debugNotice = this.debugConfigHasUnsavedChanges() ? '调试使用已保存的配置；页面中的未保存修改不会发送。' : '';
+                    this.debugErrorMessage = '';
+                    void this.loadDebugProviderModels(false);
+                },
+
+                openDebugForRoute(index) {
+                    this.selectNav('debug');
+                    const route = this._debugConfigSnapshot?.routes?.[Number(index)];
+                    if (!route) {
+                        this.debugErrorMessage = '该路由尚未保存在配置中，不能用于调试。';
+                        return;
+                    }
+                    this.debugMode = 'route';
+                    this.debugRouteIndex = Number(index);
+                    this.debugTargetIndex = 0;
+                    this.debugSimple.model = this.debugDefaultRouteModel();
+                    this.debugNotice = this.debugConfigHasUnsavedChanges() ? '调试使用已保存的配置；页面中的未保存修改不会发送。' : '';
+                    this.debugErrorMessage = '';
+                },
+
+                debugResetResponse() {
+                    this.debugStatus = 'running';
+                    this.debugStatusMessage = '正在连接调试接口…';
+                    this.debugErrorMessage = '';
+                    this.debugMeta = null;
+                    this.debugResponseStart = null;
+                    this.debugRawResponse = '';
+                    this.debugRenderedText = '';
+                    this.debugUsage = {};
+                    this.debugUpstreamRequests = [];
+                    this.debugLog = null;
+                    this.debugDoneReceived = false;
+                    this.debugStreamError = '';
+                    this.debugResponseView = 'text';
+                    this._debugOuterParser = this.debugCreateSSEParser();
+                    this._debugInnerParser = this.debugCreateSSEParser();
+                },
+
+                debugCreateSSEParser() {
+                    return { buffer: '', event: '', data: [] };
+                },
+
+                // 通用 SSE 行解析器：保留跨 chunk 的 CRLF、行尾與未完成事件。
+                debugFeedSSE(parser, chunk, final = false) {
+                    parser.buffer += String(chunk || '');
+                    const events = [];
+                    const consumeLine = (line) => {
+                        if (line === '') {
+                            if (parser.data.length) events.push({ event: parser.event || 'message', data: parser.data.join('\n') });
+                            parser.event = '';
+                            parser.data = [];
+                            return;
+                        }
+                        if (line.startsWith(':')) return;
+                        const colon = line.indexOf(':');
+                        const field = colon < 0 ? line : line.slice(0, colon);
+                        let value = colon < 0 ? '' : line.slice(colon + 1);
+                        if (value.startsWith(' ')) value = value.slice(1);
+                        if (field === 'event') parser.event = value;
+                        else if (field === 'data') parser.data.push(value);
+                    };
+                    while (parser.buffer.length) {
+                        let end = -1;
+                        for (let i = 0; i < parser.buffer.length; i++) {
+                            if (parser.buffer[i] === '\n' || parser.buffer[i] === '\r') { end = i; break; }
+                        }
+                        if (end < 0) break;
+                        if (parser.buffer[end] === '\r' && end === parser.buffer.length - 1 && !final) break;
+                        const line = parser.buffer.slice(0, end);
+                        const delimiterLength = parser.buffer[end] === '\r' && parser.buffer[end + 1] === '\n' ? 2 : 1;
+                        parser.buffer = parser.buffer.slice(end + delimiterLength);
+                        consumeLine(line);
+                    }
+                    if (final) {
+                        if (parser.buffer.length) {
+                            consumeLine(parser.buffer);
+                            parser.buffer = '';
+                        }
+                        if (parser.data.length) events.push({ event: parser.event || 'message', data: parser.data.join('\n') });
+                        parser.event = '';
+                        parser.data = [];
+                    }
+                    return events;
+                },
+
+                debugRunIsCurrent(sequence, controller) {
+                    return sequence === this._debugRunSequence && this._debugController === controller;
+                },
+
+                async debugRun() {
+                    if (this._debugRunActive) return;
+                    const built = this.debugBuildRequest();
+                    if (!built.valid) {
+                        this.debugErrorMessage = built.error;
+                        return;
+                    }
+                    const sequence = ++this._debugRunSequence;
+                    const controller = new AbortController();
+                    this._debugRunActive = true;
+                    this._debugController = controller;
+                    this._debugAbortRequested = false;
+                    this.debugResetResponse();
+                    try {
+                        const response = await fetch('/api/debug/run', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(built.payload),
+                            signal: controller.signal
+                        });
+                        if (!this.debugRunIsCurrent(sequence, controller)) return;
+                        const contentType = response.headers.get('content-type') || '';
+                        if (!contentType.toLowerCase().includes('text/event-stream')) {
+                            const responseText = await response.text();
+                            if (!this.debugRunIsCurrent(sequence, controller) || controller.signal.aborted) return;
+                            this.debugResponseStart = {
+                                status: response.status,
+                                headers: Object.fromEntries(response.headers.entries())
+                            };
+                            this.debugRawResponse = responseText;
+                            this.debugErrorMessage = this.debugErrorFromBody(responseText, response.status);
+                            this.debugStatus = 'failure';
+                            this.debugStatusMessage = '调试请求在事件流建立前失败。';
+                            return;
+                        }
+                        if (!response.body?.getReader) throw new Error('浏览器不支持读取流式响应。');
+                        const reader = response.body.getReader();
+                        this._debugReader = reader;
+                        const decoder = new TextDecoder('utf-8');
+                        while (true) {
+                            const result = await reader.read();
+                            if (!this.debugRunIsCurrent(sequence, controller)) return;
+                            if (result.done) break;
+                            this.debugConsumeOuterText(sequence, controller, decoder.decode(result.value, { stream: true }), false);
+                        }
+                        this.debugConsumeOuterText(sequence, controller, decoder.decode(), true);
+                        if (!this.debugRunIsCurrent(sequence, controller)) return;
+                        if (controller.signal.aborted || this._debugAbortRequested) {
+                            this.debugStatus = 'aborted';
+                            this.debugStatusMessage = '调试请求已中止。';
+                        } else if (!this.debugDoneReceived) {
+                            this.debugStatus = 'incomplete';
+                            this.debugStatusMessage = '事件流异常结束：未收到 done 事件。';
+                            this.debugErrorMessage = this.debugStreamError || this.debugErrorMessage || this.debugStatusMessage;
+                        } else {
+                            this.debugFinalizeInnerResponse();
+                            const status = this.debugResponseStart?.status ?? this.debugLog?.status;
+                            const failed = Number(status) >= 400 || !!this.debugLog?.error || !!this.debugStreamError;
+                            this.debugStatus = failed ? 'failure' : 'success';
+                            this.debugStatusMessage = failed ? '调试请求已结束，但响应包含错误。' : '调试请求已完成。';
+                            if (this.debugStreamError) this.debugErrorMessage = this.debugStreamError;
+                        }
+                    } catch (error) {
+                        if (!this.debugRunIsCurrent(sequence, controller)) return;
+                        if (controller.signal.aborted || error?.name === 'AbortError' || this._debugAbortRequested) {
+                            this.debugStatus = 'aborted';
+                            this.debugStatusMessage = '调试请求已中止。';
+                        } else {
+                            this.debugStatus = 'failure';
+                            this.debugStatusMessage = '调试请求失败。';
+                            this.debugErrorMessage = error?.message || '读取调试响应失败。';
+                        }
+                    } finally {
+                        if (this.debugRunIsCurrent(sequence, controller)) {
+                            this._debugRunActive = false;
+                            this._debugController = null;
+                            this._debugReader = null;
+                            if (this.debugStatus === 'running' || this.debugStatus === 'aborting') {
+                                this.debugStatus = this._debugAbortRequested ? 'aborted' : 'incomplete';
+                                this.debugStatusMessage = this._debugAbortRequested ? '调试请求已中止。' : '事件流异常结束：未收到 done 事件。';
+                            }
+                        }
+                    }
+                },
+
+                stopDebugRun() {
+                    if (!this._debugRunActive || !this._debugController) return;
+                    this._debugAbortRequested = true;
+                    this.debugStatus = 'aborting';
+                    this.debugStatusMessage = '正在中止并关闭连接…';
+                    this._debugController.abort();
+                    if (this._debugReader) void this._debugReader.cancel().catch(() => {});
+                },
+
+                debugConsumeOuterText(sequence, controller, text, final) {
+                    if (!this.debugRunIsCurrent(sequence, controller) || controller.signal.aborted) return;
+                    const events = this.debugFeedSSE(this._debugOuterParser, text, final);
+                    for (const event of events) this.debugHandleOuterEvent(event);
+                },
+
+                debugHandleOuterEvent(event) {
+                    let data;
+                    try {
+                        data = JSON.parse(event.data);
+                    } catch (_) {
+                        this.debugStreamError = `SSE ${event.event} 事件包含无效 JSON。`;
+                        return;
+                    }
+                    if (event.event === 'meta') this.debugMeta = data;
+                    else if (event.event === 'upstream_request') this.debugUpstreamRequests.push(data);
+                    else if (event.event === 'response_start') this.debugResponseStart = data;
+                    else if (event.event === 'response_chunk') {
+                        if (typeof data?.data !== 'string') {
+                            this.debugStreamError = 'response_chunk 缺少字符串 data。';
+                            return;
+                        }
+                        this.debugRawResponse += data.data;
+                        if (this.debugIsInnerSSE()) {
+                            const inner = this.debugFeedSSE(this._debugInnerParser, data.data, false);
+                            for (const item of inner) this.debugHandleInnerEvent(item);
+                        }
+                    } else if (event.event === 'done') {
+                        this.debugDoneReceived = true;
+                        this.debugLog = data.log && typeof data.log === 'object' ? data.log : null;
+                        if (!this.debugLog) this.debugStreamError = this.debugStreamError || 'done 事件缺少请求日志。';
+                        if (data.aborted === true) this._debugAbortRequested = true;
+                    }
+                },
+
+                debugIsInnerSSE() {
+                    const headers = this.debugResponseStart?.headers || {};
+                    const contentType = Object.entries(headers).find(([name]) => name.toLowerCase() === 'content-type')?.[1] || '';
+                    return String(contentType).toLowerCase().includes('text/event-stream');
+                },
+
+                debugHandleInnerEvent(event) {
+                    if (event.data === '[DONE]') return;
+                    let data;
+                    try {
+                        data = JSON.parse(event.data);
+                    } catch (_) {
+                        this.debugStreamError = `上游 ${event.event} 事件包含无效 JSON。`;
+                        return;
+                    }
+                    const format = this.debugMeta?.clientFormat || this.debugClientFormat;
+                    if (format === 'anthropic') {
+                        if (event.event === 'content_block_delta' && data.delta?.type === 'text_delta') this.debugAppendText(data.delta.text);
+                        this.debugMergeUsage(data.message?.usage || data.usage, format);
+                    } else if (format === 'openai-chat') {
+                        const delta = data.choices?.[0]?.delta?.content;
+                        if (typeof delta === 'string') this.debugAppendText(delta);
+                        else if (Array.isArray(delta)) delta.forEach(part => this.debugAppendText(part?.text));
+                        this.debugMergeUsage(data.usage, format);
+                    } else {
+                        if (event.event === 'response.output_text.delta') this.debugAppendText(data.delta);
+                        this.debugMergeUsage(data.response?.usage || data.usage, format);
+                    }
+                },
+
+                debugAppendText(value) {
+                    if (typeof value === 'string') this.debugRenderedText += value;
+                },
+
+                debugMergeUsage(usage, format) {
+                    if (!usage || typeof usage !== 'object') return;
+                    const fields = format === 'anthropic'
+                        ? [['input_tokens', 'inputTokens'], ['output_tokens', 'outputTokens']]
+                        : format === 'openai-chat'
+                            ? [['prompt_tokens', 'inputTokens'], ['completion_tokens', 'outputTokens'], ['total_tokens', 'totalTokens']]
+                            : [['input_tokens', 'inputTokens'], ['output_tokens', 'outputTokens'], ['total_tokens', 'totalTokens']];
+                    const next = { ...this.debugUsage };
+                    for (const [source, target] of fields) {
+                        if (typeof usage[source] === 'number' && Number.isFinite(usage[source])) next[target] = usage[source];
+                    }
+                    this.debugUsage = next;
+                },
+
+                debugExtractJSONText(body, format) {
+                    const textParts = [];
+                    const add = value => { if (typeof value === 'string') textParts.push(value); };
+                    if (format === 'anthropic') {
+                        (Array.isArray(body?.content) ? body.content : []).forEach(part => { if (part?.type === 'text') add(part.text); });
+                        this.debugMergeUsage(body?.usage, format);
+                    } else if (format === 'openai-chat') {
+                        const content = body?.choices?.[0]?.message?.content;
+                        if (typeof content === 'string') add(content);
+                        else if (Array.isArray(content)) content.forEach(part => add(part?.text));
+                        this.debugMergeUsage(body?.usage, format);
+                    } else {
+                        (Array.isArray(body?.output) ? body.output : []).forEach(item => {
+                            (Array.isArray(item?.content) ? item.content : []).forEach(part => {
+                                if (part?.type === 'output_text' || part?.type === 'text') add(part.text);
+                            });
+                        });
+                        this.debugMergeUsage(body?.usage, format);
+                    }
+                    this.debugRenderedText = textParts.join('');
+                },
+
+                debugFinalizeInnerResponse() {
+                    const format = this.debugMeta?.clientFormat || this.debugClientFormat;
+                    if (this.debugIsInnerSSE()) {
+                        const tail = this.debugFeedSSE(this._debugInnerParser, '', true);
+                        for (const event of tail) this.debugHandleInnerEvent(event);
+                        return;
+                    }
+                    if (!this.debugRawResponse.trim()) return;
+                    try {
+                        this.debugExtractJSONText(JSON.parse(this.debugRawResponse), format);
+                    } catch (_) {
+                        // 原始响应仍完整保留；非 JSON 错误正文不猜测其含义。
+                    }
+                },
+
+                debugErrorFromBody(text, status) {
+                    try {
+                        const body = JSON.parse(text);
+                        const message = body?.message || body?.error?.message || body?.error || body?.detail;
+                        if (typeof message === 'string' && message) return message;
+                        if (typeof body?.type === 'string') return `${body.type}${status ? `（HTTP ${status}）` : ''}`;
+                    } catch (_) { /* 展示安全的纯文本回退 */ }
+                    return String(text || `HTTP ${status}`).trim().slice(0, 4000);
+                },
+
+                debugResponseHeaderRows(headers) {
+                    return Object.entries(headers || {}).map(([name, value]) => ({ name, value: Array.isArray(value) ? value.join(', ') : String(value) }));
+                },
+
+                debugUsageRows() {
+                    return [
+                        ['inputTokens', '输入 tokens'],
+                        ['outputTokens', '输出 tokens'],
+                        ['totalTokens', '总 tokens']
+                    ].filter(([key]) => Object.prototype.hasOwnProperty.call(this.debugUsage, key))
+                        .map(([key, label]) => ({ key, label, value: this.debugUsage[key] }));
+                },
+
+                debugStatusLabel() {
+                    return ({ idle: '待运行', running: '运行中', aborting: '正在中止', success: '成功', failure: '失败', aborted: '已中止', incomplete: '异常终止' })[this.debugStatus] || '待运行';
+                },
+
+                debugStatusClass() {
+                    if (this.debugStatus === 'success') return 'border-good/40 bg-good/10 text-good';
+                    if (['failure', 'incomplete'].includes(this.debugStatus)) return 'border-danger/40 bg-danger/10 text-danger';
+                    if (['running', 'aborting'].includes(this.debugStatus)) return 'border-cyan/40 bg-cyan/10 text-cyan';
+                    if (this.debugStatus === 'aborted') return 'border-warn/40 bg-warn/10 text-warn';
+                    return 'border-line bg-white/[.04] text-muted';
+                }

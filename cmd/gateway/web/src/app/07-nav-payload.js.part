@@ -27,7 +27,7 @@
 
                 navScrollContainers(tab) {
                     // 窄屏由 main 滚动，桌面由各页内容区滚动；两层都按页签隔离。
-                    const contentRef = tab === 'monitor' ? 'monitorScroll' : tab === 'logs' ? 'logScroll' : 'configScroll';
+                    const contentRef = tab === 'monitor' ? 'monitorScroll' : tab === 'logs' ? 'logScroll' : tab === 'debug' ? 'debugScroll' : 'configScroll';
                     return [this.$refs.mainScroll, this.$refs[contentRef]].filter(Boolean);
                 },
 
@@ -60,6 +60,7 @@
                     if (this.activeTab === 'settings') return '全局设置';
                     if (this.activeTab === 'monitor') return '监控仪表盘';
                     if (this.activeTab === 'logs') return '请求日志';
+                    if (this.activeTab === 'debug') return '调试控制台';
                     return '配置管理';
                 },
 
@@ -69,6 +70,7 @@
                     if (this.activeTab === 'settings') return '管理监听、超时、缓存、直通模式和 YAML 原文';
                     if (this.activeTab === 'monitor') return '查看运行状态和 Provider 指标';
                     if (this.activeTab === 'logs') return '查看最近请求记录和转发结果';
+                    if (this.activeTab === 'debug') return '使用已保存配置验证请求、路由和上游响应';
                     return '';
                 },
 
