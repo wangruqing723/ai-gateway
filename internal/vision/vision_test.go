@@ -198,14 +198,33 @@ func TestTranslateStopsBeforeNextImageWhenContextCanceled(t *testing.T) {
 
 	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		if requests.Add(1) == 1 {
-			cancel()
-		}
+		requests.Add(1)
 		writeVisionResponse(t, w, "图片描述")
 	}))
 	defer server.Close()
 
 	translator, provider := newTestTranslator(t, server, true)
+	cacheWrite := &blockingRecognitionCache{
+		recognitionCache: translator.cache,
+		setStarted:       make(chan struct{}),
+		releaseSet:       make(chan struct{}),
+	}
+	translator.cache = cacheWrite
+	var releaseOnce sync.Once
+	releaseCacheWrite := func() { releaseOnce.Do(func() { close(cacheWrite.releaseSet) }) }
+	var recognitionRun *recognition
+	t.Cleanup(func() {
+		releaseCacheWrite()
+		if recognitionRun == nil {
+			return
+		}
+		select {
+		case <-recognitionRun.done:
+		case <-time.After(time.Second):
+			t.Errorf("取消后的后台识别未在清理前结束")
+		}
+	})
+
 	messages := []any{map[string]any{
 		"role": "user",
 		"content": []any{
@@ -214,11 +233,33 @@ func TestTranslateStopsBeforeNextImageWhenContextCanceled(t *testing.T) {
 		},
 	}}
 
-	translator.Translate(ctx, messages, provider, "vision-model", discardLog)
+	translateDone := make(chan struct{})
+	go func() {
+		translator.Translate(ctx, messages, provider, "vision-model", discardLog)
+		close(translateDone)
+	}()
+	waitForSignal(t, cacheWrite.setStarted, "首张图片未进入缓存写入")
+
+	translator.mu.Lock()
+	recognitionRun = translator.pending[cache.ImageHash(imageBlock("first-image"))]
+	translator.mu.Unlock()
+	if recognitionRun == nil {
+		t.Fatal("缓存写入期间未找到共享识别任务")
+	}
+	cancel()
+	waitForSignal(t, translateDone, "取消上下文后 Translate 未返回")
 
 	if got := requests.Load(); got != 1 {
 		t.Fatalf("请求取消后仍继续识别后续图片：请求次数 = %d，期望 1", got)
 	}
+	select {
+	case <-recognitionRun.done:
+		t.Fatal("缓存写入仍被阻塞时后台识别已结束")
+	default:
+	}
+
+	releaseCacheWrite()
+	waitForSignal(t, recognitionRun.done, "Translate 返回后的后台缓存写入未结束")
 }
 
 func TestClassifyFailureUsesStableCategories(t *testing.T) {
@@ -571,6 +612,19 @@ type recognitionCacheSpy struct {
 	releaseSecondGet chan struct{}
 	setDone          chan struct{}
 	setOnce          sync.Once
+}
+
+type blockingRecognitionCache struct {
+	recognitionCache
+	setStarted chan struct{}
+	releaseSet chan struct{}
+	setOnce    sync.Once
+}
+
+func (c *blockingRecognitionCache) Set(hash, description string) error {
+	c.setOnce.Do(func() { close(c.setStarted) })
+	<-c.releaseSet
+	return c.recognitionCache.Set(hash, description)
 }
 
 func newRecognitionCacheSpy() *recognitionCacheSpy {
