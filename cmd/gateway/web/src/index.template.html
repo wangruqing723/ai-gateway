@@ -271,7 +271,7 @@
                                                     :aria-pressed="String(routeCompactView)">紧凑</button>
                                         </div>
                                         <!-- 添加路由按钮 -->
-                                        <button @click="addRoute()" class="btn btn-secondary h-8 px-3 text-xs">
+                                        <button @click="addRoute()" data-testid="route-add" class="btn btn-secondary h-8 px-3 text-xs">
                                             <span class="material-symbols-outlined text-[16px]">add</span>
                                             添加路由
                                         </button>
@@ -463,7 +463,7 @@
                                                                 :title="routeEnabled(route) ? '停用此规则' : '启用此规则'"
                                                                 :aria-label="routeEnabled(route) ? '停用此规则' : '启用此规则'"
                                                                 x-text="routeEnabled(route) ? '停用' : '启用'"></button>
-                                                        <button @click="editRoute(index)"
+                                                        <button @click="editRoute(index)" :data-testid="'route-edit-' + index"
                                                                 class="rounded px-2 py-1 text-xs font-semibold text-text hover:bg-white/10 hover:text-white"
                                                                 title="编辑此规则">
                                                             编辑
@@ -3594,7 +3594,7 @@
 
                                         <!-- Provider 下拉选择器 -->
                                         <div class="w-32 shrink-0 sm:w-36">
-                                            <select autocomplete="off" :id="'route-target-provider-' + ti" x-model="target.provider"
+                                            <select autocomplete="off" :id="'route-target-provider-' + ti" :data-testid="'route-target-provider-' + ti" x-model="target.provider"
                                                     @change="onRouteTargetProviderChange(ti)"
                                                     :aria-label="'候选 ' + (ti + 1) + ' Provider'"
                                                     class="field py-1 text-xs">
@@ -3608,7 +3608,7 @@
                                         <!-- 目标模型输入框与下拉组合框 -->
                                         <div class="relative min-w-0 flex-1"
                                              @click.away="isModelPickerOpen('t:' + target._id) && closeModelPicker()">
-                                            <input autocomplete="off" :id="'route-target-model-' + ti" type="text" x-model="target.model"
+                                            <input autocomplete="off" :id="'route-target-model-' + ti" :data-testid="'route-target-model-' + ti" type="text" x-model="target.model"
                                                    @input="onModelPickerInput('t:' + target._id, target.provider, target.model)"
                                                    @keydown="onModelPickerKeydown($event, 't:' + target._id, target.provider, target.model, (v) => target.model = v)"
                                                    @click="openModelPicker('t:' + target._id, target.provider, target.model)"
@@ -3652,6 +3652,7 @@
                                         <!-- 右侧紧凑操作组：tune 调优设置 + 删除 -->
                                         <div class="flex shrink-0 items-center gap-1">
                                             <button type="button" @click="target.limitsOpen = !target.limitsOpen"
+                                                    :data-testid="'route-target-settings-' + ti"
                                                     :aria-expanded="String(target.limitsOpen)" :aria-controls="'route-target-limits-' + ti"
                                                     :title="targetLimitCount(ti) ? '候选调优（已设 ' + targetLimitCount(ti) + ' 项）' : '候选调优设置'"
                                                     class="btn btn-ghost px-2 py-1 text-xs"
@@ -3667,10 +3668,48 @@
                                         </div>
                                     </div>
 
+                                    <div class="mt-2 space-y-1 border-t border-line/40 pt-2 text-[11px] leading-relaxed text-muted">
+                                        <p>
+                                            超时：<span class="text-cyan" x-text="timeoutModeInfo(target).summary"></span>
+                                            <span class="mx-1 text-line">·</span>
+                                            <span x-text="targetRetrySummary(target)"></span>
+                                        </p>
+                                        <p x-show="timeoutModeInfo(target).mode === 'client'" x-cloak class="text-amber-200">
+                                            客户端模式关闭非流式整体超时、流式响应头等待和活跃生成超时；排队、建连/TLS 与独立视觉识别超时仍生效。客户端断开会终止请求；沉默连接未报错时不会主动重连。
+                                        </p>
+                                        <p x-show="localRetryModeInfo(target).mode === 'untilDisconnect'" x-cloak class="text-amber-200">
+                                            持续重试只处理响应提交前可恢复的失败，留在当前候选且不会自动轮到后续候选；遵守冷却与固定间隔。输出后不自动重放。
+                                        </p>
+                                    </div>
+
                                     <!-- 候选级参数调优展开区 (Limits Open) -->
                                     <div x-show="target.limitsOpen" x-transition x-cloak :id="'route-target-limits-' + ti"
                                          class="mt-3 border-t border-line/60 pt-3">
                                         <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                                            <label :for="'route-target-timeout-mode-' + ti" class="block">
+                                                <span class="mb-1 block text-xs text-muted">超时模式</span>
+                                                <select autocomplete="off" :id="'route-target-timeout-mode-' + ti"
+                                                        :data-testid="'route-target-timeout-mode-' + ti"
+                                                        :aria-label="'候选 ' + (ti + 1) + ' 超时模式'"
+                                                        x-model="target.timeoutMode" class="field py-1 text-xs">
+                                                    <option value="">继承路由 / 全局</option>
+                                                    <option value="global">全局超时</option>
+                                                    <option value="client">客户端控制</option>
+                                                </select>
+                                                <span class="mt-1 block text-[11px] text-muted" x-text="timeoutModeInfo(target).summary"></span>
+                                            </label>
+                                            <label :for="'route-target-local-mode-' + ti" class="block">
+                                                <span class="mb-1 block text-xs text-muted">本地重试模式</span>
+                                                <select autocomplete="off" :id="'route-target-local-mode-' + ti"
+                                                        :data-testid="'route-target-local-mode-' + ti"
+                                                        :aria-label="'候选 ' + (ti + 1) + ' 本地重试模式'"
+                                                        x-model="target.localRetry.mode" class="field py-1 text-xs">
+                                                    <option value="">继承路由 / 默认</option>
+                                                    <option value="limited">有限重试</option>
+                                                    <option value="untilDisconnect">持续重试至客户端断开</option>
+                                                </select>
+                                                <span class="mt-1 block text-[11px] text-muted" x-text="localRetryModeInfo(target).summary"></span>
+                                            </label>
                                             <label :for="'route-target-max-tokens-' + ti" class="block">
                                                 <span class="mb-1 block text-xs text-muted">最大输出 tokens</span>
                                                 <input autocomplete="off" :id="'route-target-max-tokens-' + ti" type="number" x-model.number="target.maxTokens"
@@ -3681,15 +3720,22 @@
                                                 <input autocomplete="off" :id="'route-target-context-window-' + ti" type="number" min="1" max="10000000" x-model.number="target.contextWindow"
                                                        placeholder="留空不启用预算" class="field py-1 text-xs">
                                             </label>
-                                            <label :for="'route-target-local-retries-' + ti" class="block">
-                                                <span class="mb-1 block text-xs text-muted">最大本地重试次数</span>
-                                                <input autocomplete="off" :id="'route-target-local-retries-' + ti" type="number" min="0" step="1" x-model.number="target.localRetry.maxRetries"
-                                                       placeholder="继承；0 = 关闭" class="field py-1 text-xs">
-                                            </label>
+                                            <div x-show="localRetryModeInfo(target).mode !== 'untilDisconnect'" x-cloak>
+                                                <label :for="'route-target-local-retries-' + ti" class="block">
+                                                    <span class="mb-1 block text-xs text-muted">最大本地重试次数</span>
+                                                    <input autocomplete="off" :id="'route-target-local-retries-' + ti"
+                                                           :data-testid="'route-target-local-retries-' + ti"
+                                                           type="number" min="0" step="1" x-model.number="target.localRetry.maxRetries"
+                                                           :disabled="localRetryModeInfo(target).mode === 'untilDisconnect'"
+                                                           placeholder="继承路由/Provider；0 = 关闭" class="field py-1 text-xs">
+                                                </label>
+                                            </div>
                                             <label :for="'route-target-local-interval-' + ti" class="block">
                                                 <span class="mb-1 block text-xs text-muted">重试间隔 ms</span>
-                                                <input autocomplete="off" :id="'route-target-local-interval-' + ti" type="number" min="0" max="60000" step="1" x-model.number="target.localRetry.intervalMs"
-                                                       placeholder="默认 1000" class="field py-1 text-xs">
+                                                <input autocomplete="off" :id="'route-target-local-interval-' + ti"
+                                                       :data-testid="'route-target-local-interval-' + ti"
+                                                       type="number" min="0" max="60000" step="1" x-model.number="target.localRetry.intervalMs"
+                                                       placeholder="继承路由/Provider；最终默认 1000" class="field py-1 text-xs">
                                             </label>
                                         </div>
 
@@ -3716,7 +3762,7 @@
                         </template>
                     </div>
 
-                    <button @click="addRouteTarget()" :disabled="routeForm.targets.length >= maxRouteTargets" class="btn btn-secondary mt-3 text-xs">
+                    <button @click="addRouteTarget()" data-testid="route-target-add" :disabled="routeForm.targets.length >= maxRouteTargets" class="btn btn-secondary mt-3 text-xs">
                         <span class="material-symbols-outlined text-[16px]">add</span>
                         <span x-text="'添加候选（最多 ' + maxRouteTargets + ' 个）'"></span>
                     </button>
@@ -3791,14 +3837,14 @@
                     </div>
                 </section>
 
-                <!-- 路由级高级默认值（默认折叠）：maxTokens、窗口、重试与公共 extraBody -->
+                <!-- 路由级高级默认值（默认折叠）：超时、maxTokens、窗口、重试与公共 extraBody -->
                 <div class="mt-6 border-t border-line pt-5">
-                    <button type="button" @click="routeForm.routeAdvancedOpen = !routeForm.routeAdvancedOpen"
+                    <button type="button" @click="routeForm.routeAdvancedOpen = !routeForm.routeAdvancedOpen" data-testid="route-advanced-toggle"
                             :aria-expanded="String(routeForm.routeAdvancedOpen)" aria-controls="route-advanced"
                             class="btn btn-secondary w-full px-3" :class="routeAdvancedCount() ? 'border-cyan2/50 bg-cyan2/10 text-cyan' : ''">
                         <span class="material-symbols-outlined text-[18px]">tune</span>
                         <span class="flex-1 text-left">路由级默认值与调优</span>
-                        <span class="hidden text-xs font-normal text-muted sm:inline">默认上限 · 窗口 · 重试 · 公共请求体</span>
+                        <span class="hidden text-xs font-normal text-muted sm:inline">超时 · 默认上限 · 窗口 · 重试 · 公共请求体</span>
                         <span x-show="routeAdvancedCount()" x-cloak class="chip ml-0.5 bg-cyan2/15 px-1.5 py-0 text-[11px] text-cyan" x-text="routeAdvancedCount()"></span>
                         <span class="material-symbols-outlined text-[18px]" x-text="routeForm.routeAdvancedOpen ? 'keyboard_arrow_up' : 'keyboard_arrow_down'"></span>
                     </button>
@@ -3821,17 +3867,51 @@
                             </div>
                         </section>
                         <section class="mt-4 border-t border-line/60 pt-4">
+                            <h4 class="mb-2 text-xs font-bold text-white">生成超时模式</h4>
+                            <label for="route-timeout-mode" class="block max-w-xl">
+                                <span class="mb-1 block text-xs text-muted">路由默认模式</span>
+                                <select autocomplete="off" id="route-timeout-mode" data-testid="route-timeout-mode"
+                                        aria-label="路由默认超时模式" x-model="routeForm.timeoutMode" class="field py-1 text-xs">
+                                    <option value="">继承全局超时</option>
+                                    <option value="global">全局超时</option>
+                                    <option value="client">客户端控制</option>
+                                </select>
+                                <span class="mt-1 block text-[11px] text-muted" x-text="timeoutModeInfo().summary"></span>
+                            </label>
+                            <p class="mt-2 text-[11px] leading-relaxed text-muted">
+                                候选可显式选择全局超时或客户端控制；继承候选使用本路由模式，路由继承时使用全局超时。客户端模式关闭非流式整体超时、流式响应头等待超时和流式活跃生成超时；排队等待、底层建连/TLS 与独立视觉识别超时仍生效。客户端断开会终止请求；沉默连接未报错时不会主动重连。
+                            </p>
+                        </section>
+                        <section class="mt-4 border-t border-line/60 pt-4">
                             <h4 class="mb-2 text-xs font-bold text-white">路由本地重试默认值</h4>
+                            <label for="route-local-retry-mode" class="mb-3 block max-w-xl">
+                                <span class="mb-1 block text-xs text-muted">路由重试模式</span>
+                                <select autocomplete="off" id="route-local-retry-mode" data-testid="route-local-retry-mode"
+                                        aria-label="路由本地重试模式" x-model="routeForm.localRetry.mode" class="field py-1 text-xs">
+                                    <option value="">继承有限重试</option>
+                                    <option value="limited">有限重试</option>
+                                    <option value="untilDisconnect">持续重试至客户端断开</option>
+                                </select>
+                                <span class="mt-1 block text-[11px] text-muted" x-text="routeRetryModeSummary()"></span>
+                            </label>
                             <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                                <label class="block">
-                                    <span class="mb-1 block text-xs text-muted">最大重试次数</span>
-                                    <input autocomplete="off" type="number" min="0" step="1" x-model.number="routeForm.localRetry.maxRetries" placeholder="留空 = 继承上游；0 = 关闭" class="field py-1 text-xs">
-                                </label>
+                                <div x-show="localRetryModeInfo().mode !== 'untilDisconnect'" x-cloak>
+                                    <label class="block">
+                                        <span class="mb-1 block text-xs text-muted">最大本地重试次数</span>
+                                        <input autocomplete="off" type="number" min="0" step="1" x-model.number="routeForm.localRetry.maxRetries"
+                                               data-testid="route-local-retries" :disabled="localRetryModeInfo().mode === 'untilDisconnect'"
+                                               placeholder="留空 = 继承 Provider；0 = 关闭" class="field py-1 text-xs">
+                                    </label>
+                                </div>
                                 <label class="block">
                                     <span class="mb-1 block text-xs text-muted">重试间隔 ms</span>
-                                    <input autocomplete="off" type="number" min="0" max="60000" step="1" x-model.number="routeForm.localRetry.intervalMs" placeholder="留空 = 默认 1000 ms" class="field py-1 text-xs">
+                                    <input autocomplete="off" type="number" min="0" max="60000" step="1" x-model.number="routeForm.localRetry.intervalMs"
+                                           data-testid="route-local-interval" placeholder="留空 = 继承 Provider / 默认 1000 ms" class="field py-1 text-xs">
                                 </label>
                             </div>
+                            <p class="mt-2 text-[11px] leading-relaxed text-muted">
+                                持续模式只在响应提交前遇到可恢复失败时重试，保持在当前候选，不会自动轮到后续候选；等待遵守密钥/账户冷却和固定间隔。响应开始输出后不自动重放。超时模式与重试模式互相独立。
+                            </p>
                         </section>
                         <section class="mt-4 border-t border-line/60 pt-4">
                             <div class="mb-2 flex items-center justify-between">
@@ -3858,7 +3938,7 @@
                     <span class="h-1.5 w-1.5 rounded-full bg-warn"></span>有未保存的修改
                 </span>
                 <button @click="requestCloseRouteModal()" class="btn btn-secondary">取消</button>
-                <button @click="saveRoute()" :disabled="loading" class="btn btn-primary disabled:opacity-60" title="保存（Ctrl/⌘+S）">
+                <button @click="saveRoute()" data-testid="route-save" :disabled="loading" class="btn btn-primary disabled:opacity-60" title="保存（Ctrl/⌘+S）">
                     <span x-show="loading" x-cloak class="material-symbols-outlined gw-spin text-[18px]">progress_activity</span>
                     <span x-text="loading ? '保存中…' : '保存路由'"></span>
                 </button>

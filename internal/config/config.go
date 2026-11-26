@@ -23,6 +23,11 @@ import (
 )
 
 const (
+	TimeoutModeGlobal             = "global"
+	TimeoutModeClient             = "client"
+	LocalRetryModeLimited         = "limited"
+	LocalRetryModeUntilDisconnect = "untilDisconnect"
+
 	// APIKeyKeepSentinel 是管理 API 用于表示“保留已有密钥”的精确占位符。
 	APIKeyKeepSentinel = "__AI_GATEWAY_KEEP_API_KEY__"
 	// BalanceTokenKeepSentinel 表示普通保存时保留已有的独立余额查询令牌。
@@ -166,6 +171,8 @@ func ExtraBodyBlocked(key string) bool {
 
 // LocalRetry 是单个候选的本地重试配置。数值项使用指针区分「继承」与「显式关闭」。
 type LocalRetry struct {
+	// Mode 仅 route/target 可设置；provider 只提供 maxRetries 与 intervalMs 两个继承字段。
+	Mode string `yaml:"mode,omitempty" json:"mode,omitempty"`
 	// MaxRetries 是同一候选的额外重试次数；nil 表示继承，0 表示本层关闭。
 	MaxRetries *int `yaml:"maxRetries,omitempty" json:"maxRetries,omitempty"`
 	// IntervalMs 是本地重试前的固定等待时长；nil 时由 router 使用默认值。
@@ -512,6 +519,8 @@ type Vision struct {
 type Target struct {
 	Provider string `yaml:"provider" json:"provider"`
 	Model    string `yaml:"model" json:"model"`
+	// TimeoutMode 覆盖 route.timeoutMode；省略时继承。
+	TimeoutMode string `yaml:"timeoutMode,omitempty" json:"timeoutMode,omitempty"`
 	// MaxTokens 覆盖该目标的输出上限，nil 表示不覆盖。优先级 target > route > provider。
 	MaxTokens *int `yaml:"maxTokens,omitempty" json:"maxTokens,omitempty"`
 	// ContextWindow 覆盖该目标的上下文窗口，nil 表示不覆盖。优先级 target > route > provider。
@@ -542,6 +551,8 @@ type Route struct {
 	Model    string   `yaml:"model,omitempty" json:"model,omitempty"`
 	Targets  []Target `yaml:"targets,omitempty" json:"targets,omitempty"`
 	Vision   *Vision  `yaml:"vision,omitempty" json:"vision,omitempty"`
+	// TimeoutMode 控制生成超时；省略时继承全局 global 模式。
+	TimeoutMode string `yaml:"timeoutMode,omitempty" json:"timeoutMode,omitempty"`
 	// Strategy 候选选择策略：failover | round-robin | least-queue，空等同 failover。
 	//
 	// 只做路由级，不设全局默认：全局默认会让「这条路由到底用哪个策略」需要看两处，
@@ -1637,7 +1648,7 @@ func validateProvider(name string, p *Provider, validateLimits bool) error {
 	if err := validateContextWindow(fmt.Sprintf("providers.%s.contextWindow", name), p.ContextWindow); err != nil {
 		return err
 	}
-	if err := validateLocalRetry(fmt.Sprintf("providers.%s.localRetry", name), p.LocalRetry); err != nil {
+	if err := validateLocalRetry(fmt.Sprintf("providers.%s.localRetry", name), p.LocalRetry, false); err != nil {
 		return err
 	}
 	if err := validateOneMContext(name, p.OneMContext); err != nil {
@@ -1955,7 +1966,13 @@ func validateRoute(c *Config, r *Route) error {
 	if strings.TrimSpace(r.Match) == "" {
 		return fmt.Errorf("route 缺少 match 字段")
 	}
+	if err := validateTimeoutMode(fmt.Sprintf("route %q.timeoutMode", r.Match), r.TimeoutMode); err != nil {
+		return err
+	}
 	if err := validateRouteTargets(c, r); err != nil {
+		return err
+	}
+	if err := validateEffectiveRouteRetry(c, r); err != nil {
 		return err
 	}
 	if err := validateRouteStrategy(r); err != nil {
@@ -1973,7 +1990,7 @@ func validateRoute(c *Config, r *Route) error {
 	if err := validateExtraBody(fmt.Sprintf("route %q.extraBody", r.Match), r.ExtraBody); err != nil {
 		return err
 	}
-	if err := validateLocalRetry(fmt.Sprintf("route %q.localRetry", r.Match), r.LocalRetry); err != nil {
+	if err := validateLocalRetry(fmt.Sprintf("route %q.localRetry", r.Match), r.LocalRetry, true); err != nil {
 		return err
 	}
 	if r.Vision != nil {
@@ -2040,13 +2057,16 @@ func validateRouteTargets(c *Config, r *Route) error {
 		if strings.TrimSpace(t.Model) == "" {
 			return fmt.Errorf("route %q.targets[%d] 缺少 model 字段", r.Match, i)
 		}
+		if err := validateTimeoutMode(fmt.Sprintf("route %q.targets[%d].timeoutMode", r.Match, i), t.TimeoutMode); err != nil {
+			return err
+		}
 		if t.MaxTokens != nil && (*t.MaxTokens < 1 || *t.MaxTokens > MaxOutputTokensCeiling) {
 			return fmt.Errorf("route %q.targets[%d].maxTokens 应在 1-%d 之间", r.Match, i, MaxOutputTokensCeiling)
 		}
 		if err := validateContextWindow(fmt.Sprintf("route %q.targets[%d].contextWindow", r.Match, i), t.ContextWindow); err != nil {
 			return err
 		}
-		if err := validateLocalRetry(fmt.Sprintf("route %q.targets[%d].localRetry", r.Match, i), t.LocalRetry); err != nil {
+		if err := validateLocalRetry(fmt.Sprintf("route %q.targets[%d].localRetry", r.Match, i), t.LocalRetry, true); err != nil {
 			return err
 		}
 		if err := validateExtraBody(fmt.Sprintf("route %q.targets[%d].extraBody", r.Match, i), t.ExtraBody); err != nil {
@@ -2072,15 +2092,68 @@ func validateContextWindow(path string, window *int) error {
 }
 
 // validateLocalRetry 校验本地重试次数与固定间隔的边界；0 对两项都合法。
-func validateLocalRetry(label string, retry *LocalRetry) error {
+func validateLocalRetry(label string, retry *LocalRetry, allowMode bool) error {
 	if retry == nil {
 		return nil
+	}
+	if retry.Mode != "" {
+		if !allowMode {
+			return fmt.Errorf("%s.mode 仅可在 route 或 target 上配置", label)
+		}
+		if retry.Mode != LocalRetryModeLimited && retry.Mode != LocalRetryModeUntilDisconnect {
+			return fmt.Errorf("%s.mode 须为 %s 或 %s", label, LocalRetryModeLimited, LocalRetryModeUntilDisconnect)
+		}
 	}
 	if retry.MaxRetries != nil && *retry.MaxRetries < 0 {
 		return fmt.Errorf("%s.maxRetries 不能为负数", label)
 	}
 	if retry.IntervalMs != nil && (*retry.IntervalMs < 0 || *retry.IntervalMs > maxLocalRetryIntervalMs) {
 		return fmt.Errorf("%s.intervalMs 应在 0-%d 之间", label, maxLocalRetryIntervalMs)
+	}
+	return nil
+}
+
+func validateTimeoutMode(label, mode string) error {
+	if mode != "" && mode != TimeoutModeGlobal && mode != TimeoutModeClient {
+		return fmt.Errorf("%s 须为 %s 或 %s", label, TimeoutModeGlobal, TimeoutModeClient)
+	}
+	return nil
+}
+
+// validateEffectiveRouteRetry 校验持续模式下每个实际候选继承后的固定间隔。
+// mode 仅允许 target/route 提供；provider 只能提供 maxRetries 与 intervalMs。
+func validateEffectiveRouteRetry(c *Config, route *Route) error {
+	for i, target := range route.TargetList() {
+		providerRetry := (*LocalRetry)(nil)
+		if c != nil {
+			if provider := c.Providers[target.Provider]; provider != nil {
+				providerRetry = provider.LocalRetry
+			}
+		}
+		mode := LocalRetryModeLimited
+		for _, retry := range []*LocalRetry{target.LocalRetry, route.LocalRetry} {
+			if retry != nil && retry.Mode != "" {
+				mode = retry.Mode
+				break
+			}
+		}
+		if mode != LocalRetryModeUntilDisconnect {
+			continue
+		}
+		interval := defaultLocalRetryIntervalMs
+		for _, retry := range []*LocalRetry{target.LocalRetry, route.LocalRetry, providerRetry} {
+			if retry != nil && retry.IntervalMs != nil {
+				interval = *retry.IntervalMs
+				break
+			}
+		}
+		if interval <= 0 {
+			label := fmt.Sprintf("route %q.localRetry.intervalMs", route.Match)
+			if len(route.Targets) > 0 {
+				label = fmt.Sprintf("route %q.targets[%d].localRetry.intervalMs", route.Match, i)
+			}
+			return fmt.Errorf("%s 在 untilDisconnect 模式下须大于 0", label)
+		}
 	}
 	return nil
 }

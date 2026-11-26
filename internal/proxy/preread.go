@@ -329,7 +329,9 @@ func upstreamStreamStatus(errType, errCode string) int {
 // 客户端自己的 429 退避重试能生效，日志与指标也不会把这次请求记成 200。
 func writeStreamErrorAsHTTP(opts *Options, e *UpstreamStreamError) error {
 	timeout := time.Duration(opts.StreamActivityTimeout) * time.Millisecond
-	if opts.StreamActivityTimeout <= 0 {
+	if opts.DisableGenerationTimeout {
+		timeout = 0
+	} else if opts.StreamActivityTimeout <= 0 {
 		timeout = time.Duration(opts.TimeoutMs) * time.Millisecond
 	}
 	payload := map[string]any{
@@ -346,9 +348,12 @@ func writeStreamErrorAsHTTP(opts *Options, e *UpstreamStreamError) error {
 	if err != nil {
 		body = []byte(`{"error":{"type":"api_error","message":"上游流式响应失败"}}`)
 	}
-	deadline := time.Now()
-	if timeout > 0 {
-		deadline = deadline.Add(timeout)
+	var deadline time.Time
+	if !opts.DisableGenerationTimeout {
+		deadline = time.Now()
+		if timeout > 0 {
+			deadline = deadline.Add(timeout)
+		}
 	}
 	return writeResponseAtDeadline(opts.ClientRes, e.Status, body, deadline)
 }

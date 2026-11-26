@@ -321,6 +321,95 @@ func TestDebugConsoleRouteFailoverAndLocalRetry(t *testing.T) {
 	})
 }
 
+func TestDebugConsoleContinuousRetryFollowsRouteAndTargetButNotProvider(t *testing.T) {
+	requestBody := map[string]any{
+		"model": "client-model", "max_tokens": 16,
+		"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+	}
+	newRecoveringUpstream := func(hits *atomic.Int32) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			if hits.Add(1) < 3 {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = io.WriteString(w, `{"error":"temporary"}`)
+				return
+			}
+			w.Header().Set("content-type", "application/json")
+			_, _ = io.WriteString(w, anthropicOKBody)
+		}))
+	}
+
+	t.Run("route mode", func(t *testing.T) {
+		var hits atomic.Int32
+		upstream := newRecoveringUpstream(&hits)
+		defer upstream.Close()
+		provider := localRetryProvider("primary", upstream.URL)
+		route := config.Route{Match: "*", LocalRetry: continuousRetryPolicy(0, 1), Targets: []config.Target{{Provider: "primary", Model: "upstream"}}}
+		srv := newFailoverTestServer(map[string]*config.Provider{"primary": provider}, route, upstream.Client(), config.Failover{})
+		response := debugConsoleRun(srv, map[string]any{"mode": "route", "clientFormat": "anthropic", "routeIndex": 0, "routeMatch": "*", "body": requestBody})
+		if response.Code != http.StatusOK || hits.Load() != 3 {
+			t.Fatalf("status/hits = %d/%d, route debug 应持续重试成功", response.Code, hits.Load())
+		}
+		entry := debugConsoleDoneLog(t, debugConsoleReadEvents(t, response.Body.String())).Log
+		if entry.DebugMode != "route" || len(entry.AttemptDetails) != 3 || !entry.AttemptDetails[2].LocalRetry {
+			t.Errorf("route debug 重试日志 = %#v", entry)
+		}
+	})
+
+	t.Run("target mode", func(t *testing.T) {
+		var selectedHits, otherHits atomic.Int32
+		selected := newRecoveringUpstream(&selectedHits)
+		defer selected.Close()
+		other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			otherHits.Add(1)
+			w.Header().Set("content-type", "application/json")
+			_, _ = io.WriteString(w, anthropicOKBody)
+		}))
+		defer other.Close()
+		route := config.Route{Match: "*", Targets: []config.Target{
+			{Provider: "primary", Model: "upstream", LocalRetry: continuousRetryPolicy(0, 1)},
+			{Provider: "other", Model: "other-model"},
+		}}
+		srv := newFailoverTestServer(map[string]*config.Provider{
+			"primary": localRetryProvider("primary", selected.URL),
+			"other":   localRetryProvider("other", other.URL),
+		}, route, selected.Client(), defaultTestFailover())
+		response := debugConsoleRun(srv, map[string]any{
+			"mode": "target", "clientFormat": "anthropic", "routeIndex": 0, "routeMatch": "*",
+			"targetIndex": 0, "targetProvider": "primary", "body": requestBody,
+		})
+		if response.Code != http.StatusOK || selectedHits.Load() != 3 || otherHits.Load() != 0 {
+			t.Fatalf("status/selected/other = %d/%d/%d, target debug 应只重试所选候选", response.Code, selectedHits.Load(), otherHits.Load())
+		}
+		entry := debugConsoleDoneLog(t, debugConsoleReadEvents(t, response.Body.String())).Log
+		if entry.DebugMode != "target" || len(entry.AttemptDetails) != 3 || !entry.AttemptDetails[2].LocalRetry {
+			t.Errorf("target debug 重试日志 = %#v", entry)
+		}
+	})
+
+	t.Run("provider remains isolated single request", func(t *testing.T) {
+		var hits atomic.Int32
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			hits.Add(1)
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = io.WriteString(w, `{"error":"temporary"}`)
+		}))
+		defer upstream.Close()
+		provider := localRetryProvider("primary", upstream.URL)
+		provider.LocalRetry = continuousRetryPolicy(100, 1)
+		srv := newFailoverTestServer(map[string]*config.Provider{"primary": provider}, config.Route{Match: "*", Provider: "primary", Model: "upstream"}, upstream.Client(), config.Failover{})
+		response := debugConsoleRun(srv, map[string]any{
+			"mode": "provider", "clientFormat": "anthropic", "provider": "primary", "body": requestBody,
+		})
+		if response.Code != http.StatusOK || hits.Load() != 1 {
+			t.Fatalf("debug envelope status/upstream hits = %d/%d, provider debug 必须隔离单发", response.Code, hits.Load())
+		}
+		entry := debugConsoleDoneLog(t, debugConsoleReadEvents(t, response.Body.String())).Log
+		if entry.DebugMode != "provider" || len(entry.AttemptDetails) != 1 {
+			t.Errorf("provider debug 不应继承持续策略: %#v", entry)
+		}
+	})
+}
+
 func TestDebugConsoleTargetNarrowsWithoutRotationAndAppliesOverrides(t *testing.T) {
 	var firstHits, selectedHits atomic.Int32
 	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

@@ -114,7 +114,11 @@ type Options struct {
 	TimeoutMs             int
 	HeaderTimeoutMs       int // 流式：等上游响应头的超时（毫秒）。为 0 时回退用 TimeoutMs，保证非直通调用方行为不变
 	StreamActivityTimeout int
-	HTTPClient            *http.Client
+	// DisableGenerationTimeout 明确关闭生成阶段时限；必须独立于 0 值，0 在旧调用中仍表示回退全局默认。
+	DisableGenerationTimeout bool
+	// RetryReadErrorBeforeCommit 允许持续模式在非流式正文或流式预读读错且尚未提交时重试。
+	RetryReadErrorBeforeCommit bool
+	HTTPClient                 *http.Client
 	// GlobalHeaders 是已按实际目标 Provider.Format 选出的全局默认头。它必须在
 	// Provider.ExtraHeaders 之前写入，确保 Provider 的既有覆盖位置保持不变。
 	GlobalHeaders map[string]string
@@ -351,6 +355,13 @@ func readObservedErrorBody(cancel context.CancelFunc, resp *http.Response, secre
 // readStreamErrorBody 为“已拿到流响应头、且必须回传错误正文”的阶段保留活跃超时。
 // 流式请求已在拿到响应头后取消 header timer，错误正文本身仍可能卡住。
 func readStreamErrorBody(ctx context.Context, cancel context.CancelFunc, r io.Reader, opts *Options, limit int) ([]byte, string, bool, error) {
+	if opts.DisableGenerationTimeout {
+		raw, observed, truncated, err := readErrorBody(r, limit, diagnosticSecrets(opts)...)
+		if err != nil && errors.Is(ctx.Err(), context.Canceled) {
+			return raw, observed, truncated, ctx.Err()
+		}
+		return raw, observed, truncated, err
+	}
 	timeoutMs := opts.StreamActivityTimeout
 	if timeoutMs <= 0 {
 		timeoutMs = opts.TimeoutMs
@@ -458,6 +469,9 @@ func Forward(opts *Options) (resultErr error) {
 	defer cancel()
 
 	timeout := time.Duration(opts.TimeoutMs) * time.Millisecond
+	if opts.DisableGenerationTimeout {
+		timeout = 0
+	}
 
 	if opts.IsStreaming {
 		// 流式路径：对 Do 阶段加 header 响应超时，避免上游接受连接但不发字节时永久阻塞
@@ -466,6 +480,9 @@ func Forward(opts *Options) (resultErr error) {
 		headerTimeoutMs := opts.TimeoutMs
 		if opts.HeaderTimeoutMs > 0 {
 			headerTimeoutMs = opts.HeaderTimeoutMs
+		}
+		if opts.DisableGenerationTimeout {
+			headerTimeoutMs = 0
 		}
 		headerTimeout := time.Duration(headerTimeoutMs) * time.Millisecond
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, upstreamURL+upstreamPath, bytes.NewReader(opts.UpstreamBody))
@@ -483,22 +500,29 @@ func Forward(opts *Options) (resultErr error) {
 			opts.OnBeforeRequest(req.Method, req.URL.String(), req.Header.Clone(), append([]byte(nil), opts.UpstreamBody...))
 		}
 
-		var headerTimedOut atomic.Bool
-		headerTimerDone := make(chan struct{})
-		headerTimer := time.AfterFunc(headerTimeout, func() {
-			headerTimedOut.Store(true)
-			cancel()
-			close(headerTimerDone)
-		})
-		resp, err := opts.HTTPClient.Do(req)
-		if !headerTimer.Stop() {
-			<-headerTimerDone
-		}
-		if headerTimedOut.Load() {
-			if resp != nil {
-				_ = resp.Body.Close()
+		var (
+			headerTimedOut atomic.Bool
+			resp           *http.Response
+		)
+		if opts.DisableGenerationTimeout {
+			resp, err = opts.HTTPClient.Do(req)
+		} else {
+			headerTimerDone := make(chan struct{})
+			headerTimer := time.AfterFunc(headerTimeout, func() {
+				headerTimedOut.Store(true)
+				cancel()
+				close(headerTimerDone)
+			})
+			resp, err = opts.HTTPClient.Do(req)
+			if !headerTimer.Stop() {
+				<-headerTimerDone
 			}
-			err = context.DeadlineExceeded
+			if headerTimedOut.Load() {
+				if resp != nil {
+					_ = resp.Body.Close()
+				}
+				err = context.DeadlineExceeded
+			}
 		}
 		if err != nil {
 			if clientRequestCanceled(opts) {
@@ -545,7 +569,12 @@ func Forward(opts *Options) (resultErr error) {
 	}
 
 	// 非流式：整体超时
-	ctx, cancel2 := context.WithTimeout(ctx, timeout)
+	var cancel2 context.CancelFunc
+	if opts.DisableGenerationTimeout {
+		ctx, cancel2 = context.WithCancel(ctx)
+	} else {
+		ctx, cancel2 = context.WithTimeout(ctx, timeout)
+	}
 	defer cancel2()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, upstreamURL+upstreamPath, bytes.NewReader(opts.UpstreamBody))
@@ -611,6 +640,11 @@ func Forward(opts *Options) (resultErr error) {
 func handleResponse(ctx context.Context, resp *http.Response, opts *Options) error {
 	raw, err := readAllLimited(resp.Body, maxResponseBodyBytes)
 	if err != nil {
+		// 大小上限是网关的本地保护终态，不是可恢复的上游连接读错；
+		// 持续模式重试只会再次下载并拒绝同一份超限响应。
+		if opts.RetryReadErrorBeforeCommit && !errors.Is(err, errResponseBodyTooLarge) && !clientRequestCanceled(opts) && abandonAttempt(opts, 0, 0, err) {
+			return ErrAttemptAbandoned
+		}
 		opts.Log("上游响应流错误: %s", err.Error())
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			msg := fmt.Sprintf("上游响应体超时 (%d秒)", opts.TimeoutMs/1000)
@@ -748,6 +782,11 @@ func handleStream(ctx context.Context, cancel context.CancelFunc, resp *http.Res
 		}
 		return ctx.Err()
 	}
+	if pre.readErr != nil && pre.readErr != io.EOF && opts.RetryReadErrorBeforeCommit && !clientRequestCanceled(opts) {
+		if abandonAttempt(opts, 0, 0, pre.readErr) {
+			return ErrAttemptAbandoned
+		}
+	}
 	if pre.failure != nil {
 		cancel() // 停止后台读取，放弃这条流
 		recordErrorBody(opts, sanitizeErrorBody(pre.failure.Raw), false)
@@ -771,6 +810,9 @@ func handleStream(ctx context.Context, cancel context.CancelFunc, resp *http.Res
 	opts.ClientRes.WriteHeader(http.StatusOK)
 
 	activityTimeout := time.Duration(opts.StreamActivityTimeout) * time.Millisecond
+	if opts.DisableGenerationTimeout {
+		activityTimeout = 0
+	}
 	if err := writeAndFlushStream(opts.ClientRes, flusher, nil, activityTimeout); err != nil {
 		return finishStreamWrite(err, cancel, opts)
 	}
@@ -780,33 +822,40 @@ func handleStream(ctx context.Context, cancel context.CancelFunc, resp *http.Res
 	watcherStop := make(chan struct{})
 	watcherDone := make(chan struct{})
 	var timedOut atomic.Bool
-	go func() {
-		defer close(watcherDone)
-		timer := time.NewTimer(activityTimeout)
-		defer timer.Stop()
-		for {
-			select {
-			case <-timer.C:
-				timedOut.Store(true)
-				cancel() // 中断上游读取
-				return
-			case <-activity:
-				if !timer.Stop() {
-					select {
-					case <-timer.C:
-					default:
+	watcherStarted := !opts.DisableGenerationTimeout
+	if watcherStarted {
+		go func() {
+			defer close(watcherDone)
+			timer := time.NewTimer(activityTimeout)
+			defer timer.Stop()
+			for {
+				select {
+				case <-timer.C:
+					timedOut.Store(true)
+					cancel() // 中断上游读取
+					return
+				case <-activity:
+					if !timer.Stop() {
+						select {
+						case <-timer.C:
+						default:
+						}
 					}
+					timer.Reset(activityTimeout)
+				case <-ctx.Done():
+					return
+				case <-watcherStop:
+					return
 				}
-				timer.Reset(activityTimeout)
-			case <-ctx.Done():
-				return
-			case <-watcherStop:
-				return
 			}
-		}
-	}()
+		}()
+	} else {
+		close(watcherDone)
+	}
 	defer func() {
-		close(watcherStop)
+		if watcherStarted {
+			close(watcherStop)
+		}
 		<-watcherDone
 	}()
 	markActivity := func() {
@@ -1175,7 +1224,7 @@ func finishStreamWrite(err error, cancel context.CancelFunc, opts *Options) erro
 }
 
 func clientRequestCanceled(opts *Options) bool {
-	return opts.ClientReq != nil && errors.Is(opts.ClientReq.Context().Err(), context.Canceled)
+	return opts.ClientReq != nil && opts.ClientReq.Context().Err() != nil
 }
 
 func newSSEEventTooLargeError() error {
@@ -1197,7 +1246,9 @@ func responsesStreamFailure(errType, message string) []byte {
 // handleStreamErrorPayload 将已经读取过一次的上游错误正文回写给客户端。
 func handleStreamErrorPayload(ctx context.Context, statusCode int, raw []byte, readErr error, opts *Options) error {
 	timeoutMs := opts.StreamActivityTimeout
-	if timeoutMs <= 0 {
+	if opts.DisableGenerationTimeout {
+		timeoutMs = 0
+	} else if timeoutMs <= 0 {
 		timeoutMs = opts.TimeoutMs
 	}
 	if clientRequestCanceled(opts) {
@@ -1209,7 +1260,7 @@ func handleStreamErrorPayload(ctx context.Context, statusCode int, raw []byte, r
 			msg := readErr.Error()
 			opts.Log("   错误响应读取失败: %s", msg)
 			markResponseStarted(opts)
-			if writeErr := writeJSONErrorWithTimeout(opts.ClientRes, http.StatusBadGateway, "upstream_error", msg, time.Duration(timeoutMs)*time.Millisecond); writeErr != nil {
+			if writeErr := writeStreamJSONError(opts, http.StatusBadGateway, "upstream_error", msg, time.Duration(timeoutMs)*time.Millisecond); writeErr != nil {
 				return writeErr
 			}
 			return readErr
@@ -1218,7 +1269,7 @@ func handleStreamErrorPayload(ctx context.Context, statusCode int, raw []byte, r
 			msg := fmt.Sprintf("上游错误响应体超时 (%d秒)", timeoutMs/1000)
 			opts.Log("%s", msg)
 			markResponseStarted(opts)
-			if writeErr := writeJSONErrorWithTimeout(opts.ClientRes, http.StatusGatewayTimeout, "timeout_error", msg, time.Duration(timeoutMs)*time.Millisecond); writeErr != nil {
+			if writeErr := writeStreamJSONError(opts, http.StatusGatewayTimeout, "timeout_error", msg, time.Duration(timeoutMs)*time.Millisecond); writeErr != nil {
 				return writeErr
 			}
 			return readErr
@@ -1228,13 +1279,23 @@ func handleStreamErrorPayload(ctx context.Context, statusCode int, raw []byte, r
 		}
 		opts.Log("   错误响应读取失败: %s", readErr.Error())
 		markResponseStarted(opts)
-		if writeErr := writeJSONErrorWithTimeout(opts.ClientRes, http.StatusBadGateway, "upstream_error", readErr.Error(), time.Duration(timeoutMs)*time.Millisecond); writeErr != nil {
+		if writeErr := writeStreamJSONError(opts, http.StatusBadGateway, "upstream_error", readErr.Error(), time.Duration(timeoutMs)*time.Millisecond); writeErr != nil {
 			return writeErr
 		}
 		return readErr
 	}
 	markResponseStarted(opts)
+	if opts.DisableGenerationTimeout {
+		return writeErrorResponseWithoutTimeout(statusCode, raw, opts.ClientRes, opts.Log)
+	}
 	return writeErrorResponseWithTimeout(statusCode, raw, opts.ClientRes, opts.Log, time.Duration(timeoutMs)*time.Millisecond)
+}
+
+func writeStreamJSONError(opts *Options, status int, errType, message string, timeout time.Duration) error {
+	if opts.DisableGenerationTimeout {
+		return writeJSONErrorWithoutTimeout(opts.ClientRes, status, errType, message)
+	}
+	return writeJSONErrorWithTimeout(opts.ClientRes, status, errType, message, timeout)
 }
 
 // handleErrorPayload 回写已经读取过的错误正文，确保最终失败时能原样回传。
@@ -1273,6 +1334,15 @@ func writeErrorResponseWithTimeout(statusCode int, raw []byte, w http.ResponseWr
 	return writeResponseAtDeadline(w, statusCode, raw, time.Now().Add(timeout))
 }
 
+func writeErrorResponseWithoutTimeout(statusCode int, raw []byte, w http.ResponseWriter, log LogFunc) error {
+	if len(raw) > 300 {
+		log("   错误响应: %s", raw[:300])
+	} else {
+		log("   错误响应: %s", raw)
+	}
+	return writeResponseAtDeadline(w, statusCode, raw, time.Time{})
+}
+
 func writeResponseWithDeadline(ctx context.Context, w http.ResponseWriter, statusCode int, payload []byte) error {
 	if deadline, ok := ctx.Deadline(); ok {
 		return writeResponseAtDeadline(w, statusCode, payload, deadline)
@@ -1285,6 +1355,13 @@ func writeJSONErrorWithTimeout(w http.ResponseWriter, status int, errType, messa
 		"error": map[string]any{"type": errType, "message": message},
 	})
 	return writeResponseAtDeadline(w, status, payload, time.Now().Add(timeout))
+}
+
+func writeJSONErrorWithoutTimeout(w http.ResponseWriter, status int, errType, message string) error {
+	payload, _ := json.Marshal(map[string]any{
+		"error": map[string]any{"type": errType, "message": message},
+	})
+	return writeResponseAtDeadline(w, status, payload, time.Time{})
 }
 
 func writeResponseAtDeadline(w http.ResponseWriter, statusCode int, payload []byte, deadline time.Time) error {

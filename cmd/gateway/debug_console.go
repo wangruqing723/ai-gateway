@@ -691,7 +691,8 @@ func (s *server) runProviderDebug(stream *debugEnvelopeWriter, r *http.Request, 
 	if candidate.Provider.UsesKeyList() {
 		excluded = make(map[string]struct{}, len(candidate.Provider.APIKeys))
 	}
-	chainRemaining := time.Duration(requestChainBudgetMs(cfg, internal.Stream)) * time.Millisecond
+	disableGenerationTimeout := candidate.TimeoutMode == config.TimeoutModeClient
+	chainRemaining := time.Duration(requestChainBudgetMsForMode(cfg, internal.Stream, disableGenerationTimeout)) * time.Millisecond
 	var contextBudget int
 	if candidate.ContextWindow != nil {
 		estimated := tokenest.Estimate(internal.System, internal.Messages, internal.Tools)
@@ -783,27 +784,28 @@ func (s *server) runProviderDebug(stream *debugEnvelopeWriter, r *http.Request, 
 			s.handleDebugUpstreamRequest(stream, sequence, candidate, method, requestURL, headers, body)
 		}
 		lastOutcome = s.forwardAttempt(w, r, forwardAttemptInput{
-			cfg:                   cfg,
-			reqID:                 reqID,
-			start:                 start,
-			clientFormat:          request.ClientFormat,
-			originalModel:         model,
-			internal:              internal,
-			rawBody:               request.Body,
-			candidate:             candidate,
-			keyTicket:             ticket,
-			allowKeySwitch:        allowSwitch,
-			chainBudgetMs:         int(chainRemaining / time.Millisecond),
-			contextBudget:         contextBudget,
-			attemptNo:             1,
-			httpAttemptNo:         requestCount + 1,
-			allowFailoverTransfer: false,
-			allowLocalRetry:       false,
-			allowInactiveQueue:    true,
-			onBeforeRequest:       beforeRequest,
-			reqLog:                &reqLog,
-			detail:                &detail,
-			diagnostic:            true,
+			cfg:                      cfg,
+			reqID:                    reqID,
+			start:                    start,
+			clientFormat:             request.ClientFormat,
+			originalModel:            model,
+			internal:                 internal,
+			rawBody:                  request.Body,
+			candidate:                candidate,
+			keyTicket:                ticket,
+			allowKeySwitch:           allowSwitch,
+			chainBudgetMs:            int(chainRemaining / time.Millisecond),
+			disableGenerationTimeout: disableGenerationTimeout,
+			contextBudget:            contextBudget,
+			attemptNo:                1,
+			httpAttemptNo:            requestCount + 1,
+			allowFailoverTransfer:    false,
+			allowLocalRetry:          false,
+			allowInactiveQueue:       true,
+			onBeforeRequest:          beforeRequest,
+			reqLog:                   &reqLog,
+			detail:                   &detail,
+			diagnostic:               true,
 		})
 		detail.DurationMs = time.Since(attemptStarted).Milliseconds()
 		appendAttemptDetail(&reqLog, detail)

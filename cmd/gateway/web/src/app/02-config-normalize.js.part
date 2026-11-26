@@ -68,6 +68,8 @@
                             provider: pick(r, 'provider', 'Provider') || '',
                             model: pick(r, 'model', 'Model') || ''
                         };
+                        const timeoutMode = pick(r, 'timeoutMode', 'TimeoutMode');
+                        if (timeoutMode) route.timeoutMode = timeoutMode;
                         const enabled = pick(r, 'enabled', 'Enabled');
                         if (enabled === false) route.enabled = false;
                         // strategy 必须读出来：漏读会让手写的策略在下次保存时被静默抹掉
@@ -81,7 +83,7 @@
                         const routeContextWindow = pick(r, 'contextWindow', 'ContextWindow') ?? null;
                         if (routeContextWindow !== null) route.contextWindow = routeContextWindow;
                         // localRetry 是嵌套配置；未配置保持 undefined，避免序列化出空对象。
-                        const routeLocalRetry = this.normalizeLocalRetry(pick(r, 'localRetry', 'LocalRetry'));
+                        const routeLocalRetry = this.normalizeLocalRetry(pick(r, 'localRetry', 'LocalRetry'), true);
                         if (routeLocalRetry) route.localRetry = routeLocalRetry;
                         // route 级 extraBody：保留 map 原样，未配置不挂字段（否则每次保存写空 extraBody）。
                         const routeExtraBody = pick(r, 'extraBody', 'ExtraBody');
@@ -92,8 +94,10 @@
                                 const tgt = {
                                     provider: pick(t, 'provider', 'Provider') || '',
                                     model: pick(t, 'model', 'Model') || '',
-                                    localRetry: this.normalizeLocalRetry(pick(t, 'localRetry', 'LocalRetry'))
+                                    localRetry: this.normalizeLocalRetry(pick(t, 'localRetry', 'LocalRetry'), true)
                                 };
+                                const targetTimeoutMode = pick(t, 'timeoutMode', 'TimeoutMode');
+                                if (targetTimeoutMode) tgt.timeoutMode = targetTimeoutMode;
                                 const tMax = pick(t, 'maxTokens', 'MaxTokens') ?? null;
                                 if (tMax !== null) tgt.maxTokens = tMax;
                                 const tContextWindow = pick(t, 'contextWindow', 'ContextWindow') ?? null;
@@ -211,40 +215,44 @@
                     };
                 },
 
-                // LocalRetry 的数字值使用 null 表示继承，显式 0 必须保留。
-                // 后端 omitempty 负责省略 nil；这里也把空对象折成 undefined。
-                normalizeLocalRetry(raw) {
+                // LocalRetry 的数字值使用 null 表示继承，显式 0 必须保留；route/target 另保留 mode。
+                // Provider 调用时不启用 mode，后端也禁止 Provider 配置该字段。
+                normalizeLocalRetry(raw, allowMode = false) {
                     if (!raw || typeof raw !== 'object') return undefined;
                     const pick = (obj, lower, upper) => obj?.[lower] ?? obj?.[upper];
                     const numberOrNull = (value) => typeof value === 'number' && Number.isFinite(value) ? value : null;
+                    const mode = allowMode ? (pick(raw, 'mode', 'Mode') || '') : '';
                     const localRetry = {
+                        ...(mode ? { mode } : {}),
                         maxRetries: numberOrNull(pick(raw, 'maxRetries', 'MaxRetries')),
                         intervalMs: numberOrNull(pick(raw, 'intervalMs', 'IntervalMs'))
                     };
-                    return localRetry.maxRetries === null && localRetry.intervalMs === null ? undefined : localRetry;
+                    return localRetry.mode === undefined && localRetry.maxRetries === null && localRetry.intervalMs === null ? undefined : localRetry;
                 },
 
                 // 表单始终绑定一个对象；未配置的字段显示为空，而不是 0。
-                localRetryForm(raw) {
-                    const localRetry = this.normalizeLocalRetry(raw);
+                localRetryForm(raw, allowMode = false) {
+                    const localRetry = this.normalizeLocalRetry(raw, allowMode);
                     return {
+                        mode: localRetry?.mode || '',
                         maxRetries: localRetry?.maxRetries ?? null,
                         intervalMs: localRetry?.intervalMs ?? null
                     };
                 },
 
-                // 请求体 / 配置内存中同时遵循 *int 的 null 语义；两项皆空时
+                // 请求体 / 配置内存中同时遵循 *int 的 null 语义；没有数字和 mode 时
                 // 整体返回 undefined，让 JSON/YAML omitempty 保持干净。
-                localRetryPayload(raw) {
+                localRetryPayload(raw, allowMode = false) {
                     if (!raw || typeof raw !== 'object') return undefined;
                     const maxRetries = this.numOrNull(raw.maxRetries);
                     const intervalMs = this.numOrNull(raw.intervalMs);
-                    if (maxRetries === null && intervalMs === null) return undefined;
-                    return { maxRetries, intervalMs };
+                    const mode = allowMode && typeof raw.mode === 'string' ? raw.mode : '';
+                    if (!mode && maxRetries === null && intervalMs === null) return undefined;
+                    return { ...(mode ? { mode } : {}), maxRetries, intervalMs };
                 },
 
                 localRetryHasValue(raw) {
-                    return !!raw && (this.numOrNull(raw.maxRetries) !== null || this.numOrNull(raw.intervalMs) !== null);
+                    return !!raw && (!!raw.mode || this.numOrNull(raw.maxRetries) !== null || this.numOrNull(raw.intervalMs) !== null);
                 },
 
                 // normalizeFailover 把 failover 块规范成表单可绑定的形状。

@@ -1036,10 +1036,22 @@ func (s *server) runInference(w http.ResponseWriter, r *http.Request, urlPath st
 	for pos := 0; pos < len(order) && attempts < attemptLimit; pos++ {
 		candidate := matched.Candidates[order[pos]]
 		name := candidate.Provider.Name
+		continuousRetry := candidate.LocalRetryMode == config.LocalRetryModeUntilDisconnect
+		providerUnavailable := false
+		if continuousRetry {
+			// 持续模式在候选前置冷却等待后刷新 Provider，避免配置已停用或删除时
+			// 仍使用路由匹配时的旧快照发出请求。
+			currentProvider := s.currentProviderSnapshot(name)
+			if currentProvider == nil {
+				providerUnavailable = true
+			} else {
+				candidate.Provider = currentProvider
+			}
+		}
 
 		// 禁用过滤：被使用者显式停用的 provider 直接跳过，不占用尝试额度。
 		// 优先于熔断判断：禁用是稳定的人工状态，比瞬时熔断更该顶在前面。
-		if !candidate.Provider.IsEnabled() {
+		if providerUnavailable || !candidate.Provider.IsEnabled() {
 			disabledSkips++
 			trail.Add(name + ":provider_disabled")
 			skipStarted := time.Now()
@@ -1085,6 +1097,14 @@ func (s *server) runInference(w http.ResponseWriter, r *http.Request, urlPath st
 		// 账户共享冷却：上游明确报告额度耗尽，同账户全部 Provider 暂停准入。放在熔断之前，
 		// 不消耗额度、不调用 breaker（DESIGN 6.4）。
 		if until := s.candidateAccountCooldown(candidate.Provider); !until.IsZero() {
+			if continuousRetry {
+				if waitUntilContext(r.Context(), until) {
+					pos--
+					continue
+				}
+				localRetryCanceled = true
+				break
+			}
 			cooldownSkips++
 			if soonestCooldown.IsZero() || until.Before(soonestCooldown) {
 				soonestCooldown = until
@@ -1131,6 +1151,17 @@ func (s *server) runInference(w http.ResponseWriter, r *http.Request, urlPath st
 		}
 
 		if candidate.Provider.UsesKeyList() && (s.keyPool == nil || !s.keyPool.HasSelectable(name, candidate.Provider, nil)) {
+			if continuousRetry {
+				retryAt := s.keyPool.EarliestRecovery(name, candidate.Provider)
+				if !retryAt.IsZero() {
+					if waitUntilContext(r.Context(), retryAt) {
+						pos--
+						continue
+					}
+					localRetryCanceled = true
+					break
+				}
+			}
 			keySkips++
 			retryAt := s.keyPool.EarliestRecovery(name, candidate.Provider)
 			if !retryAt.IsZero() && (soonestKeyRetry.IsZero() || retryAt.Before(soonestKeyRetry)) {
@@ -1206,6 +1237,7 @@ func (s *server) runInference(w http.ResponseWriter, r *http.Request, urlPath st
 			logf(reqID, "  候选 %s 装不下请求，跳过（估算输入 %d、可用预算 %d）", name, estimatedInputTokens, contextBudget)
 			continue
 		}
+		persistentCandidateEntered := continuousRetry
 
 		// 是否还有后续候选可试：额度未用尽且 order 里后面还有候选
 		hasCompatibleNext := false
@@ -1231,9 +1263,25 @@ func (s *server) runInference(w http.ResponseWriter, r *http.Request, urlPath st
 		// candidateCooledDown 表示准入阶段的放弃来自账户共享冷却而不是暂停。
 		candidateCooledDown := false
 		outcomeTrailRecorded := false
+		retryAfterAdmission := false
 		var outcome forwardAttemptOutcome
 		for {
-			chainRemaining := time.Duration(requestChainBudgetMs(cfg, internal.Stream)) * time.Millisecond
+			if persistentCandidateEntered && localRetryAttempt {
+				currentProvider := s.currentProviderSnapshot(name)
+				if currentProvider == nil || !currentProvider.IsEnabled() {
+					candidatePaused = true
+					trail.Add(name + ":provider_disabled")
+					break
+				}
+				candidate.Provider = currentProvider
+				if s.candidateAccountPaused(candidate.Provider) {
+					candidatePaused = true
+					trail.Add(name + ":account_paused")
+					break
+				}
+			}
+			disableGenerationTimeout := candidate.TimeoutMode == config.TimeoutModeClient
+			chainRemaining := time.Duration(requestChainBudgetMsForMode(cfg, internal.Stream, disableGenerationTimeout)) * time.Millisecond
 			for {
 				var ticket *keypool.Ticket
 				allowKeySwitch := false
@@ -1241,6 +1289,21 @@ func (s *server) runInference(w http.ResponseWriter, r *http.Request, urlPath st
 					var retryAt time.Time
 					ticket, retryAt = s.keyPool.Select(name, candidate.Provider, excludedKeys)
 					if ticket == nil {
+						if persistentCandidateEntered {
+							recoverAt := retryAt
+							if recoverAt.IsZero() {
+								recoverAt = s.keyPool.EarliestRecovery(name, candidate.Provider)
+							}
+							if !recoverAt.IsZero() {
+								if waitUntilContext(r.Context(), recoverAt) {
+									excludedKeys = make(map[string]struct{})
+									localRetryAttempt = true
+									retryAfterAdmission = true
+									break
+								}
+								localRetryCanceled = true
+							}
+						}
 						if !retryAt.IsZero() && (soonestKeyRetry.IsZero() || retryAt.Before(soonestKeyRetry)) {
 							soonestKeyRetry = retryAt
 						}
@@ -1314,9 +1377,11 @@ func (s *server) runInference(w http.ResponseWriter, r *http.Request, urlPath st
 					keyTicket:                       ticket,
 					allowKeySwitch:                  allowKeySwitch,
 					chainBudgetMs:                   int(chainRemaining / time.Millisecond),
+					disableGenerationTimeout:        disableGenerationTimeout,
 					contextBudget:                   contextBudget,
 					allowFailoverTransfer:           hasNext,
-					allowLocalRetry:                 localRetriesRemaining > 0,
+					allowLocalRetry:                 localRetriesRemaining > 0 || candidate.LocalRetryMode == config.LocalRetryModeUntilDisconnect,
+					continuousRetry:                 candidate.LocalRetryMode == config.LocalRetryModeUntilDisconnect,
 					attemptNo:                       attempts + 1,
 					httpAttemptNo:                   nextHTTPAttemptNo + 1,
 					reqLog:                          &reqLog,
@@ -1333,6 +1398,24 @@ func (s *server) runInference(w http.ResponseWriter, r *http.Request, urlPath st
 					}
 				}
 				if outcome.accountPaused || outcome.accountCooldown {
+					if persistentCandidateEntered && outcome.accountCooldown {
+						if until := s.candidateAccountCooldown(candidate.Provider); !until.IsZero() {
+							if waitRetryUntil(r.Context(), candidate.LocalRetryIntervalMs, time.Time{}, until) {
+								if candidateActualAttempts > 0 {
+									outcome = previousOutcome
+								} else {
+									outcome = forwardAttemptOutcome{breakerOutcome: breaker.OutcomeIgnored}
+								}
+								candidatePaused = false
+								candidateCooledDown = false
+								localRetryAttempt = true
+								trail.Add(name + ":local_retry")
+								retryAfterAdmission = true
+								break
+							}
+							localRetryCanceled = true
+						}
+					}
 					candidatePaused = true
 					candidateCooledDown = outcome.accountCooldown
 					if candidateActualAttempts > 0 {
@@ -1349,12 +1432,17 @@ func (s *server) runInference(w http.ResponseWriter, r *http.Request, urlPath st
 					if !outcome.freeAttempt {
 						candidateAllFreeAttempts = false
 					}
-					chainRemaining -= outcome.upstreamDuration
+					if chainRemaining > 0 {
+						chainRemaining -= outcome.upstreamDuration
+					}
 				}
 
 				willLocalRetry := outcome.abandoned && !outcome.keySwitch && !outcome.freeAttempt && localRetriesRemaining > 0
+				if persistentCandidateEntered {
+					willLocalRetry = outcome.abandoned && !outcome.keySwitch
+				}
 				deferShortRateLimitCooldown := ticket != nil && outcome.upstreamStatus == http.StatusTooManyRequests &&
-					willLocalRetry && !isLongRetryAfter(&cfg.Failover, outcome.retryAfter)
+					willLocalRetry && !persistentCandidateEntered && !isLongRetryAfter(&cfg.Failover, outcome.retryAfter)
 				if ticket != nil && outcome.requestStarted && !deferShortRateLimitCooldown {
 					s.keyPool.Report(ticket, outcome.upstreamStatus, outcome.retryAfter)
 				}
@@ -1363,7 +1451,7 @@ func (s *server) runInference(w http.ResponseWriter, r *http.Request, urlPath st
 					excludedKeys[ticket.Key.ID] = struct{}{}
 					trail.Add(outcome.trail)
 					outcomeTrailRecorded = true
-					if chainRemaining <= 0 {
+					if !disableGenerationTimeout && chainRemaining <= 0 {
 						candidateKeySelectionExhausted = true
 						break
 					}
@@ -1374,6 +1462,23 @@ func (s *server) runInference(w http.ResponseWriter, r *http.Request, urlPath st
 
 			if candidateNoKey || candidateKeySelectionExhausted || candidatePaused {
 				break
+			}
+			if retryAfterAdmission {
+				retryAfterAdmission = false
+				continue
+			}
+			if persistentCandidateEntered {
+				if outcome.buildErr != "" || !outcome.abandoned {
+					break
+				}
+				trail.Add(name + ":local_retry")
+				if !waitRetryUntil(r.Context(), candidate.LocalRetryIntervalMs, time.Now().Add(outcome.retryAfter), outcome.cooldownUntil) {
+					localRetryCanceled = true
+					break
+				}
+				excludedKeys = make(map[string]struct{})
+				localRetryAttempt = true
+				continue
 			}
 			// 触发共享冷却的那次失败不在同一账户上本地重试：重试一定会被冷却拦下。
 			if outcome.buildErr != "" || !outcome.abandoned || outcome.freeAttempt || localRetriesRemaining <= 0 || !outcome.cooldownUntil.IsZero() ||
@@ -1390,6 +1495,9 @@ func (s *server) runInference(w http.ResponseWriter, r *http.Request, urlPath st
 			localRetryAttempt = true
 		}
 		if candidateNoKey {
+			if persistentCandidateEntered || localRetryCanceled {
+				break
+			}
 			continue
 		}
 		if candidatePaused && candidateActualAttempts == 0 {
@@ -1404,10 +1512,16 @@ func (s *server) runInference(w http.ResponseWriter, r *http.Request, urlPath st
 					soonestCooldown = until
 				}
 				logf(reqID, "  候选 %s 的 ChatGPT OAuth 账户在准入前进入额度冷却，跳过", name)
+				if persistentCandidateEntered || localRetryCanceled {
+					break
+				}
 				continue
 			}
 			pausedSkips++
 			logf(reqID, "  候选 %s 的 ChatGPT OAuth 账户在准入前被暂停，跳过", name)
+			if persistentCandidateEntered || localRetryCanceled {
+				break
+			}
 			continue
 		}
 		if candidateActualAttempts > 0 {
@@ -1423,11 +1537,17 @@ func (s *server) runInference(w http.ResponseWriter, r *http.Request, urlPath st
 			buildErr = outcome.buildErr
 			trail.Add(fmt.Sprintf("%s:build_error", name))
 			logf(reqID, "  候选 %s 构建失败，跳过: %s", name, outcome.buildErr)
+			if persistentCandidateEntered {
+				break
+			}
 			continue
 		}
 
 		if s.breaker != nil {
 			s.breaker.Report(name, outcome.breakerOutcome)
+		}
+		if persistentCandidateEntered {
+			outcome.freeAttempt = false
 		}
 		if outcome.freeAttempt {
 			// 上游自报「这段时间不可用」（429 + 超阈值的 Retry-After）：与熔断跳过同等
@@ -1457,6 +1577,9 @@ func (s *server) runInference(w http.ResponseWriter, r *http.Request, urlPath st
 		}
 		logf(reqID, "  候选 %s 放弃（%s），尝试下一个", name, outcome.trail)
 		if localRetryCanceled {
+			break
+		}
+		if persistentCandidateEntered {
 			break
 		}
 	}
@@ -1555,6 +1678,13 @@ func (s *server) runInference(w http.ResponseWriter, r *http.Request, urlPath st
 }
 
 func requestChainBudgetMs(cfg *config.Config, streaming bool) int {
+	return requestChainBudgetMsForMode(cfg, streaming, false)
+}
+
+func requestChainBudgetMsForMode(cfg *config.Config, streaming, disableGenerationTimeout bool) int {
+	if disableGenerationTimeout {
+		return 0
+	}
 	if cfg.DirectMode {
 		if streaming {
 			return cfg.DirectTimeoutStreamHeader
@@ -1566,6 +1696,13 @@ func requestChainBudgetMs(cfg *config.Config, streaming bool) int {
 
 // forwardAttemptTimeouts 解析单次转发超时；密钥链预算只覆盖列表模式的真实请求。
 func forwardAttemptTimeouts(cfg *config.Config, streaming, keyListMode bool, chainBudgetMs int) (timeoutMs, headerTimeoutMs, activityTimeoutMs int) {
+	return forwardAttemptTimeoutsForMode(cfg, streaming, keyListMode, chainBudgetMs, false)
+}
+
+func forwardAttemptTimeoutsForMode(cfg *config.Config, streaming, keyListMode bool, chainBudgetMs int, disableGenerationTimeout bool) (timeoutMs, headerTimeoutMs, activityTimeoutMs int) {
+	if disableGenerationTimeout {
+		return 0, 0, 0
+	}
 	timeoutMs = cfg.Timeout
 	headerTimeoutMs = 0 // 0 表示 proxy 回退用 timeoutMs
 	activityTimeoutMs = cfg.StreamActivityTimeout
@@ -1599,12 +1736,47 @@ func waitLocalRetry(ctx context.Context, intervalMs int) bool {
 	if ctx.Err() != nil {
 		return false
 	}
+	timer := time.NewTimer(time.Duration(intervalMs) * time.Millisecond)
+	defer timer.Stop()
 	select {
-	case <-time.After(time.Duration(intervalMs) * time.Millisecond):
+	case <-timer.C:
 		return ctx.Err() == nil
 	case <-ctx.Done():
 		return false
 	}
+}
+
+func waitUntilContext(ctx context.Context, until time.Time) bool {
+	if ctx.Err() != nil {
+		return false
+	}
+	delay := time.Until(until)
+	if delay <= 0 {
+		return true
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return ctx.Err() == nil
+	case <-ctx.Done():
+		return false
+	}
+}
+
+// waitRetryUntil 同时满足固定重试间隔与上游/账户给出的冷却截止时间。
+func waitRetryUntil(ctx context.Context, intervalMs int, retryAfterUntil, cooldownUntil time.Time) bool {
+	if intervalMs <= 0 {
+		intervalMs = config.DefaultLocalRetryIntervalMs
+	}
+	next := time.Now().Add(time.Duration(intervalMs) * time.Millisecond)
+	if retryAfterUntil.After(next) {
+		next = retryAfterUntil
+	}
+	if cooldownUntil.After(next) {
+		next = cooldownUntil
+	}
+	return waitUntilContext(ctx, next)
 }
 
 func contextWindowExceededMessage(candidates []router.Candidate, estimatedInput, safetyMargin int) string {
@@ -1679,6 +1851,17 @@ func (s *server) candidateAccountPaused(p *config.Provider) bool {
 	return p != nil && p.AuthType == "chatgptOAuth" && s.chatgptAuth != nil && s.chatgptAuth.IsPaused(p.AccountID)
 }
 
+func (s *server) currentProviderSnapshot(name string) *config.Provider {
+	s.cfgMu.RLock()
+	defer s.cfgMu.RUnlock()
+	if s.cfg == nil || s.cfg.Providers[name] == nil {
+		return nil
+	}
+	copy := *s.cfg.Providers[name]
+	copy.Name = name
+	return &copy
+}
+
 // forwardAttemptInput 单次候选尝试的输入，字段在循环内不被修改。
 type forwardAttemptInput struct {
 	cfg           *config.Config
@@ -1695,6 +1878,7 @@ type forwardAttemptInput struct {
 	keyTicket                       *keypool.Ticket
 	allowKeySwitch                  bool
 	chainBudgetMs                   int
+	disableGenerationTimeout        bool
 	// contextBudget 本次允许的输出上限硬顶，0 表示不限制。
 	contextBudget int
 	attemptNo     int // 从 1 开始，用于 x-ai-gateway-attempts
@@ -1703,6 +1887,7 @@ type forwardAttemptInput struct {
 	// 是否允许本次失败换候选 / 在当前候选内重试；两种决策互相独立。
 	allowFailoverTransfer bool
 	allowLocalRetry       bool
+	continuousRetry       bool
 	onBeforeRequest       proxy.BeforeRequestFunc
 	allowInactiveQueue    bool
 	reqLog                *metrics.RequestLog
@@ -2080,7 +2265,7 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 					in.detail.Outcome = "skipped"
 				}
 				decision := classifyFailure(&cfg.Failover, 0, 0, queue.ErrQueueTimeout)
-				failoverOK := cfg.Failover.Enabled && in.allowFailoverTransfer && decision.transfer
+				failoverOK := !in.continuousRetry && cfg.Failover.Enabled && in.allowFailoverTransfer && decision.transfer
 				localOK := in.allowLocalRetry && decision.transfer && !decision.freeAttempt
 				if failoverOK || localOK {
 					if in.detail != nil {
@@ -2131,7 +2316,7 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 	// 从这里开始即视为已准入：之后的暂停与冷却不再截断本次请求。
 	admission.Release()
 
-	timeoutMs, headerTimeoutMs, activityTimeoutMs := forwardAttemptTimeouts(cfg, in.internal.Stream, in.keyTicket != nil, in.chainBudgetMs)
+	timeoutMs, headerTimeoutMs, activityTimeoutMs := forwardAttemptTimeoutsForMode(cfg, in.internal.Stream, in.keyTicket != nil, in.chainBudgetMs, in.disableGenerationTimeout)
 
 	// 告知客户端实际服务的候选与尝试次数（对齐 Cloudflare 的 cf-aig-step 思路）。
 	// 所有放弃都发生在 WriteHeader 之前，因此这里覆盖写入是安全的，流式响应也能带上。
@@ -2173,24 +2358,26 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 		errorBody string
 	)
 	opts := &proxy.Options{
-		ClientReq:             r,
-		ClientRes:             w,
-		UpstreamBody:          upstreamBody,
-		Provider:              p,
-		OAuthAccessToken:      oauthAccessToken,
-		ChatGPTAccountID:      chatgptAccountID,
-		ClientFormat:          in.clientFormat,
-		OriginalModel:         in.originalModel,
-		IsStreaming:           in.internal.Stream,
-		Log:                   attemptLog,
-		StartTime:             in.start,
-		TimeoutMs:             timeoutMs,
-		HeaderTimeoutMs:       headerTimeoutMs,
-		StreamActivityTimeout: activityTimeoutMs,
-		HTTPClient:            client,
-		GlobalUserAgent:       globalUserAgent,
-		GlobalHeaders:         globalHeaders,
-		OnBeforeRequest:       in.onBeforeRequest,
+		ClientReq:                  r,
+		ClientRes:                  w,
+		UpstreamBody:               upstreamBody,
+		Provider:                   p,
+		OAuthAccessToken:           oauthAccessToken,
+		ChatGPTAccountID:           chatgptAccountID,
+		ClientFormat:               in.clientFormat,
+		OriginalModel:              in.originalModel,
+		IsStreaming:                in.internal.Stream,
+		Log:                        attemptLog,
+		StartTime:                  in.start,
+		TimeoutMs:                  timeoutMs,
+		HeaderTimeoutMs:            headerTimeoutMs,
+		StreamActivityTimeout:      activityTimeoutMs,
+		DisableGenerationTimeout:   in.disableGenerationTimeout,
+		RetryReadErrorBeforeCommit: in.continuousRetry,
+		HTTPClient:                 client,
+		GlobalUserAgent:            globalUserAgent,
+		GlobalHeaders:              globalHeaders,
+		OnBeforeRequest:            in.onBeforeRequest,
 		// Codex 的 namespace 工具在请求侧被展平成顶层 function，响应侧要按这张映射
 		// 把扁平名改回 {name, namespace}，否则 Codex 报 unsupported call。
 		ToolNamespaces: in.internal.ToolNamespaces,
@@ -2260,7 +2447,7 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 		opts.ShouldRetry = func(upstreamCode int, retryAfter time.Duration, err error) bool {
 			if in.keyTicket != nil && in.allowKeySwitch && isKeyRelatedFailure(upstreamCode) {
 				remaining := time.Duration(in.chainBudgetMs)*time.Millisecond - time.Since(upstreamStarted)
-				if remaining >= time.Second {
+				if in.disableGenerationTimeout || remaining >= time.Second {
 					abandonReason = keyFailureReason(upstreamCode)
 					abandonBreaker = breakerOutcomeFor(upstreamCode, err)
 					abandonFree = isKeySwitchFreeAttempt(upstreamCode, &cfg.Failover, retryAfter)
@@ -2271,8 +2458,11 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 				}
 			}
 			decision := classifyFailure(&cfg.Failover, upstreamCode, retryAfter, err)
-			failoverOK := cfg.Failover.Enabled && in.allowFailoverTransfer && decision.transfer
+			failoverOK := !in.continuousRetry && cfg.Failover.Enabled && in.allowFailoverTransfer && decision.transfer
 			localOK := in.allowLocalRetry && decision.transfer && !decision.freeAttempt
+			if in.continuousRetry {
+				localOK = in.allowLocalRetry && decision.transfer && continuousFailureRetryable(upstreamCode, err)
+			}
 			if in.keyTicket != nil && (upstreamCode == http.StatusUnauthorized || upstreamCode == http.StatusForbidden || upstreamCode == http.StatusPaymentRequired) {
 				localOK = false
 			}
@@ -2386,7 +2576,7 @@ func (s *server) forwardAttempt(w http.ResponseWriter, r *http.Request, in forwa
 	// 用词与队列那条路的 client_disconnected 对齐。只覆盖「上游未响应」这一种：
 	// 响应头之后再断开时 upstreamStatus 已是 200、字节已经写给客户端，那种记
 	// success 是对的。
-	if forwardErr == nil && upstreamStatus == 0 && errors.Is(r.Context().Err(), context.Canceled) {
+	if forwardErr == nil && upstreamStatus == 0 && r.Context().Err() != nil {
 		in.reqLog.Error = "客户端在上游响应前断开连接"
 		if in.detail != nil {
 			in.detail.Outcome = "skipped"
@@ -2727,6 +2917,7 @@ func classifyFailure(f *config.Failover, upstreamCode int, retryAfter time.Durat
 		if !f.TransferOnRateLimit() {
 			return failoverDecision{}
 		}
+
 		// Retry-After 超过阈值：上游自己说了这段时间没戏，转移且不消耗额度。
 		// cap 为 0 表示不设上限，此时所有 429 照常消耗额度。
 		cap := f.RetryAfterCapMs()
@@ -2743,6 +2934,21 @@ func classifyFailure(f *config.Failover, upstreamCode int, retryAfter time.Durat
 	default:
 		return failoverDecision{}
 	}
+}
+
+// continuousFailureRetryable 限定 untilDisconnect 可以长期重试的错误范围。
+// 普通 4xx（包括鉴权与配额状态）不能因为 failover 开关而变成无限循环。
+func continuousFailureRetryable(upstreamCode int, err error) bool {
+	if errors.Is(err, context.Canceled) || errors.Is(err, proxy.ErrConversion) {
+		return false
+	}
+	if upstreamCode == http.StatusTooManyRequests || upstreamCode >= 500 && upstreamCode < 600 {
+		return true
+	}
+	if upstreamCode != 0 || err == nil {
+		return false
+	}
+	return true
 }
 
 // breakerOutcomeFor 把一次尝试结果归类成熔断判据。

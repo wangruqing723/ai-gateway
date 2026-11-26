@@ -26,6 +26,12 @@ func localRetryProvider(name, baseURL string) *config.Provider {
 	return &config.Provider{Name: name, BaseURL: baseURL, Format: "anthropic", MaxConcurrent: 1, MaxQueueWait: 1000}
 }
 
+func continuousRetryPolicy(maxRetries, intervalMs int) *config.LocalRetry {
+	retry := localRetryPolicy(maxRetries, intervalMs)
+	retry.Mode = config.LocalRetryModeUntilDisconnect
+	return retry
+}
+
 func TestAttemptDetailAndTrailFolding(t *testing.T) {
 	t.Run("details stay byte-compatible through the limit", func(t *testing.T) {
 		var reqLog metrics.RequestLog

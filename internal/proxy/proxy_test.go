@@ -471,6 +471,30 @@ func TestHandleStreamReadErrorWritesResponsesFailure(t *testing.T) {
 	}
 }
 
+func TestHandleResponseCanRetryRecoverableReadErrorBeforeCommit(t *testing.T) {
+	readErr := errors.New("upstream read failed")
+	var retryCalls int
+	recorder := httptest.NewRecorder()
+	opts := &Options{
+		ClientRes:                  recorder,
+		RetryReadErrorBeforeCommit: true,
+		Log:                        func(string, ...any) {},
+		ShouldRetry: func(status int, _ time.Duration, err error) bool {
+			retryCalls++
+			return status == 0 && errors.Is(err, readErr)
+		},
+	}
+	resp := &http.Response{Body: io.NopCloser(fixedErrorReader{err: readErr})}
+
+	err := handleResponse(context.Background(), resp, opts)
+	if !errors.Is(err, ErrAttemptAbandoned) {
+		t.Fatalf("handleResponse() error = %v, want retryable read error to abandon before commit", err)
+	}
+	if retryCalls != 1 {
+		t.Fatalf("ShouldRetry calls = %d, want 1 for an ordinary upstream read error", retryCalls)
+	}
+}
+
 func TestForwardRejectsNonStreamConversionError(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("content-type", "application/json")

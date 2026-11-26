@@ -95,9 +95,10 @@
                         // 存真实枚举值而不是空字符串，保证下拉的 DOM 值总能匹配到一个 option
                         strategy: 'failover',
                         quotaAware: false,
+                        timeoutMode: '',
                         maxTokens: null,
                         contextWindow: null,
-                        localRetry: { maxRetries: null, intervalMs: null },
+                        localRetry: { mode: '', maxRetries: null, intervalMs: null },
                         extraBody: [],
                         enableVision: false,
                         visionProvider: providers[0] || '',
@@ -114,14 +115,15 @@
                     this.routeForm = {
                         match: route.match,
                         enabled: route.enabled !== false,
-                        targets: this.routeTargets(route).map((t) => this.newRouteTarget(t.provider || '', t.model || '', t.maxTokens ?? null, t.contextWindow ?? null, this.bodyToRows(t.extraBody), this.localRetryForm(t.localRetry))),
+                        targets: this.routeTargets(route).map((t) => this.newRouteTarget(t.provider || '', t.model || '', t.maxTokens ?? null, t.contextWindow ?? null, this.bodyToRows(t.extraBody), this.localRetryForm(t.localRetry, true), t.timeoutMode || '')),
                         // 配置里没写 strategy 就是默认 failover；这里补成真实枚举值，
                         // 留空会让下拉匹配不到 option、显示回落到第一项
                         strategy: route.strategy || 'failover',
+                        timeoutMode: route.timeoutMode || '',
                         quotaAware: route.quotaAware === true,
                         maxTokens: route.maxTokens ?? null,
                         contextWindow: route.contextWindow ?? null,
-                        localRetry: this.localRetryForm(route.localRetry),
+                        localRetry: this.localRetryForm(route.localRetry, true),
                         extraBody: this.bodyToRows(route.extraBody),
                         enableVision: !!route.vision,
                         visionProvider: route.vision?.provider || '',
@@ -145,12 +147,13 @@
                         match: route.match || '',
                         // 复制规则时默认启用，避免新副本因来源停用而继续失效。
                         enabled: true,
-                        targets: this.routeTargets(route).map((t) => this.newRouteTarget(t.provider || '', t.model || '', t.maxTokens ?? null, t.contextWindow ?? null, this.bodyToRows(t.extraBody), this.localRetryForm(t.localRetry))),
+                        targets: this.routeTargets(route).map((t) => this.newRouteTarget(t.provider || '', t.model || '', t.maxTokens ?? null, t.contextWindow ?? null, this.bodyToRows(t.extraBody), this.localRetryForm(t.localRetry, true), t.timeoutMode || '')),
                         strategy: route.strategy || 'failover',
+                        timeoutMode: route.timeoutMode || '',
                         quotaAware: route.quotaAware === true,
                         maxTokens: route.maxTokens ?? null,
                         contextWindow: route.contextWindow ?? null,
-                        localRetry: this.localRetryForm(route.localRetry),
+                        localRetry: this.localRetryForm(route.localRetry, true),
                         extraBody: this.bodyToRows(route.extraBody),
                         enableVision: !!route.vision,
                         visionProvider: route.vision?.provider || '',
@@ -162,7 +165,7 @@
                     this.showStatus(`已按「${route.match || '(空)'}」预填，记得改匹配模式`, 'success');
                 },
 
-                // 候选 target 的运行时形状：provider/model/maxTokens/contextWindow/localRetry 是落盘字段，
+                // 候选 target 的运行时形状：provider/model/timeoutMode/maxTokens/contextWindow/localRetry 是落盘字段，
                 // limitsOpen（行内上限展开区）是瞬态状态，saveRoute 不读它；模型下拉的状态在 modelPicker 里。
                 // limitsOpen 初值恒为 false：候选设置一律默认折叠，不论是否已配。
                 // 已配的候选不会被藏没——模板里 tune 按钮会因 targetLimitCount>0 高亮并显示已设项数，
@@ -172,9 +175,105 @@
                 // 把原来那行的 DOM 留在原位只改绑定值，而行内 <select> 的选中态在
                 // options 已渲染的情况下不会被重新认领（见模板里 :selected 那段注释的
                 // 同源问题），表现就是拖完两行的 provider 串了。
-                newRouteTarget(provider, model = '', maxTokens = null, contextWindow = null, extraBody = [], localRetry = null) {
-                    const retryForm = this.localRetryForm(localRetry);
-                    return { _id: ++this._routeTargetSeq, provider, model, maxTokens, contextWindow, localRetry: retryForm, extraBody: Array.isArray(extraBody) ? extraBody : [], limitsOpen: false };
+                newRouteTarget(provider, model = '', maxTokens = null, contextWindow = null, extraBody = [], localRetry = null, timeoutMode = '') {
+                    const retryForm = this.localRetryForm(localRetry, true);
+                    return { _id: ++this._routeTargetSeq, provider, model, timeoutMode: timeoutMode || '', maxTokens, contextWindow, localRetry: retryForm, extraBody: Array.isArray(extraBody) ? extraBody : [], limitsOpen: false };
+                },
+
+                timeoutModeInfo(target = null) {
+                    const routeMode = this.routeForm?.timeoutMode || '';
+                    const targetMode = target?.timeoutMode || '';
+                    const mode = targetMode || routeMode || 'global';
+                    const source = targetMode ? '候选' : routeMode ? '路由' : '全局默认';
+                    return {
+                        mode,
+                        label: mode === 'client' ? '客户端控制' : '全局超时',
+                        source,
+                        summary: `${mode === 'client' ? '客户端控制' : '全局超时'}（${source}）`
+                    };
+                },
+
+                localRetryModeInfo(target = null) {
+                    const routeMode = this.routeForm?.localRetry?.mode || '';
+                    const targetMode = target?.localRetry?.mode || '';
+                    const mode = targetMode || routeMode || 'limited';
+                    const source = targetMode ? '候选' : routeMode ? '路由' : '默认';
+                    return {
+                        mode,
+                        label: mode === 'untilDisconnect' ? '持续重试' : '有限重试',
+                        source,
+                        summary: `${mode === 'untilDisconnect' ? '持续重试' : '有限重试'}（${source}）`
+                    };
+                },
+
+                localRetryIntervalInfo(target = null) {
+                    const candidates = [
+                        [target?.localRetry?.intervalMs, '候选'],
+                        [this.routeForm?.localRetry?.intervalMs, '路由'],
+                        [this.config?.providers?.[target?.provider]?.localRetry?.intervalMs, 'Provider']
+                    ];
+                    for (const [raw, source] of candidates) {
+                        const value = this.numOrNull(raw);
+                        if (value !== null) return { value, source };
+                    }
+                    return { value: 1000, source: '默认' };
+                },
+
+                localRetryCountInfo(target = null) {
+                    const candidates = [
+                        [target?.localRetry?.maxRetries, '候选'],
+                        [this.routeForm?.localRetry?.maxRetries, '路由'],
+                        [this.config?.providers?.[target?.provider]?.localRetry?.maxRetries, 'Provider']
+                    ];
+                    for (const [raw, source] of candidates) {
+                        const value = this.numOrNull(raw);
+                        if (value !== null) return { value, source };
+                    }
+                    return { value: 0, source: '默认' };
+                },
+
+                targetRetrySummary(target) {
+                    const mode = this.localRetryModeInfo(target);
+                    const interval = this.localRetryIntervalInfo(target);
+                    if (mode.mode === 'untilDisconnect') {
+                        return `有效：${mode.summary} · 固定间隔 ${interval.value} ms（${interval.source}）`;
+                    }
+                    const count = this.localRetryCountInfo(target);
+                    const countLabel = count.value === 0 ? '关闭（0 次）' : `最多额外 ${count.value} 次`;
+                    return `有效：${mode.summary} · ${countLabel}（${count.source}）· 间隔 ${interval.value} ms（${interval.source}）`;
+                },
+
+                routeRetryModeSummary() {
+                    const mode = this.localRetryModeInfo();
+                    return `本路由默认：${mode.summary}；数值按候选 > 路由 > Provider > 默认逐项继承`;
+                },
+
+                validateRouteRetrySettings(targets) {
+                    const retryEntries = [
+                        ['路由', this.routeForm?.localRetry],
+                        ...(targets || []).map((target, index) => [`候选 ${index + 1}`, target.localRetry])
+                    ];
+                    for (const [label, retry] of retryEntries) {
+                        if (!retry) continue;
+                        const maxRetries = this.numOrNull(retry.maxRetries);
+                        if (maxRetries !== null && (!Number.isInteger(maxRetries) || maxRetries < 0)) {
+                            return `${label}的最大本地重试次数须为非负整数`;
+                        }
+                        const intervalMs = this.numOrNull(retry.intervalMs);
+                        if (intervalMs !== null && (!Number.isInteger(intervalMs) || intervalMs < 0 || intervalMs > 60000)) {
+                            return `${label}的重试间隔须为 0–60000 ms 的整数`;
+                        }
+                    }
+
+                    for (let index = 0; index < (targets || []).length; index++) {
+                        const target = targets[index];
+                        if (this.localRetryModeInfo(target).mode !== 'untilDisconnect') continue;
+                        const interval = this.localRetryIntervalInfo(target);
+                        if (!Number.isInteger(interval.value) || interval.value <= 0 || interval.value > 60000) {
+                            return `候选 ${index + 1} 的持续重试有效间隔须大于 0 且不超过 60000 ms（当前 ${interval.value} ms，来自 ${interval.source}）`;
+                        }
+                    }
+                    return '';
                 },
 
                 // 路由级默认值与调优区已配置项计数，给折叠条徽标和初始展开状态用。
@@ -186,6 +285,7 @@
                     let n = 0;
                     if (this.numOrNull(f.maxTokens) !== null) n++;
                     if (this.numOrNull(f.contextWindow) !== null) n++;
+                    if (f.timeoutMode) n++;
                     if (this.localRetryHasValue(f.localRetry)) n++;
                     if ((f.extraBody || []).some((r) => (r?.key || '').trim())) n++;
                     return n;
@@ -199,6 +299,7 @@
                     let n = 0;
                     if (this.numOrNull(t.maxTokens) !== null) n++;
                     if (this.numOrNull(t.contextWindow) !== null) n++;
+                    if (t.timeoutMode) n++;
                     if (this.localRetryHasValue(t.localRetry)) n++;
                     if ((t.extraBody || []).some((r) => (r?.key || '').trim())) n++;
                     return n;
@@ -495,8 +596,9 @@
                         const out = {
                             provider: (t.provider || '').trim(),
                             model: (t.model || '').trim(),
-                            localRetry: this.localRetryPayload(t.localRetry)
+                            localRetry: this.localRetryPayload(t.localRetry, true)
                         };
+                        if (t.timeoutMode) out.timeoutMode = t.timeoutMode;
                         // 只在真配了才落盘：*int 字段带 null 进 yaml 会落一行 maxTokens: null，
                         // 后端解成 nil 虽无害，但预览和磁盘上多出一堆噪音。
                         const max = this.numOrNull(t.maxTokens);
@@ -523,6 +625,12 @@
                         seen.add(key);
                     }
 
+                    const retryError = this.validateRouteRetrySettings(targets);
+                    if (retryError) {
+                        this.showStatus(retryError, 'error');
+                        return;
+                    }
+
                     if (this.routeForm.enableVision && (!this.routeForm.visionProvider || !this.routeForm.visionModel)) {
                         this.showStatus('启用视觉时，视觉 Provider 和模型不能为空', 'error');
                         return;
@@ -542,15 +650,21 @@
                     }
                     // quotaAware 同 strategy：只对多候选有效，单候选写 true 会被后端拒绝。
                     if (targets.length > 1 && this.routeForm.quotaAware === true) route.quotaAware = true;
+                    // 单候选写法会折叠 target；保留更具体的 target 超时模式，否则继承 route。
+                    const timeoutMode = targets.length === 1
+                        ? (targets[0].timeoutMode || this.routeForm.timeoutMode)
+                        : this.routeForm.timeoutMode;
+                    if (timeoutMode) route.timeoutMode = timeoutMode;
                     // 多候选保留路由级默认与每个候选覆盖；单候选采用扁平 provider/model 形状，
                     // 因此按字段把 target 值合入 route，target 非空值优先，空值继续继承 route。
-                    const routeLocalRetry = this.localRetryPayload(this.routeForm.localRetry);
+                    const routeLocalRetry = this.localRetryPayload(this.routeForm.localRetry, true);
                     const targetLocalRetry = targets.length === 1 ? targets[0].localRetry : undefined;
                     const mergedLocalRetry = targets.length === 1
                         ? this.localRetryPayload({
+                            mode: targetLocalRetry?.mode ?? routeLocalRetry?.mode ?? '',
                             maxRetries: targetLocalRetry?.maxRetries ?? routeLocalRetry?.maxRetries ?? null,
                             intervalMs: targetLocalRetry?.intervalMs ?? routeLocalRetry?.intervalMs ?? null
-                        })
+                        }, true)
                         : routeLocalRetry;
                     if (mergedLocalRetry) route.localRetry = mergedLocalRetry;
                     // 路由级 maxTokens 同样只在配了时才落盘。

@@ -14,6 +14,8 @@ import (
 type Candidate struct {
 	Provider    *config.Provider
 	TargetModel string
+	// TimeoutMode 是合成后的生成超时策略；仅 client 会关闭代理生成时限。
+	TimeoutMode string
 	// MaxTokens 该候选的输出上限，nil 表示不覆盖客户端值。
 	// 优先级：target > route > provider，由 MatchRoute 合成。
 	MaxTokens *int
@@ -27,6 +29,8 @@ type Candidate struct {
 	LocalRetryMax int
 	// LocalRetryIntervalMs 是同一候选每次重试前等待的毫秒数。
 	LocalRetryIntervalMs int
+	// LocalRetryMode 为 limited 或 untilDisconnect；由 target > route 解析，默认 limited。
+	LocalRetryMode string
 }
 
 // Match 路由匹配结果。
@@ -130,15 +134,37 @@ func buildCandidate(target config.Target, route config.Route, provider *config.P
 		}
 	}
 	localRetryMax, localRetryIntervalMs := resolveLocalRetry(target, route, provider)
+	localRetryMode := resolveLocalRetryMode(target, route)
 	return Candidate{
 		Provider:             &pCopy,
 		TargetModel:          targetModel,
+		TimeoutMode:          resolveTimeoutMode(target, route),
 		MaxTokens:            resolveMaxTokens(target, route, provider),
 		ContextWindow:        contextWindow,
 		ExtraBody:            resolveExtraBody(target, route, provider),
 		LocalRetryMax:        localRetryMax,
 		LocalRetryIntervalMs: localRetryIntervalMs,
+		LocalRetryMode:       localRetryMode,
 	}
+}
+
+func resolveTimeoutMode(target config.Target, route config.Route) string {
+	if target.TimeoutMode != "" {
+		return target.TimeoutMode
+	}
+	if route.TimeoutMode != "" {
+		return route.TimeoutMode
+	}
+	return config.TimeoutModeGlobal
+}
+
+func resolveLocalRetryMode(target config.Target, route config.Route) string {
+	for _, retry := range []*config.LocalRetry{target.LocalRetry, route.LocalRetry} {
+		if retry != nil && retry.Mode != "" {
+			return retry.Mode
+		}
+	}
+	return config.LocalRetryModeLimited
 }
 
 // resolveLocalRetry 按字段级优先级 target > route > provider 合成本地重试配置。

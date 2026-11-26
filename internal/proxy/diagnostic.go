@@ -2,7 +2,6 @@ package proxy
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -192,7 +191,7 @@ func (o *streamErrorObserver) dispatch() {
 }
 
 func classifyDiagnosticError(opts *Options, err error) {
-	if opts.ClientReq != nil && errors.Is(opts.ClientReq.Context().Err(), context.Canceled) {
+	if opts.ClientReq != nil && opts.ClientReq.Context().Err() != nil {
 		reportDiagnostic(opts, ErrorDiagnostic{Source: "client", Category: "client_disconnected"})
 		return
 	}
