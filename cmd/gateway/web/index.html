@@ -1911,13 +1911,38 @@
                         </div>
 
                         <div x-show="debugMode === 'provider'" x-cloak class="mt-4 grid min-w-0 grid-cols-1 gap-2 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
-                            <label class="min-w-0 text-xs font-bold text-muted">目标模型
-                                <input autocomplete="off" list="debug-provider-model-options" x-model="debugSimple.model"
-                                       class="field mt-1.5 w-full font-mono text-sm" placeholder="可从模型列表选择，也可手动填写" aria-label="Provider 目标模型">
-                                <datalist id="debug-provider-model-options">
-                                    <template x-for="model in debugProviderModels" :key="model"><option :value="model"></option></template>
-                                </datalist>
-                            </label>
+                            <div class="relative min-w-0" x-data="debugModelPicker()" @click.outside="close()" @focusout="if (!$el.contains($event.relatedTarget)) close()" x-effect="sync(debugProvider, debugMode, debugProviderModels)">
+                                <label for="debug-model-input" class="text-xs font-bold text-muted">目标模型</label>
+                                <div class="relative mt-1.5">
+                                    <input id="debug-model-input" x-ref="modelInput" autocomplete="off" x-model="debugSimple.model"
+                                           @click="openList()" @input="openList(); active = -1"
+                                           @keydown.arrow-down.prevent="move(1)" @keydown.arrow-up.prevent="move(-1)"
+                                           @keydown.enter="if (open && active >= 0) { $event.preventDefault(); choose(filtered()[active]); }"
+                                           @keydown.escape.stop.prevent="close()" @keydown.tab="close()"
+                                           role="combobox" aria-autocomplete="list" aria-controls="debug-model-list"
+                                           :aria-expanded="String(open)" :aria-activedescendant="open && active >= 0 && active < filtered().length ? 'debug-model-option-' + active : null"
+                                           class="field w-full pr-10 font-mono text-sm" placeholder="搜索模型，或手动填写模型名" aria-label="Provider 目标模型">
+                                    <button type="button" @click="open ? close() : openList(); $refs.modelInput.focus()"
+                                            :aria-expanded="String(open)" aria-controls="debug-model-list" aria-label="展开或收起模型列表"
+                                            class="absolute inset-y-0 right-0 flex w-10 items-center justify-center rounded-r-lg text-muted hover:text-cyan focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan2">
+                                        <span class="material-symbols-outlined text-[18px]" aria-hidden="true" x-text="open ? 'keyboard_arrow_up' : 'keyboard_arrow_down'"></span>
+                                    </button>
+                                </div>
+                                <div x-show="open" x-cloak class="absolute left-0 right-0 z-30 mt-1 overflow-hidden rounded-lg border border-line bg-panel shadow-xl">
+                                    <div class="border-b border-line px-3 py-2 text-xs text-muted" role="status"
+                                         x-text="debugProviderModelsLoading ? '正在加载模型目录…' : filtered().length + ' 个匹配模型 · 支持手动输入'"></div>
+                                    <ul id="debug-model-list" role="listbox" aria-label="可选目标模型" :aria-busy="String(debugProviderModelsLoading)" class="max-h-60 overflow-y-auto overscroll-contain p-1">
+                                        <template x-for="(model, index) in filtered()" :key="model">
+                                            <li :id="'debug-model-option-' + index" role="option" :aria-selected="String(debugSimple.model === model)"
+                                                @mousedown.prevent @click="choose(model)" @mousemove="active = index"
+                                                :class="active === index ? 'bg-cyan2/10 text-cyan' : 'text-text hover:bg-white/[.05]'"
+                                                class="cursor-pointer rounded-md px-3 py-2 font-mono text-xs leading-5 [overflow-wrap:anywhere]" :title="model" x-text="model"></li>
+                                        </template>
+                                    </ul>
+                                    <p x-show="!filtered().length" class="px-3 pb-3 text-xs leading-5 text-muted"
+                                       x-text="debugProviderModelsLoading ? '加载期间仍可手动填写模型名。' : (debugProviderModels.length ? '没有匹配结果，可直接使用输入的模型名。' : (debugProviderModelsMessage || '暂无模型目录，请查询模型或手动填写。'))"></p>
+                                </div>
+                            </div>
                             <div class="flex min-w-0 flex-wrap items-center gap-2">
                                 <button type="button" @click="loadDebugProviderModels(true)" :disabled="!debugProvider || debugProviderModelsLoading"
                                         class="btn btn-secondary px-3 py-2 disabled:cursor-wait disabled:opacity-50" aria-label="刷新 Provider 模型列表">
@@ -14917,6 +14942,43 @@
                     ALLOW_DATA_ATTR: false,
                     ALLOW_ARIA_ATTR: false,
                 });
+            },
+            // 下拉状态限定在控件内，不污染调试请求和已保存配置。
+            debugModelPicker() {
+                return {
+                    open: false,
+                    active: -1,
+                    provider: null,
+                    mode: null,
+                    models: null,
+                    filtered() {
+                        const query = String(this.debugSimple.model || '').trim().toLowerCase();
+                        return [...new Set(this.debugProviderModels.filter(model => typeof model === 'string' && model))]
+                            .filter(model => model.toLowerCase().includes(query));
+                    },
+                    sync(provider, mode, models) {
+                        if (this.provider !== provider || this.mode !== mode) this.close();
+                        if (this.models !== models) this.active = -1;
+                        this.provider = provider;
+                        this.mode = mode;
+                        this.models = models;
+                    },
+                    openList() { this.open = true; },
+                    close() { this.open = false; this.active = -1; },
+                    choose(model) {
+                        if (typeof model !== 'string') return;
+                        this.debugSimple.model = model;
+                        this.close();
+                        this.$refs.modelInput.focus();
+                    },
+                    move(direction) {
+                        this.open = true;
+                        const count = this.filtered().length;
+                        if (!count) { this.active = -1; return; }
+                        this.active = this.active < 0 ? (direction > 0 ? 0 : count - 1) : (this.active + direction + count) % count;
+                        this.$nextTick(() => document.getElementById('debug-model-option-' + this.active)?.scrollIntoView({ block: 'nearest' }));
+                    },
+                };
             },
             };
         }

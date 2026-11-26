@@ -416,6 +416,19 @@ try {
     check('Provider 模型列表复用已保存模型查询接口', modelQueries.some(query => query.path === '/api/providers/models' && query.provider === 'saved') && await evaluate(`window.Alpine.$data(document.body).debugProviderModels.includes('fixture-alt')`));
     check('调试模型目录只向本地假接口查询', modelQueries.length > 0 && modelQueries.every(query => query.path === '/api/providers/models' && query.provider === 'saved'));
 
+    await evaluate(`(() => { const el = document.querySelector('#debug-model-input'); el.focus(); el.click(); el.value = 'FIXTURE-ALT'; el.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+    await waitFor(`document.querySelectorAll('#debug-model-list [role="option"]').length === 1`, '模型列表搜索');
+    check('自定义模型下拉支持大小写不敏感搜索', await evaluate(`document.querySelector('#debug-model-list [role="option"]').textContent === 'fixture-alt'`));
+    await evaluate(`(() => { const el = document.querySelector('#debug-model-input'); el.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true })); })()`);
+    await waitFor(`document.querySelector('#debug-model-input').getAttribute('aria-activedescendant') === 'debug-model-option-0'`, '模型键盘高亮');
+    await evaluate(`document.querySelector('#debug-model-input').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))`);
+    await waitFor(`window.Alpine.$data(document.body).debugSimple.model === 'fixture-alt' && document.querySelector('#debug-model-input').getAttribute('aria-expanded') === 'false'`, '键盘确认模型');
+    check('模型下拉键盘确认后写入请求模型并收起', true);
+    await evaluate(`(() => { const el = document.querySelector('#debug-model-input'); el.click(); el.value = 'custom-unlisted'; el.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+    await waitFor(`document.querySelectorAll('#debug-model-list [role="option"]').length === 0`, '模型无匹配结果');
+    await evaluate(`document.querySelector('#debug-model-input').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+    check('无匹配时保留手动模型且 Esc 收起', await evaluate(`window.Alpine.$data(document.body).debugSimple.model === 'custom-unlisted' && document.querySelector('#debug-model-input').getAttribute('aria-expanded') === 'false'`));
+
     await evaluate(`(() => { const a = window.Alpine.$data(document.body); a.config.providers.unsavedDraft = { baseUrl: 'http://draft.invalid', format: 'anthropic' }; return true; })()`);
     const savedNames = await evaluate(`window.Alpine.$data(document.body).debugSavedProviders().map(entry => entry.name)`);
     check('配置快照不包含未保存 Provider 草稿', savedNames.includes('saved') && !savedNames.includes('unsavedDraft'));

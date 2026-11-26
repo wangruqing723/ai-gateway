@@ -148,6 +148,30 @@ function createGatewayApp() {
     return new Function(`return ({\n${parts}\n})`)();
 }
 
+test('模型下拉不区分大小写筛选、去重，支持键盘和手动输入', () => {
+    const picker = createGatewayApp().debugModelPicker();
+    picker.debugSimple = { model: 'GPT' };
+    picker.debugProviderModels = ['gpt-one', 'Claude', 'GPT-two', 'gpt-one'];
+    picker.$nextTick = () => {};
+    picker.$refs = { modelInput: { focus() {} } };
+    assert.deepEqual(picker.filtered(), ['gpt-one', 'GPT-two']);
+    picker.move(1);
+    assert.equal(picker.active, 0);
+    picker.move(-1);
+    assert.equal(picker.active, 1);
+    picker.choose(picker.filtered()[picker.active]);
+    assert.equal(picker.debugSimple.model, 'GPT-two');
+    assert.equal(picker.open, false);
+    picker.debugSimple.model = 'custom-model';
+    picker.move(1);
+    assert.equal(picker.active, -1);
+    picker.close();
+    assert.equal(picker.debugSimple.model, 'custom-model');
+    picker.openList();
+    picker.sync('another', 'provider', []);
+    assert.equal(picker.open, false);
+});
+
 test('全局 User-Agent 开关在配置加载前后都有完整默认值', () => {
     const app = createGatewayApp();
     const defaults = { anthropic: true, openai: true, 'openai-responses': true };

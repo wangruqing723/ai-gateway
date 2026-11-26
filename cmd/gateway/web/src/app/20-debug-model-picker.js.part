@@ -1,0 +1,37 @@
+            // 下拉状态限定在控件内，不污染调试请求和已保存配置。
+            debugModelPicker() {
+                return {
+                    open: false,
+                    active: -1,
+                    provider: null,
+                    mode: null,
+                    models: null,
+                    filtered() {
+                        const query = String(this.debugSimple.model || '').trim().toLowerCase();
+                        return [...new Set(this.debugProviderModels.filter(model => typeof model === 'string' && model))]
+                            .filter(model => model.toLowerCase().includes(query));
+                    },
+                    sync(provider, mode, models) {
+                        if (this.provider !== provider || this.mode !== mode) this.close();
+                        if (this.models !== models) this.active = -1;
+                        this.provider = provider;
+                        this.mode = mode;
+                        this.models = models;
+                    },
+                    openList() { this.open = true; },
+                    close() { this.open = false; this.active = -1; },
+                    choose(model) {
+                        if (typeof model !== 'string') return;
+                        this.debugSimple.model = model;
+                        this.close();
+                        this.$refs.modelInput.focus();
+                    },
+                    move(direction) {
+                        this.open = true;
+                        const count = this.filtered().length;
+                        if (!count) { this.active = -1; return; }
+                        this.active = this.active < 0 ? (direction > 0 ? 0 : count - 1) : (this.active + direction + count) % count;
+                        this.$nextTick(() => document.getElementById('debug-model-option-' + this.active)?.scrollIntoView({ block: 'nearest' }));
+                    },
+                };
+            },
