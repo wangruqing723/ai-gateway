@@ -629,4 +629,4 @@
                     if (['running', 'aborting'].includes(this.debugStatus)) return 'border-cyan/40 bg-cyan/10 text-cyan';
                     if (this.debugStatus === 'aborted') return 'border-warn/40 bg-warn/10 text-warn';
                     return 'border-line bg-white/[.04] text-muted';
-                }
+                },

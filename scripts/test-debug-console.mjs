@@ -126,7 +126,7 @@ test('调试日志筛选会写入查询参数，重置会清空新旧过滤条�
     assert.equal(app.loadCount, 1);
 });
 
-test('配置选项来自保存快照，响应视图区使用纯文本绑定', () => {
+test('配置选项来自保存快照，仅正文通过安全 Markdown 入口渲染', () => {
     const app = appFor({ config: { providers: { saved: {}, unsavedDraft: {} }, routes: [{ match: 'draft-*' }] } });
     assert.deepEqual(app.debugSavedProviders().map(entry => entry.name), ['saved', 'disabled']);
     assert.deepEqual(app.debugSavedRoutes().map(entry => entry.route.match), ['claude-*']);
@@ -134,8 +134,8 @@ test('配置选项来自保存快照，响应视图区使用纯文本绑定', ()
     const template = readFileSync(resolve(root, 'cmd/gateway/web/src/index.template.html'), 'utf8');
     const debugSection = template.slice(template.indexOf('x-ref="debugScroll"'), template.indexOf('x-ref="monitorScroll"'));
     assert.ok(debugSection.length > 0);
-    assert.doesNotMatch(debugSection, /x-html\s*=/);
-    assert.match(debugSection, /x-text="debugRenderedText/);
+    assert.equal([...debugSection.matchAll(/x-html\s*=/g)].length, 1);
+    assert.match(debugSection, /x-html="debugMarkdownHTML\(debugRenderedText/);
     assert.match(debugSection, /x-text="debugRawResponse/);
     assert.match(debugSection, /x-text="debugErrorMessage/);
     assert.doesNotMatch(readFileSync(resolve(root, 'cmd/gateway/web/src/app/18-debug-console.js.part'), 'utf8'), /localStorage|sessionStorage/);

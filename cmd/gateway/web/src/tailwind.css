@@ -14,6 +14,29 @@
 @tailwind components;
 @tailwind utilities;
 
+/* 调试正文沿用页面配色；代码和表格在结果区域内滚动。 */
+.debug-markdown { overflow-wrap: anywhere; }
+.debug-markdown > :first-child { margin-top: 0; }
+.debug-markdown > :last-child { margin-bottom: 0; }
+.debug-markdown p, .debug-markdown ul, .debug-markdown ol, .debug-markdown blockquote, .debug-markdown pre, .debug-markdown table { margin: .75rem 0; }
+.debug-markdown h1, .debug-markdown h2, .debug-markdown h3, .debug-markdown h4, .debug-markdown h5, .debug-markdown h6 { margin: 1.25rem 0 .5rem; font-weight: 700; line-height: 1.4; }
+.debug-markdown h1 { font-size: 1.5rem; }
+.debug-markdown h2 { font-size: 1.25rem; }
+.debug-markdown h3 { font-size: 1.125rem; }
+.debug-markdown ul { list-style: disc; padding-left: 1.5rem; }
+.debug-markdown ol { list-style: decimal; padding-left: 1.5rem; }
+.debug-markdown li > ul, .debug-markdown li > ol { margin: .25rem 0; }
+.debug-markdown blockquote { border-left: 1px solid #00d2ff; padding-left: 1rem; }
+.debug-markdown a { color: #00d2ff; text-decoration: underline; text-underline-offset: 3px; }
+.debug-markdown a:focus-visible { outline: 2px solid #00d2ff; outline-offset: 3px; }
+.debug-markdown code { font-family: 'JetBrains Mono', monospace; font-size: .85em; background: rgb(255 255 255 / .06); padding: .15em .3em; border-radius: .25rem; }
+.debug-markdown pre { max-width: 100%; overflow: auto; padding: .75rem; background: rgb(0 0 0 / .25); border-radius: .5rem; white-space: pre; overflow-wrap: normal; }
+.debug-markdown pre code { background: none; padding: 0; }
+.debug-markdown table { display: block; max-width: 100%; overflow: auto; border-collapse: collapse; }
+.debug-markdown th, .debug-markdown td { border: 1px solid rgb(255 255 255 / .15); padding: .5rem .75rem; text-align: left; }
+.debug-markdown th { background: rgb(255 255 255 / .05); }
+.debug-markdown hr { margin: 1rem 0; border-color: rgb(255 255 255 / .15); }
+
 /* 字体全部本地化：Material Symbols 是 ligature 字体，离线或内网环境下字体拉不到时，
    界面上所有图标会退化成 monitoring、dns、alt_route 这样的英文单词。作为本地网关不该有这个外部依赖。
    三个字体族都用 variable font（wght 是区间而非枚举），一个文件覆盖全部字重；

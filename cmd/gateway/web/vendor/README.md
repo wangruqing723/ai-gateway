@@ -4,6 +4,14 @@ These files are pinned locally so the privileged admin page does not execute mut
 
 ## Scripts and styles
 
+调试 Markdown 使用本地固定版本依赖，原始 HTML 与图片禁用，渲染后再做标签及属性白名单过滤。
+
+| 文件 | 版本 | 来源 | SHA-256 |
+|---|---|---|---|
+| `markdown-it.min.js` | 14.1.0 | `https://cdn.jsdelivr.net/npm/markdown-it@14.1.0/dist/markdown-it.min.js` | `38c70a1e7ca91ab40e2d9e6e60129851a717ed1c7d4acbbdd41bf9503791cf68` |
+| `purify.min.js` | 3.3.0 | `https://cdn.jsdelivr.net/npm/dompurify@3.3.0/dist/purify.min.js` | `e7cb1db3d3bb7f1bbcdea1ca8377690d4002a952f781ba6e8831c8067edec8e0` |
+
+
 | File | Version | Source | SHA-256 |
 |---|---:|---|---|
 | `alpine.min.js` | 3.14.9 | `https://cdn.jsdelivr.net/npm/alpinejs@3.14.9/dist/cdn.min.js` | `3ed1eed252488921df65e363d6715deb04d7f92aaedb9e52199fdf73cb1e0ad3` |

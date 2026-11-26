@@ -50,6 +50,8 @@ jobs:
         run: |
           printf '%s  %s\n' \
             '3ed1eed252488921df65e363d6715deb04d7f92aaedb9e52199fdf73cb1e0ad3' 'cmd/gateway/web/vendor/alpine.min.js' \
+            '38c70a1e7ca91ab40e2d9e6e60129851a717ed1c7d4acbbdd41bf9503791cf68' 'cmd/gateway/web/vendor/markdown-it.min.js' \
+            'e7cb1db3d3bb7f1bbcdea1ca8377690d4002a952f781ba6e8831c8067edec8e0' 'cmd/gateway/web/vendor/purify.min.js' \
             | sha256sum --check -
           node --check cmd/gateway/web/vendor/alpine.min.js
           node <<'NODE'

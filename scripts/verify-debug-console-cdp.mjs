@@ -403,7 +403,7 @@ try {
         return evaluate(`(() => {
             const root = document.querySelector(${JSON.stringify(debugScrollSelector)});
             const panel = root?.querySelector(${JSON.stringify(panelSelector)});
-            const pre = panel?.querySelector('pre');
+            const pre = panel?.querySelector('.debug-markdown, pre');
             return root && panel && pre && getComputedStyle(panel).display !== 'none' ? pre.textContent : null;
         })()`);
     };
@@ -467,10 +467,10 @@ try {
     check('响应内容按纯文本渲染，HTML 事件未执行', await evaluate(`(() => {
         const root = document.querySelector(${JSON.stringify(debugScrollSelector)});
         const panel = root?.querySelector(${JSON.stringify(responsePanelSelector('text'))});
-        const pre = panel?.querySelector('pre');
+        const pre = panel?.querySelector('.debug-markdown, pre');
         const app = window.Alpine.$data(document.body);
         return Boolean(root && panel && pre && getComputedStyle(panel).display !== 'none')
-            && app.debugRenderedText === ${JSON.stringify(expectedRenderedText)} && pre.textContent === ${JSON.stringify(expectedRenderedText)}
+            && app.debugRenderedText === ${JSON.stringify(expectedRenderedText)} && pre.textContent.trim() === ${JSON.stringify(expectedRenderedText)}
             && !pre.querySelector('img') && !window.__debugHTMLExecuted;
     })()`));
     check('未提供的 usage 项不会被伪造为零', await evaluate(`window.Alpine.$data(document.body).debugUsage.totalTokens === undefined`));
@@ -479,13 +479,24 @@ try {
     check('原始响应视图保留完整内层 SSE 原文', rawResponseText === innerStream('anthropic') && await evaluate(`(() => {
         const root = document.querySelector(${JSON.stringify(debugScrollSelector)});
         const panel = root?.querySelector(${JSON.stringify(responsePanelSelector('raw'))});
-        const pre = panel?.querySelector('pre');
+        const pre = panel?.querySelector('.debug-markdown, pre');
         return Boolean(root && panel && pre && getComputedStyle(panel).display !== 'none')
             && !pre.querySelector('img') && !window.__debugHTMLExecuted;
     })()`));
     await selectResponseView('text', expectedRenderedText);
     const textView = await responsePreText('text');
-    check('渲染文本视图只保留文本增量', textView === expectedRenderedText && !textView.includes('content_block_delta'));
+    check('渲染文本视图只保留文本增量', textView.trim() === expectedRenderedText && !textView.includes('content_block_delta'));
+    const markdownFixture = '# 标题\n\n**加粗**与 `代码`\n\n- 项目\n\n> 引用\n\n| 名称 | 值 |\n| --- | --- |\n| 测试 | 1 |\n\n```js\nconst value = 1;\n```\n\n[安全链接](https://example.com)\n\n![图片](https://example.com/tracker.png)\n\n[危险](javascript:alert(1))\n\n<img src=x onerror="window.__debugHTMLExecuted=true">\n<div x-init="window.__debugHTMLExecuted=true">内容</div>';
+    await evaluate(`window.Alpine.$data(document.body).debugRenderedText = ${JSON.stringify(markdownFixture)}`);
+    await waitFor(`document.querySelector('.debug-markdown h1')?.textContent === '标题'`, 'Markdown 正文更新');
+    check('Markdown 标题、列表、引用、表格与代码块渲染', await evaluate(`(() => { const r = document.querySelector('.debug-markdown'); return ['h1','strong','ul li','blockquote','table td','pre code'].every(s => r.querySelector(s)); })()`));
+    check('Markdown 不产生图片、危险链接或可执行属性', await evaluate(`(() => { const r = document.querySelector('.debug-markdown'); return !r.querySelector('img,script,[x-init],[onerror]') && r.querySelectorAll('a').length === 1 && r.querySelector('a').getAttribute('href') === 'https://example.com' && !window.__debugHTMLExecuted; })()`));
+    await evaluate('window.Alpine.$data(document.body).debugRenderedText = "```js\\nconst partial ="');
+    await waitFor(`document.querySelector('.debug-markdown pre code')?.textContent.includes('const partial =')`, '未闭合流式代码块');
+    await evaluate('window.Alpine.$data(document.body).debugRenderedText += " 1;\\n```"');
+    await waitFor(`document.querySelector('.debug-markdown pre code')?.textContent.includes('const partial = 1;')`, '流式代码块闭合');
+    check('流式未闭合代码块更新后正确闭合', true);
+    await evaluate(`window.Alpine.$data(document.body).debugRenderedText = ${JSON.stringify(expectedRenderedText)}`);
     await selectResponseView('attempts', '已省略 1 条尝试明细');
     check('尝试视图复用 attemptDetailRows 的省略行', (await responsePanelText('attempts'))?.includes('已省略 1 条尝试明细') === true);
     await selectResponseView('upstream', '<已脱敏>');

@@ -1,0 +1,19 @@
+            // 只渲染模型正文；禁用 HTML 和图片，再按白名单过滤生成结果。
+            debugMarkdownHTML(text) {
+                const escape = value => String(value).replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
+                if (!window.markdownit || !window.DOMPurify) return `<pre>${escape(text)}</pre>`;
+                if (!this._debugMarkdownParser) {
+                    const parser = window.markdownit({ html: false, linkify: false, typographer: false });
+                    // 保留图片语法解析，但只输出说明文字，避免退化成可点击的图片地址。
+                    parser.renderer.rules.image = (tokens, index) => escape(tokens[index].content || '图片');
+                    // 管理页面不生成相对路径链接，避免跳向本机管理接口。
+                    parser.validateLink = url => /^https?:\/\//i.test(url);
+                    this._debugMarkdownParser = parser;
+                }
+                return window.DOMPurify.sanitize(this._debugMarkdownParser.render(String(text)), {
+                    ALLOWED_TAGS: ['p', 'br', 'hr', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'ul', 'ol', 'li', 'blockquote', 'pre', 'code', 'strong', 'em', 's', 'a', 'table', 'thead', 'tbody', 'tr', 'th', 'td'],
+                    ALLOWED_ATTR: ['href', 'title', 'start'],
+                    ALLOW_DATA_ATTR: false,
+                    ALLOW_ARIA_ATTR: false,
+                });
+            },

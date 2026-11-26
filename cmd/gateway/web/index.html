@@ -14,6 +14,8 @@
          首屏也不再有无样式闪烁。
          改动页面上的 class 之后必须重跑 `make web-css`，否则新类名没有对应样式。 -->
     <link rel="stylesheet" href="/vendor/tailwind.css">
+    <script defer src="/vendor/markdown-it.min.js"></script>
+    <script defer src="/vendor/purify.min.js"></script>
     <script defer src="/vendor/alpine.min.js"></script>
 </head>
 <body class="h-screen overflow-hidden font-sans antialiased" x-data="gatewayApp()" x-init="init()">
@@ -2040,7 +2042,7 @@
                                 </template>
                             </div>
                             <div x-show="debugResponseView === 'text'" x-cloak class="mt-3 min-w-0">
-                                <pre class="max-h-[32rem] min-h-28 max-w-full overflow-auto whitespace-pre-wrap break-words rounded-lg border border-line bg-ink/75 p-3 font-mono text-xs leading-5 text-text [overflow-wrap:anywhere]" x-text="debugRenderedText || '暂无可显示文本。思考内容与工具调用请查看原始响应。'"></pre>
+                                <div class="debug-markdown max-h-[32rem] min-h-28 max-w-full overflow-auto rounded-lg border border-line bg-ink/75 p-3 text-sm leading-6 text-text" x-html="debugMarkdownHTML(debugRenderedText || '暂无可显示文本。思考内容与工具调用请查看原始响应。')"></div>
                             </div>
                             <div x-show="debugResponseView === 'raw'" x-cloak class="mt-3 min-w-0">
                                 <pre class="max-h-[32rem] min-h-28 max-w-full overflow-auto whitespace-pre-wrap break-words rounded-lg border border-line bg-ink/75 p-3 font-mono text-xs leading-5 text-text [overflow-wrap:anywhere]" x-text="debugRawResponse || '尚未收到响应正文。'"></pre>
@@ -14896,7 +14898,26 @@
                     if (['running', 'aborting'].includes(this.debugStatus)) return 'border-cyan/40 bg-cyan/10 text-cyan';
                     if (this.debugStatus === 'aborted') return 'border-warn/40 bg-warn/10 text-warn';
                     return 'border-line bg-white/[.04] text-muted';
+                },
+            // 只渲染模型正文；禁用 HTML 和图片，再按白名单过滤生成结果。
+            debugMarkdownHTML(text) {
+                const escape = value => String(value).replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
+                if (!window.markdownit || !window.DOMPurify) return `<pre>${escape(text)}</pre>`;
+                if (!this._debugMarkdownParser) {
+                    const parser = window.markdownit({ html: false, linkify: false, typographer: false });
+                    // 保留图片语法解析，但只输出说明文字，避免退化成可点击的图片地址。
+                    parser.renderer.rules.image = (tokens, index) => escape(tokens[index].content || '图片');
+                    // 管理页面不生成相对路径链接，避免跳向本机管理接口。
+                    parser.validateLink = url => /^https?:\/\//i.test(url);
+                    this._debugMarkdownParser = parser;
                 }
+                return window.DOMPurify.sanitize(this._debugMarkdownParser.render(String(text)), {
+                    ALLOWED_TAGS: ['p', 'br', 'hr', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'ul', 'ol', 'li', 'blockquote', 'pre', 'code', 'strong', 'em', 's', 'a', 'table', 'thead', 'tbody', 'tr', 'th', 'td'],
+                    ALLOWED_ATTR: ['href', 'title', 'start'],
+                    ALLOW_DATA_ATTR: false,
+                    ALLOW_ARIA_ATTR: false,
+                });
+            },
             };
         }
     </script>
