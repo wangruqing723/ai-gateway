@@ -1910,19 +1910,19 @@
                             </label>
                         </div>
 
-                        <div x-show="debugMode === 'provider'" x-cloak class="mt-4 grid min-w-0 grid-cols-1 gap-2 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
+                        <div x-show="debugMode === 'provider'" x-cloak class="mt-4 grid min-w-0 grid-cols-1 gap-3 sm:grid-cols-3 sm:items-end">
                             <div class="relative min-w-0" x-data="debugModelPicker()" @click.outside="close()" @focusout="if (!$el.contains($event.relatedTarget)) close()" x-effect="sync(debugProvider, debugMode, debugProviderModels)">
                                 <label for="debug-model-input" class="text-xs font-bold text-muted">目标模型</label>
                                 <div class="relative mt-1.5">
                                     <input id="debug-model-input" x-ref="modelInput" autocomplete="off" x-model="debugSimple.model"
-                                           @click="openList()" @input="openList(); active = -1"
+                                           @focus="openList()" @click="openList()" @input="searchInput($event.target.value)"
                                            @keydown.arrow-down.prevent="move(1)" @keydown.arrow-up.prevent="move(-1)"
                                            @keydown.enter="if (open && active >= 0) { $event.preventDefault(); choose(filtered()[active]); }"
                                            @keydown.escape.stop.prevent="close()" @keydown.tab="close()"
                                            role="combobox" aria-autocomplete="list" aria-controls="debug-model-list"
                                            :aria-expanded="String(open)" :aria-activedescendant="open && active >= 0 && active < filtered().length ? 'debug-model-option-' + active : null"
                                            class="field w-full pr-10 font-mono text-sm" placeholder="搜索模型，或手动填写模型名" aria-label="Provider 目标模型">
-                                    <button type="button" @click="open ? close() : openList(); $refs.modelInput.focus()"
+                                    <button type="button" @mousedown.prevent @click="const wasOpen = open; $refs.modelInput.focus(); wasOpen ? close() : openList()"
                                             :aria-expanded="String(open)" aria-controls="debug-model-list" aria-label="展开或收起模型列表"
                                             class="absolute inset-y-0 right-0 flex w-10 items-center justify-center rounded-r-lg text-muted hover:text-cyan focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan2">
                                         <span class="material-symbols-outlined text-[18px]" aria-hidden="true" x-text="open ? 'keyboard_arrow_up' : 'keyboard_arrow_down'"></span>
@@ -1984,7 +1984,8 @@
                                     <textarea autocomplete="off" x-model="debugSimple.system" rows="3" class="field mt-1.5 w-full resize-y text-sm" placeholder="可留空"></textarea>
                                 </label>
                                 <label class="min-w-0 text-xs font-bold text-muted">用户消息
-                                    <textarea autocomplete="off" x-model="debugSimple.message" rows="3" class="field mt-1.5 w-full resize-y text-sm" placeholder="输入一条用户消息"></textarea>
+                                    <textarea autocomplete="off" x-model="debugSimple.message" rows="3" required aria-describedby="debug-message-hint" :aria-invalid="String(!String(debugSimple.message || '').trim())" class="field mt-1.5 w-full resize-y text-sm" placeholder="输入一条用户消息"></textarea>
+                                    <span id="debug-message-hint" x-show="!String(debugSimple.message || '').trim()" class="mt-1 block text-xs text-muted">请输入用户消息后再发送调试请求。</span>
                                 </label>
                                 <label class="min-w-0 text-xs font-bold text-muted">Max tokens
                                     <input autocomplete="off" type="number" min="1" step="1" x-model="debugSimple.maxTokens" class="field mt-1.5 w-full font-mono text-sm" placeholder="留空：由网关配置优先级决定">
@@ -2745,7 +2746,7 @@
                          时间 8%：只渲染时分秒（logClock），常见桌面宽度下仍宽于 HH:MM:SS。
                          流式 4%（只放一枚标签）、耗时 8%，紧邻摆放：首字耗时只在流式下存在，
                          两列相邻才能互相解释——看到「非流式」标签就知道旁边为什么只有一个数。
-                         转移轨迹 16%、错误 15%，空的时候也不会变成沙漠。
+                         尝试轨迹 16%、错误 15%，空的时候也不会变成沙漠。
                          九列相加必须等于 100，改任一列都要在别处等量补回。 -->
                     <div x-ref="logScroll" class="min-h-0 overflow-x-auto lg:flex-1 lg:overflow-y-auto">
                         <table class="w-full min-w-[930px] table-fixed border-collapse text-left">
@@ -2769,7 +2770,7 @@
                                     <th scope="col" class="whitespace-nowrap px-4 py-2.5 font-bold">Provider</th>
                                     <th scope="col" class="whitespace-nowrap px-3 py-2.5 font-bold">流式</th>
                                     <th scope="col" class="whitespace-nowrap px-4 py-2.5 text-right font-bold" title="流式显示「首字 / 总计」，非流式只有总计">首字/耗时</th>
-                                    <th scope="col" class="whitespace-nowrap px-4 py-2.5 font-bold">转移轨迹</th>
+                                    <th scope="col" class="whitespace-nowrap px-4 py-2.5 font-bold">尝试轨迹</th>
                                     <th scope="col" class="whitespace-nowrap px-4 py-2.5 font-bold">错误</th>
                                 </tr>
                             </thead>
@@ -2881,10 +2882,10 @@
                                                   x-text="durationText(log.durationMs ?? log.latencyMs)"></span>
                                         </td>
                                         <td class="truncate px-4 py-2.5 font-mono text-[11px]"
-                                            :class="log.attemptTrail ? 'text-warn' : 'text-muted'"
-                                            @mouseenter="showTip(log.attemptTrail || '', $event)"
+                                            :class="hasAttemptTrail(log) ? 'text-warn' : 'text-muted'"
+                                            @mouseenter="showTip(hasAttemptTrail(log) ? (log.attemptTrail || '') : '', $event)"
                                             @mouseleave="hideTip()"
-                                            @focus="showTip(log.attemptTrail || '', $event)"
+                                            @focus="showTip(hasAttemptTrail(log) ? (log.attemptTrail || '') : '', $event)"
                                             @blur="hideTip()" tabindex="0" x-text="attemptTrailText(log)"></td>
                                         <td class="truncate px-4 py-2.5 text-xs text-muted"
                                             @mouseenter="showTip(logErrorSummary(log), $event)"
@@ -3010,8 +3011,8 @@
                                                     <dd class="mt-1 font-mono text-text" x-text="log.attempts"></dd>
                                                 </div>
                                             </dl>
-                                            <div x-show="hasLogValue(log.attemptTrail)" class="mt-4 rounded-lg border border-warn/25 bg-warn/5 px-3 py-2">
-                                                <div class="text-xs text-muted">转移轨迹</div>
+                                            <div x-show="hasAttemptTrail(log) && hasLogValue(log.attemptTrail)" class="mt-4 rounded-lg border border-warn/25 bg-warn/5 px-3 py-2">
+                                                <div class="text-xs text-muted">尝试轨迹</div>
                                                 <div class="mt-1 break-words font-mono text-xs text-warn" x-text="log.attemptTrail"></div>
                                             </div>
                                             <div x-show="Array.isArray(log.attemptDetails) && log.attemptDetails.length" class="mt-4 overflow-x-auto rounded-lg border border-line bg-panel2/40">
@@ -7236,10 +7237,20 @@
                     ].join('\n');
                 },
 
-                // attemptTrailText 只在发生过候选转移时显示轨迹，单次直达显示 '--'
+                // 单次直达不展示轨迹；换密钥、重试与跳过不能只看候选尝试次数。
+                hasAttemptTrail(log) {
+                    const details = Array.isArray(log?.attemptDetails) ? log.attemptDetails : [];
+                    return (Number(log?.attempts) || 0) > 1 || details.length > 1 ||
+                        (Number(log?.attemptDetailsOmitted) || 0) > 0 ||
+                        details.some(detail => String(detail.kind || '').includes('skip') || String(detail.outcome || '').includes('skip')) ||
+                        String(log?.attemptTrail || '').includes(' → ') ||
+                        /:(?:no_selectable_key|key_switch_exhausted|[a-z_]*skip)(?:$| → )/.test(String(log?.attemptTrail || ''));
+                },
+
                 attemptTrailText(log) {
+                    if (!this.hasAttemptTrail(log)) return '--';
                     if (log?.attemptTrail) return log.attemptTrail;
-                    return (Number(log?.attempts) || 0) > 1 ? `${log.attempts} 次尝试` : '--';
+                    return `${Number(log?.attempts) || 0} 次尝试`;
                 },
 
                 // 为请求日志详情插入一个稳定键的省略占位行，供单根 tr 的 x-for 渲染。
@@ -14504,6 +14515,9 @@
                     }
                     const maxField = this.debugClientFormat === 'openai-responses' ? 'max_output_tokens' : 'max_tokens';
                     if (this.debugRequestView === 'simple') {
+                        if (!String(this.debugSimple.message || '').trim()) {
+                            return { valid: false, error: '请输入用户消息后再发送调试请求。' };
+                        }
                         const value = String(this.debugSimple.maxTokens ?? '').trim();
                         if (value && (!/^\d+$/.test(value) || Number(value) < 1)) {
                             return { valid: false, error: 'max tokens 留空表示不传；填写时请输入正整数。' };
@@ -14948,11 +14962,12 @@
                 return {
                     open: false,
                     active: -1,
+                    search: '',
                     provider: null,
                     mode: null,
                     models: null,
                     filtered() {
-                        const query = String(this.debugSimple.model || '').trim().toLowerCase();
+                        const query = this.search.trim().toLowerCase();
                         return [...new Set(this.debugProviderModels.filter(model => typeof model === 'string' && model))]
                             .filter(model => model.toLowerCase().includes(query));
                     },
@@ -14963,13 +14978,21 @@
                         this.mode = mode;
                         this.models = models;
                     },
-                    openList() { this.open = true; },
-                    close() { this.open = false; this.active = -1; },
+                    openList() {
+                        if (!this.open) { this.search = ''; this.active = -1; }
+                        this.open = true;
+                    },
+                    searchInput(value) {
+                        this.open = true;
+                        this.search = String(value || '');
+                        this.active = -1;
+                    },
+                    close() { this.open = false; this.active = -1; this.search = ''; },
                     choose(model) {
                         if (typeof model !== 'string') return;
                         this.debugSimple.model = model;
-                        this.close();
                         this.$refs.modelInput.focus();
+                        this.close();
                     },
                     move(direction) {
                         this.open = true;

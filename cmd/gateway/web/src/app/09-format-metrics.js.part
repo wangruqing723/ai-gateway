@@ -97,10 +97,20 @@
                     ].join('\n');
                 },
 
-                // attemptTrailText 只在发生过候选转移时显示轨迹，单次直达显示 '--'
+                // 单次直达不展示轨迹；换密钥、重试与跳过不能只看候选尝试次数。
+                hasAttemptTrail(log) {
+                    const details = Array.isArray(log?.attemptDetails) ? log.attemptDetails : [];
+                    return (Number(log?.attempts) || 0) > 1 || details.length > 1 ||
+                        (Number(log?.attemptDetailsOmitted) || 0) > 0 ||
+                        details.some(detail => String(detail.kind || '').includes('skip') || String(detail.outcome || '').includes('skip')) ||
+                        String(log?.attemptTrail || '').includes(' → ') ||
+                        /:(?:no_selectable_key|key_switch_exhausted|[a-z_]*skip)(?:$| → )/.test(String(log?.attemptTrail || ''));
+                },
+
                 attemptTrailText(log) {
+                    if (!this.hasAttemptTrail(log)) return '--';
                     if (log?.attemptTrail) return log.attemptTrail;
-                    return (Number(log?.attempts) || 0) > 1 ? `${log.attempts} 次尝试` : '--';
+                    return `${Number(log?.attempts) || 0} 次尝试`;
                 },
 
                 // 为请求日志详情插入一个稳定键的省略占位行，供单根 tr 的 x-for 渲染。

@@ -424,6 +424,14 @@ try {
     await evaluate(`document.querySelector('#debug-model-input').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))`);
     await waitFor(`window.Alpine.$data(document.body).debugSimple.model === 'fixture-alt' && document.querySelector('#debug-model-input').getAttribute('aria-expanded') === 'false'`, '键盘确认模型');
     check('模型下拉键盘确认后写入请求模型并收起', true);
+    await evaluate(`document.querySelector('#debug-model-input').dispatchEvent(new Event('mouseenter'))`);
+    check('鼠标移入模型输入框不展开列表', await evaluate(`document.querySelector('#debug-model-input').getAttribute('aria-expanded') === 'false'`));
+    for (const event of ['focus', 'click']) {
+        await evaluate(`document.querySelector('#debug-model-input').dispatchEvent(new Event(${JSON.stringify(event)}))`);
+        await waitFor(`document.querySelectorAll('#debug-model-list [role="option"]').length === 2 && document.querySelector('#debug-model-input').getAttribute('aria-expanded') === 'true'`, '已有模型重新展开显示全部目录');
+        check(`已有模型时 ${event} 展示全部且保留已选值`, await evaluate(`window.Alpine.$data(document.body).debugSimple.model === 'fixture-alt'`));
+        await evaluate(`document.querySelector('#debug-model-input').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+    }
     await evaluate(`(() => { const el = document.querySelector('#debug-model-input'); el.click(); el.value = 'custom-unlisted'; el.dispatchEvent(new Event('input', { bubbles: true })); })()`);
     await waitFor(`document.querySelectorAll('#debug-model-list [role="option"]').length === 0`, '模型无匹配结果');
     await evaluate(`document.querySelector('#debug-model-input').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);

@@ -3,11 +3,12 @@
                 return {
                     open: false,
                     active: -1,
+                    search: '',
                     provider: null,
                     mode: null,
                     models: null,
                     filtered() {
-                        const query = String(this.debugSimple.model || '').trim().toLowerCase();
+                        const query = this.search.trim().toLowerCase();
                         return [...new Set(this.debugProviderModels.filter(model => typeof model === 'string' && model))]
                             .filter(model => model.toLowerCase().includes(query));
                     },
@@ -18,13 +19,21 @@
                         this.mode = mode;
                         this.models = models;
                     },
-                    openList() { this.open = true; },
-                    close() { this.open = false; this.active = -1; },
+                    openList() {
+                        if (!this.open) { this.search = ''; this.active = -1; }
+                        this.open = true;
+                    },
+                    searchInput(value) {
+                        this.open = true;
+                        this.search = String(value || '');
+                        this.active = -1;
+                    },
+                    close() { this.open = false; this.active = -1; this.search = ''; },
                     choose(model) {
                         if (typeof model !== 'string') return;
                         this.debugSimple.model = model;
-                        this.close();
                         this.$refs.modelInput.focus();
+                        this.close();
                     },
                     move(direction) {
                         this.open = true;

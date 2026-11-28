@@ -210,6 +210,9 @@
                     }
                     const maxField = this.debugClientFormat === 'openai-responses' ? 'max_output_tokens' : 'max_tokens';
                     if (this.debugRequestView === 'simple') {
+                        if (!String(this.debugSimple.message || '').trim()) {
+                            return { valid: false, error: '请输入用户消息后再发送调试请求。' };
+                        }
                         const value = String(this.debugSimple.maxTokens ?? '').trim();
                         if (value && (!/^\d+$/.test(value) || Number(value) < 1)) {
                             return { valid: false, error: 'max tokens 留空表示不传；填写时请输入正整数。' };

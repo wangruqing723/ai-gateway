@@ -30,6 +30,23 @@ function appFor(overrides = {}) {
     });
 }
 
+test('用户消息为空或仅空白时禁止发送，有内容后恢复且不裁剪原文', async () => {
+    for (const format of ['anthropic', 'openai-chat', 'openai-responses']) {
+        const app = appFor({ debugClientFormat: format });
+        for (const message of ['', ' \n\t ']) {
+            app.debugSimple.message = message;
+            assert.equal(app.debugCanRun(), false);
+            assert.equal(app.debugBuildRequest().error, '请输入用户消息后再发送调试请求。');
+            await app.debugRun();
+            assert.equal(app.debugErrorMessage, '请输入用户消息后再发送调试请求。');
+        }
+        app.debugSimple.message = ' 测试消息 ';
+        assert.equal(app.debugCanRun(), true);
+        const body = app.debugBuildRequest().payload.body;
+        assert.equal(format === 'openai-responses' ? body.input : body.messages.at(-1).content, ' 测试消息 ');
+    }
+});
+
 test('简易表单按三种客户端格式构造请求体，默认流式且不传 max tokens', () => {
     const app = appFor();
     const anthropic = app.debugBuildRequest();
@@ -148,12 +165,29 @@ function createGatewayApp() {
     return new Function(`return ({\n${parts}\n})`)();
 }
 
+test('尝试轨迹隐藏单次直达，保留重试、换密钥、跳过和折叠轨迹', () => {
+    const app = createGatewayApp();
+    const single = { attempts: 1, attemptTrail: 'provider#key:503', attemptDetails: [{ kind: 'request', outcome: 'final_error' }] };
+    assert.equal(app.attemptTrailText(single), '--');
+    assert.equal(app.hasAttemptTrail(single), false);
+    assert.equal(single.attemptTrail, 'provider#key:503');
+    assert.equal(app.hasAttemptTrail({ ...single, attemptDetails: [{}, {}] }), true);
+    assert.equal(app.hasAttemptTrail({ ...single, attemptDetailsOmitted: 1 }), true);
+    assert.equal(app.hasAttemptTrail({ attempts: 0, attemptDetails: [{ kind: 'breaker_skip', outcome: 'skipped' }] }), true);
+    assert.equal(app.attemptTrailText({ attempts: 1, attemptTrail: 'p#k1:429 → p#k2:200' }), 'p#k1:429 → p#k2:200');
+    assert.equal(app.attemptTrailText({ attempts: 2 }), '2 次尝试');
+    assert.equal(app.attemptTrailText({}), '--');
+});
+
 test('模型下拉不区分大小写筛选、去重，支持键盘和手动输入', () => {
     const picker = createGatewayApp().debugModelPicker();
     picker.debugSimple = { model: 'GPT' };
     picker.debugProviderModels = ['gpt-one', 'Claude', 'GPT-two', 'gpt-one'];
     picker.$nextTick = () => {};
     picker.$refs = { modelInput: { focus() {} } };
+    picker.openList();
+    assert.deepEqual(picker.filtered(), ['gpt-one', 'Claude', 'GPT-two']);
+    picker.searchInput('GPT');
     assert.deepEqual(picker.filtered(), ['gpt-one', 'GPT-two']);
     picker.move(1);
     assert.equal(picker.active, 0);
@@ -162,7 +196,11 @@ test('模型下拉不区分大小写筛选、去重，支持键盘和手动输�
     picker.choose(picker.filtered()[picker.active]);
     assert.equal(picker.debugSimple.model, 'GPT-two');
     assert.equal(picker.open, false);
+    picker.openList();
+    assert.deepEqual(picker.filtered(), ['gpt-one', 'Claude', 'GPT-two']);
+    assert.equal(picker.debugSimple.model, 'GPT-two');
     picker.debugSimple.model = 'custom-model';
+    picker.searchInput('custom-model');
     picker.move(1);
     assert.equal(picker.active, -1);
     picker.close();
